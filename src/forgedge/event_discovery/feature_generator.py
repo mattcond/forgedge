@@ -328,6 +328,19 @@ class FeatureGenerator:
                         operation="ratio",
                         source_cols=[col_a, col_b],
                     )
+                    # diff_norm: (A - B) / std(A - B)
+                    dn_col = f"diffnorm_{pf_a.base}_{pf_a.indicator}{param_a:02d}_{pf_b.indicator}{param_b:02d}"
+                    if dn_col not in extended.columns:
+                        dn_series = _safe_diff_norm(df[col_a], df[col_b])
+                        extended[dn_col] = dn_series
+                        meta[dn_col] = DerivedFeature(
+                            col=dn_col,
+                            series=dn_series,
+                            is_scale_free=True,
+                            arity=2,
+                            operation="diff_norm",
+                            source_cols=[col_a, col_b],
+                        )
 
         # Price vs its own MA (close vs close_ema_N / close_sma_N)
         price_cols = [col for col, pf in parsed.items() if pf.family == "price"]
@@ -516,6 +529,20 @@ def _safe_spread_pct(a: pd.Series, b: pd.Series) -> pd.Series:
     """
     result = (a - b) / b
     return result.replace([float("inf"), float("-inf")], pd.NA)
+
+
+def _safe_diff_norm(a: pd.Series, b: pd.Series) -> pd.Series:
+    """Compute ``(a - b) / std(a - b)`` over the full history.
+
+    Normalises the difference series by its historical standard deviation,
+    producing a z-score of the spread.  Returns a NaN series when the
+    difference is constant (zero standard deviation).
+    """
+    diff = a - b
+    std = float(diff.std())
+    if std == 0 or pd.isna(std):
+        return pd.Series(float("nan"), index=a.index, dtype=float)
+    return diff / std
 
 
 def _safe_position(value: pd.Series, lower: pd.Series, upper: pd.Series) -> pd.Series:
