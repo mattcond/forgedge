@@ -15,6 +15,14 @@ NOT ALLOWED
   • Same transform + same source feature with different thresholds
     (redundant: one is a superset of the other)
   • More than three events in AND (structural overfitting)
+
+Performance
+-----------
+Pair evaluation is fully vectorized: all event series are stacked into a
+boolean matrix and the gate criteria are computed in a single batch of
+numpy/BLAS operations rather than per-pair Python loops.  This removes the
+need for an arbitrary pool cap and makes evaluation of tens of thousands of
+pairs practical on typical hardware.
 """
 from __future__ import annotations
 
@@ -26,16 +34,26 @@ import numpy as np
 import pandas as pd
 
 from .consistency_gate import ConsistencyGate, _build_month_index
-from .models import EventComponent, GateResult, RawEvent
+from .models import EventComponent, GateParams, GateResult, RawEvent
+
+# Number of (i, j) pairs processed per vectorized batch.  Larger values
+# consume more peak memory; smaller values add Python loop overhead.
+# At 5 000 pairs with n_rows ≈ 8 760 (1 year 1H) the float32 cast of
+# and_chunk costs ~175 MB — a comfortable headroom on modern hardware.
+_CHUNK_SIZE = 5_000
 
 # Maximum number of events to retain per (feature, transform) slot
-# before cross-feature AND composition.
+# before cross-feature AND composition.  Within-slot events differ only
+# in their threshold; keeping at most 3 preserves diversity while
+# containing the total pair count.
 _MAX_PER_SLOT = 3
 
-# Hard cap on AND-composition pool to keep O(n^2) tractable.
-_MAX_POOL = 300
+# Pool size cap for triple enumeration.  O(n³) blowup makes uncapped
+# triples infeasible; pairs are fine because the vectorized batch loop
+# scales well.
+_MAX_POOL_TRIPLES = 80
 
-# Maximum composed events returned (avoid memory explosion).
+# Maximum composed events returned (pairs + triples combined).
 _MAX_COMPOSED = 2000
 
 
@@ -66,27 +84,44 @@ class ANDComposer:
         1. **Pool construction**: ``_build_composition_pool`` reduces the
            full set of passing events to a tractable subset by keeping at
            most ``_MAX_PER_SLOT`` events per (source_feature, transform,
-           params) slot and capping the total pool at ``_MAX_POOL``.  This
-           keeps the O(n²) pair enumeration manageable.
+           params) slot.  No global pool cap is applied for pair
+           evaluation — the vectorized batch approach makes the full pool
+           tractable regardless of size.
 
-        2. **Boolean array cache**: Each event's series is pre-converted to
-           a uint8 numpy array once, so the bitwise AND of any pair requires
-           only a single vectorised operation.
+        2. **Validity pre-filter**: ``_validity_mask`` computes a boolean
+           matrix of shape (n_pool, n_pool) in pure numpy by comparing
+           string arrays for source_feature and transform.  The upper
+           triangle of valid pairs is extracted as two index arrays
+           ``(ii, jj)`` so no per-pair Python logic is needed.
 
-        3. **Pair enumeration** (max_components >= 2): All ``combinations(pool, 2)``
-           are checked.  Invalid pairs (same transform + same params + same
-           feature, or same native type on the same source) are skipped via
-           ``_is_valid_pair``.  The gate is evaluated on the AND result; only
-           passing pairs are added to ``composed``.  The full pd.Series for
-           the AND result is only constructed after the gate passes, avoiding
-           memory allocation for the ~95% of pairs that fail.
+        3. **One-hot month matrix**: ``_build_one_hot_f32`` constructs a
+           (n_rows, n_months) float32 matrix where ``M[r, m] = 1`` if row
+           ``r`` belongs to month ``m``.  A left-multiply of a boolean row
+           vector against this matrix sums activations by month in a single
+           BLAS ``gemm`` call.
 
-        4. **Triple enumeration** (max_components >= 3, only if pool <= 80):
-           Same logic applied to ``combinations(pool, 3)``.  The pool size
-           cap prevents O(n³) blowup.
+        4. **Vectorized pair gate** (max_components >= 2): The pool is
+           stacked into a uint8 boolean matrix of shape (n_pool, n_rows).
+           Pairs are processed in chunks of ``_CHUNK_SIZE``:
 
-        5. **Hard cap**: ``_MAX_COMPOSED`` limits the total number of composed
-           events returned to avoid memory explosions when many pairs pass.
+           * ``and_chunk = bool_matrix[ii_chunk] & bool_matrix[jj_chunk]``
+             — bitwise AND, shape (K, n_rows)
+           * ``counts = and_chunk.astype(float32) @ one_hot``
+             — monthly activation counts, shape (K, n_months), via BLAS
+           * Gate criteria (volume, coverage, concentration, frequency)
+             are evaluated as vectorized numpy comparisons over the entire
+             chunk, producing a boolean mask of passing pairs.
+
+           Only the passing pairs require the overhead of constructing a
+           pandas Series and a ``RawEvent`` object.
+
+        5. **Triple enumeration** (max_components >= 3, pool <= 80):
+           Same loop logic applied to ``combinations(pool[:80], 3)``.
+           The pool is capped at ``_MAX_POOL_TRIPLES`` to prevent O(n³)
+           blowup.
+
+        6. **Hard cap**: ``_MAX_COMPOSED`` limits the total number of
+           composed events returned to avoid memory explosions.
 
         Parameters
         ----------
@@ -107,55 +142,96 @@ class ANDComposer:
 
         month_index, n_total_months = _build_month_index(timestamps)
 
-        # Build the composition pool from two sub-pools:
-        #   A) within-feature pool: all passing events, capped per feature×transform slot
-        #   B) cross-feature pool: top events per feature (by n_activations)
         pool = _build_composition_pool(passing_events)
+        if len(pool) < 2:
+            return []
 
-        # Pre-cache uint8 boolean arrays for fast numpy AND
-        bool_arrays: dict[int, np.ndarray] = {
-            id(ev): ev.series.fillna(0).values.astype(np.uint8)
-            for ev in pool
-        }
+        # Pre-compute shared structures used by all batch evaluations
+        one_hot = _build_one_hot_f32(month_index, n_total_months)
+        bool_matrix = np.stack(
+            [ev.series.fillna(0).values.astype(np.uint8) for ev in pool]
+        )  # (n_pool, n_rows)
 
         composed: list[RawEvent] = []
+        p = self.gate.params
 
-        for ev_a, ev_b in itertools.combinations(pool, 2):
+        # ----------------------------------------------------------------
+        # Pair enumeration — fully vectorized
+        # ----------------------------------------------------------------
+        # Build validity mask and extract upper-triangle index pairs
+        valid_mask = _validity_mask(pool)
+        ii_all, jj_all = np.where(np.triu(valid_mask, k=1))
+
+        n_pairs = len(ii_all)
+        for chunk_start in range(0, n_pairs, _CHUNK_SIZE):
             if len(composed) >= _MAX_COMPOSED:
                 break
-            if not self._is_valid_pair(ev_a, ev_b):
-                continue
+            chunk_end = min(chunk_start + _CHUNK_SIZE, n_pairs)
+            ii = ii_all[chunk_start:chunk_end]
+            jj = jj_all[chunk_start:chunk_end]
 
-            a_arr = bool_arrays[id(ev_a)]
-            b_arr = bool_arrays[id(ev_b)]
-            and_arr = a_arr & b_arr
+            # Shape: (K, n_rows)
+            and_chunk = bool_matrix[ii] & bool_matrix[jj]
 
-            counts = np.zeros(n_total_months, dtype=np.int32)
-            np.add.at(counts, month_index, and_arr.astype(np.int32))
+            # Monthly counts via BLAS matmul: (K, n_months)
+            counts_chunk = and_chunk.astype(np.float32) @ one_hot
 
-            result = self.gate.evaluate(and_arr.astype(bool), counts, n_total_months)
-            if not result.passed:
-                continue
+            # Gate criteria — vectorized
+            n_act = and_chunk.sum(axis=1).astype(np.int32)     # (K,)
+            n_active = (counts_chunk > 0).sum(axis=1)          # (K,)
+            safe_n_act = np.maximum(n_act, 1).astype(np.float32)
+            max_conc = counts_chunk.max(axis=1) / safe_n_act   # (K,)
+            mean_tpm = n_act / n_total_months                  # (K,)
 
-            and_series = pd.Series(and_arr.astype(float), index=ev_a.series.index)
-            composed.append(_make_composed_event(ev_a, ev_b, and_series, result))
+            passing_mask = (
+                (n_act >= p.min_act)
+                & (n_active >= p.min_months)
+                & (max_conc <= p.max_conc)
+                & (mean_tpm >= p.min_tpm)
+            )
 
-        if max_components >= 3 and len(pool) <= 80:
+            passing_indices = np.where(passing_mask)[0]
+            remaining = _MAX_COMPOSED - len(composed)
+            if len(passing_indices) > remaining:
+                passing_indices = passing_indices[:remaining]
+
+            for k in passing_indices:
+                ev_a = pool[ii[k]]
+                ev_b = pool[jj[k]]
+                gate_result = GateResult(
+                    passed=True,
+                    n_activations=int(n_act[k]),
+                    n_active_months=int(n_active[k]),
+                    max_monthly_share=float(max_conc[k]),
+                    mean_tpm=float(mean_tpm[k]),
+                )
+                and_series = pd.Series(
+                    and_chunk[k].astype(float), index=ev_a.series.index
+                )
+                composed.append(_make_composed_event(ev_a, ev_b, and_series, gate_result))
+
+        # ----------------------------------------------------------------
+        # Triple enumeration — capped pool, per-triple loop
+        # ----------------------------------------------------------------
+        if max_components >= 3 and len(pool) <= _MAX_POOL_TRIPLES:
             for ev_a, ev_b, ev_c in itertools.combinations(pool, 3):
                 if len(composed) >= _MAX_COMPOSED:
                     break
                 if not self._is_valid_triple(ev_a, ev_b, ev_c):
                     continue
-                a_arr = bool_arrays[id(ev_a)]
-                b_arr = bool_arrays[id(ev_b)]
-                c_arr = bool_arrays[id(ev_c)]
+                a_arr = bool_matrix[pool.index(ev_a)]
+                b_arr = bool_matrix[pool.index(ev_b)]
+                c_arr = bool_matrix[pool.index(ev_c)]
                 and_arr = a_arr & b_arr & c_arr
-                counts = np.zeros(n_total_months, dtype=np.int32)
-                np.add.at(counts, month_index, and_arr.astype(np.int32))
+                counts = (and_arr.astype(np.float32) @ one_hot).astype(np.int32)
                 result = self.gate.evaluate(and_arr.astype(bool), counts, n_total_months)
                 if result.passed:
-                    and_series = pd.Series(and_arr.astype(float), index=ev_a.series.index)
-                    composed.append(_make_composed_event(ev_a, ev_b, and_series, result, third=ev_c))
+                    and_series = pd.Series(
+                        and_arr.astype(float), index=ev_a.series.index
+                    )
+                    composed.append(
+                        _make_composed_event(ev_a, ev_b, and_series, result, third=ev_c)
+                    )
 
         return composed
 
@@ -238,14 +314,15 @@ def _build_composition_pool(events: list[RawEvent]) -> list[RawEvent]:
     ``(source_feature, transform, sorted_params)``.  Within each slot,
     events differ only in their threshold value.  Keeping more than
     ``_MAX_PER_SLOT`` (default 3) events per slot adds diminishing diversity
-    while rapidly inflating the O(n²) pair count.
+    while rapidly inflating the total pair count.
 
     The top events within each slot are selected by ``n_activations``
     (descending) to favour events that fire more often and are therefore
     more likely to survive the AND's intersection.
 
-    After slot-level pruning, the overall pool is capped at ``_MAX_POOL``
-    (default 300) using the same ``n_activations`` ranking.
+    Unlike the previous implementation, no global pool cap is applied.
+    The vectorized batch gate in ``ANDComposer.compose`` handles arbitrarily
+    large pools efficiently through chunked numpy/BLAS operations.
 
     Parameters
     ----------
@@ -255,7 +332,8 @@ def _build_composition_pool(events: list[RawEvent]) -> list[RawEvent]:
     Returns
     -------
     list[RawEvent]
-        Subset of ``events`` of length <= ``_MAX_POOL``.
+        Subset of ``events``, at most ``_MAX_PER_SLOT`` per
+        (feature, transform, params) slot.
     """
     slots: dict[str, list[RawEvent]] = defaultdict(list)
     for ev in events:
@@ -266,7 +344,6 @@ def _build_composition_pool(events: list[RawEvent]) -> list[RawEvent]:
 
     pool: list[RawEvent] = []
     for slot_events in slots.values():
-        # Keep top events per slot, sorted descending by n_activations
         top = sorted(
             slot_events,
             key=lambda e: e.gate_result.n_activations if e.gate_result else 0,
@@ -274,15 +351,94 @@ def _build_composition_pool(events: list[RawEvent]) -> list[RawEvent]:
         )[:_MAX_PER_SLOT]
         pool.extend(top)
 
-    # Final cap
-    if len(pool) > _MAX_POOL:
-        pool = sorted(
-            pool,
-            key=lambda e: e.gate_result.n_activations if e.gate_result else 0,
-            reverse=True,
-        )[:_MAX_POOL]
-
     return pool
+
+
+# ---------------------------------------------------------------------------
+# Vectorized helpers
+# ---------------------------------------------------------------------------
+
+def _build_one_hot_f32(month_index: np.ndarray, n_months: int) -> np.ndarray:
+    """Build a float32 one-hot month matrix for vectorized monthly counting.
+
+    Constructs a matrix ``M`` of shape ``(n_rows, n_months)`` where
+    ``M[r, m] = 1.0`` if row ``r`` belongs to calendar month ``m``.
+    Pre-multiplying a boolean activation row vector by ``M`` produces
+    per-month activation counts as a single BLAS ``gemv``/``gemm`` call,
+    making batch counting of thousands of pairs fast.
+
+    Parameters
+    ----------
+    month_index : np.ndarray
+        Integer array of shape (n_rows,), as returned by
+        ``_build_month_index``.  Each value is the zero-based month index
+        for that row.
+    n_months : int
+        Total number of distinct calendar months.
+
+    Returns
+    -------
+    np.ndarray
+        Float32 matrix of shape (n_rows, n_months).
+    """
+    n_rows = len(month_index)
+    one_hot = np.zeros((n_rows, n_months), dtype=np.float32)
+    one_hot[np.arange(n_rows), month_index] = 1.0
+    return one_hot
+
+
+def _validity_mask(pool: list[RawEvent]) -> np.ndarray:
+    """Build a boolean validity matrix for all pool pairs in pure numpy.
+
+    Encodes the same two rejection rules as ``_is_valid_pair`` but
+    operates over all N² pairs simultaneously via broadcasting, avoiding
+    per-pair Python logic:
+
+    1. **Native-type same source**: both transforms are in
+       ``{binary_native, categorical_onehot}`` and source features match.
+    2. **Same transform + same params + same source**: the AND would be
+       equivalent to the stricter threshold alone.
+
+    Parameters
+    ----------
+    pool : list[RawEvent]
+        Composition candidate pool produced by ``_build_composition_pool``.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean matrix of shape (n_pool, n_pool).  Entry ``[i, j]`` is
+        True when the pair ``(pool[i], pool[j])`` is a valid composition
+        candidate.  The upper triangle is what ``compose`` extracts with
+        ``np.triu(mask, k=1)``.
+    """
+    n = len(pool)
+    sources = np.array([ev.component.source_feature for ev in pool])
+    transforms = np.array([ev.component.transform for ev in pool])
+    # Params encoded as a single string for equality comparison
+    params_str = np.array([
+        "_".join(f"{k}{v}" for k, v in sorted(ev.component.transform_params.items()))
+        for ev in pool
+    ])
+
+    native_types = {"binary_native", "categorical_onehot"}
+    is_native = np.array([ev.component.transform in native_types for ev in pool])
+
+    # Rule 1: both native + same source → invalid
+    same_source = sources[:, None] == sources[None, :]  # (n, n)
+    both_native = is_native[:, None] & is_native[None, :]
+    native_same_source = both_native & same_source
+
+    # Rule 2: same source + same transform + same params → invalid
+    same_transform = transforms[:, None] == transforms[None, :]
+    same_params = params_str[:, None] == params_str[None, :]
+    subset_pair = same_source & same_transform & same_params
+
+    invalid = native_same_source | subset_pair
+    # Diagonal is also invalid (pair with itself)
+    np.fill_diagonal(invalid, True)
+
+    return ~invalid
 
 
 # ---------------------------------------------------------------------------
