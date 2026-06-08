@@ -68,19 +68,24 @@ class EventGenerator:
         thresholds = self._compute_thresholds(series, ts.is_zscore)
         events: list[RawEvent] = []
 
+        # Merge feature-level params (e.g. diffnorm_std) into transform_params
+        # so that EventComponent.transform_params is self-contained for replay.
+        merged_params = {**ts.transform_params, **ts.feature_params}
+
         for threshold, t_type, direction in thresholds:
             # Threshold event
             bool_series = _apply_threshold(ts.series, threshold, direction)
             comp = EventComponent(
                 source_feature=ts.source_feature,
                 transform=ts.transform,
-                transform_params=ts.transform_params,
+                transform_params=merged_params,
                 transformed_col=ts.col,
                 threshold=threshold,
                 threshold_type=t_type,
                 direction=direction,
                 event_type="threshold",
                 expression=_make_expr(ts.col, direction, threshold),
+                source_cols=ts.source_cols,
             )
             events.append(RawEvent(series=bool_series, component=comp))
 
@@ -93,13 +98,14 @@ class EventGenerator:
                 cross_comp = EventComponent(
                     source_feature=ts.source_feature,
                     transform=ts.transform,
-                    transform_params=ts.transform_params,
+                    transform_params=merged_params,
                     transformed_col=ts.col,
                     threshold=threshold,
                     threshold_type=t_type,
                     direction=direction,
                     event_type="crossing",
                     expression=_make_crossing_expr(ts.col, direction, threshold),
+                    source_cols=ts.source_cols,
                 )
                 events.append(RawEvent(series=cross_series, component=cross_comp))
 

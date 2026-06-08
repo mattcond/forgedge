@@ -8,7 +8,7 @@ Applies four temporal transformations to every feature in the extended catalog:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -52,6 +52,10 @@ class TransformedSeries:
     transform_params: dict
     source_feature: str
     is_zscore: bool = False
+    feature_params: dict = field(default_factory=dict)
+    """Operation-specific parameters from FeatureGenerator (e.g. ``diffnorm_std``)."""
+    source_cols: list = field(default_factory=list)
+    """Original native column names used to construct the source feature."""
 
 
 class TransformLayer:
@@ -89,7 +93,11 @@ class TransformLayer:
             if col not in df.columns:
                 continue
             series = df[col]
-            results.extend(self.transform_one(series, col, meta.is_scale_free))
+            results.extend(self.transform_one(
+                series, col, meta.is_scale_free,
+                feature_params=meta.params,
+                source_cols=meta.source_cols,
+            ))
         return results
 
     def transform_one(
@@ -97,6 +105,8 @@ class TransformLayer:
         series: pd.Series,
         col: str,
         is_scale_free: bool,
+        feature_params: dict | None = None,
+        source_cols: list | None = None,
     ) -> list[TransformedSeries]:
         """Apply all four transforms to a single feature series.
 
@@ -138,6 +148,8 @@ class TransformLayer:
             Between 10 (non-scale-free) and 11 (scale-free) TransformedSeries
             objects per feature.
         """
+        fp = feature_params or {}
+        sc = source_cols or []
         out: list[TransformedSeries] = []
 
         # Identity — only for scale-free series
@@ -149,6 +161,8 @@ class TransformLayer:
                 transform_params={},
                 source_feature=col,
                 is_zscore=False,
+                feature_params=fp,
+                source_cols=sc,
             ))
 
         # Pctrank
@@ -162,6 +176,8 @@ class TransformLayer:
                 transform_params={"window": w},
                 source_feature=col,
                 is_zscore=False,
+                feature_params=fp,
+                source_cols=sc,
             ))
 
         # Z-score
@@ -175,6 +191,8 @@ class TransformLayer:
                 transform_params={"window": w},
                 source_feature=col,
                 is_zscore=True,
+                feature_params=fp,
+                source_cols=sc,
             ))
 
         # Delta
@@ -188,6 +206,8 @@ class TransformLayer:
                 transform_params={"lag": lag},
                 source_feature=col,
                 is_zscore=False,
+                feature_params=fp,
+                source_cols=sc,
             ))
 
         return out

@@ -172,6 +172,14 @@ class DerivedFeature:
     arity: int                        # 1, 2, or 3
     operation: str                    # "identity", "ratio", "spread_pct", "diff_norm", "position"
     source_cols: list[str] = field(default_factory=list)
+    params: dict = field(default_factory=dict)
+    """Operation-specific scalar parameters needed for out-of-sample replay.
+
+    For ``diff_norm`` features this contains ``{"diffnorm_std": float}`` —
+    the in-sample standard deviation used to normalise the difference series.
+    Empty for all other operations (ratio, spread_pct, position are
+    parameter-free formulas).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +339,7 @@ class FeatureGenerator:
                     # diff_norm: (A - B) / std(A - B)
                     dn_col = f"diffnorm_{pf_a.base}_{pf_a.indicator}{param_a:02d}_{pf_b.indicator}{param_b:02d}"
                     if dn_col not in extended.columns:
-                        dn_series = _safe_diff_norm(df[col_a], df[col_b])
+                        dn_series, dn_std = _safe_diff_norm(df[col_a], df[col_b])
                         extended[dn_col] = dn_series
                         meta[dn_col] = DerivedFeature(
                             col=dn_col,
@@ -340,6 +348,7 @@ class FeatureGenerator:
                             arity=2,
                             operation="diff_norm",
                             source_cols=[col_a, col_b],
+                            params={"diffnorm_std": dn_std},
                         )
 
         # Price vs its own MA (close vs close_ema_N / close_sma_N)
@@ -531,18 +540,25 @@ def _safe_spread_pct(a: pd.Series, b: pd.Series) -> pd.Series:
     return result.replace([float("inf"), float("-inf")], pd.NA)
 
 
-def _safe_diff_norm(a: pd.Series, b: pd.Series) -> pd.Series:
+def _safe_diff_norm(a: pd.Series, b: pd.Series) -> tuple[pd.Series, float]:
     """Compute ``(a - b) / std(a - b)`` over the full history.
 
-    Normalises the difference series by its historical standard deviation,
-    producing a z-score of the spread.  Returns a NaN series when the
-    difference is constant (zero standard deviation).
+    Normalises the difference series by its in-sample standard deviation,
+    producing a z-score of the spread.  Returns a NaN series and std=0.0
+    when the difference is constant (zero standard deviation).
+
+    Returns
+    -------
+    tuple[pd.Series, float]
+        ``(normalised_series, std_used)`` — the std is stored in
+        ``DerivedFeature.params["diffnorm_std"]`` so that the event can be
+        replicated on out-of-sample data without re-computing the normaliser.
     """
     diff = a - b
     std = float(diff.std())
     if std == 0 or pd.isna(std):
-        return pd.Series(float("nan"), index=a.index, dtype=float)
-    return diff / std
+        return pd.Series(float("nan"), index=a.index, dtype=float), 0.0
+    return diff / std, std
 
 
 def _safe_position(value: pd.Series, lower: pd.Series, upper: pd.Series) -> pd.Series:
