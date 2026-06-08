@@ -76,6 +76,8 @@ class TypeClassifier:
             series = df[col].dropna()
             if len(series) == 0:
                 continue
+            if series.nunique() <= 1:
+                continue
             results[col] = self._classify(col, series)
         return results
 
@@ -107,7 +109,7 @@ class TypeClassifier:
                 n_distinct=n_distinct,
             )
 
-        if n_distinct <= 2:
+        if n_distinct == 2:
             return ColumnClassification(
                 col_name=col,
                 col_type=ColumnType.BINARY,
@@ -181,5 +183,5 @@ class TypeClassifier:
             [series.iloc[i * w: (i + 1) * w].mean() for i in range(n_windows)],
             dtype=float,
         )
-        drift_ratio = float(np.std(window_means)) / overall_std
+        drift_ratio = float(np.std(window_means, ddof=1)) / overall_std
         return drift_ratio <= self.scale_free_drift_threshold

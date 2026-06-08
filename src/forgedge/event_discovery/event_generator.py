@@ -84,8 +84,11 @@ class EventGenerator:
             )
             events.append(RawEvent(series=bool_series, component=comp))
 
-            # Crossing event — only makes sense for identity transform (absolute thresholds)
-            if ts.transform == "identity":
+            # Crossing event — only for identity transform on low-direction thresholds.
+            # The spec defines only the downward crossing formula (serie_t < soglia AND
+            # serie_{t-1} >= soglia).  High-direction crossings are not meaningful for
+            # the oversold/extreme-low detection use case and are omitted.
+            if ts.transform == "identity" and direction == "below":
                 cross_series = _apply_crossing(ts.series, threshold, direction)
                 cross_comp = EventComponent(
                     source_feature=ts.source_feature,
