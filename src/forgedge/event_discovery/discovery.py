@@ -131,7 +131,7 @@ class EventDiscovery:
         """
         cfg = self.config
 
-        timestamps = self._extract_timestamps()
+        timestamps = self._prepare_timestamps()
         self._timestamps = timestamps
 
         # Step 0 — classify columns
@@ -159,6 +159,9 @@ class EventDiscovery:
         # Step 1 — generate derived features for continuous columns
         fg = FeatureGenerator()
         extended_df, derived_meta = fg.generate(self.df, classifications)
+        # expose the full derived feature table (with DatetimeIndex) for debugging
+        extended_df.index = self.df.index
+        self.df = extended_df
 
         # Step 2 — apply temporal transforms
         transformer = TransformLayer()
@@ -256,44 +259,84 @@ class EventDiscovery:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _extract_timestamps(self) -> pd.Series:
-        """Extract the datetime series from the KPI table.
+    def _prepare_timestamps(self) -> pd.Series:
+        """Parse and normalise the timestamp column, setting a DatetimeIndex.
 
-        Supports two input formats:
+        Accepts the following input formats (checked in order):
 
-        * **Column-based**: if a column named ``config.timestamp_col``
-          (default ``"open_dt"``) exists, it is parsed with ``pd.to_datetime``
-          and the DataFrame is reset to a RangeIndex.
+        1. **DatetimeIndex** — used as-is; the index name is preserved.
+        2. **Datetime-typed column** (``datetime64``, ``pd.Timestamp``) — parsed
+           with ``pd.to_datetime`` and no unit conversion needed.
+        3. **Numeric column** — the unit (``s`` / ``ms`` / ``us`` / ``ns``) is
+           inferred automatically from the median value:
 
-        * **DatetimeIndex**: if the DataFrame has a DatetimeIndex, its values
-          are used as timestamps and the index is reset to columns (so that
-          downstream code always works with a RangeIndex).
+           ============  =================  ========================
+           Unit          Median range       Approximate epoch range
+           ============  =================  ========================
+           seconds       1e9 – 1e10         2001 – 2286
+           milliseconds  1e12 – 1e13        2001 – 2286
+           microseconds  1e15 – 1e16        2001 – 2286
+           nanoseconds   > 1e16             2001 – 2286
+           ============  =================  ========================
+
+        4. **String column** — passed directly to ``pd.to_datetime`` for
+           ISO-8601 parsing.
+
+        After parsing, ``self.df`` is updated so that:
+
+        * The DatetimeIndex is set to the parsed timestamps.
+        * The original timestamp column is **dropped** from ``self.df``
+          (it is redundant once the index is set and would confuse the
+          TypeClassifier).
+
+        The returned Series has a plain ``RangeIndex`` so that pipeline
+        steps that use positional alignment continue to work correctly.
+        The DatetimeIndex is re-attached to ``event_series`` in
+        ``_to_candidate`` so that callers can call ``resample`` directly.
 
         Raises
         ------
         ValueError
-            If neither format is detected.
+            If no timestamp source is found.
 
         Returns
         -------
         pd.Series
-            Datetime series of length n_rows with a RangeIndex.
+            Datetime series with RangeIndex, length ``n_rows``.
         """
         ts_col = self.config.timestamp_col
-        if ts_col in self.df.columns:
-            ts = pd.to_datetime(self.df[ts_col])
-            self.df = self.df.reset_index(drop=True)
-            return ts.reset_index(drop=True)
 
+        # ── Case 1: already a DatetimeIndex ──────────────────────────────
         if isinstance(self.df.index, pd.DatetimeIndex):
-            ts = self.df.index.to_series()
-            self.df = self.df.reset_index(drop=False)
-            return ts.reset_index(drop=True)
+            ts = self.df.index.to_series().reset_index(drop=True)
+            # keep DatetimeIndex on self.df (drop=True avoids duplicate col)
+            self.df = self.df.reset_index(drop=True)
+            self.df.index = pd.DatetimeIndex(ts.values, name=ts_col)
+            return ts
 
-        raise ValueError(
-            f"No datetime column '{ts_col}' found and index is not DatetimeIndex. "
-            "Provide a DataFrame with an 'open_dt' column or a DatetimeIndex."
-        )
+        # ── Case 2 / 3 / 4: column-based ─────────────────────────────────
+        if ts_col not in self.df.columns:
+            raise ValueError(
+                f"Timestamp column '{ts_col}' not found and index is not a "
+                "DatetimeIndex.  Pass the correct column name via "
+                "DiscoveryConfig(timestamp_col='...')."
+            )
+
+        raw = self.df[ts_col]
+
+        if pd.api.types.is_datetime64_any_dtype(raw):
+            # already datetime
+            parsed = raw.reset_index(drop=True)
+        elif pd.api.types.is_numeric_dtype(raw):
+            unit = _infer_timestamp_unit(raw)
+            parsed = pd.to_datetime(raw, unit=unit).reset_index(drop=True)
+        else:
+            # string / object — let pandas infer the format
+            parsed = pd.to_datetime(raw).reset_index(drop=True)
+
+        self.df = self.df.drop(columns=[ts_col]).reset_index(drop=True)
+        self.df.index = pd.DatetimeIndex(parsed.values, name=ts_col)
+        return parsed
 
     def _to_candidate(
         self,
@@ -341,6 +384,10 @@ class EventDiscovery:
             mean_tpm=g.mean_tpm if g else float("nan"),
         )
 
+        # Attach DatetimeIndex so callers can call .resample() directly
+        series_dt = ev.series.copy()
+        series_dt.index = pd.DatetimeIndex(timestamps.values, name=self.config.timestamp_col)
+
         return EventCandidate(
             event_id=_make_event_id(components, idx),
             status="CANDIDATE",
@@ -348,13 +395,39 @@ class EventDiscovery:
             expression=comp.expression,
             activation_stats=stats,
             consistency_gate=g,
-            event_series=ev.series,
+            event_series=series_dt,
         )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _infer_timestamp_unit(series: pd.Series) -> str:
+    """Infer the Unix timestamp unit from the median value of a numeric series.
+
+    Boundaries are chosen so that any timestamp between year 2001 and 2286
+    maps to exactly one unit bucket.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Numeric column whose values are Unix timestamps.
+
+    Returns
+    -------
+    str
+        One of ``"s"``, ``"ms"``, ``"us"``, ``"ns"``.
+    """
+    median_val = float(series.median())
+    if median_val < 1e10:
+        return "s"
+    if median_val < 1e13:
+        return "ms"
+    if median_val < 1e16:
+        return "us"
+    return "ns"
+
 
 def _count_zero_months(series: pd.Series, timestamps: pd.Series) -> int:
     """Count calendar months in which the event never fired.
@@ -375,9 +448,14 @@ def _count_zero_months(series: pd.Series, timestamps: pd.Series) -> int:
     int
         Number of calendar months with zero activations.
     """
-    active = series.fillna(0).astype(bool)
-    periods = timestamps.dt.to_period("M")
-    counts = active.groupby(periods).sum()
+    # Strip both indices before groupby to avoid DatetimeIndex vs RangeIndex
+    # alignment failures (event_series carries DatetimeIndex from the pipeline).
+    if isinstance(series.index, pd.DatetimeIndex):
+        periods = series.index.to_period("M")
+    else:
+        periods = pd.DatetimeIndex(timestamps.values).to_period("M")
+    active_vals = series.fillna(0).values.astype(bool)
+    counts = pd.Series(active_vals, index=periods).groupby(level=0).sum()
     all_months = pd.period_range(periods.min(), periods.max(), freq="M")
     counts = counts.reindex(all_months, fill_value=0)
     return int((counts == 0).sum())

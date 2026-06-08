@@ -34,16 +34,11 @@ df = pd.read_excel(EXCEL_PATH)
 
 # Filtra il simbolo desiderato
 df = df[df["symbol"] == SYMBOL].copy()
-
-# I timestamp sono Unix milliseconds (int64): usare unit='ms' è obbligatorio.
-# Senza unit='ms' pandas li interpreta come nanosecondi → 1970 → gate fallisce.
-df.index = pd.to_datetime(df["open_time"], unit="ms")
-df.index.name = "open_dt"
-df = df.drop(columns=["open_time"])
-df = df.sort_index()
+df = df.sort_values("open_time")
 
 print(f"Rows : {len(df)}")
-print(f"Range: {df.index[0].date()} → {df.index[-1].date()}")
+print(f"Range: {pd.to_datetime(df['open_time'].iloc[0], unit='ms').date()} → "
+      f"{pd.to_datetime(df['open_time'].iloc[-1], unit='ms').date()}")
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +52,8 @@ config = DiscoveryConfig(
         max_conc=0.40,   # nessun mese assorbe più del 40% delle attivazioni
         min_tpm=2.0,     # almeno 2 attivazioni/mese in media
     ),
+    # EventDiscovery auto-rileva l'unità (s/ms/us/ns) per colonne numeriche
+    timestamp_col="open_time",
 )
 
 ed = EventDiscovery(df, config)
@@ -69,17 +66,7 @@ print(f"\nTotal candidates: {len(candidates)}")
 # 3. Summary DataFrame ordinabile
 # ---------------------------------------------------------------------------
 
-# Il pipeline usa un RangeIndex internamente; per resample è necessario
-# riallineare l'event_series con i timestamp estratti dal pipeline.
-timestamps = ed._timestamps
-
-
-def monthly_activations(event_series: pd.Series, ts: pd.Series) -> pd.Series:
-    """Attivazioni mensili usando i timestamps del pipeline."""
-    s = event_series.copy()
-    s.index = pd.to_datetime(ts.values)
-    return s.resample("ME").sum()
-
+# event_series ha già il DatetimeIndex → resample() diretto, nessun helper necessario
 
 records = []
 for c in candidates:
@@ -151,7 +138,7 @@ for comp in best_and.components:
 # 7. Breakdown mensile del migliore AND
 # ---------------------------------------------------------------------------
 
-monthly = monthly_activations(best_and.event_series, timestamps)
+monthly = best_and.event_series.resample("ME").sum()
 monthly.index = monthly.index.strftime("%Y-%m")
 print("\nAttivazioni mensili (mesi non-zero):")
 print(monthly[monthly > 0].to_string())
@@ -186,6 +173,22 @@ print(
 
 
 # ---------------------------------------------------------------------------
+# 10. Debug: DataFrame interno con tutte le feature derivate
+# ---------------------------------------------------------------------------
+
+# ed.df è il DataFrame completo post-pipeline con DatetimeIndex e tutte
+# le colonne derivate (ratio, spread_pct, diffnorm, bb_pct_b, ...).
+print(f"\n─── ed.df (feature table) ───")
+print(f"Shape  : {ed.df.shape}")
+print(f"Index  : {type(ed.df.index).__name__}  {ed.df.index[0]} → {ed.df.index[-1]}")
+derived_cols = [c for c in ed.df.columns if any(
+    c.startswith(p) for p in ("ratio_", "spread_", "diffnorm_", "bb_", "rng_")
+)]
+print(f"Derived: {len(derived_cols)} feature columns")
+print(f"  {derived_cols[:6]} ...")
+
+
+# ---------------------------------------------------------------------------
 # 10. Grafico mensile (opzionale, richiede matplotlib)
 # ---------------------------------------------------------------------------
 
@@ -198,7 +201,7 @@ try:
     fig, axes = plt.subplots(2, 1, figsize=(14, 7))
 
     # Pannello A — migliore single event
-    m_single = monthly_activations(best_single.event_series, timestamps)
+    m_single = best_single.event_series.resample("ME").sum()
     m_single.index = m_single.index.strftime("%Y-%m")
     ax = axes[0]
     m_single.plot(kind="bar", ax=ax, color="steelblue", width=0.8)
