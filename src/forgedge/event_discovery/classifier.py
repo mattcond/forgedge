@@ -20,6 +20,23 @@ class TypeClassifier:
     Continuous columns are further assessed for scale-free behaviour.
     The scale-free check is conservative: when in doubt, returns False.
     Users may override via ``scale_free_overrides``.
+
+    Parameters
+    ----------
+    max_categorical_classes : int
+        Columns classified as CATEGORICAL with more distinct values than this
+        limit are still stored in the classification dict but are excluded from
+        the event generation pipeline.
+    scale_free_overrides : dict[str, bool] or None
+        Manual overrides for specific columns.  Useful when the automatic
+        heuristic produces a false negative (e.g. a short history for RSI).
+    skip_cols : set[str] or None
+        Additional column names to skip, merged with the built-in ``_SKIP_COLS``
+        set (datetime, OHLCV raw columns, regime labels).
+    scale_free_drift_threshold : float
+        Maximum allowed drift ratio for the scale-free heuristic.  A column
+        passes if ``std(window_means) / overall_std <= threshold``.
+        Lower values are stricter; default 0.25 is conservative.
     """
 
     def __init__(
@@ -35,6 +52,23 @@ class TypeClassifier:
         self.scale_free_drift_threshold = scale_free_drift_threshold
 
     def fit(self, df: pd.DataFrame) -> dict[str, ColumnClassification]:
+        """Classify every column in ``df`` and return the results dict.
+
+        Columns listed in ``skip_cols`` and all-NaN columns are silently
+        ignored.  The returned dict maps column name → ColumnClassification
+        and is passed directly to FeatureGenerator and EventGenerator.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The raw KPI table.  Must include a datetime column (skipped
+            automatically via ``_SKIP_COLS``).
+
+        Returns
+        -------
+        dict[str, ColumnClassification]
+            One entry per non-skipped, non-empty column.
+        """
         results: dict[str, ColumnClassification] = {}
         for col in df.columns:
             if col in self.skip_cols:
@@ -46,6 +80,24 @@ class TypeClassifier:
         return results
 
     def _classify(self, col: str, series: pd.Series) -> ColumnClassification:
+        """Determine the type of a single non-null series.
+
+        Decision tree:
+        1. Non-numeric dtype → CATEGORICAL (strings, objects).
+        2. Exactly 2 distinct values → BINARY (boolean flags, 0/1 indicators).
+        3. Otherwise → CONTINUOUS; run scale-free detection and apply overrides.
+
+        Parameters
+        ----------
+        col : str
+            Column name (used to look up any user override).
+        series : pd.Series
+            Already dropna'd values for the column.
+
+        Returns
+        -------
+        ColumnClassification
+        """
         n_distinct = int(series.nunique())
 
         if not pd.api.types.is_numeric_dtype(series):
@@ -75,11 +127,41 @@ class TypeClassifier:
     def _is_scale_free(self, series: pd.Series) -> bool:
         """Return True only if the series level is stable across rolling windows.
 
-        Splits the series into four equal windows and checks whether the
-        standard deviation of the window means (relative to the overall series
-        std) is below ``scale_free_drift_threshold``.  In case of doubt the
-        method returns False (conservative: a false positive would corrupt
-        identity thresholds).
+        The heuristic splits the series into four equal-length windows and
+        measures how much the window means drift relative to the overall
+        series standard deviation::
+
+            drift_ratio = std(window_means) / overall_std
+
+        A series is considered scale-free when ``drift_ratio <=
+        scale_free_drift_threshold`` (default 0.25).
+
+        Design rationale
+        ----------------
+        The check is deliberately conservative.  A false positive (declaring
+        a trending price series scale-free) would corrupt the identity-transform
+        thresholds by anchoring them to a level that no longer holds out-of-
+        sample.  A false negative (missing that RSI is scale-free) only costs
+        some identity events — far less damaging.
+
+        Minimum data requirements
+        -------------------------
+        * ``n >= 48`` total non-null observations.
+        * Each window must be at least 12 bars (``w = n // 4 >= 12``).
+
+        Columns with zero standard deviation (constant series) always return
+        False because they carry no information.
+
+        Parameters
+        ----------
+        series : pd.Series
+            Numeric series (NaNs already dropped by the caller).
+
+        Returns
+        -------
+        bool
+            True if the drift ratio is within the threshold; False otherwise
+            or when there is insufficient data.
         """
         series = series.dropna()
         n = len(series)

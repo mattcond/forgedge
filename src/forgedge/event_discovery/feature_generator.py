@@ -20,6 +20,30 @@ from .models import ColumnClassification, ColumnType
 
 @dataclass
 class ParsedFeature:
+    """Structured representation of a recognised KPI column name.
+
+    Column names follow the convention ``<base>_<indicator>_<param>``
+    (e.g. ``close_ema_25``, ``close_bb_lower_20``).  ``parse_feature``
+    extracts the semantic parts so FeatureGenerator can group columns by
+    family for arity-2 and arity-3 feature construction.
+
+    Attributes
+    ----------
+    col : str
+        Original column name as it appears in the DataFrame.
+    base : str
+        Underlying price/volume series (``close``, ``high``, ``low``,
+        ``open``, ``volume``).
+    indicator : str
+        Indicator type string, resolved from the regex match groups
+        (e.g. ``ema``, ``sma``, ``bb_lower``, ``raw``).
+    params : list[int]
+        Numeric parameters extracted from the column name (period lengths).
+    family : str
+        Semantic grouping key used to find pairable columns.  Examples:
+        ``ema``, ``sma``, ``bollinger``, ``rolling_min``, ``volume_ma``.
+    """
+
     col: str
     base: str       # "close", "volume", "high", "low"
     indicator: str  # "ema", "sma", "rsi", "bb_lower", etc.
@@ -28,6 +52,7 @@ class ParsedFeature:
 
     @property
     def full_key(self) -> str:
+        """Composite key ``<base>_<indicator>`` for quick identity checks."""
         return f"{self.base}_{self.indicator}"
 
 
@@ -51,6 +76,26 @@ _PATTERNS: list[tuple[str, str, str]] = [
 
 
 def parse_feature(col: str) -> Optional[ParsedFeature]:
+    """Try to parse ``col`` against the known naming patterns.
+
+    Iterates through ``_PATTERNS`` in order.  The first matching pattern
+    wins; earlier patterns take priority (Bollinger bands must be matched
+    before the generic ``{base}_{indicator}_{param}`` pattern to avoid
+    mis-classifying ``close_bb_lower_20`` as ``indicator=bb``,
+    ``family=bb``).
+
+    Parameters
+    ----------
+    col : str
+        Column name to parse.
+
+    Returns
+    -------
+    ParsedFeature or None
+        Parsed structure if the column matches a known pattern, None if it
+        does not (e.g. a custom or derived column that was already present
+        in the DataFrame).
+    """
     for pattern, ind_tmpl, fam_tmpl in _PATTERNS:
         m = re.match(pattern, col)
         if m is None:
@@ -66,6 +111,24 @@ def parse_feature(col: str) -> Optional[ParsedFeature]:
 
 
 def _resolve(tmpl: str, groups: tuple) -> str:
+    """Substitute positional placeholders ``{0}``, ``{1}`` … with regex groups.
+
+    Used internally to build indicator and family strings from regex match
+    groups without a full format-string approach (which would require named
+    groups in every pattern).
+
+    Parameters
+    ----------
+    tmpl : str
+        Template string containing zero or more ``{N}`` placeholders.
+    groups : tuple
+        Regex match groups (may include None for optional groups).
+
+    Returns
+    -------
+    str
+        Template with placeholders replaced by the corresponding group value.
+    """
     result = tmpl
     for i, g in enumerate(groups):
         result = result.replace(f"{{{i}}}", g or "")
@@ -78,6 +141,31 @@ def _resolve(tmpl: str, groups: tuple) -> str:
 
 @dataclass
 class DerivedFeature:
+    """Metadata record for one generated (or pass-through) feature.
+
+    Created by FeatureGenerator and consumed by TransformLayer.  Each entry
+    in the ``derived_meta`` dict corresponds to one column in
+    ``extended_df``.
+
+    Attributes
+    ----------
+    col : str
+        Name of the column in ``extended_df``.
+    series : pd.Series
+        The actual numeric values (reference into ``extended_df``).
+    is_scale_free : bool
+        Whether this feature has a stable level over time.  All arity-2
+        and arity-3 derived features are always scale-free by construction.
+        Arity-1 features inherit the result of the classifier.
+    arity : int
+        Number of input columns used to produce this feature (1, 2, or 3).
+    operation : str
+        Construction method: ``"identity"``, ``"ratio"``, ``"spread_pct"``,
+        or ``"position"``.
+    source_cols : list[str]
+        Names of the input columns (length == arity).
+    """
+
     col: str
     series: pd.Series
     is_scale_free: bool
@@ -103,9 +191,34 @@ class FeatureGenerator:
         df: pd.DataFrame,
         classifications: dict[str, ColumnClassification],
     ) -> tuple[pd.DataFrame, dict[str, DerivedFeature]]:
-        """Return (extended_df, derived_meta) where extended_df contains all
-        native continuous columns plus newly generated derived columns."""
+        """Build the extended feature catalog and return it alongside metadata.
 
+        Processing order
+        ----------------
+        1. **Arity 1**: scale-free continuous columns are added to ``meta``
+           as identity features (no new DataFrame column is needed — the
+           original column is reused).
+        2. **Arity 2**: ``_generate_arity2`` creates ratio and spread_pct
+           features by pairing same-family columns (EMA pairs, price vs MA,
+           volume vs volume-MA).
+        3. **Arity 3**: ``_generate_arity3`` creates position features by
+           combining a price column with its Bollinger or rolling-range bands.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Original KPI table (must not be modified in place).
+        classifications : dict[str, ColumnClassification]
+            Output of ``TypeClassifier.fit(df)``.
+
+        Returns
+        -------
+        extended_df : pd.DataFrame
+            Copy of ``df`` with additional derived columns appended.
+        derived_meta : dict[str, DerivedFeature]
+            One entry per feature that will be passed to the TransformLayer,
+            including both arity-1 pass-throughs and newly computed columns.
+        """
         continuous = {
             col: cls
             for col, cls in classifications.items()
@@ -149,7 +262,39 @@ class FeatureGenerator:
         extended: pd.DataFrame,
         meta: dict[str, DerivedFeature],
     ) -> None:
-        # Group by (base, indicator-family) to find same-family pairs
+        """Generate all arity-2 derived features and append them to ``extended``/``meta``.
+
+        Three sub-cases are handled:
+
+        **Same-indicator pairs** (e.g. EMA-9 / EMA-25, RSI-14 / RSI-25):
+        Columns sharing the same ``(base, family)`` key are sorted by period
+        parameter (smaller = faster).  For every (fast, slow) pair, a ratio
+        ``fast / slow`` is computed.  This captures crossover dynamics in a
+        scale-free form.  Column name: ``ratio_{base}_{ind}{p_fast}_{ind}{p_slow}``.
+
+        **Price vs its own moving average** (e.g. close / close_ema_25):
+        The raw close price divided by (or spread relative to) each of its
+        MA columns gives a mean-reversion signal.  Computed as
+        ``(close - MA) / MA``.  Column name: ``spread_{base}_{ind}{param}``.
+
+        **Volume vs volume MA** (e.g. volume / volume_sma_25):
+        Captures volume spikes in normalised form.
+        Column name: ``ratio_volume_{ind}{param}``.
+
+        All generated features are marked ``is_scale_free=True`` because the
+        division/subtraction removes the price level by construction.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Original KPI table (read-only).
+        parsed : dict[str, ParsedFeature]
+            Pre-parsed feature metadata for continuous columns.
+        extended : pd.DataFrame
+            Target DataFrame — new columns are appended here.
+        meta : dict[str, DerivedFeature]
+            Target metadata dict — new entries are added here.
+        """
         from collections import defaultdict
         groups: dict[str, list[str]] = defaultdict(list)
         for col, pf in parsed.items():
@@ -243,6 +388,39 @@ class FeatureGenerator:
         extended: pd.DataFrame,
         meta: dict[str, DerivedFeature],
     ) -> None:
+        """Generate all arity-3 derived features (relative position within a range).
+
+        Two sub-cases:
+
+        **Bollinger %B** (``bb_pct_b_{base}_{param}``):
+        For each (base, period) pair that has both a ``bb_lower`` and
+        ``bb_upper`` column, the close price position within the band is
+        computed as ``(close - lower) / (upper - lower)``.  Values near 0
+        indicate the price is at the lower band; near 1 at the upper band.
+        A value outside [0, 1] means the price has broken out of the bands.
+
+        **Rolling range position** (``pos_{base}_range{param}``):
+        For each (base, period) pair that has both a ``close_min_N`` and
+        ``close_max_N`` column, the price position within the rolling N-bar
+        range is computed identically.  Values near 0/1 signal new lows/highs
+        within the lookback window.
+
+        Both features are scale-free by construction (division removes
+        absolute price level).  Division by zero (when upper == lower,
+        i.e. a flat market) is handled by ``_safe_position`` which replaces
+        inf with pd.NA.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Original KPI table (read-only).
+        parsed : dict[str, ParsedFeature]
+            Pre-parsed feature metadata for continuous columns.
+        extended : pd.DataFrame
+            Target DataFrame — new columns are appended here.
+        meta : dict[str, DerivedFeature]
+            Target metadata dict — new entries are added here.
+        """
         from collections import defaultdict
 
         # Bollinger bands: group by (base, param)
@@ -320,16 +498,35 @@ class FeatureGenerator:
 # ---------------------------------------------------------------------------
 
 def _safe_ratio(a: pd.Series, b: pd.Series) -> pd.Series:
+    """Compute ``a / b``, replacing ±inf with pd.NA.
+
+    Division by zero yields ±inf in pandas; replacing those values with NA
+    avoids propagating infinities into downstream thresholds.
+    """
     result = a / b
     return result.replace([float("inf"), float("-inf")], pd.NA)
 
 
 def _safe_spread_pct(a: pd.Series, b: pd.Series) -> pd.Series:
+    """Compute ``(a - b) / b``, replacing ±inf with pd.NA.
+
+    Used for the price-vs-MA spread where ``b`` could momentarily be zero
+    (unlikely in practice for a moving average of a positive price, but
+    guarded defensively).
+    """
     result = (a - b) / b
     return result.replace([float("inf"), float("-inf")], pd.NA)
 
 
 def _safe_position(value: pd.Series, lower: pd.Series, upper: pd.Series) -> pd.Series:
+    """Compute the relative position of ``value`` within [``lower``, ``upper``].
+
+    Formula: ``(value - lower) / (upper - lower)``.
+
+    When ``upper == lower`` (flat market, zero-width band) the denominator is
+    zero, producing ±inf.  These are replaced with pd.NA so that downstream
+    quantile-based thresholds are unaffected.
+    """
     denom = upper - lower
     result = (value - lower) / denom
     return result.replace([float("inf"), float("-inf")], pd.NA)
