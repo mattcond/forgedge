@@ -19,7 +19,8 @@
 7. [Step 4 — Consistency Gate](#7-step-4--consistency-gate)
 8. [Step 5 — AND Composition](#8-step-5--and-composition)
 9. [Output: Event Candidate](#9-output-event-candidate)
-10. [Esempio end-to-end: da `close_rsi_25` a `rsi25_pr96 < 0.10`](#10-esempio-end-to-end-da-close_rsi_25-a-rsi25_pr96--010)
+10. [Decodifica dei nomi degli eventi](#10-decodifica-dei-nomi-degli-eventi)
+11. [Esempio end-to-end: da `close_rsi_25` a `rsi25_pr96 < 0.10`](#11-esempio-end-to-end-da-close_rsi_25-a-rsi25_pr96--010)
 
 ---
 
@@ -714,7 +715,297 @@ alpha_discovery_response: null
 
 ---
 
-## 10. Esempio end-to-end: da `close_rsi_25` a `rsi25_pr96 < 0.10`
+## 10. Decodifica dei nomi degli eventi
+
+Ogni `expression` restituita da EventDiscovery è costruita a partire da un nome di colonna trasformata e una soglia. La struttura del nome è deterministica e completamente decodificabile — ogni parte porta informazione precisa su cosa si sta misurando e in che contesto.
+
+### Struttura generale
+
+```
+{prefisso_trasformata}_{feature}_{param_trasformata} {operatore} {soglia}
+```
+
+Le tre parti (prefisso, feature, parametro) si leggono come una frase:
+> **"la [trasformata] su [finestra/lag] di [feature] è [sotto/sopra] [soglia]"**
+
+---
+
+### Prefisso della trasformata
+
+Il prefisso indica quale trasformazione temporale è stata applicata alla feature.
+
+| Prefisso | Trasformata | Parametro finale | Esempio |
+|---|---|---|---|
+| *(nessuno)* | Identità — valore grezzo scale-free | — | `close_rsi_25 < 30.5` |
+| `pr_` | Rolling Pctrank — posizione nel range delle ultime W barre | `_{W}` | `pr_close_rsi_25_96 < 0.10` |
+| `zs_` | Rolling Z-score — distanza in σ dalla media delle ultime W barre | `_{W}` | `zs_close_rsi_25_48 < -1` |
+| `delta_` | Delta — variazione assoluta rispetto a L barre precedenti | `_{L}` | `delta_close_rsi_25_3 < -4.11` |
+
+- **W** (finestra) ∈ {48, 96, 168} — ore di lookback per pctrank e z-score
+- **L** (lag) ∈ {1, 3, 6, 12} — barre di ritardo per il delta
+
+---
+
+### Feature: arity 1 (feature native)
+
+Feature native del Variable Catalog, senza operazioni combinatorie.
+
+```
+{sorgente}_{indicatore}_{param_indicatore}
+```
+
+| Parte | Significato | Esempio |
+|---|---|---|
+| `sorgente` | Colonna base del KPI (`close`, `volume`, …) | `close` |
+| `indicatore` | Tipo di indicatore (`rsi`, `sma`, `ema`, `bb`, …) | `rsi` |
+| `param_indicatore` | Parametro dell'indicatore (periodo, lunghezza) | `25` |
+
+**Esempi:**
+
+| Nome colonna | Sorgente | Indicatore | Param |
+|---|---|---|---|
+| `close_rsi_25` | `close` | `rsi` | 25 periodi |
+| `close_sma_09` | `close` | `sma` | 9 periodi |
+| `color` | — | intero {-1, 0, 1} (colore candela) | — |
+
+**Esempi di eventi con feature native:**
+
+```
+close_rsi_25 < 30.5
+    → RSI(25) grezzo sotto 30.5 (p10 della distribuzione storica)
+    → Trasformata: identità (scale-free confermato)
+
+pr_close_rsi_25_96 < 0.135
+    → RSI(25) negli ultimi 96 valori è nel 13.5° percentile
+    → Trasformata: pctrank, finestra W=96
+
+zs_close_rsi_25_48 < -1
+    → RSI(25) è 1σ sotto la media delle ultime 48 barre
+    → Trasformata: z-score, finestra W=48
+
+delta_close_rsi_25_3 < -4.11
+    → RSI(25) è calato di almeno 4.11 punti rispetto a 3 barre fa
+    → Trasformata: delta, lag L=3
+```
+
+---
+
+### Feature: arity 2 (feature derivate binarie)
+
+Operazioni su **due feature della stessa famiglia semantica** (stessa unità di misura). Il nome è costruito concatenando le due sorgenti.
+
+#### `ratio_` — rapporto tra due indicatori
+
+```
+ratio_{base}_{indicatore_A}{param_A}_{indicatore_B}{param_B}
+```
+
+Misura **quanto A è sopra o sotto B** in termini moltiplicativi. Valore intorno a 1; > 1 significa A sopra B.
+
+| Nome colonna | Formula | Semantica |
+|---|---|---|
+| `ratio_close_rsi14_rsi25` | `close_rsi_14 / close_rsi_25` | RSI(14) relativo a RSI(25) |
+| `ratio_close_sma09_sma25` | `close_sma_09 / close_sma_25` | SMA veloce / SMA lenta |
+
+**Esempi di eventi:**
+
+```
+pr_ratio_close_rsi14_rsi25_96 < 0.135
+    → Il rapporto rsi14/rsi25 è nel 13.5° percentile degli ultimi 96 valori
+    → Segnala: rsi14 è insolitamente basso rispetto a rsi25
+
+ratio_close_sma09_sma25 < 0.997
+    → SMA(9) è almeno 0.3% sotto SMA(25)  [valore assoluto — solo se scale-free]
+```
+
+#### `spread_` — distanza percentuale tra prezzo e media mobile
+
+```
+spread_{base}_{media_mobile}{param}
+```
+
+Formula: `(close - MA) / MA`. Misura quanto il prezzo si discosta dalla sua media mobile. Centrato su 0; negativo = prezzo sotto la MA.
+
+| Nome colonna | Formula | Semantica |
+|---|---|---|
+| `spread_close_sma09` | `(close - close_sma_09) / close_sma_09` | Distanza % da SMA(9) |
+| `spread_close_sma25` | `(close - close_sma_25) / close_sma_25` | Distanza % da SMA(25) |
+
+**Esempi di eventi:**
+
+```
+pr_spread_close_sma09_96 > 0.864
+    → La distanza % da SMA(9) è nell'86.4° percentile delle ultime 96 barre
+    → Segnala: il prezzo è insolitamente sopra la sua media veloce
+
+pr_spread_close_sma25_168 < 0.10
+    → La distanza % da SMA(25) è nel 10° percentile delle ultime 168 barre
+    → Segnala: il prezzo è insolitamente vicino o sotto la media lenta
+```
+
+#### `diffnorm_` — differenza normalizzata tra due indicatori
+
+```
+diffnorm_{base}_{indicatore_A}{param_A}_{indicatore_B}{param_B}
+```
+
+Formula: `(A - B) / std(A - B)`. È lo z-score della differenza — misura **quanto è anomala la divergenza** tra i due indicatori. Centrato su 0; distribuito circa come N(0,1).
+
+| Nome colonna | Formula | Semantica |
+|---|---|---|
+| `diffnorm_close_rsi14_rsi25` | `(rsi14 - rsi25) / std(rsi14-rsi25)` | Divergenza normalizzata RSI(14) vs RSI(25) |
+| `diffnorm_close_sma09_sma25` | `(sma09 - sma25) / std(sma09-sma25)` | Divergenza normalizzata SMA veloce vs lenta |
+
+**Esempi di eventi:**
+
+```
+delta_diffnorm_close_rsi14_rsi25_1 < -0.626
+    → La divergenza normalizzata rsi14-rsi25 è calata di 0.626σ in 1 barra
+    → Segnala: rsi14 si sta avvicinando rapidamente a rsi25 dal basso
+
+zs_diffnorm_close_rsi14_rsi25_96 > 1
+    → La divergenza normalizzata è 1σ sopra la media delle ultime 96 barre
+    → Segnala: rsi14 è insolitamente sopra rsi25 nel contesto recente
+```
+
+---
+
+### Feature: arity 3 (feature derivate ternarie)
+
+Operazioni su tre feature con struttura `(lower, value, upper)`. Producono una posizione relativa in [0, 1].
+
+#### `bb_pct_b_` — posizione nelle Bande di Bollinger
+
+```
+bb_pct_b_{base}_{param_bb}
+```
+
+Formula: `(close - bb_lower) / (bb_upper - bb_lower)`. 0 = banda inferiore, 1 = banda superiore.
+
+```
+pr_bb_pct_b_close_20 < 0.05
+    → Il prezzo è nel 5° percentile della sua posizione nelle BB degli ultimi 96 valori
+    → Segnala: prezzo insolitamente vicino (o sotto) la banda inferiore
+```
+
+#### `pos_` — posizione nel range min/max rolling
+
+```
+pos_{base}_range{param}
+```
+
+Formula: `(close - min_N) / (max_N - min_N)`. 0 = minimo delle N barre, 1 = massimo.
+
+```
+pr_pos_close_range24_96 < 0.08
+    → La posizione del prezzo nel range 24h è nell'8° percentile delle ultime 96 barre
+    → Segnala: il prezzo è insolitamente vicino al minimo recente
+```
+
+---
+
+### Operatore e soglia
+
+L'operatore deriva dalla **direzione** dell'evento (configurata dal Threshold Catalog):
+
+| Operatore | Direzione | Significato |
+|---|---|---|
+| `<` | `below` | Evento attivo quando la serie è **sotto** la soglia |
+| `>` | `above` | Evento attivo quando la serie è **sopra** la soglia |
+| `crosses_below` | crossing `below` | Evento attivo **solo** nella barra di discesa sotto la soglia |
+
+Per la soglia stessa, il suffisso `threshold_type` nel componente indica come è stata calcolata:
+
+| `threshold_type` | Come è calcolata la soglia |
+|---|---|
+| `distributional_p03` … `distributional_p15` | Percentile della serie trasformata in-sample |
+| `distributional_p85` … `distributional_p97` | Percentile della serie trasformata in-sample |
+| `theoretical_z-2.0` … `theoretical_z2.0` | Valore fisso (solo per z-score) |
+| `binary_native` | Valore massimo della colonna binaria |
+| `categorical_onehot` | Sempre 1.0 (one-hot) |
+
+---
+
+### Composizioni AND
+
+Le composizioni AND concatenano due (o tre) espressioni con ` AND `:
+
+```
+{espressione_1} AND {espressione_2}
+```
+
+**Regole di lettura:**
+- Ogni sub-espressione si decodifica autonomamente con le regole sopra
+- Le due sub-espressioni sono quasi sempre su **trasformate ortogonali** della stessa feature (identità + pctrank, pctrank + zscore, …) oppure su **feature semanticamente diverse**
+- Il gate richiede che la condizione AND sia vera contemporaneamente: entrambe le condizioni devono essere soddisfatte nella stessa barra
+
+**Esempio completo:**
+
+```
+pr_color_48 > 0.78125 AND zs_color_48 > 1
+```
+
+| Parte | Decodifica |
+|---|---|
+| `pr_color_48` | Pctrank della colonna `color` su finestra 48 barre |
+| `> 0.78125` | La serie è nell'84° percentile (cioè il suo pctrank è alto) |
+| `zs_color_48` | Z-score della colonna `color` su finestra 48 barre |
+| `> 1` | La serie è oltre 1σ sopra la media recente |
+| **AND** | Entrambe le condizioni devono essere vere nella stessa barra |
+| **Lettura** | Il colore candela è insolitamente alto sia in termini di rango (top 22%) che di deviazione standard (+1σ) nelle ultime 48 barre |
+
+```
+pr_color_48 > 0.78125 AND delta_diffnorm_close_rsi14_rsi25_1 > 0.448
+```
+
+| Parte | Decodifica |
+|---|---|
+| `pr_color_48 > 0.78125` | Colore candela nel top 22% degli ultimi 48 valori |
+| `delta_diffnorm_close_rsi14_rsi25_1 > 0.448` | La divergenza normalizzata rsi14-rsi25 è aumentata di almeno 0.448σ in 1 barra |
+| **Lettura** | Candela rialzista forte (top 22% di rango) accompagnata da un accelerazione della divergenza RSI veloce/lento |
+
+---
+
+### Cheat sheet rapido
+
+```
+pr_close_rsi_25_96 < 0.135
+│  │     │      │  └──── W=96 (finestra pctrank)
+│  │     │      └─────── param indicatore = 25
+│  │     └────────────── indicatore = rsi
+│  └──────────────────── sorgente = close
+└─────────────────────── trasformata = pctrank (pr_)
+
+                  < 0.135  →  sotto il 13.5° percentile delle ultime 96 barre
+
+─────────────────────────────────────────────────────────────────────────────
+
+delta_diffnorm_close_rsi14_rsi25_1 > 0.448
+│      │        │     │      │     └── lag=1 (delta di 1 barra)
+│      │        │     │      └──────── indicatore B = rsi25
+│      │        │     └─────────────── indicatore A = rsi14
+│      │        └───────────────────── sorgente = close
+│      └────────────────────────────── operazione arity-2 = diffnorm
+└───────────────────────────────────── trasformata = delta
+
+                  > 0.448  →  la differenza normalizzata è salita di 0.448σ in 1 barra
+
+─────────────────────────────────────────────────────────────────────────────
+
+zs_diffnorm_close_rsi14_rsi25_168 < -1
+│   │        │     │      │       └── W=168 (finestra zscore)
+│   │        │     │      └────────── indicatore B = rsi25
+│   │        │     └───────────────── indicatore A = rsi14
+│   │        └─────────────────────── sorgente = close
+│   └──────────────────────────────── operazione arity-2 = diffnorm
+└──────────────────────────────────── trasformata = zscore (zs_)
+
+                  < -1   →  la divergenza è 1σ sotto la media delle ultime 168 barre
+```
+
+---
+
+## 11. Esempio end-to-end: da `close_rsi_25` a `rsi25_pr96 < 0.10`
 
 Traccia completa del percorso attraverso i cinque step, usando `close_rsi_25` come feature di partenza. Il modulo non conosce RSI, non conosce oversold — sa solo che ha una serie numerica e un catalogo di trasformazioni da applicare.
 
@@ -787,5 +1078,5 @@ Il modulo ha prodotto `close_rsi_25 < 30.5 AND pr_close_rsi_25_96 < 0.10` come u
 
 ---
 
-*Event Discovery Module — FORGE (Feature-Oriented Rule Generation Engine) · Versione 2.1 · Giugno 2026*
+*Event Discovery Module — FORGE (Feature-Oriented Rule Generation Engine) · Versione 2.2 · Giugno 2026*
 *Status: Draft · Parte di FORGE v1.0*

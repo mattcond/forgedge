@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 
@@ -176,6 +177,33 @@ class EventComponent:
     direction: str   # "below" | "above"
     event_type: str  # "threshold" | "crossing"
     expression: str
+    source_cols: list = field(default_factory=list)
+    """Original native column names used to build ``source_feature``.
+
+    Empty for arity-1 (native) features.  For arity-2 features, contains
+    ``[col_a, col_b]``; for arity-3, ``[value_col, lower_col, upper_col]``.
+    Used by ``EventCandidate.apply()`` to reconstruct the feature series on
+    new data without requiring the full FeatureGenerator to run.
+    """
+    sql_expression: str = ""
+    """DuckDB-compatible SQL boolean expression that replicates this component.
+
+    Can be used directly in a SELECT or WHERE clause against a table that
+    contains the same source columns as the original KPI DataFrame (i.e.
+    any table with the same schema as ``EventDiscovery.df``).
+
+    For pctrank, ``list_grade_up`` + ``list_position`` window functions are
+    used (DuckDB ≥ 0.8 required).  For zscore and delta, standard window
+    functions (``AVG``, ``STDDEV_SAMP``, ``LAG``) are used.  The
+    ``ORDER BY open_dt`` clause assumes the timestamp column is named
+    ``open_dt``; substitute as needed.
+
+    Example usage in DuckDB::
+
+        import duckdb
+        rel = duckdb.from_df(ed.df.reset_index())
+        rel.query("df", f"SELECT *, ({comp.sql_expression})::INT AS event_active FROM df")
+    """
 
 
 @dataclass
@@ -246,10 +274,18 @@ class RawEvent:
         Events sharing the same transform_key differ only in their threshold
         value — the AND composer uses this to avoid pairing redundant events
         (one threshold is a superset of another within the same slot).
-        Format: ``<source_feature>__<transform>__<sorted_params>``.
+        Format: ``<source_feature>__<transform>__<sorted_temporal_params>``.
+
+        Only temporal parameters (``window``, ``lag``) are included; feature-level
+        parameters such as ``diffnorm_std`` are excluded to keep the key stable
+        and comparable across different assets.
         """
         c = self.component
-        params_str = "_".join(f"{k}{v}" for k, v in sorted(c.transform_params.items()))
+        _temporal = {"window", "lag"}
+        params_str = "_".join(
+            f"{k}{v}" for k, v in sorted(c.transform_params.items())
+            if k in _temporal
+        )
         return f"{c.source_feature}__{c.transform}__{params_str}"
 
 
@@ -289,6 +325,73 @@ class EventCandidate:
     consistency_gate: GateResult
     event_series: Optional[pd.Series] = field(default=None, repr=False)
 
+    @property
+    def sql_expression(self) -> str:
+        """DuckDB-compatible SQL boolean expression for the full event.
+
+        For single-component events, returns the component's ``sql_expression``
+        directly.  For AND-composed events, joins each component's expression
+        with ``AND``, wrapping each in parentheses for clarity.
+
+        Returns an empty string if no component has a populated ``sql_expression``
+        (e.g. legacy candidates created before this field was added).
+
+        Example usage in DuckDB::
+
+            import duckdb
+            rel = duckdb.from_df(ed.df.reset_index())
+            query = f"SELECT *, ({candidate.sql_expression})::INT AS active FROM df"
+            rel.query("df", query)
+        """
+        parts = [c.sql_expression for c in self.components if c.sql_expression]
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+        return " AND ".join(f"({p})" for p in parts)
+
+    def apply(self, df: pd.DataFrame) -> pd.Series:
+        """Reconstruct the event boolean series on new (out-of-sample) data.
+
+        Given a DataFrame that contains the same source columns used during
+        training, this method replicates all pipeline steps — feature
+        construction, temporal transform, threshold application — using the
+        parameters stored in each ``EventComponent``.
+
+        For ``diffnorm`` features, the in-sample standard deviation stored in
+        ``transform_params["diffnorm_std"]`` is used as the normaliser, so the
+        event preserves exactly the same scale as the training period.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            DataFrame with the same column names as the original KPI table.
+            Must contain all columns referenced in ``self.components``.
+
+        Returns
+        -------
+        pd.Series
+            Float series (0.0 / 1.0 / NaN) with the same index as ``df``.
+            1.0 means the event is active on that bar.
+
+        Raises
+        ------
+        KeyError
+            If a required source column is missing from ``df``.
+        """
+        result: pd.Series | None = None
+        for comp in self.components:
+            part = _apply_component(comp, df)
+            if result is None:
+                result = part
+            else:
+                # Match pipeline AND behavior: NaN is treated as inactive (0),
+                # consistent with the uint8 bitwise AND used in ANDComposer.
+                result = (result.fillna(0).astype(bool) & part.fillna(0).astype(bool)).astype(float)
+        if result is None:
+            return pd.Series(float("nan"), index=df.index)
+        return result
+
     def to_dict(self) -> dict:
         """Serialise the candidate to a flat dictionary for DataFrame construction.
 
@@ -315,7 +418,109 @@ class EventCandidate:
                     "direction": c.direction,
                     "event_type": c.event_type,
                     "expression": c.expression,
+                    "sql_expression": c.sql_expression,
                 }
                 for c in self.components
             ],
         }
+
+
+# ---------------------------------------------------------------------------
+# Replay helpers
+# ---------------------------------------------------------------------------
+
+def _apply_component(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
+    """Reconstruct a single EventComponent's boolean series on ``df``.
+
+    Steps
+    -----
+    1. Build the feature series (native, ratio, spread_pct, diffnorm, …).
+    2. Apply the temporal transform (identity, pctrank, zscore, delta).
+    3. Apply the threshold / crossing condition.
+
+    Parameters
+    ----------
+    comp : EventComponent
+        A fully populated component (source_cols and transform_params
+        must contain all values stored during training).
+    df : pd.DataFrame
+        DataFrame with native source columns.
+
+    Returns
+    -------
+    pd.Series
+        Float 0/1/NaN series aligned to ``df.index``.
+    """
+    sf = comp.source_feature
+
+    # ── 1. Feature series ────────────────────────────────────────────────
+    if comp.transform in ("binary_native",):
+        # Binary: active when column equals the stored threshold value
+        raw = df[sf]
+        return (raw == comp.threshold).astype(float).where(raw.notna(), float("nan"))
+
+    if comp.transform == "categorical_onehot":
+        cls = comp.transform_params.get("class")
+        raw = df[sf]
+        return (raw == cls).astype(float).where(raw.notna(), float("nan"))
+
+    sc = comp.source_cols
+    if sf.startswith("ratio_") and len(sc) == 2:
+        series = df[sc[0]] / df[sc[1]]
+    elif sf.startswith("spread_") and len(sc) == 2:
+        series = (df[sc[0]] - df[sc[1]]) / df[sc[1]]
+    elif sf.startswith("diffnorm_") and len(sc) == 2:
+        std = comp.transform_params.get("diffnorm_std")
+        if not std:
+            raise KeyError(
+                f"'diffnorm_std' missing from transform_params of component "
+                f"'{comp.expression}'. Was this candidate created with an older "
+                "version of EventDiscovery?"
+            )
+        series = (df[sc[0]] - df[sc[1]]) / std
+    elif sf.startswith("bb_pct_b_") and len(sc) == 3:
+        val, lower, upper = sc
+        denom = df[upper] - df[lower]
+        series = (df[val] - df[lower]) / denom.replace(0, float("nan"))
+    elif sf.startswith("pos_") and len(sc) == 3:
+        val, mn, mx = sc
+        denom = df[mx] - df[mn]
+        series = (df[val] - df[mn]) / denom.replace(0, float("nan"))
+    else:
+        # Arity-1 native feature — use source_feature name directly
+        series = df[sf]
+
+    # ── 2. Temporal transform ────────────────────────────────────────────
+    # Use the same min_periods heuristic as TransformLayer to match NaN positions.
+    t = comp.transform
+    if t == "rolling_pctrank":
+        w = comp.transform_params["window"]
+        min_p = max(2, w // 2)
+        series = series.rolling(w, min_periods=min_p).rank(pct=True)
+    elif t == "rolling_zscore":
+        w = comp.transform_params["window"]
+        min_p = max(2, w // 2)
+        roll = series.rolling(w, min_periods=min_p)
+        mu = roll.mean()
+        sd = roll.std()
+        series = (series - mu) / sd.replace(0, float("nan"))
+    elif t == "delta":
+        series = series.diff(comp.transform_params["lag"])
+    # identity: no transform
+
+    # ── 3. Threshold / crossing ──────────────────────────────────────────
+    thr = comp.threshold
+    if comp.event_type == "crossing":
+        if comp.direction == "below":
+            current  = series < thr
+            previous = series.shift(1) >= thr
+        else:
+            current  = series > thr
+            previous = series.shift(1) <= thr
+        result = (current & previous).astype(float)
+        result[series.isna() | series.shift(1).isna()] = float("nan")
+        return result
+    else:
+        if comp.direction == "below":
+            return (series < thr).astype(float).where(series.notna(), float("nan"))
+        return (series > thr).astype(float).where(series.notna(), float("nan"))

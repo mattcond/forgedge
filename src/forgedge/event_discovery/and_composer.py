@@ -558,6 +558,9 @@ def _make_composed_event(
     source = " AND ".join(c.source_feature for c in components)
     t_cols = " AND ".join(c.transformed_col for c in components)
 
+    sql_parts = [c.sql_expression for c in components if c.sql_expression]
+    sql_expr = " AND ".join(f"({s})" for s in sql_parts) if sql_parts else ""
+
     comp = EventComponent(
         source_feature=source,
         transform="and_composition",
@@ -568,6 +571,7 @@ def _make_composed_event(
         direction="n/a",
         event_type="threshold",
         expression=expr,
+        sql_expression=sql_expr,
     )
     comp._components = components  # type: ignore[attr-defined]
 
