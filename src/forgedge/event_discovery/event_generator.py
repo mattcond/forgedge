@@ -86,6 +86,10 @@ class EventGenerator:
                 event_type="threshold",
                 expression=_make_expr(ts.col, direction, threshold),
                 source_cols=ts.source_cols,
+                sql_expression=_build_sql_expression(
+                    ts.source_feature, ts.source_cols, ts.transform,
+                    merged_params, threshold, direction, "threshold",
+                ),
             )
             events.append(RawEvent(series=bool_series, component=comp))
 
@@ -106,6 +110,10 @@ class EventGenerator:
                     event_type="crossing",
                     expression=_make_crossing_expr(ts.col, direction, threshold),
                     source_cols=ts.source_cols,
+                    sql_expression=_build_sql_expression(
+                        ts.source_feature, ts.source_cols, ts.transform,
+                        merged_params, threshold, direction, "crossing",
+                    ),
                 )
                 events.append(RawEvent(series=cross_series, component=cross_comp))
 
@@ -150,6 +158,7 @@ class EventGenerator:
             direction="above",
             event_type="threshold",
             expression=f"{col_name} == {high_val}",
+            sql_expression=f'"{col_name}" = {high_val}',
         )
         return [RawEvent(series=bool_series, component=comp)]
 
@@ -204,6 +213,7 @@ class EventGenerator:
                 direction="above",
                 event_type="threshold",
                 expression=f"{col_name} == '{cls}'",
+                sql_expression=f'"{col_name}" = \'{cls}\'',
             )
             events.append(RawEvent(series=bool_series, component=comp))
         return events
@@ -388,3 +398,117 @@ def _make_crossing_expr(col: str, direction: str, threshold: float) -> str:
     """
     direction_word = "crosses_below" if direction == "below" else "crosses_above"
     return f"{col} {direction_word} {threshold:.6g}"
+
+
+# ---------------------------------------------------------------------------
+# SQL expression builders (DuckDB-compatible)
+# ---------------------------------------------------------------------------
+
+def _build_sql_expression(
+    source_feature: str,
+    source_cols: list,
+    transform: str,
+    transform_params: dict,
+    threshold: float,
+    direction: str,
+    event_type: str,
+    ts_col: str = "open_dt",
+) -> str:
+    """Build a DuckDB-compatible SQL boolean expression for one event component.
+
+    Parameters
+    ----------
+    source_feature : str
+        Name of the derived feature (e.g. ``"close_rsi_25"`` or
+        ``"diffnorm_close_rsi14_rsi25"``).
+    source_cols : list
+        Original native columns used to build the feature (empty for arity-1).
+    transform : str
+        Transform identifier (``"identity"``, ``"rolling_pctrank"``,
+        ``"rolling_zscore"``, ``"delta"``).
+    transform_params : dict
+        Transform parameters including ``window``, ``lag``, and
+        ``diffnorm_std`` when applicable.
+    threshold : float
+        Numerical threshold for the boolean condition.
+    direction : str
+        ``"below"`` or ``"above"``.
+    event_type : str
+        ``"threshold"`` or ``"crossing"``.
+    ts_col : str
+        Name of the timestamp/ordering column in the target table.
+        Defaults to ``"open_dt"``.
+
+    Returns
+    -------
+    str
+        SQL boolean expression string, valid as a SELECT or WHERE clause
+        when used against a table with the same schema as
+        ``EventDiscovery.df``.
+    """
+    feat_sql = _sql_feature(source_feature, source_cols, transform_params)
+    t_sql = _sql_transform(feat_sql, transform, transform_params, ts_col)
+    return _sql_condition(t_sql, threshold, direction, event_type, ts_col)
+
+
+def _sql_feature(source_feature: str, source_cols: list, transform_params: dict) -> str:
+    """Return SQL expression for the raw (pre-transform) feature value."""
+    sf = source_feature
+    sc = source_cols
+    if sf.startswith("ratio_") and len(sc) == 2:
+        return f'"{sc[0]}" / NULLIF("{sc[1]}", 0)'
+    if sf.startswith("spread_") and len(sc) == 2:
+        return f'("{sc[0]}" - "{sc[1]}") / NULLIF("{sc[1]}", 0)'
+    if sf.startswith("diffnorm_") and len(sc) == 2:
+        std = transform_params.get("diffnorm_std", 1.0)
+        return f'("{sc[0]}" - "{sc[1]}") / {std:.6g}'
+    if sf.startswith("bb_pct_b_") and len(sc) == 3:
+        val, lower, upper = sc
+        return f'("{val}" - "{lower}") / NULLIF("{upper}" - "{lower}", 0)'
+    if sf.startswith("pos_") and len(sc) == 3:
+        val, mn, mx = sc
+        return f'("{val}" - "{mn}") / NULLIF("{mx}" - "{mn}", 0)'
+    return f'"{sf}"'
+
+
+def _sql_transform(feat_sql: str, transform: str, transform_params: dict, ts_col: str) -> str:
+    """Wrap a feature SQL expression with the temporal transform."""
+    if transform == "identity":
+        return feat_sql
+    if transform == "rolling_pctrank":
+        w = transform_params["window"]
+        win = f"ORDER BY {ts_col} ROWS BETWEEN {w - 1} PRECEDING AND CURRENT ROW"
+        cnt = f"COUNT(*) OVER ({win})"
+        grade = f"list_grade_up(list({feat_sql}) OVER ({win}))"
+        return f"(list_position({grade}, {cnt}) - 1.0) / NULLIF({cnt} - 1.0, 0)"
+    if transform == "rolling_zscore":
+        w = transform_params["window"]
+        win = f"ORDER BY {ts_col} ROWS BETWEEN {w - 1} PRECEDING AND CURRENT ROW"
+        avg = f"AVG({feat_sql}) OVER ({win})"
+        std = f"STDDEV_SAMP({feat_sql}) OVER ({win})"
+        return f"({feat_sql} - {avg}) / NULLIF({std}, 0)"
+    if transform == "delta":
+        lag = transform_params["lag"]
+        return f"{feat_sql} - LAG({feat_sql}, {lag}) OVER (ORDER BY {ts_col})"
+    return feat_sql
+
+
+def _sql_condition(
+    t_sql: str,
+    threshold: float,
+    direction: str,
+    event_type: str,
+    ts_col: str,
+) -> str:
+    """Apply threshold/crossing condition to a transformed SQL expression."""
+    op = "<" if direction == "below" else ">"
+    opp = ">=" if direction == "below" else "<="
+    thr = f"{threshold:.6g}"
+    if event_type == "crossing":
+        # Crossing events are only generated for identity transform, so t_sql
+        # contains no nested window functions — LAG(t_sql) is valid DuckDB SQL.
+        return (
+            f"(({t_sql}) {op} {thr}"
+            f" AND LAG(({t_sql})) OVER (ORDER BY {ts_col}) {opp} {thr})"
+        )
+    return f"({t_sql}) {op} {thr}"

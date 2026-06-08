@@ -185,6 +185,25 @@ class EventComponent:
     Used by ``EventCandidate.apply()`` to reconstruct the feature series on
     new data without requiring the full FeatureGenerator to run.
     """
+    sql_expression: str = ""
+    """DuckDB-compatible SQL boolean expression that replicates this component.
+
+    Can be used directly in a SELECT or WHERE clause against a table that
+    contains the same source columns as the original KPI DataFrame (i.e.
+    any table with the same schema as ``EventDiscovery.df``).
+
+    For pctrank, ``list_grade_up`` + ``list_position`` window functions are
+    used (DuckDB ≥ 0.8 required).  For zscore and delta, standard window
+    functions (``AVG``, ``STDDEV_SAMP``, ``LAG``) are used.  The
+    ``ORDER BY open_dt`` clause assumes the timestamp column is named
+    ``open_dt``; substitute as needed.
+
+    Example usage in DuckDB::
+
+        import duckdb
+        rel = duckdb.from_df(ed.df.reset_index())
+        rel.query("df", f"SELECT *, ({comp.sql_expression})::INT AS event_active FROM df")
+    """
 
 
 @dataclass
@@ -306,6 +325,31 @@ class EventCandidate:
     consistency_gate: GateResult
     event_series: Optional[pd.Series] = field(default=None, repr=False)
 
+    @property
+    def sql_expression(self) -> str:
+        """DuckDB-compatible SQL boolean expression for the full event.
+
+        For single-component events, returns the component's ``sql_expression``
+        directly.  For AND-composed events, joins each component's expression
+        with ``AND``, wrapping each in parentheses for clarity.
+
+        Returns an empty string if no component has a populated ``sql_expression``
+        (e.g. legacy candidates created before this field was added).
+
+        Example usage in DuckDB::
+
+            import duckdb
+            rel = duckdb.from_df(ed.df.reset_index())
+            query = f"SELECT *, ({candidate.sql_expression})::INT AS active FROM df"
+            rel.query("df", query)
+        """
+        parts = [c.sql_expression for c in self.components if c.sql_expression]
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+        return " AND ".join(f"({p})" for p in parts)
+
     def apply(self, df: pd.DataFrame) -> pd.Series:
         """Reconstruct the event boolean series on new (out-of-sample) data.
 
@@ -374,6 +418,7 @@ class EventCandidate:
                     "direction": c.direction,
                     "event_type": c.event_type,
                     "expression": c.expression,
+                    "sql_expression": c.sql_expression,
                 }
                 for c in self.components
             ],
