@@ -192,11 +192,13 @@ class EventComponent:
     contains the same source columns as the original KPI DataFrame (i.e.
     any table with the same schema as ``EventDiscovery.df``).
 
-    For pctrank, ``list_grade_up`` + ``list_position`` window functions are
-    used (DuckDB ≥ 0.8 required).  For zscore and delta, standard window
-    functions (``AVG``, ``STDDEV_SAMP``, ``LAG``) are used.  The
-    ``ORDER BY open_dt`` clause assumes the timestamp column is named
-    ``open_dt``; substitute as needed.
+    For pctrank, an average-method rank is computed with ``list_filter``
+    lambdas (DuckDB ≥ 0.8 required) so that tied values match pandas'
+    ``rank(pct=True)`` exactly.  For zscore and delta, standard window
+    functions (``AVG``, ``STDDEV_SAMP``, ``LAG``) are used.  Rolling
+    transforms reproduce ``min_periods = max(2, window // 2)`` via a
+    ``CASE WHEN`` guard.  The ``ORDER BY open_dt`` clause assumes the
+    timestamp column is named ``open_dt``; substitute as needed.
 
     Example usage in DuckDB::
 
@@ -502,7 +504,7 @@ def _apply_component(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
         min_p = max(2, w // 2)
         roll = series.rolling(w, min_periods=min_p)
         mu = roll.mean()
-        sd = roll.std()
+        sd = roll.std(ddof=1)  # explicit: match TransformLayer's sample std
         series = (series - mu) / sd.replace(0, float("nan"))
     elif t == "delta":
         series = series.diff(comp.transform_params["lag"])

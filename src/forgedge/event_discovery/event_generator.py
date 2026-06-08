@@ -6,6 +6,7 @@ that bypass Steps 1-2.
 """
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Optional
 
 import numpy as np
@@ -472,25 +473,60 @@ def _sql_feature(source_feature: str, source_cols: list, transform_params: dict)
 
 
 def _sql_transform(feat_sql: str, transform: str, transform_params: dict, ts_col: str) -> str:
-    """Wrap a feature SQL expression with the temporal transform."""
+    """Wrap a feature SQL expression with the temporal transform.
+
+    The rolling transforms reproduce ``min_periods = max(2, window // 2)``
+    from :func:`TransformLayer` via a ``CASE WHEN COUNT(*) OVER win >= min_p``
+    guard, so warmup bars evaluate to NULL exactly as they do in pandas.
+    """
     if transform == "identity":
         return feat_sql
     if transform == "rolling_pctrank":
         w = transform_params["window"]
+        min_p = max(2, w // 2)
         win = f"ORDER BY {ts_col} ROWS BETWEEN {w - 1} PRECEDING AND CURRENT ROW"
-        cnt = f"COUNT(*) OVER ({win})"
-        grade = f"list_grade_up(list({feat_sql}) OVER ({win}))"
-        return f"(list_position({grade}, {cnt}) - 1.0) / NULLIF({cnt} - 1.0, 0)"
+        # Non-null count drives both the min_periods guard and the denominator,
+        # matching pandas which ignores NaN in rolling().rank(pct=True).
+        cnt = f"COUNT({feat_sql}) OVER ({win})"
+        arr = f"list({feat_sql}) OVER ({win})"
+        # Average-method rank (pandas default): values strictly below plus half
+        # of the tied group.  avg_rank = (#less) + (#equal + 1) / 2, then / count.
+        less = f"length(list_filter({arr}, v -> v < {feat_sql}))"
+        eq = f"length(list_filter({arr}, v -> v = {feat_sql}))"
+        pct = f"({less} + ({eq} + 1) / 2.0)::DOUBLE / NULLIF({cnt}, 0)"
+        return f"CASE WHEN {cnt} >= {min_p} AND {feat_sql} IS NOT NULL THEN {pct} END"
     if transform == "rolling_zscore":
         w = transform_params["window"]
+        min_p = max(2, w // 2)
         win = f"ORDER BY {ts_col} ROWS BETWEEN {w - 1} PRECEDING AND CURRENT ROW"
+        cnt = f"COUNT({feat_sql}) OVER ({win})"
         avg = f"AVG({feat_sql}) OVER ({win})"
         std = f"STDDEV_SAMP({feat_sql}) OVER ({win})"
-        return f"({feat_sql} - {avg}) / NULLIF({std}, 0)"
+        z = f"({feat_sql} - {avg}) / NULLIF({std}, 0)"
+        return f"CASE WHEN {cnt} >= {min_p} THEN {z} END"
     if transform == "delta":
         lag = transform_params["lag"]
         return f"{feat_sql} - LAG({feat_sql}, {lag}) OVER (ORDER BY {ts_col})"
     return feat_sql
+
+
+def _sql_threshold_literal(threshold: float) -> str:
+    """Render a threshold as a DuckDB DOUBLE literal that round-trips exactly.
+
+    The pipeline binarises with the full-precision Python ``float`` threshold,
+    so the SQL comparison must use the *identical* IEEE-754 double — otherwise
+    values sitting exactly on a discrete boundary (e.g. a rolling pctrank of
+    ``k/window``) flip between active and inactive.
+
+    A plain ``repr(float)`` is **not** safe here: DuckDB's text-to-double
+    parser is not always correctly rounded and can land on the adjacent double
+    for a 17-significant-digit string.  Emitting the *exact* decimal expansion
+    of the double via :class:`decimal.Decimal` removes the ambiguity — the
+    value is representable exactly, so any parser must round it back to the
+    same double — and the explicit ``::DOUBLE`` cast keeps the comparison in
+    double space (the exact expansion overflows DuckDB's DECIMAL precision).
+    """
+    return f"{Decimal(float(threshold))}::DOUBLE"
 
 
 def _sql_condition(
@@ -503,7 +539,7 @@ def _sql_condition(
     """Apply threshold/crossing condition to a transformed SQL expression."""
     op = "<" if direction == "below" else ">"
     opp = ">=" if direction == "below" else "<="
-    thr = f"{threshold:.6g}"
+    thr = _sql_threshold_literal(threshold)
     if event_type == "crossing":
         # Crossing events are only generated for identity transform, so t_sql
         # contains no nested window functions — LAG(t_sql) is valid DuckDB SQL.
