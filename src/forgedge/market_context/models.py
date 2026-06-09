@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 
@@ -66,11 +66,29 @@ class EMAProxyConfig:
         Their number must be exactly ``len(labels) - 1``.  The defaults
         ``[0.975, 0.990, 1.010, 1.025]`` are calibrated empirically on
         crypto 1H data.
-    window_estimation_bars : int
-        Width, in bars, of the rolling window used to estimate the local OU
-        half-life when ``auto_window`` is ``True``.
-    window_stride_bars : int
-        Step, in bars, between successive local half-life estimates.
+    window_unit : str
+        Unit in which the estimation window/stride (``window_estimation`` and
+        ``window_stride``) are expressed:
+
+        * ``"bar"`` (default) — measured in candles (timeframe-agnostic).
+          ``W = 168`` means 168 bars regardless of timeframe: one week on 1H,
+          168 days on 1D.  The derived spans are therefore *not* comparable in
+          wall-clock terms across timeframes.
+        * ``"day"`` — measured in calendar days and converted to bars using the
+          candle duration.  ``W = 168`` means 168 days on *every* timeframe
+          (even 1H), so the estimation horizon — and the derived spans — line
+          up in wall-clock terms.  The same single value of ``window_estimation``
+          is simply reinterpreted from bars to days by this flag.
+    window_estimation : float
+        Width of the rolling estimation window, expressed in the unit selected
+        by ``window_unit`` (bars when ``"bar"``, days when ``"day"``).
+    window_stride : float
+        Step between successive estimates, in the same unit as
+        ``window_estimation``.
+    bar_hours : float or None
+        Explicit candle duration in hours, used to convert days↔bars in
+        ``"day"`` mode.  When ``None`` it is inferred from the table's
+        DatetimeIndex (or a datetime column).
     fast_ratio : float
         Fast span as a fraction of the slow span when auto-deriving
         (default ``1 / 2.3``).
@@ -87,10 +105,14 @@ class EMAProxyConfig:
     thresholds: List[float] = field(
         default_factory=lambda: [0.975, 0.990, 1.010, 1.025]
     )
-    window_estimation_bars: int = 168
-    window_stride_bars: int = 24
+    window_unit: str = "bar"
+    window_estimation: float = 168
+    window_stride: float = 24
+    bar_hours: Optional[float] = None
     fast_ratio: float = 1 / 2.3
     min_window_estimates: int = 10
+
+
 
 
 

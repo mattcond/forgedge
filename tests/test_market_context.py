@@ -272,6 +272,103 @@ class TestAutoWindow:
         # Strong drift, short series → should not converge
         assert derive_ema_windows(price, min_estimates=10) is None
 
+    def test_run_robust_to_nonpositive_close(self):
+        """A zero/negative-prefixed close must not crash the OU window fit."""
+        prices = _ou_prices(1500, theta=0.05)
+        prices[:50] = 0.0  # invalid prices in the first window
+        df = pd.DataFrame(
+            {"open_dt": pd.date_range("2024-01-01", periods=len(prices), freq="1h"),
+             "close": prices}
+        )
+        mc = MarketContext(df)
+        out = mc.run()  # must not raise LinAlgError
+        assert mc.window_resolution["source"] in {"hurst_ou", "fallback"}
+        # Regime is still produced on the valid region.
+        assert out["regime"].iloc[100:].notna().any()
+
+
+# ---------------------------------------------------------------------------
+# window_unit: bar (default, timeframe-agnostic) vs day (timeframe-coherent)
+# ---------------------------------------------------------------------------
+
+class TestWindowUnit:
+    def _ou_kpi(self, n=3000, freq="1h", theta=0.05):
+        prices = _ou_prices(n, theta=theta)
+        return pd.DataFrame(
+            {"open_dt": pd.date_range("2024-01-01", periods=n, freq=freq),
+             "close": prices}
+        )
+
+    def test_bar_is_default(self):
+        assert EMAProxyConfig().window_unit == "bar"
+
+    def test_bar_mode_uses_bar_window(self):
+        # window_estimation = 168 interpreted as 168 *bars*.
+        mc = MarketContext(self._ou_kpi())
+        mc.run()
+        assert mc.window_resolution["unit"] == "bar"
+        assert mc.window_resolution["estimation_window_bars"] == 168
+
+    def test_day_mode_same_W_means_days_on_1h(self):
+        # The SAME single value (168) is reinterpreted as 168 *days* on 1h,
+        # i.e. 168 * 24 = 4032 bars — even though the timeframe is hourly.
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="day", window_estimation=168)
+        )
+        mc = MarketContext(self._ou_kpi(), cfg)
+        mc.run()
+        res = mc.window_resolution
+        assert res["unit"] == "day"
+        assert abs(res["bar_hours"] - 1.0) < 1e-6
+        assert res["estimation_window_bars"] == 4032  # 168d * 24 / 1h
+
+    def test_day_mode_converts_per_timeframe_4h(self):
+        # 168 days on 4h → 168 * 24 / 4 = 1008 bars.
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="day", window_estimation=168)
+        )
+        mc = MarketContext(self._ou_kpi(n=2000, freq="4h"), cfg)
+        mc.run()
+        res = mc.window_resolution
+        assert abs(res["bar_hours"] - 4.0) < 1e-6
+        assert res["estimation_window_bars"] == 1008  # 168d * 24 / 4h
+
+    def test_day_mode_small_W_converges_on_1h(self):
+        # 7-day window, 1-day stride on 1h → 168-bar window, 24-bar stride:
+        # both W and stride follow the "day" unit.
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(
+                window_unit="day", window_estimation=7, window_stride=1
+            )
+        )
+        mc = MarketContext(self._ou_kpi(), cfg)
+        mc.run()
+        res = mc.window_resolution
+        assert res["estimation_window_bars"] == 168  # 7d * 24 / 1h
+        assert res["source"] == "hurst_ou"
+
+    def test_day_mode_requires_time_info(self):
+        df = pd.DataFrame({"close": _ou_prices(2000)})  # RangeIndex, no datetime
+        cfg = MarketContextConfig(ema_proxy=EMAProxyConfig(window_unit="day"))
+        with pytest.raises(ValueError):
+            MarketContext(df, cfg).run()
+
+    def test_day_mode_explicit_bar_hours(self):
+        df = pd.DataFrame({"close": _ou_prices(3000)})
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(
+                window_unit="day", window_estimation=7, bar_hours=1.0
+            )
+        )
+        mc = MarketContext(df, cfg)
+        mc.run()
+        assert mc.window_resolution["estimation_window_bars"] == 168
+
+    def test_invalid_window_unit_raises(self):
+        cfg = MarketContextConfig(ema_proxy=EMAProxyConfig(window_unit="hour"))
+        with pytest.raises(ValueError):
+            MarketContext(self._ou_kpi(), cfg).run()
+
 
 # ---------------------------------------------------------------------------
 # regime_stable logic
@@ -338,6 +435,13 @@ class TestHurstTooling:
         price = 100 * np.cumprod(1 + rng.normal(0.002, 0.003, 2000))
         # Strong positive drift → not mean reverting → None
         assert ou_halflife(price) is None
+
+    def test_log_functions_handle_nonpositive_without_crashing(self):
+        bad = np.array([1.0, 1.1, 0.0, -2.0, 1.2] * 40, dtype=float)
+        assert ou_halflife(bad) is None
+        assert np.isnan(hurst_dfa(bad))
+        vr = variance_ratio_profile(bad, lags_candles=[4, 8])
+        assert all(np.isnan(v) for v in vr.values())
 
     def test_rolling_halflife_shape(self):
         prices = pd.Series(self._ou_series(2000))

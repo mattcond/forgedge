@@ -88,6 +88,9 @@ def hurst_dfa(
         ``NaN`` if the series is too short to fit the scaling law.
     """
     series = np.asarray(series, dtype=float)
+    if series.size < 2 or not np.all(np.isfinite(series)) or np.any(series <= 0):
+        # log() requires strictly-positive, finite prices.
+        return np.nan
     log_ret = np.diff(np.log(series))
     n = len(log_ret)
 
@@ -144,6 +147,10 @@ def ou_halflife(series: np.ndarray) -> Optional[float]:
         the resulting half-life is non-physical.
     """
     series = np.asarray(series, dtype=float)
+    if series.size < 3 or not np.all(np.isfinite(series)) or np.any(series <= 0):
+        # log() / the OLS fit require strictly-positive, finite prices;
+        # a non-finite design matrix makes numpy's lstsq raise LinAlgError.
+        return None
     log_p = np.log(series)
     delta = np.diff(log_p)
     lag = log_p[:-1]
@@ -211,6 +218,8 @@ def variance_ratio_profile(
     ``VR > 1`` momentum, ``VR = 1`` random walk, ``VR < 1`` mean reversion.
     """
     series = np.asarray(series, dtype=float)
+    if series.size < 2 or not np.all(np.isfinite(series)) or np.any(series <= 0):
+        return {lag: np.nan for lag in lags_candles}
     log_ret = np.diff(np.log(series))
     var_1 = np.var(log_ret, ddof=1)
     if var_1 == 0:

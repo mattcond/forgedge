@@ -111,6 +111,11 @@ Calcola il ratio tra una EMA veloce e una EMA lenta come proxy
 del trend di mercato, e lo discretizza in regime tramite soglie
 configurabili.
 
+> `short_period` e `long_period` non sono fissi: vengono risolti a monte dal
+> Market Context Module a partire dall'analisi Hurst/OU dei dati (vedi
+> [Scelta delle finestre EMA](#scelta-delle-finestre-ema-fastslow--automatica)).
+> Quando `classify` viene invocato, le due finestre sono già state decise.
+
 ### Logica
 
 ```
@@ -135,7 +140,7 @@ FUNCTION classify(kpi_table):
     ratio = ema_short / ema_long
 
     // Step 4: classifica per soglie
-    regime = pd.cut(ratio, bins=[0] + thresholds + [99], labels=labels)
+    regime = pd.cut(ratio, bins=[0] + thresholds + [+inf], labels=labels)
 
     RETURN regime
 ```
@@ -183,6 +188,9 @@ market_context:
   ema_proxy:
     source_col:    "close"   # colonna OHLCV su cui calcolare le EMA
     auto_window:   true      # decide short/long dai dati (Hurst/OU)
+    window_unit:   "bar"     # "bar" (default) | "day" (coerente tra timeframe)
+    window_estimation: 168   # W: 168 barre se unit="bar", 168 giorni se unit="day"
+    window_stride:  24       # passo tra le stime, stessa unità di W
     short_period:  9         # fallback EMA veloce (se l'analisi non converge)
     long_period:   25        # fallback EMA lenta  (se l'analisi non converge)
     thresholds:    [0.975, 0.990, 1.010, 1.025]
@@ -202,6 +210,10 @@ market_context:
 | `classifier` | `"ema_proxy"` | Implementazione del RegimeClassifier |
 | `ema_proxy.source_col` | `"close"` | Colonna su cui calcolare le EMA |
 | `ema_proxy.auto_window` | `true` | Decide `short`/`long` dall'analisi Hurst/OU dei dati |
+| `ema_proxy.window_unit` | `"bar"` | Unità di `window_estimation`/`window_stride`: `"bar"` (per-TF) o `"day"` (coerente tra TF) |
+| `ema_proxy.window_estimation` | `168` | Ampiezza finestra di stima — barre se `"bar"`, giorni se `"day"` |
+| `ema_proxy.window_stride` | `24` | Passo tra le stime, stessa unità di `window_estimation` |
+| `ema_proxy.bar_hours` | `null` | Durata candela (h) per `"day"`; inferita dall'indice se assente |
 | `ema_proxy.short_period` | `9` | EMA veloce — fallback se l'analisi non converge |
 | `ema_proxy.long_period` | `25` | EMA lenta — fallback se l'analisi non converge |
 | `ema_proxy.thresholds` | `[0.975, 0.990, 1.010, 1.025]` | Soglie di discretizzazione del ratio |
@@ -418,6 +430,13 @@ I default `short_period=9` / `long_period=25` restano nella configurazione
 puramente trending o storia troppo corta). Per forzare finestre fisse si
 imposta `ema_proxy.auto_window: false`.
 
+> **Nota:** con `auto_window: true` le finestre derivate possono non
+> coincidere con eventuali EMA precomputate nella KPI Table (es. `close_ema_25`):
+> in tal caso la EMA della finestra derivata viene calcolata inline dal `close`.
+> Le colonne precomputate restano comunque inalterate nella tabella. Per usare
+> esattamente le EMA precomputate si imposta `auto_window: false` con i
+> `short_period` / `long_period` corrispondenti.
+
 La risoluzione effettiva (`source`, spans usati, half-life stimata) è esposta
 in `MarketContext.window_resolution` e in `get_config()` per la tracciabilità
 nel report.
@@ -432,6 +451,41 @@ nel report.
 Entrambi mean-reverting (Hurst ≪ 0.5), half-life intraday stabile ~20-21h:
 le finestre derivate sono vicine ai default storici, confermandone la
 calibrazione, ma vengono ora ricalcolate per ogni asset.
+
+#### Coerenza tra timeframe — `window_unit`
+
+La finestra di stima è **un unico valore** (`ema_proxy.window_estimation`, 168)
+la cui *unità* dipende da `ema_proxy.window_unit`:
+
+- **`"bar"` (default)** — `W = 168` significa 168 **candele**, indipendentemente
+  dal timeframe: 1 settimana su 1H, ma 168 giorni su 1D. È *timeframe-agnostica*,
+  quindi le finestre derivate **non sono confrontabili in tempo reale** tra
+  timeframe diversi.
+- **`"day"`** — `W = 168` significa 168 **giorni** su *ogni* timeframe (anche
+  1H), convertiti in barre tramite la durata candela (inferita dall'indice
+  datetime o impostata con `bar_hours`). Lo stesso valore di `window_estimation`
+  viene semplicemente reinterpretato da barre a giorni. L'orizzonte di stima è
+  identico in wall-clock su ogni timeframe, quindi l'half-life — e le EMA
+  derivate — risultano coerenti in tempo reale.
+  `window_stride` segue la stessa unità di `W`.
+
+Aggregando ADAUSDC 1H → 1D, con `W = 168`:
+
+| | `unit="bar"` (168 barre) | `unit="day"` (168 giorni) |
+|---|---|---|
+| **1H** | stima su 168b (1 settimana) → slow **21h** | stima su 4032b (168g) → slow **545h** |
+| **1D** | stima su 168b (168 giorni) → slow **576h** ❌ | stima su 168b (168g) → slow **552h** ✅ |
+
+In modalità `"bar"` l'orizzonte di stima cambia con il timeframe e l'half-life
+salta da 21h (1H) a 576h (1D). In modalità `"day"` l'orizzonte è 168 giorni su
+entrambi e l'half-life resta coerente (~545h, ovvero la mean-reversion a scala
+multi-settimanale catturata da quell'orizzonte).
+
+> **Limite fisico:** una dinamica sotto-timeframe (es. la mean-reversion
+> intraday ~21h) non è risolvibile su candele 1D. Con un `W` ampio (168 giorni)
+> entrambi i timeframe convergono sulla scala lenta e coincidono; con un `W`
+> piccolo (es. 7 giorni) su 1H si recupera la scala ~21h, ma su 1D degenera a
+> una EMA di 1-2 barre.
 
 ---
 
