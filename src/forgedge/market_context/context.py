@@ -298,6 +298,89 @@ class MarketContext:
             }
         )
 
+    def regime_table(self, timestamp_col: Optional[str] = None) -> pd.DataFrame:
+        """Return a compact ``[timestamp, regime, regime_stable]`` frame to join.
+
+        Convenience accessor that extracts just the regime output plus its
+        timestamp key, ready to be merged back onto the caller's original
+        data::
+
+            mc = MarketContext(kpi); mc.run()
+            joined = original_df.merge(mc.regime_table(), on="open_dt", how="left")
+
+        The timestamp is taken from (in order): the requested ``timestamp_col``,
+        the table's DatetimeIndex, or the first datetime column found.  The
+        returned frame has a plain RangeIndex and keeps ``regime`` as an ordered
+        categorical.
+
+        Parameters
+        ----------
+        timestamp_col : str, optional
+            Name to use for the timestamp column (and, when it matches a column
+            in the table, the source of the timestamps).  When ``None`` the name
+            is inferred from the DatetimeIndex/datetime column, defaulting to
+            ``"open_dt"``.
+
+        Raises
+        ------
+        RuntimeError
+            If called before :meth:`run`.
+        KeyError
+            If ``timestamp_col`` is given but is neither a column nor the
+            DatetimeIndex of the table.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns ``[<timestamp_col>, "regime", "regime_stable"]``.
+        """
+        if self._result is None:
+            raise RuntimeError("Call run() before regime_table().")
+        res = self._result
+
+        name, ts_values = self._resolve_timestamp(res, timestamp_col)
+
+        out = pd.DataFrame(
+            {
+                name: ts_values,
+                REGIME_COL: pd.Categorical(
+                    res[REGIME_COL].to_numpy(),
+                    categories=self.classifier.get_labels(),
+                    ordered=True,
+                ),
+                REGIME_STABLE_COL: res[REGIME_STABLE_COL].to_numpy(),
+            }
+        )
+        return out
+
+    @staticmethod
+    def _resolve_timestamp(res: pd.DataFrame, timestamp_col: Optional[str]) -> tuple:
+        """Resolve the timestamp key for :meth:`regime_table`.
+
+        Returns ``(column_name, values)``.
+        """
+        if timestamp_col is not None:
+            if timestamp_col in res.columns:
+                return timestamp_col, res[timestamp_col].to_numpy()
+            if (
+                isinstance(res.index, pd.DatetimeIndex)
+                and (res.index.name is None or res.index.name == timestamp_col)
+            ):
+                return timestamp_col, res.index.to_numpy()
+            raise KeyError(
+                f"timestamp_col '{timestamp_col}' is neither a column nor the "
+                f"DatetimeIndex of the enriched table."
+            )
+
+        # Inference: DatetimeIndex first, then the first datetime column.
+        if isinstance(res.index, pd.DatetimeIndex):
+            return (res.index.name or "open_dt"), res.index.to_numpy()
+        for col in res.columns:
+            if pd.api.types.is_datetime64_any_dtype(res[col]):
+                return col, res[col].to_numpy()
+        # No datetime found — fall back to the existing index as the key.
+        return (res.index.name or "index"), res.index.to_numpy()
+
 
 # ---------------------------------------------------------------------------
 # Helpers

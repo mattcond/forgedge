@@ -62,10 +62,43 @@ class EMAProxyConfig:
         Fallback span of the slow EMA.  The default of ``25`` ≈ the observed
         intraday OU half-life on crypto 1H data.
     thresholds : list[float]
-        Ascending cut points applied to the ``ema_short / ema_long`` ratio.
+        Ascending cut points applied to the ``ema_short / ema_long`` ratio when
+        ``threshold_mode == "fixed"`` (and the fallback for ``"balanced"``).
         Their number must be exactly ``len(labels) - 1``.  The defaults
         ``[0.975, 0.990, 1.010, 1.025]`` are calibrated empirically on
         crypto 1H data.
+    threshold_mode : str
+        How the ratio is cut into regimes:
+
+        * ``"fixed"`` (default) — the absolute ``thresholds`` above (e.g. a
+          ``STRONG_BULL`` is literally fast EMA > 2.5% above the slow EMA).
+        * ``"balanced"`` — the thresholds are recomputed per asset as the
+          quantiles of the EMA ratio at the cumulative boundaries of
+          ``target_distribution``, so the regime frequencies match that target
+          (two populated tails).  The span is left untouched, so its
+          mean-reversion meaning is preserved; only the cut adapts.  Falls back
+          to ``"fixed"`` if the ratio is degenerate.
+    target_distribution : list[float]
+        Target regime frequencies for ``threshold_mode == "balanced"``, one per
+        label.  Need not sum to 1 (interpreted as relative weights and
+        normalised); all entries must be > 0.  Default
+        ``[0.10, 0.20, 0.40, 0.20, 0.10]`` (a bell with two 10% tails).
+    threshold_basis : str
+        How the ``"balanced"`` quantile thresholds are estimated over time:
+
+        * ``"global"`` (default) — the quantiles are computed **once** over the
+          whole ratio series.  This hits the target distribution exactly but is
+          *not* causal: a bar's label depends on the full sample, including
+          future bars (look-ahead).  Consistent with how FORGE calibrates its
+          distributional thresholds elsewhere; appropriate for one-shot
+          in-sample labelling.
+        * ``"expanding"`` — the quantiles at bar *t* are computed over the
+          history ``[0..t]`` only, so the labelling is causal (no look-ahead).
+          The target distribution then holds only approximately, and the first
+          ``threshold_warmup`` bars fall back to the fixed ``thresholds``.
+    threshold_warmup : int
+        Number of leading bars that use the fixed ``thresholds`` before enough
+        history is available for ``threshold_basis == "expanding"`` quantiles.
     window_unit : str
         Unit in which the estimation window/stride (``window_estimation`` and
         ``window_stride``) are expressed:
@@ -110,6 +143,12 @@ class EMAProxyConfig:
     thresholds: List[float] = field(
         default_factory=lambda: [0.975, 0.990, 1.010, 1.025]
     )
+    threshold_mode: str = "fixed"
+    target_distribution: List[float] = field(
+        default_factory=lambda: [0.10, 0.20, 0.40, 0.20, 0.10]
+    )
+    threshold_basis: str = "global"
+    threshold_warmup: int = 200
     window_unit: str = "day"
     window_estimation: float = 168
     window_stride: float = 1

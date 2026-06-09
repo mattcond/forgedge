@@ -139,6 +139,164 @@ class TestEMAProxyClassifier:
 
 
 # ---------------------------------------------------------------------------
+# threshold_mode: fixed (absolute) vs balanced (distributional)
+# ---------------------------------------------------------------------------
+
+class TestThresholdMode:
+    def _varied_close(self, n=6000, seed=7):
+        # A series whose EMA ratio has a wide spread, so quantile cuts are
+        # well-defined across all five buckets.
+        rng = np.random.default_rng(seed)
+        steps = rng.normal(0, 0.01, n)
+        steps[: n // 2] += 0.0004   # an up-leg then a down-leg → both tails
+        steps[n // 2 :] -= 0.0004
+        return 100 * np.cumprod(1 + steps)
+
+    def test_fixed_is_default(self):
+        assert EMAProxyConfig().threshold_mode == "fixed"
+
+    def test_balanced_matches_target_distribution(self):
+        df = pd.DataFrame({"close": self._varied_close()})
+        target = [0.10, 0.20, 0.40, 0.20, 0.10]
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        cfg = EMAProxyConfig(
+            auto_window=False, short_period=20, long_period=120,
+            threshold_mode="balanced", target_distribution=target,
+        )
+        regime = EMAProxyClassifier(cfg, labels).classify(df)
+        shares = regime.value_counts(normalize=True).reindex(
+            ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        ).to_numpy()
+        # Quantile cut → each share within a small tolerance of the target.
+        assert np.allclose(shares, target, atol=0.03)
+
+    def test_balanced_uniform_target(self):
+        df = pd.DataFrame({"close": self._varied_close()})
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        cfg = EMAProxyConfig(
+            auto_window=False, short_period=20, long_period=120,
+            threshold_mode="balanced", target_distribution=[1, 1, 1, 1, 1],
+        )
+        regime = EMAProxyClassifier(cfg, labels).classify(df)
+        shares = regime.value_counts(normalize=True).reindex(labels).to_numpy()
+        assert np.allclose(shares, [0.2] * 5, atol=0.03)
+
+    def test_balanced_records_resolved_thresholds(self):
+        df = pd.DataFrame({"close": self._varied_close()})
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        clf = EMAProxyClassifier(
+            EMAProxyConfig(auto_window=False, threshold_mode="balanced"), labels
+        )
+        clf.classify(df)
+        cfg = clf.get_config()
+        assert cfg["resolved_threshold_mode"] == "balanced"
+        assert len(cfg["resolved_thresholds"]) == 4
+        # data-driven cut points differ from the fixed defaults
+        assert cfg["resolved_thresholds"] != list(EMAProxyConfig().thresholds)
+
+    def test_balanced_falls_back_on_degenerate_ratio(self):
+        # Constant price → ratio ≡ 1 → quantiles collapse → fixed fallback
+        df = pd.DataFrame({"close": np.full(500, 100.0)})
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        clf = EMAProxyClassifier(
+            EMAProxyConfig(auto_window=False, threshold_mode="balanced"), labels
+        )
+        clf.classify(df)
+        assert clf.resolved_threshold_mode == "fixed"
+
+    def test_invalid_threshold_mode_raises(self):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        with pytest.raises(ValueError):
+            EMAProxyClassifier(EMAProxyConfig(threshold_mode="quantile"), labels)
+
+    def test_bad_target_distribution_length_raises(self):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        cfg = EMAProxyConfig(threshold_mode="balanced",
+                             target_distribution=[0.5, 0.5])
+        with pytest.raises(ValueError):
+            EMAProxyClassifier(cfg, labels)
+
+    def test_nonpositive_target_weight_raises(self):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        cfg = EMAProxyConfig(threshold_mode="balanced",
+                             target_distribution=[0.3, 0.3, 0.4, 0.0, 0.0])
+        with pytest.raises(ValueError):
+            EMAProxyClassifier(cfg, labels)
+
+    def test_balanced_via_market_context(self):
+        df = pd.DataFrame(
+            {"open_dt": pd.date_range("2024-01-01", periods=6000, freq="1h"),
+             "close": self._varied_close()}
+        )
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="bar", threshold_mode="balanced")
+        )
+        mc = MarketContext(df, cfg)
+        mc.run()
+        # Every label populated → two non-empty tails.
+        dist = mc.distribution()
+        assert (dist["n_bars"].fillna(0) > 0).all()
+
+    # -- threshold_basis: global (default) vs expanding (causal) ------------
+
+    def _balanced_clf(self, basis, warmup=200):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        cfg = EMAProxyConfig(
+            auto_window=False, short_period=20, long_period=120,
+            threshold_mode="balanced", threshold_basis=basis,
+            threshold_warmup=warmup,
+        )
+        return EMAProxyClassifier(cfg, labels)
+
+    def test_global_is_default_basis(self):
+        assert EMAProxyConfig().threshold_basis == "global"
+
+    def test_expanding_is_causal(self):
+        # A label must not depend on any future bar.
+        df = pd.DataFrame({"close": self._varied_close()})
+        clf = self._balanced_clf("expanding")
+        full = clf.classify(df)
+        t = 4000
+        trunc = clf.classify(df.iloc[: t + 1])
+        assert str(full.iloc[t]) == str(trunc.iloc[t])
+        assert clf.resolved_threshold_basis == "expanding"
+
+    def test_global_is_not_causal(self):
+        # Global quantiles use the whole sample → look-ahead (contrast case).
+        df = pd.DataFrame({"close": self._varied_close()})
+        clf = self._balanced_clf("global")
+        full = clf.classify(df)
+        # Truncating the future shifts the global quantiles, changing early labels.
+        trunc = clf.classify(df.iloc[:5000])
+        early_full = full.iloc[:5000].astype(str).to_numpy()
+        early_trunc = trunc.astype(str).to_numpy()
+        assert (early_full != early_trunc).any()
+
+    def test_expanding_warmup_uses_fixed(self):
+        # Within the warm-up the cut must equal the plain fixed classification.
+        df = pd.DataFrame({"close": self._varied_close()})
+        warm = 300
+        exp = self._balanced_clf("expanding", warmup=warm).classify(df)
+        fixed_cfg = EMAProxyConfig(auto_window=False, short_period=20,
+                                   long_period=120, threshold_mode="fixed")
+        fixed = EMAProxyClassifier(
+            fixed_cfg, ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        ).classify(df)
+        head = slice(0, warm - 1)
+        assert (exp.iloc[head].astype(str) == fixed.iloc[head].astype(str)).all()
+
+    def test_invalid_threshold_basis_raises(self):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        with pytest.raises(ValueError):
+            EMAProxyClassifier(EMAProxyConfig(threshold_basis="rolling"), labels)
+
+    def test_bad_warmup_raises(self):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        with pytest.raises(ValueError):
+            EMAProxyClassifier(EMAProxyConfig(threshold_warmup=0), labels)
+
+
+# ---------------------------------------------------------------------------
 # MarketContext orchestrator
 # ---------------------------------------------------------------------------
 
@@ -249,6 +407,63 @@ class TestMarketContext:
         df = _make_kpi_table()
         out = MarketContext(df, classifier=AllBull()).run()
         assert (out["regime"] == "BULL").all()
+
+
+# ---------------------------------------------------------------------------
+# regime_table() — compact frame for joining back onto the source data
+# ---------------------------------------------------------------------------
+
+class TestRegimeTable:
+    def test_columns_and_length_from_datetime_column(self):
+        df = _make_kpi_table()  # has open_dt column, RangeIndex
+        mc = MarketContext(df)
+        mc.run()
+        rt = mc.regime_table()
+        assert list(rt.columns) == ["open_dt", "regime", "regime_stable"]
+        assert len(rt) == len(df)
+        assert isinstance(rt["regime"].dtype, pd.CategoricalDtype)
+        assert rt["regime"].cat.ordered
+        assert rt["regime_stable"].dtype == bool
+
+    def test_uses_datetimeindex(self):
+        df = _make_kpi_table().set_index("open_dt")
+        mc = MarketContext(df)
+        mc.run()
+        rt = mc.regime_table()
+        assert rt.columns[0] == "open_dt"
+        assert pd.api.types.is_datetime64_any_dtype(rt["open_dt"])
+        assert len(rt) == len(df)
+
+    def test_joins_back_onto_source(self):
+        df = _make_kpi_table()
+        mc = MarketContext(df)
+        mc.run()
+        joined = df.merge(mc.regime_table(), on="open_dt", how="left")
+        assert "regime" in joined.columns
+        assert "regime_stable" in joined.columns
+        assert len(joined) == len(df)
+        assert joined["regime"].notna().any()
+        # The join must align row-for-row with run()'s in-place output.
+        assert (joined["regime"].astype(str) == mc._result["regime"].astype(str)).all()
+
+    def test_custom_timestamp_col_name(self):
+        df = _make_kpi_table().rename(columns={"open_dt": "ts"})
+        mc = MarketContext(df, MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="bar")))
+        mc.run()
+        rt = mc.regime_table(timestamp_col="ts")
+        assert list(rt.columns) == ["ts", "regime", "regime_stable"]
+
+    def test_before_run_raises(self):
+        with pytest.raises(RuntimeError):
+            MarketContext(_make_kpi_table()).regime_table()
+
+    def test_unknown_timestamp_col_raises(self):
+        df = _make_kpi_table()
+        mc = MarketContext(df)
+        mc.run()
+        with pytest.raises(KeyError):
+            mc.regime_table(timestamp_col="does_not_exist")
 
 
 # ---------------------------------------------------------------------------
