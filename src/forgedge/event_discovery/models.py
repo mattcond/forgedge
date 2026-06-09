@@ -607,17 +607,19 @@ def build_feature_series(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
 
     sc = comp.source_cols
     if sf.startswith("ratio_") and len(sc) == 2:
-        return df[sc[0]] / df[sc[1]]
+        return (df[sc[0]] / df[sc[1]]).replace([float("inf"), float("-inf")], float("nan"))
     if sf.startswith("spread_") and len(sc) == 2:
-        return (df[sc[0]] - df[sc[1]]) / df[sc[1]]
+        return ((df[sc[0]] - df[sc[1]]) / df[sc[1]]).replace([float("inf"), float("-inf")], float("nan"))
     if sf.startswith("diffnorm_") and len(sc) == 2:
         std = comp.transform_params.get("diffnorm_std")
-        if not std:
+        if std is None:
             raise KeyError(
                 f"'diffnorm_std' missing from transform_params of component "
                 f"'{comp.expression}'. Was this candidate created with an older "
                 "version of EventDiscovery?"
             )
+        if std == 0:
+            return pd.Series(float("nan"), index=df.index, dtype=float)
         return (df[sc[0]] - df[sc[1]]) / std
     if sf.startswith("bb_pct_b_") and len(sc) == 3:
         val, lower, upper = sc

@@ -11,15 +11,25 @@ from forgedge.event_discovery import (
     ValidationResult,
     WalkForwardConfig,
 )
+from forgedge.event_discovery.and_composer import ANDComposer
 from forgedge.event_discovery.classifier import TypeClassifier
 from forgedge.event_discovery.consistency_gate import (
     ConsistencyGate,
     _build_month_index,
     _count_by_month,
+    _monthly_counts,
 )
+from forgedge.event_discovery.discovery import _count_zero_months
 from forgedge.event_discovery.event_generator import EventGenerator
 from forgedge.event_discovery.feature_generator import FeatureGenerator, parse_feature
-from forgedge.event_discovery.models import ColumnType, GateParams, RawEvent
+from forgedge.event_discovery.models import (
+    ColumnType,
+    EventCandidate,
+    EventComponent,
+    GateParams,
+    RawEvent,
+    _apply_component,
+)
 from forgedge.event_discovery.transform_layer import TransformLayer
 
 
@@ -525,3 +535,184 @@ class TestWalkForward:
         cands = ed.run()
         stable = ed.validated_candidates()
         assert len(stable) == 0  # nothing survives impossible OOS criteria
+
+
+# ---------------------------------------------------------------------------
+# Bug-regression tests
+# ---------------------------------------------------------------------------
+
+def _make_component(
+    source_feature: str,
+    transform: str,
+    transform_params: dict,
+    source_cols: list,
+    threshold: float = 0.5,
+    direction: str = "above",
+    event_type: str = "threshold",
+) -> EventComponent:
+    return EventComponent(
+        source_feature=source_feature,
+        transform=transform,
+        transform_params=transform_params,
+        transformed_col=source_feature,
+        threshold=threshold,
+        threshold_type="test",
+        direction=direction,
+        event_type=event_type,
+        expression=f"{source_feature} > {threshold}",
+        source_cols=source_cols,
+        sql_expression="",
+    )
+
+
+class TestBugRegressions:
+    # ── Bug #1: _apply_component leaves ±inf in ratio_ / spread_ series ────
+
+    def test_ratio_zero_denominator_gives_nan_not_inf(self):
+        """ratio_ replay must produce NaN (not ±inf) where denominator == 0."""
+        df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [1.0, 0.0, 2.0]})
+        comp = _make_component(
+            "ratio_a_b", "identity", {}, ["a", "b"], threshold=0.5
+        )
+        series = _apply_component(comp, df)
+        assert not np.isinf(series).any(), "±inf found in ratio_ replay result"
+        assert pd.isna(series.iloc[1]), "zero-denominator bar should be NaN"
+
+    def test_spread_zero_denominator_gives_nan_not_inf(self):
+        """spread_ replay must produce NaN (not ±inf) where denominator == 0."""
+        df = pd.DataFrame({"price": [100.0, 100.0, 102.0], "ma": [100.0, 0.0, 100.0]})
+        comp = _make_component(
+            "spread_price_ma", "identity", {}, ["price", "ma"], threshold=0.0
+        )
+        series = _apply_component(comp, df)
+        assert not np.isinf(series).any(), "±inf found in spread_ replay result"
+        assert pd.isna(series.iloc[1])
+
+    def test_ratio_replay_matches_training_path(self):
+        """End-to-end: apply() on out-of-sample data with zero-denominator bars
+        must not produce ±inf that would corrupt rolling window statistics."""
+        rng = np.random.default_rng(0)
+        close = 100 * np.cumprod(1 + rng.normal(0, 0.005, 500))
+        ema = pd.Series(close).ewm(span=25).mean().values.copy()
+        ema[50] = 0.0  # inject a zero-denominator bar
+        df = pd.DataFrame({"close": close, "close_ema_25": ema,
+                           "open_dt": pd.date_range("2024-01-01", periods=500, freq="1h")})
+
+        ed = EventDiscovery(
+            df,
+            config=DiscoveryConfig(
+                gate_params=GateParams(min_act=10, min_months=1, max_conc=1.0, min_tpm=0.1)
+            ),
+        )
+        ed.run()
+        for cand in ed._candidates or []:
+            result = cand.apply(df.drop(columns=["open_dt"]))
+            assert not np.isinf(result.fillna(0)).any(), (
+                f"±inf found in apply() result for {cand.event_id}"
+            )
+
+    # ── Bug #2: ANDComposer float32 → float64 boundary consistency ──────────
+
+    def test_and_composer_max_conc_matches_single_gate(self):
+        """max_monthly_share in AND-composed GateResult must match float64
+        ConsistencyGate.evaluate() for the same activation array."""
+        # Use a 1-year hourly series where each event fires ~15% of bars
+        # (≈1314 activations). Gate is loose so the AND pair passes easily.
+        rng = np.random.default_rng(7)
+        n = 8760
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        month_idx, n_months = _build_month_index(ts)
+
+        gate = ConsistencyGate(GateParams(min_act=50, min_months=6, max_conc=0.40, min_tpm=2.0))
+
+        # Build two highly correlated events so their AND fires often enough
+        base = rng.random(n) < 0.30
+        s1 = pd.Series((base & (rng.random(n) < 0.80)).astype(float))
+        s2 = pd.Series((base & (rng.random(n) < 0.80)).astype(float))
+
+        def _make_ev(s: pd.Series, name: str) -> RawEvent:
+            comp = _make_component(name, "identity", {}, [])
+            ev = RawEvent(series=s, component=comp)
+            ev.gate_result = gate.evaluate_series(s, month_idx, n_months)
+            return ev
+
+        ev1 = _make_ev(s1, "feat_a")
+        ev2 = _make_ev(s2, "feat_b")
+        assert ev1.gate_result.passed and ev2.gate_result.passed, (
+            "Fixture setup failed: single events must pass gate"
+        )
+
+        composed = ANDComposer(gate).compose([ev1, ev2], ts, max_components=2)
+        assert composed, "Fixture setup failed: AND composed event must pass gate"
+
+        for ev in composed:
+            and_arr = (ev1.series.fillna(0).values.astype(bool) &
+                       ev2.series.fillna(0).values.astype(bool))
+            counts = _count_by_month(and_arr, month_idx, n_months)
+            scalar = gate.evaluate(and_arr, counts, n_months)
+            assert abs(ev.gate_result.max_monthly_share - scalar.max_monthly_share) < 1e-9, (
+                "float64 mismatch between ANDComposer and ConsistencyGate.evaluate"
+            )
+
+    # ── Bug #3: diffnorm_std == 0 must return all-NaN, not KeyError ─────────
+
+    def test_diffnorm_std_zero_returns_all_nan(self):
+        """_apply_component with diffnorm_std=0 must return NaN series, not raise."""
+        df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [1.0, 2.0, 3.0]})
+        comp = _make_component(
+            "diffnorm_a_b", "identity", {"diffnorm_std": 0.0}, ["a", "b"]
+        )
+        result = _apply_component(comp, df)
+        assert result.isna().all(), "diffnorm_std=0 should produce all-NaN"
+
+    def test_diffnorm_std_none_raises_key_error(self):
+        """_apply_component with missing diffnorm_std must raise KeyError."""
+        df = pd.DataFrame({"a": [1.0, 2.0], "b": [0.5, 1.0]})
+        comp = _make_component(
+            "diffnorm_a_b", "identity", {}, ["a", "b"]
+        )
+        with pytest.raises(KeyError, match="diffnorm_std"):
+            _apply_component(comp, df)
+
+    # ── Bug #4: _monthly_counts index-alignment safety ───────────────────────
+
+    def test_monthly_counts_mismatched_indices(self):
+        """_monthly_counts must produce correct results when active has a
+        DatetimeIndex but timestamps has a RangeIndex."""
+        dates = pd.date_range("2024-01-01", periods=60, freq="1D")
+        active_dt = pd.Series(
+            [1.0] * 30 + [0.0] * 30,
+            index=dates,
+        )
+        timestamps_ri = pd.Series(dates)
+
+        result = _monthly_counts(active_dt, timestamps_ri)
+        assert result[pd.Period("2024-01", freq="M")] == 30
+        assert result[pd.Period("2024-02", freq="M")] == 0
+
+    def test_monthly_counts_rangeindex_active(self):
+        """_monthly_counts with RangeIndex active and RangeIndex timestamps."""
+        dates = pd.date_range("2024-01-01", periods=60, freq="1D")
+        active_ri = pd.Series([1.0] * 30 + [0.0] * 30)
+        timestamps_ri = pd.Series(dates)
+
+        result = _monthly_counts(active_ri, timestamps_ri)
+        assert result[pd.Period("2024-01", freq="M")] == 30
+        assert result[pd.Period("2024-02", freq="M")] == 0
+
+    # ── Bug #5: NaT in period range must not crash ───────────────────────────
+
+    def test_count_zero_months_nat_index_returns_zero(self):
+        """_count_zero_months must return 0 (not crash) when index contains NaT."""
+        nat_index = pd.DatetimeIndex([pd.NaT, pd.NaT, pd.NaT])
+        series = pd.Series([1.0, 0.0, 1.0], index=nat_index)
+        ts = pd.Series([pd.NaT, pd.NaT, pd.NaT])
+        result = _count_zero_months(series, ts)
+        assert result == 0
+
+    def test_monthly_counts_nat_timestamps_returns_empty(self):
+        """_monthly_counts must return empty Series (not crash) on all-NaT timestamps."""
+        active = pd.Series([1.0, 0.0, 1.0])
+        timestamps = pd.Series(pd.to_datetime([pd.NaT, pd.NaT, pd.NaT]))
+        result = _monthly_counts(active, timestamps)
+        assert len(result) == 0

@@ -520,24 +520,25 @@ class FeatureGenerator:
 # ---------------------------------------------------------------------------
 
 def _safe_ratio(a: pd.Series, b: pd.Series) -> pd.Series:
-    """Compute ``a / b``, replacing ±inf with pd.NA.
+    """Compute ``a / b``, replacing ±inf with NaN.
 
-    Division by zero yields ±inf in pandas; replacing those values with NA
-    avoids propagating infinities into downstream thresholds.
+    Division by zero yields ±inf in pandas; replacing those values with NaN
+    (not pd.NA, which upcasts float64 to object) avoids propagating infinities
+    into downstream rolling operations.
     """
     result = a / b
-    return result.replace([float("inf"), float("-inf")], pd.NA)
+    return result.replace([float("inf"), float("-inf")], float("nan"))
 
 
 def _safe_spread_pct(a: pd.Series, b: pd.Series) -> pd.Series:
-    """Compute ``(a - b) / b``, replacing ±inf with pd.NA.
+    """Compute ``(a - b) / b``, replacing ±inf with NaN.
 
     Used for the price-vs-MA spread where ``b`` could momentarily be zero
     (unlikely in practice for a moving average of a positive price, but
     guarded defensively).
     """
     result = (a - b) / b
-    return result.replace([float("inf"), float("-inf")], pd.NA)
+    return result.replace([float("inf"), float("-inf")], float("nan"))
 
 
 def _safe_diff_norm(a: pd.Series, b: pd.Series) -> tuple[pd.Series, float]:
@@ -567,9 +568,10 @@ def _safe_position(value: pd.Series, lower: pd.Series, upper: pd.Series) -> pd.S
     Formula: ``(value - lower) / (upper - lower)``.
 
     When ``upper == lower`` (flat market, zero-width band) the denominator is
-    zero, producing ±inf.  These are replaced with pd.NA so that downstream
-    quantile-based thresholds are unaffected.
+    zero, producing ±inf.  These are replaced with NaN (not pd.NA, which
+    upcasts float64 to object) so that downstream rolling operations are
+    unaffected.
     """
     denom = upper - lower
     result = (value - lower) / denom
-    return result.replace([float("inf"), float("-inf")], pd.NA)
+    return result.replace([float("inf"), float("-inf")], float("nan"))

@@ -637,7 +637,10 @@ def _count_zero_months(series: pd.Series, timestamps: pd.Series) -> int:
         periods = pd.DatetimeIndex(timestamps.values).to_period("M")
     active_vals = series.fillna(0).values.astype(bool)
     counts = pd.Series(active_vals, index=periods).groupby(level=0).sum()
-    all_months = pd.period_range(periods.min(), periods.max(), freq="M")
+    p_min, p_max = periods.min(), periods.max()
+    if pd.isnull(p_min) or pd.isnull(p_max):
+        return 0
+    all_months = pd.period_range(p_min, p_max, freq="M")
     counts = counts.reindex(all_months, fill_value=0)
     return int((counts == 0).sum())
 
