@@ -303,31 +303,49 @@ class TestWindowUnit:
         assert EMAProxyConfig().window_unit == "bar"
 
     def test_bar_mode_uses_bar_window(self):
+        # window_estimation = 168 interpreted as 168 *bars*.
         mc = MarketContext(self._ou_kpi())
         mc.run()
         assert mc.window_resolution["unit"] == "bar"
         assert mc.window_resolution["estimation_window_bars"] == 168
 
-    def test_day_mode_infers_bar_hours_1h(self):
+    def test_day_mode_same_W_means_days_on_1h(self):
+        # The SAME single value (168) is reinterpreted as 168 *days* on 1h,
+        # i.e. 168 * 24 = 4032 bars — even though the timeframe is hourly.
         cfg = MarketContextConfig(
-            ema_proxy=EMAProxyConfig(window_unit="day", window_estimation_days=7)
+            ema_proxy=EMAProxyConfig(window_unit="day", window_estimation=168)
         )
         mc = MarketContext(self._ou_kpi(), cfg)
         mc.run()
         res = mc.window_resolution
         assert res["unit"] == "day"
         assert abs(res["bar_hours"] - 1.0) < 1e-6
-        assert res["estimation_window_bars"] == 168  # 7d * 24 / 1h
+        assert res["estimation_window_bars"] == 4032  # 168d * 24 / 1h
 
     def test_day_mode_converts_per_timeframe_4h(self):
+        # 168 days on 4h → 168 * 24 / 4 = 1008 bars.
         cfg = MarketContextConfig(
-            ema_proxy=EMAProxyConfig(window_unit="day", window_estimation_days=7)
+            ema_proxy=EMAProxyConfig(window_unit="day", window_estimation=168)
         )
         mc = MarketContext(self._ou_kpi(n=2000, freq="4h"), cfg)
         mc.run()
         res = mc.window_resolution
         assert abs(res["bar_hours"] - 4.0) < 1e-6
-        assert res["estimation_window_bars"] == 42  # 7d * 24 / 4h
+        assert res["estimation_window_bars"] == 1008  # 168d * 24 / 4h
+
+    def test_day_mode_small_W_converges_on_1h(self):
+        # 7-day window, 1-day stride on 1h → 168-bar window, 24-bar stride:
+        # both W and stride follow the "day" unit.
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(
+                window_unit="day", window_estimation=7, window_stride=1
+            )
+        )
+        mc = MarketContext(self._ou_kpi(), cfg)
+        mc.run()
+        res = mc.window_resolution
+        assert res["estimation_window_bars"] == 168  # 7d * 24 / 1h
+        assert res["source"] == "hurst_ou"
 
     def test_day_mode_requires_time_info(self):
         df = pd.DataFrame({"close": _ou_prices(2000)})  # RangeIndex, no datetime
@@ -339,7 +357,7 @@ class TestWindowUnit:
         df = pd.DataFrame({"close": _ou_prices(3000)})
         cfg = MarketContextConfig(
             ema_proxy=EMAProxyConfig(
-                window_unit="day", window_estimation_days=7, bar_hours=1.0
+                window_unit="day", window_estimation=7, bar_hours=1.0
             )
         )
         mc = MarketContext(df, cfg)

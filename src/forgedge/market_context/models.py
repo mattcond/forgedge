@@ -66,29 +66,25 @@ class EMAProxyConfig:
         Their number must be exactly ``len(labels) - 1``.  The defaults
         ``[0.975, 0.990, 1.010, 1.025]`` are calibrated empirically on
         crypto 1H data.
-    window_estimation_bars : int
-        Width, in bars, of the rolling window used to estimate the local OU
-        half-life when ``auto_window`` is ``True`` and ``window_unit == "bar"``.
-    window_stride_bars : int
-        Step, in bars, between successive local half-life estimates
-        (``window_unit == "bar"``).
     window_unit : str
-        Unit in which the estimation window is expressed:
+        Unit in which the estimation window/stride (``window_estimation`` and
+        ``window_stride``) are expressed:
 
-        * ``"bar"`` (default) — window measured in candles (timeframe-agnostic).
-          ``168`` bars means one week on 1H but 168 days on 1D, so the derived
-          spans are *not* comparable in wall-clock terms across timeframes.
-        * ``"day"`` — window measured in calendar days and converted to bars
-          using the inferred bar size.  This keeps the estimation horizon
-          coherent across timeframes (a 7-day window is 7 days on both 1H and
-          1D), so the derived spans line up in wall-clock terms — within the
-          limit that sub-timeframe dynamics (e.g. a 21h half-life) cannot be
-          resolved on coarser candles.
-    window_estimation_days : float
-        Width, in calendar days, of the estimation window when
-        ``window_unit == "day"``.
-    window_stride_days : float
-        Step, in calendar days, between estimates when ``window_unit == "day"``.
+        * ``"bar"`` (default) — measured in candles (timeframe-agnostic).
+          ``W = 168`` means 168 bars regardless of timeframe: one week on 1H,
+          168 days on 1D.  The derived spans are therefore *not* comparable in
+          wall-clock terms across timeframes.
+        * ``"day"`` — measured in calendar days and converted to bars using the
+          candle duration.  ``W = 168`` means 168 days on *every* timeframe
+          (even 1H), so the estimation horizon — and the derived spans — line
+          up in wall-clock terms.  The same single value of ``window_estimation``
+          is simply reinterpreted from bars to days by this flag.
+    window_estimation : float
+        Width of the rolling estimation window, expressed in the unit selected
+        by ``window_unit`` (bars when ``"bar"``, days when ``"day"``).
+    window_stride : float
+        Step between successive estimates, in the same unit as
+        ``window_estimation``.
     bar_hours : float or None
         Explicit candle duration in hours, used to convert days↔bars in
         ``"day"`` mode.  When ``None`` it is inferred from the table's
@@ -110,13 +106,12 @@ class EMAProxyConfig:
         default_factory=lambda: [0.975, 0.990, 1.010, 1.025]
     )
     window_unit: str = "bar"
-    window_estimation_bars: int = 168
-    window_stride_bars: int = 24
-    window_estimation_days: float = 7.0
-    window_stride_days: float = 1.0
+    window_estimation: float = 168
+    window_stride: float = 24
     bar_hours: Optional[float] = None
     fast_ratio: float = 1 / 2.3
     min_window_estimates: int = 10
+
 
 
 

@@ -223,11 +223,15 @@ class MarketContext:
         """
         unit = ema_cfg.window_unit.lower().strip()
         if unit == "bar":
-            return ema_cfg.window_estimation_bars, ema_cfg.window_stride_bars, None
+            return (
+                max(2, int(round(ema_cfg.window_estimation))),
+                max(1, int(round(ema_cfg.window_stride))),
+                None,
+            )
         if unit == "day":
             bar_hours = self._infer_bar_hours(ema_cfg)
-            est = max(2, int(round(ema_cfg.window_estimation_days * 24 / bar_hours)))
-            stride = max(1, int(round(ema_cfg.window_stride_days * 24 / bar_hours)))
+            est = max(2, int(round(ema_cfg.window_estimation * 24 / bar_hours)))
+            stride = max(1, int(round(ema_cfg.window_stride * 24 / bar_hours)))
             return est, stride, bar_hours
         raise ValueError(
             f"window_unit must be 'bar' or 'day', got '{ema_cfg.window_unit}'."
