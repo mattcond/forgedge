@@ -346,3 +346,39 @@ class TestEventDiscoveryE2E:
         )
         candidates = ed.run()
         assert len(candidates) > 0
+
+    def test_unsorted_input_produces_same_results_as_sorted(self):
+        """Rolling windows must be computed in chronological order regardless of input row order."""
+        df_sorted = _make_kpi_table(n=2000)
+        # Shuffle the input rows (preserves all data, breaks row order)
+        df_shuffled = df_sorted.sample(frac=1, random_state=0).reset_index(drop=True)
+
+        cfg = DiscoveryConfig(
+            gate_params=GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0)
+        )
+        candidates_sorted = EventDiscovery(df_sorted, config=cfg).run()
+        candidates_shuffled = EventDiscovery(df_shuffled, config=cfg).run()
+
+        ids_sorted = {c.event_id for c in candidates_sorted}
+        ids_shuffled = {c.event_id for c in candidates_shuffled}
+        assert ids_sorted == ids_shuffled, (
+            f"Sorted input produced {ids_sorted - ids_shuffled} extra events and "
+            f"missed {ids_shuffled - ids_sorted} compared to shuffled input"
+        )
+
+    def test_unsorted_datetimeindex_input_is_sorted(self):
+        """DatetimeIndex path also sorts rows before rolling calculations."""
+        df = _make_kpi_table(n=2000)
+        df_sorted = df.set_index("open_dt")
+        df_shuffled = df_sorted.sample(frac=1, random_state=0)
+
+        cfg = DiscoveryConfig(
+            timestamp_col="open_dt",
+            gate_params=GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0),
+        )
+        candidates_sorted = EventDiscovery(df_sorted, config=cfg).run()
+        candidates_shuffled = EventDiscovery(df_shuffled, config=cfg).run()
+
+        ids_sorted = {c.event_id for c in candidates_sorted}
+        ids_shuffled = {c.event_id for c in candidates_shuffled}
+        assert ids_sorted == ids_shuffled
