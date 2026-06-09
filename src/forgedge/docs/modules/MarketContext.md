@@ -196,6 +196,26 @@ due code da 10%) è interpretato come pesi relativi (normalizzati); usare
 `[1,1,1,1,1]` per una distribuzione uniforme. Le soglie effettivamente usate
 sono esposte in `get_config()['classifier']['resolved_thresholds']`.
 
+#### Causalità delle soglie — `threshold_basis`
+
+Le soglie quantile di `balanced` possono essere stimate in due modi
+(`ema_proxy.threshold_basis`):
+
+- **`"global"` (default)** — quantili calcolati **una volta** sull'intera serie.
+  Centra il target in modo esatto, ma **non è causale**: la label della barra
+  *t* dipende dall'intero campione, futuro incluso (look-ahead). Coerente con
+  come FORGE calibra altrove le soglie distribuzionali; adatto al labeling
+  one-shot in-sample.
+- **`"expanding"`** — i quantili alla barra *t* usano solo lo storico `[0..t]`,
+  quindi la classificazione è **causale (niente look-ahead)**. Il target è poi
+  rispettato solo in modo approssimato e le prime `threshold_warmup` barre
+  ricadono sulle soglie fisse.
+
+Su ADAUSDC 1H le label `global` ed `expanding` differiscono sul ~22% delle barre
+(per lo più all'inizio della serie); le soglie finali invece convergono. Nota:
+anche lo **span** è stimato globalmente, quindi una dipendenza in-sample resta
+anche in `fixed`/`global` — `expanding` rende causale il solo taglio.
+
 Esempio su ADAUSDC 1H (span 545 invariato):
 
 | | SB | BE | NE | BU | SU |
@@ -229,6 +249,8 @@ market_context:
     short_period:  9         # fallback EMA veloce (se l'analisi non converge)
     long_period:   25        # fallback EMA lenta  (se l'analisi non converge)
     threshold_mode: "fixed"  # "fixed" (default) | "balanced" (soglie distribuzionali)
+    threshold_basis: "global"  # "global" (default, esatto) | "expanding" (causale)
+    threshold_warmup: 200    # barre iniziali su soglie fisse se basis="expanding"
     thresholds:    [0.975, 0.990, 1.010, 1.025]   # usate da "fixed"
     target_distribution: [0.10, 0.20, 0.40, 0.20, 0.10]  # target di "balanced"
 
@@ -254,6 +276,8 @@ market_context:
 | `ema_proxy.short_period` | `9` | EMA veloce — fallback se l'analisi non converge |
 | `ema_proxy.long_period` | `25` | EMA lenta — fallback se l'analisi non converge |
 | `ema_proxy.threshold_mode` | `"fixed"` | Modo di taglio: `"fixed"` (soglie assolute) o `"balanced"` (quantili) |
+| `ema_proxy.threshold_basis` | `"global"` | Stima soglie `"balanced"`: `"global"` (esatto, look-ahead) o `"expanding"` (causale) |
+| `ema_proxy.threshold_warmup` | `200` | Barre iniziali su soglie fisse con `"expanding"` |
 | `ema_proxy.thresholds` | `[0.975, 0.990, 1.010, 1.025]` | Soglie assolute usate da `"fixed"` |
 | `ema_proxy.target_distribution` | `[0.10, 0.20, 0.40, 0.20, 0.10]` | Frequenze target per `"balanced"` (pesi relativi) |
 | `labels` | `["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]` | Label regime (ordinate dal più ribassista) |

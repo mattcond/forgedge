@@ -237,6 +237,64 @@ class TestThresholdMode:
         dist = mc.distribution()
         assert (dist["n_bars"].fillna(0) > 0).all()
 
+    # -- threshold_basis: global (default) vs expanding (causal) ------------
+
+    def _balanced_clf(self, basis, warmup=200):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        cfg = EMAProxyConfig(
+            auto_window=False, short_period=20, long_period=120,
+            threshold_mode="balanced", threshold_basis=basis,
+            threshold_warmup=warmup,
+        )
+        return EMAProxyClassifier(cfg, labels)
+
+    def test_global_is_default_basis(self):
+        assert EMAProxyConfig().threshold_basis == "global"
+
+    def test_expanding_is_causal(self):
+        # A label must not depend on any future bar.
+        df = pd.DataFrame({"close": self._varied_close()})
+        clf = self._balanced_clf("expanding")
+        full = clf.classify(df)
+        t = 4000
+        trunc = clf.classify(df.iloc[: t + 1])
+        assert str(full.iloc[t]) == str(trunc.iloc[t])
+        assert clf.resolved_threshold_basis == "expanding"
+
+    def test_global_is_not_causal(self):
+        # Global quantiles use the whole sample → look-ahead (contrast case).
+        df = pd.DataFrame({"close": self._varied_close()})
+        clf = self._balanced_clf("global")
+        full = clf.classify(df)
+        # Truncating the future shifts the global quantiles, changing early labels.
+        trunc = clf.classify(df.iloc[:5000])
+        early_full = full.iloc[:5000].astype(str).to_numpy()
+        early_trunc = trunc.astype(str).to_numpy()
+        assert (early_full != early_trunc).any()
+
+    def test_expanding_warmup_uses_fixed(self):
+        # Within the warm-up the cut must equal the plain fixed classification.
+        df = pd.DataFrame({"close": self._varied_close()})
+        warm = 300
+        exp = self._balanced_clf("expanding", warmup=warm).classify(df)
+        fixed_cfg = EMAProxyConfig(auto_window=False, short_period=20,
+                                   long_period=120, threshold_mode="fixed")
+        fixed = EMAProxyClassifier(
+            fixed_cfg, ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        ).classify(df)
+        head = slice(0, warm - 1)
+        assert (exp.iloc[head].astype(str) == fixed.iloc[head].astype(str)).all()
+
+    def test_invalid_threshold_basis_raises(self):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        with pytest.raises(ValueError):
+            EMAProxyClassifier(EMAProxyConfig(threshold_basis="rolling"), labels)
+
+    def test_bad_warmup_raises(self):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        with pytest.raises(ValueError):
+            EMAProxyClassifier(EMAProxyConfig(threshold_warmup=0), labels)
+
 
 # ---------------------------------------------------------------------------
 # MarketContext orchestrator
