@@ -322,6 +322,79 @@ class TestRegimeSensitivity:
 
 
 # ---------------------------------------------------------------------------
+# No-recompute contract — events and regimes are consumed, never re-derived
+# ---------------------------------------------------------------------------
+
+class TestNoRecompute:
+    def test_events_come_from_stored_series_not_apply(self, monkeypatch):
+        """With event_series present, EventCandidate.apply must never run."""
+        df = _predictive_kpi_table()
+        ed, cands = _make_candidates(df)
+        assert all(c.event_series is not None for c in cands)
+
+        def _boom(self, frame):
+            raise AssertionError("Alpha Discovery recomputed an event via apply()")
+
+        from forgedge.event_discovery.models import EventCandidate
+        monkeypatch.setattr(EventCandidate, "apply", _boom)
+
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(
+            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        contracts = ad.run()
+        assert len(contracts) == len(cands)
+
+    def test_features_read_from_table_when_present(self, monkeypatch):
+        """With ed.df as input every feature column exists — no replay needed."""
+        df = _predictive_kpi_table()
+        ed, cands = _make_candidates(df)
+
+        import forgedge.alpha_discovery.discovery as disc
+
+        def _boom(comp, frame):
+            raise AssertionError(
+                f"Alpha Discovery rebuilt feature '{comp.source_feature}' "
+                "despite it being available in the table"
+            )
+
+        monkeypatch.setattr(disc, "build_feature_series", _boom)
+
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(
+            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        contracts = ad.run()
+        assert len(contracts) == len(cands)
+
+    def test_apply_fallback_when_series_missing(self):
+        """Candidates serialised without event_series still work via replay."""
+        df = _predictive_kpi_table()
+        ed, cands = _make_candidates(df)
+        stripped = cands[:5]
+        for c in stripped:
+            c.event_series = None
+
+        ad = AlphaDiscovery(ed.df, stripped, AlphaConfig(
+            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        contracts = ad.run()
+        assert len(contracts) == 5
+
+    def test_activation_counts_match_event_discovery(self):
+        """The activations Alpha Discovery sees are Event Discovery's, bar for bar."""
+        df = _predictive_kpi_table()
+        ed, cands = _make_candidates(df)
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(
+            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        ad.run()
+        # n_activations in the contract differs from the gate count only by the
+        # bars whose forward target is incomplete (the last h bars).
+        h = 12
+        for cand, contract in zip(cands, ad._contracts):
+            stored = cand.event_series.fillna(0).astype(bool)
+            tail_active = int(stored.iloc[-h:].sum())
+            expected_min = cand.activation_stats.n_activations - tail_active
+            assert expected_min <= contract.event_stats.n_activations \
+                <= cand.activation_stats.n_activations
+
+
+# ---------------------------------------------------------------------------
 # Input handling
 # ---------------------------------------------------------------------------
 

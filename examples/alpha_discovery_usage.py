@@ -3,14 +3,16 @@ ForgeEdge — Alpha Discovery (Modulo 2) end-to-end
 ==================================================
 Dataset: ADAUSDC 1h
 
-Catena completa della pipeline:
+Catena completa della pipeline — strettamente sequenziale:
 
     Market Context  →  Event Discovery  →  Alpha Discovery
 
 Market Context etichetta ogni barra per regime; Event Discovery genera gli
-Event Candidate (senza guardare il forward return); Alpha Discovery misura il
-potere predittivo di ciascun candidato rispetto a un target economico e
-promuove quelli con evidenza statistica sufficiente in Alpha Contract.
+Event Candidate (senza guardare il forward return); Alpha Discovery riceve
+entrambi gli output — la tabella post-pipeline ``ed.df`` (regime + feature
+derivate) e i candidati con le loro ``event_series`` — e non ricalcola nulla:
+misura il potere predittivo di ciascun candidato rispetto al target economico
+e promuove quelli con evidenza statistica sufficiente in Alpha Contract.
 
 Prerequisiti
 ------------
@@ -102,7 +104,10 @@ config = AlphaConfig(
     ),
 )
 
-ad = AlphaDiscovery(enriched.copy(), candidates, config)
+# ed.df è la tabella post-pipeline di Event Discovery: contiene la colonna
+# 'regime' di Market Context e tutte le feature derivate (ratio_, spread_, …).
+# Alpha Discovery legge da lì — niente viene ricalcolato.
+ad = AlphaDiscovery(ed.df, candidates, config)
 contracts = ad.run()
 
 ms = ad.market_structure

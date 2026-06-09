@@ -5,6 +5,12 @@ each event (and its underlying continuous feature) on the KPI table, measures
 predictive power against an economic target, and compiles an ``AlphaContract``
 per candidate.
 
+The flow is strictly sequential and read-only: regimes come from Market
+Context, events come from Event Discovery — Alpha Discovery recomputes
+neither.  It reads each candidate's stored ``event_series``, reads the
+``regime`` column from the enriched table, and reads the underlying feature
+columns from Event Discovery's post-pipeline table.
+
 Usage
 -----
     from forgedge import (
@@ -12,11 +18,13 @@ Usage
         AlphaDiscovery, AlphaConfig, TargetDefinition,
     )
 
-    enriched = MarketContext(kpi).run()          # adds 'regime'
-    candidates = EventDiscovery(enriched).run()   # Event Candidates
+    enriched = MarketContext(kpi).run()          # Modulo 0 — adds 'regime'
+    ed = EventDiscovery(enriched)
+    candidates = ed.run()                        # Modulo 1 — Event Candidates
 
     ad = AlphaDiscovery(
-        enriched, candidates,
+        ed.df,                                   # regime + derived features
+        candidates,
         AlphaConfig(target=TargetDefinition(holding_period_h=24, sell_pct=0.04)),
     )
     contracts = ad.run()                # all evaluated contracts
@@ -54,12 +62,17 @@ class AlphaDiscovery:
     Parameters
     ----------
     kpi_table : pd.DataFrame
-        The KPI table that produced the candidates — same native columns Event
-        Discovery saw, ideally enriched with the Market Context ``regime``
-        column.  Must carry a datetime column (default ``open_dt``) or a
-        DatetimeIndex.
+        The KPI table that produced the candidates.  In the sequential FORGE
+        flow this is Event Discovery's post-pipeline table (``ed.df``): it
+        carries the Market Context ``regime`` column *and* every derived
+        feature column, so Alpha Discovery recomputes nothing — it only reads.
+        Any table with the same native columns also works (missing derived
+        features are then replayed deterministically from the candidates'
+        stored parameters).  Must carry a datetime column (default
+        ``open_dt``) or a DatetimeIndex.
     event_candidates : list[EventCandidate]
-        Output of ``EventDiscovery.run()``.
+        Output of ``EventDiscovery.run()``.  Each candidate's stored
+        ``event_series`` is used as-is — events are never re-derived.
     config : AlphaConfig, optional
         Target definition and gates.  Defaults to a 24-bar / +4% long target
         with the documented promotion thresholds.
@@ -108,7 +121,7 @@ class AlphaDiscovery:
         for cand in self.event_candidates:
             event = self._event_series(cand)
             comp0 = cand.components[0]
-            feature = build_feature_series(comp0, self._frame)
+            feature = self._feature_series(comp0)
 
             ic_res = self._measure_ic(feature, fwd_return, comp0.source_feature, ic_window)
             ev_stats = self._measure_event(event, target_binary, fwd_return, base_rate)
@@ -489,13 +502,37 @@ class AlphaDiscovery:
         return df.sort_index()
 
     def _event_series(self, cand: EventCandidate) -> pd.Series:
-        """Reconstruct the candidate's boolean activation series on the frame.
+        """Return the candidate's boolean activation series, aligned to the frame.
 
-        Uses ``EventCandidate.apply`` so the event is rebuilt from native
-        columns with the exact thresholds and windows stored at discovery time
-        — never re-fitted, never modified.
+        Alpha Discovery does **not** recompute events — the activation series
+        produced by Event Discovery (``EventCandidate.event_series``, carrying
+        its DatetimeIndex) is used as-is, reindexed onto the KPI frame.  Bars
+        outside the candidate's discovery period align to NaN and are treated
+        as inactive downstream.
+
+        ``EventCandidate.apply()`` is used only as a fallback for candidates
+        that were serialised without their series (``event_series is None``);
+        even then it is a deterministic replay of the stored thresholds and
+        windows, never a re-fit.
         """
+        if cand.event_series is not None:
+            return cand.event_series.reindex(self._frame.index)
         return cand.apply(self._frame)
+
+    def _feature_series(self, comp) -> pd.Series:
+        """Return the component's underlying continuous feature.
+
+        Reads the column straight from the frame when it is already there —
+        native features always are, and derived features (``ratio_…``,
+        ``spread_…``) are too when the caller passes Event Discovery's
+        post-pipeline table (``ed.df``).  Only when the column is absent is
+        the feature replayed from the component's stored parameters
+        (deterministic algebra on native columns — no re-fitting).
+        """
+        name = comp.source_feature
+        if name in self._frame.columns:
+            return self._frame[name]
+        return build_feature_series(comp, self._frame)
 
     def _regime_series(self) -> Optional[pd.Series]:
         """Return the (optionally stability-filtered) regime series, or None."""
