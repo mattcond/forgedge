@@ -22,8 +22,7 @@ import sys
 import pandas as pd
 
 sys.path.insert(0, "src")
-from forgedge import MarketContext, MarketContextConfig
-from forgedge.market_context import EMAProxyConfig
+from forgedge import MarketContext
 from forgedge.market_context.hurst import suggest_ema_windows
 
 
@@ -48,27 +47,30 @@ print(f"Range  : {kpi['open_dt'].iloc[0].date()} → {kpi['open_dt'].iloc[-1].da
 
 
 # ---------------------------------------------------------------------------
-# 2. Scelta delle finestre EMA via half-life OU locale (Hurst tooling)
+# 2. Anteprima (facoltativa) della scelta finestre via Hurst tooling.
+#    MarketContext effettua questa stessa derivazione automaticamente in run();
+#    qui la mostriamo solo per ispezione.
 # ---------------------------------------------------------------------------
 
 sug = suggest_ema_windows(kpi.set_index("open_dt")["close"], timeframe="1h")
-print("\n─── EMA window suggestion (local OU half-life) ───")
+print("\n─── EMA window analysis (local OU half-life) ───")
 print(f"  Hurst median        : {sug['hurst_median']}  (<0.5 → mean reverting)")
 print(f"  Half-life           : {sug['half_life_hours']}h")
 print(f"  Suggested short/long: {sug['suggested_short_period']} / {sug['suggested_long_period']}")
-print("  → i default v1.0 (9 / 25) sono coerenti con questa stima")
 
 
 # ---------------------------------------------------------------------------
-# 3. Esecuzione del Market Context Module
+# 3. Esecuzione del Market Context Module.
+#    auto_window=True (default): le finestre EMA vengono decise dai dati;
+#    i 9/25 restano solo come fallback se l'half-life OU non converge.
 # ---------------------------------------------------------------------------
 
-config = MarketContextConfig(
-    ema_proxy=EMAProxyConfig(source_col="close", short_period=9, long_period=25),
-    stable_window=12,
-)
-mc = MarketContext(kpi, config)
+mc = MarketContext(kpi)  # config di default → auto_window attivo
 enriched = mc.run()
+
+print("\n─── Window resolution (deciso da MarketContext) ───")
+for k, v in mc.window_resolution.items():
+    print(f"  {k}: {v}")
 
 new_cols = set(enriched.columns) - set(kpi.columns)
 print(f"\nColonne aggiunte: {sorted(new_cols)}")
@@ -82,7 +84,7 @@ print(f"Nessuna colonna EMA intermedia trapelata: "
 
 print("\n─── Regime distribution ───")
 print(mc.distribution().to_string())
-print(f"\nBarre stabili (regime invariato ≥ {config.stable_window} barre): "
+print(f"\nBarre stabili (regime invariato ≥ {mc.config.stable_window} barre): "
       f"{enriched['regime_stable'].mean():.1%}")
 
 

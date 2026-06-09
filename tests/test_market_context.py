@@ -12,12 +12,23 @@ from forgedge.market_context import (
 )
 from forgedge.market_context.context import _rolling_stability
 from forgedge.market_context.hurst import (
+    derive_ema_windows,
     hurst_dfa,
     ou_halflife,
     rolling_halflife,
     suggest_ema_windows,
     variance_ratio_profile,
 )
+
+
+def _ou_prices(n=3000, theta=0.05, sigma=0.01, seed=0):
+    """Synthetic mean-reverting (OU) price series for window-derivation tests."""
+    rng = np.random.default_rng(seed)
+    mu = np.log(100.0)
+    x = [mu]
+    for _ in range(n - 1):
+        x.append(x[-1] + theta * (mu - x[-1]) + sigma * rng.standard_normal())
+    return np.exp(np.array(x))
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +208,69 @@ class TestMarketContext:
         df = _make_kpi_table()
         out = MarketContext(df, classifier=AllBull()).run()
         assert (out["regime"] == "BULL").all()
+
+
+# ---------------------------------------------------------------------------
+# Automatic EMA window selection (Hurst/OU) with fallback
+# ---------------------------------------------------------------------------
+
+class TestAutoWindow:
+    def _ou_kpi(self, n=3000, theta=0.05):
+        prices = _ou_prices(n, theta=theta)
+        return pd.DataFrame(
+            {"open_dt": pd.date_range("2024-01-01", periods=n, freq="1h"),
+             "close": prices}
+        )
+
+    def test_windows_derived_from_data(self):
+        mc = MarketContext(self._ou_kpi())
+        mc.run()
+        res = mc.window_resolution
+        assert res["source"] == "hurst_ou"
+        assert res["half_life_bars"] > 0
+        # The classifier in use must reflect the derived spans.
+        cfg = mc.classifier.get_config()
+        assert cfg["short_period"] == res["short_period"]
+        assert cfg["long_period"] == res["long_period"]
+        assert res["short_period"] < res["long_period"]
+
+    def test_derived_windows_differ_from_default_when_warranted(self):
+        # theta=0.2 → half-life ≈ -ln2/ln(0.8) ≈ 3.1 bars → spans ≠ 9/25
+        mc = MarketContext(self._ou_kpi(theta=0.2))
+        mc.run()
+        assert mc.window_resolution["source"] == "hurst_ou"
+        assert mc.window_resolution["long_period"] != 25
+
+    def test_fallback_when_not_enough_data(self):
+        # Only ~6 estimation windows possible < min_window_estimates=10 → fallback
+        df = self._ou_kpi(n=300)
+        mc = MarketContext(df)
+        mc.run()
+        res = mc.window_resolution
+        assert res["source"] == "fallback"
+        assert (res["short_period"], res["long_period"]) == (9, 25)
+
+    def test_auto_window_disabled_uses_configured(self):
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(auto_window=False, short_period=5, long_period=20)
+        )
+        mc = MarketContext(self._ou_kpi(), cfg)
+        mc.run()
+        res = mc.window_resolution
+        assert res["source"] == "configured"
+        assert (res["short_period"], res["long_period"]) == (5, 20)
+        assert mc.classifier.get_config()["long_period"] == 20
+
+    def test_get_config_reports_window_resolution(self):
+        mc = MarketContext(self._ou_kpi())
+        mc.run()
+        assert mc.get_config()["window_resolution"]["source"] == "hurst_ou"
+
+    def test_derive_ema_windows_none_for_trending(self):
+        rng = np.random.default_rng(3)
+        price = pd.Series(100 * np.cumprod(1 + rng.normal(0.003, 0.002, 1000)))
+        # Strong drift, short series → should not converge
+        assert derive_ema_windows(price, min_estimates=10) is None
 
 
 # ---------------------------------------------------------------------------

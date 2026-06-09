@@ -229,7 +229,70 @@ def variance_ratio_profile(
 
 
 # ---------------------------------------------------------------------------
-# Window suggestion
+# Window derivation (timeframe-agnostic, used by MarketContext)
+# ---------------------------------------------------------------------------
+
+def derive_ema_windows(
+    prices: pd.Series,
+    estimation_window_bars: int = 168,
+    stride_bars: int = 24,
+    fast_ratio: float = 1 / 2.3,
+    min_estimates: int = 10,
+) -> Optional[dict]:
+    """Derive fast/slow EMA spans from the local OU half-life, in bars.
+
+    This is the engine behind ``MarketContext``'s automatic window selection.
+    It is deliberately timeframe-agnostic — everything is expressed in bars —
+    because an EMA span is measured in bars and the OU half-life comes out of
+    the regression in bars directly.
+
+    The slow span is the median local half-life; the fast span is
+    ``fast_ratio`` of it.  The estimate is considered *converged* only when at
+    least ``min_estimates`` rolling windows yield a mean-reverting fit and the
+    resulting fast span is strictly below the slow span.
+
+    Parameters
+    ----------
+    prices : pd.Series
+        Price levels, chronologically ordered.
+    estimation_window_bars : int
+        Width, in bars, of each local OU estimation window.
+    stride_bars : int
+        Step, in bars, between successive estimates.
+    fast_ratio : float
+        Fast span as a fraction of the slow span.
+    min_estimates : int
+        Minimum number of converging estimates required.
+
+    Returns
+    -------
+    dict or None
+        ``{"short_period", "long_period", "half_life_bars", "n_estimates"}``
+        when the half-life converges, otherwise ``None`` (caller should fall
+        back to its configured defaults).
+    """
+    hl_series = rolling_halflife(prices, estimation_window_bars, stride_bars).dropna()
+    if len(hl_series) < min_estimates:
+        return None
+
+    hl = float(hl_series.median())
+    long_period = max(2, int(round(hl)))
+    short_period = max(1, int(round(hl * fast_ratio)))
+    if short_period >= long_period:
+        # Degenerate (half-life too small to separate the two spans) —
+        # treat as non-converged so the caller uses its fallback.
+        return None
+
+    return {
+        "short_period": short_period,
+        "long_period": long_period,
+        "half_life_bars": round(hl, 1),
+        "n_estimates": int(len(hl_series)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Window suggestion (timeframe-aware, user-facing analysis helper)
 # ---------------------------------------------------------------------------
 
 def suggest_ema_windows(
@@ -268,26 +331,28 @@ def suggest_ema_windows(
     win_c = hours_to_candles(estimation_window_hours, timeframe)
     stride_c = hours_to_candles(stride_hours, timeframe)
 
-    hl_series = rolling_halflife(prices, win_c, stride_c).dropna()
-    if hl_series.empty:
+    derived = derive_ema_windows(
+        prices,
+        estimation_window_bars=win_c,
+        stride_bars=stride_c,
+        fast_ratio=fast_ratio,
+        min_estimates=1,
+    )
+    if derived is None:
         raise ValueError(
             "No mean-reverting window found — cannot suggest EMA spans. "
             "The series may be purely trending over this estimation window."
         )
 
-    hl_candles = float(hl_series.median())
-    long_period = max(2, int(round(hl_candles)))
-    short_period = max(1, int(round(hl_candles * fast_ratio)))
-
     h_series = _rolling_hurst(prices, win_c, stride_c).dropna()
     hurst_median = float(h_series.median()) if not h_series.empty else np.nan
 
     return {
-        "half_life_candles": round(hl_candles, 1),
-        "half_life_hours": round(hl_candles * tf_hours(timeframe), 1),
-        "suggested_short_period": short_period,
-        "suggested_long_period": long_period,
-        "n_estimates": int(len(hl_series)),
+        "half_life_candles": derived["half_life_bars"],
+        "half_life_hours": round(derived["half_life_bars"] * tf_hours(timeframe), 1),
+        "suggested_short_period": derived["short_period"],
+        "suggested_long_period": derived["long_period"],
+        "n_estimates": derived["n_estimates"],
         "hurst_median": round(hurst_median, 3) if not np.isnan(hurst_median) else np.nan,
     }
 
