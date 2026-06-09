@@ -14,11 +14,13 @@ Usage
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional
 
 import pandas as pd
 
 from .ema_proxy import EMAProxyClassifier
+from .hurst import derive_ema_windows
 from .models import (
     REGIME_COL,
     REGIME_STABLE_COL,
@@ -80,6 +82,8 @@ class MarketContext:
         self.config = config or MarketContextConfig()
         self.classifier = classifier or build_classifier(self.config)
         self._result: Optional[pd.DataFrame] = None
+        # Populated by run() when the EMA windows are resolved from the data.
+        self.window_resolution: Optional[dict] = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -98,6 +102,7 @@ class MarketContext:
             Copy of the KPI Table with ``regime`` (ordered categorical) and
             ``regime_stable`` (bool) appended.
         """
+        self._resolve_ema_windows()
         regime = self.classifier.classify(self.df)
         # Align defensively to the table index in case the classifier reset it.
         regime = pd.Series(regime.values, index=self.df.index, name=REGIME_COL)
@@ -119,6 +124,82 @@ class MarketContext:
             "classifier": self.classifier.get_config(),
             "labels": list(self.config.labels),
             "stable_window": self.config.stable_window,
+            "window_resolution": self.window_resolution,
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_ema_windows(self) -> None:
+        """Derive the EMA fast/slow spans from the data when auto-window is on.
+
+        The Market Context Module *decides* the EMA spans per dataset from the
+        Hurst / Ornstein-Uhlenbeck analysis (the local mean-reversion
+        half-life).  The configured ``short_period`` / ``long_period`` are used
+        only as a fallback when the half-life does not converge.
+
+        The resolution outcome is recorded in ``self.window_resolution`` for
+        report traceability with one of three sources:
+
+        * ``"hurst_ou"``   — spans derived from the converged local half-life;
+        * ``"fallback"``   — auto-window requested but did not converge;
+        * ``"configured"`` — auto-window disabled, configured spans used as-is.
+
+        Only applies to :class:`EMAProxyClassifier`; for any other classifier
+        this is a no-op.
+        """
+        clf = self.classifier
+        if not isinstance(clf, EMAProxyClassifier):
+            return
+
+        ema_cfg = clf.config
+        if not ema_cfg.auto_window:
+            self.window_resolution = {
+                "source": "configured",
+                "short_period": ema_cfg.short_period,
+                "long_period": ema_cfg.long_period,
+            }
+            return
+
+        src = ema_cfg.source_col
+        if src not in self.df.columns:
+            # classify() will raise the explanatory KeyError; nothing to derive.
+            return
+
+        prices = self.df[src].astype(float)
+        derived = derive_ema_windows(
+            prices,
+            estimation_window_bars=ema_cfg.window_estimation_bars,
+            stride_bars=ema_cfg.window_stride_bars,
+            fast_ratio=ema_cfg.fast_ratio,
+            min_estimates=ema_cfg.min_window_estimates,
+        )
+
+        if derived is None:
+            # Hurst/OU did not converge → keep the configured fallback spans.
+            self.window_resolution = {
+                "source": "fallback",
+                "short_period": ema_cfg.short_period,
+                "long_period": ema_cfg.long_period,
+                "half_life_bars": None,
+            }
+            return
+
+        # Rebuild the classifier with the data-derived spans so that both
+        # classify() and get_config() reflect the values actually used.
+        new_cfg = replace(
+            ema_cfg,
+            short_period=derived["short_period"],
+            long_period=derived["long_period"],
+        )
+        self.classifier = EMAProxyClassifier(new_cfg, clf.get_labels())
+        self.window_resolution = {
+            "source": "hurst_ou",
+            "short_period": derived["short_period"],
+            "long_period": derived["long_period"],
+            "half_life_bars": derived["half_life_bars"],
+            "n_estimates": derived["n_estimates"],
         }
 
     def distribution(self) -> pd.DataFrame:

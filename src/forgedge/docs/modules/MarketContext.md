@@ -182,8 +182,9 @@ market_context:
 
   ema_proxy:
     source_col:    "close"   # colonna OHLCV su cui calcolare le EMA
-    short_period:  9         # periodo EMA veloce
-    long_period:   25        # periodo EMA lenta
+    auto_window:   true      # decide short/long dai dati (Hurst/OU)
+    short_period:  9         # fallback EMA veloce (se l'analisi non converge)
+    long_period:   25        # fallback EMA lenta  (se l'analisi non converge)
     thresholds:    [0.975, 0.990, 1.010, 1.025]
 
   labels:
@@ -200,8 +201,9 @@ market_context:
 |---|---|---|
 | `classifier` | `"ema_proxy"` | Implementazione del RegimeClassifier |
 | `ema_proxy.source_col` | `"close"` | Colonna su cui calcolare le EMA |
-| `ema_proxy.short_period` | `9` | Periodo EMA veloce |
-| `ema_proxy.long_period` | `25` | Periodo EMA lenta |
+| `ema_proxy.auto_window` | `true` | Decide `short`/`long` dall'analisi Hurst/OU dei dati |
+| `ema_proxy.short_period` | `9` | EMA veloce — fallback se l'analisi non converge |
+| `ema_proxy.long_period` | `25` | EMA lenta — fallback se l'analisi non converge |
 | `ema_proxy.thresholds` | `[0.975, 0.990, 1.010, 1.025]` | Soglie di discretizzazione del ratio |
 | `labels` | `["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]` | Label regime (ordinate dal più ribassista) |
 
@@ -384,31 +386,52 @@ Classificazione: regime-conditional
 
 ---
 
-### Scelta delle finestre EMA (fast/slow)
+### Scelta delle finestre EMA (fast/slow) — automatica
 
-I default `short_period=9` e `long_period=25` sono giustificati dall'analisi
-del coefficiente di Hurst e dell'half-life del processo OU (vedi
+Le finestre EMA **non sono valori fissi**: il Market Context Module le *decide
+per ogni dataset caricato* a partire dall'analisi del coefficiente di Hurst e
+dell'half-life del processo Ornstein-Uhlenbeck (vedi
 `forgedge.market_context.hurst` e `notebooks/hurst.ipynb`).
 
-Sui dati 1H forniti (ADAUSDC, DOGEUSDC):
-
-- il coefficiente di Hurst rolling è ben sotto 0.5 → regime mean-reverting;
-- l'half-life OU **locale** (stimata su finestra di ~1 settimana) è ~20-21h,
-  stabile su entrambi gli asset.
-
-Seguendo la convenzione *EMA lenta ≈ half-life, EMA veloce ≈ half-life / 2-3*:
-
 ```
-long_period  = 25  ≈ half-life OU (~21h)   → la EMA lenta traccia il livello
-                                              di mean-reversion
-short_period =  9  ≈ half-life / 2.3        → la EMA veloce traccia lo
-                                              scostamento di breve da quel livello
+FUNCTION _resolve_ema_windows(prices):
+    // half-life OU locale, stimata su finestre rolling (robusta al drift)
+    hl_bars = median( rolling_halflife(prices, estimation_window_bars) )
+
+    SE l'half-life converge (abbastanza finestre mean-reverting):
+        long_period  = round(hl_bars)            // EMA lenta ≈ half-life
+        short_period = round(hl_bars * 1/2.3)    // EMA veloce ≈ half-life / 2.3
+        source = "hurst_ou"
+    ALTRIMENTI:
+        long_period  = 25   // fallback
+        short_period = 9    // fallback
+        source = "fallback"
 ```
 
 Il rapporto `ema_short / ema_long` è quindi un proxy di *quanto il prezzo è
 sopra/sotto il proprio livello di mean-reversion* — esattamente il segnale di
-trend che il classificatore discretizza. La tooling
-`suggest_ema_windows()` ricalcola queste finestre per qualsiasi asset/timeframe.
+trend che il classificatore discretizza — con le finestre calibrate sulla
+dinamica effettiva dell'asset.
+
+I default `short_period=9` / `long_period=25` restano nella configurazione
+**solo come fallback**, usati quando il coefficiente non converge (serie
+puramente trending o storia troppo corta). Per forzare finestre fisse si
+imposta `ema_proxy.auto_window: false`.
+
+La risoluzione effettiva (`source`, spans usati, half-life stimata) è esposta
+in `MarketContext.window_resolution` e in `get_config()` per la tracciabilità
+nel report.
+
+#### Esempio sui dati 1H forniti
+
+| Asset | Hurst median | Half-life OU locale | Finestre decise |
+|---|---:|---:|---:|
+| ADAUSDC | 0.07 | ~21h | short=9 / long=21 |
+| DOGEUSDC | 0.08 | ~20h | short=9 / long=20 |
+
+Entrambi mean-reverting (Hurst ≪ 0.5), half-life intraday stabile ~20-21h:
+le finestre derivate sono vicine ai default storici, confermandone la
+calibrazione, ma vengono ora ricalcolate per ogni asset.
 
 ---
 
