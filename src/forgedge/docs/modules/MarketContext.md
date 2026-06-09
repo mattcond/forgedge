@@ -188,6 +188,8 @@ market_context:
   ema_proxy:
     source_col:    "close"   # colonna OHLCV su cui calcolare le EMA
     auto_window:   true      # decide short/long dai dati (Hurst/OU)
+    window_unit:   "bar"     # "bar" (default) | "day" (coerente tra timeframe)
+    window_estimation_days: 7 # ampiezza finestra di stima (se window_unit="day")
     short_period:  9         # fallback EMA veloce (se l'analisi non converge)
     long_period:   25        # fallback EMA lenta  (se l'analisi non converge)
     thresholds:    [0.975, 0.990, 1.010, 1.025]
@@ -207,6 +209,9 @@ market_context:
 | `classifier` | `"ema_proxy"` | Implementazione del RegimeClassifier |
 | `ema_proxy.source_col` | `"close"` | Colonna su cui calcolare le EMA |
 | `ema_proxy.auto_window` | `true` | Decide `short`/`long` dall'analisi Hurst/OU dei dati |
+| `ema_proxy.window_unit` | `"bar"` | Unità finestra di stima: `"bar"` (per-TF) o `"day"` (coerente tra TF) |
+| `ema_proxy.window_estimation_days` | `7` | Ampiezza finestra di stima in giorni (se `window_unit="day"`) |
+| `ema_proxy.bar_hours` | `null` | Durata candela (h) per `"day"`; inferita dall'indice se assente |
 | `ema_proxy.short_period` | `9` | EMA veloce — fallback se l'analisi non converge |
 | `ema_proxy.long_period` | `25` | EMA lenta — fallback se l'analisi non converge |
 | `ema_proxy.thresholds` | `[0.975, 0.990, 1.010, 1.025]` | Soglie di discretizzazione del ratio |
@@ -444,6 +449,37 @@ nel report.
 Entrambi mean-reverting (Hurst ≪ 0.5), half-life intraday stabile ~20-21h:
 le finestre derivate sono vicine ai default storici, confermandone la
 calibrazione, ma vengono ora ricalcolate per ogni asset.
+
+#### Coerenza tra timeframe — `window_unit`
+
+La finestra di stima dell'half-life può essere espressa in due unità
+(`ema_proxy.window_unit`):
+
+- **`"bar"` (default)** — finestra in candele (`window_estimation_bars`, 168).
+  È *timeframe-agnostica*: 168 barre sono 1 settimana su 1H ma 168 giorni su 1D,
+  quindi le finestre derivate **non sono confrontabili in tempo reale** tra
+  timeframe diversi.
+- **`"day"`** — finestra in giorni di calendario (`window_estimation_days`, 7),
+  convertita in barre tramite la durata candela (inferita dall'indice datetime
+  o impostata con `bar_hours`). L'orizzonte di stima è lo stesso wall-clock su
+  ogni timeframe, quindi l'half-life — e le EMA derivate — risultano coerenti
+  in tempo reale.
+
+Aggregando ADAUSDC 1H → 1D (half-life intraday ~21h):
+
+| | `unit="bar"` (168 barre) | `unit="day"` (7 giorni) |
+|---|---|---|
+| **1H** | slow 21 barre = **21h** | slow 21 barre = **21h** |
+| **1D** | slow 24 barre = **576h** ❌ | slow ~2 barre = **48h** ✅ |
+
+In modalità `"bar"` l'orizzonte di stima cambia con il timeframe e l'half-life
+salta da 21h a 576h. In modalità `"day"` l'half-life resta coerente (~21h).
+
+> **Limite fisico:** una mean-reversion sub-giornaliera (~21h) non è
+> risolvibile su candele 1D — al meglio si ottiene una EMA di 1-2 barre. Per
+> orizzonti risolvibili su entrambi i timeframe (≥ pochi giorni) la coerenza è
+> piena; per catturare una dinamica più lenta su timeframe grossi si aumenta
+> `window_estimation_days`.
 
 ---
 

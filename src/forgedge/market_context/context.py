@@ -167,14 +167,22 @@ class MarketContext:
             # classify() will raise the explanatory KeyError; nothing to derive.
             return
 
+        est_bars, stride_bars, bar_hours = self._estimation_window_bars(ema_cfg)
+
         prices = self.df[src].astype(float)
         derived = derive_ema_windows(
             prices,
-            estimation_window_bars=ema_cfg.window_estimation_bars,
-            stride_bars=ema_cfg.window_stride_bars,
+            estimation_window_bars=est_bars,
+            stride_bars=stride_bars,
             fast_ratio=ema_cfg.fast_ratio,
             min_estimates=ema_cfg.min_window_estimates,
         )
+
+        meta = {
+            "unit": ema_cfg.window_unit,
+            "estimation_window_bars": est_bars,
+            "bar_hours": round(bar_hours, 4) if bar_hours is not None else None,
+        }
 
         if derived is None:
             # Hurst/OU did not converge → keep the configured fallback spans.
@@ -183,6 +191,7 @@ class MarketContext:
                 "short_period": ema_cfg.short_period,
                 "long_period": ema_cfg.long_period,
                 "half_life_bars": None,
+                **meta,
             }
             return
 
@@ -200,7 +209,64 @@ class MarketContext:
             "long_period": derived["long_period"],
             "half_life_bars": derived["half_life_bars"],
             "n_estimates": derived["n_estimates"],
+            **meta,
         }
+
+    def _estimation_window_bars(self, ema_cfg) -> tuple:
+        """Resolve the estimation window / stride into bars for the chosen unit.
+
+        Returns ``(estimation_bars, stride_bars, bar_hours)``.  In ``"bar"``
+        mode ``bar_hours`` is ``None`` (not needed); in ``"day"`` mode the
+        calendar-day window is converted to bars using the inferred (or
+        configured) candle duration so the estimation horizon is the same
+        wall-clock length on every timeframe.
+        """
+        unit = ema_cfg.window_unit.lower().strip()
+        if unit == "bar":
+            return ema_cfg.window_estimation_bars, ema_cfg.window_stride_bars, None
+        if unit == "day":
+            bar_hours = self._infer_bar_hours(ema_cfg)
+            est = max(2, int(round(ema_cfg.window_estimation_days * 24 / bar_hours)))
+            stride = max(1, int(round(ema_cfg.window_stride_days * 24 / bar_hours)))
+            return est, stride, bar_hours
+        raise ValueError(
+            f"window_unit must be 'bar' or 'day', got '{ema_cfg.window_unit}'."
+        )
+
+    def _infer_bar_hours(self, ema_cfg) -> float:
+        """Infer the candle duration (hours) for day↔bar conversion.
+
+        Uses ``ema_cfg.bar_hours`` when set, otherwise the median spacing of a
+        DatetimeIndex or the first datetime column.
+
+        Raises
+        ------
+        ValueError
+            If the duration cannot be determined and was not provided.
+        """
+        if ema_cfg.bar_hours is not None:
+            return float(ema_cfg.bar_hours)
+
+        idx = self.df.index
+        candidates = []
+        if isinstance(idx, pd.DatetimeIndex):
+            candidates.append(pd.Series(idx))
+        else:
+            for col in self.df.columns:
+                if pd.api.types.is_datetime64_any_dtype(self.df[col]):
+                    candidates.append(self.df[col])
+                    break
+
+        for ts in candidates:
+            delta = ts.diff().dt.total_seconds().median()
+            if delta and delta > 0:
+                return float(delta) / 3600.0
+
+        raise ValueError(
+            "window_unit='day' needs the candle duration: provide a "
+            "DatetimeIndex (or a datetime column) on the KPI table, or set "
+            "ema_proxy.bar_hours explicitly."
+        )
 
     def distribution(self) -> pd.DataFrame:
         """Return the per-regime bar count and share.

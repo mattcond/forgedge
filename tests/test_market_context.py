@@ -288,6 +288,71 @@ class TestAutoWindow:
 
 
 # ---------------------------------------------------------------------------
+# window_unit: bar (default, timeframe-agnostic) vs day (timeframe-coherent)
+# ---------------------------------------------------------------------------
+
+class TestWindowUnit:
+    def _ou_kpi(self, n=3000, freq="1h", theta=0.05):
+        prices = _ou_prices(n, theta=theta)
+        return pd.DataFrame(
+            {"open_dt": pd.date_range("2024-01-01", periods=n, freq=freq),
+             "close": prices}
+        )
+
+    def test_bar_is_default(self):
+        assert EMAProxyConfig().window_unit == "bar"
+
+    def test_bar_mode_uses_bar_window(self):
+        mc = MarketContext(self._ou_kpi())
+        mc.run()
+        assert mc.window_resolution["unit"] == "bar"
+        assert mc.window_resolution["estimation_window_bars"] == 168
+
+    def test_day_mode_infers_bar_hours_1h(self):
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="day", window_estimation_days=7)
+        )
+        mc = MarketContext(self._ou_kpi(), cfg)
+        mc.run()
+        res = mc.window_resolution
+        assert res["unit"] == "day"
+        assert abs(res["bar_hours"] - 1.0) < 1e-6
+        assert res["estimation_window_bars"] == 168  # 7d * 24 / 1h
+
+    def test_day_mode_converts_per_timeframe_4h(self):
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="day", window_estimation_days=7)
+        )
+        mc = MarketContext(self._ou_kpi(n=2000, freq="4h"), cfg)
+        mc.run()
+        res = mc.window_resolution
+        assert abs(res["bar_hours"] - 4.0) < 1e-6
+        assert res["estimation_window_bars"] == 42  # 7d * 24 / 4h
+
+    def test_day_mode_requires_time_info(self):
+        df = pd.DataFrame({"close": _ou_prices(2000)})  # RangeIndex, no datetime
+        cfg = MarketContextConfig(ema_proxy=EMAProxyConfig(window_unit="day"))
+        with pytest.raises(ValueError):
+            MarketContext(df, cfg).run()
+
+    def test_day_mode_explicit_bar_hours(self):
+        df = pd.DataFrame({"close": _ou_prices(3000)})
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(
+                window_unit="day", window_estimation_days=7, bar_hours=1.0
+            )
+        )
+        mc = MarketContext(df, cfg)
+        mc.run()
+        assert mc.window_resolution["estimation_window_bars"] == 168
+
+    def test_invalid_window_unit_raises(self):
+        cfg = MarketContextConfig(ema_proxy=EMAProxyConfig(window_unit="hour"))
+        with pytest.raises(ValueError):
+            MarketContext(self._ou_kpi(), cfg).run()
+
+
+# ---------------------------------------------------------------------------
 # regime_stable logic
 # ---------------------------------------------------------------------------
 
