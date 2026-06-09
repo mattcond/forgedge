@@ -17,7 +17,7 @@ import pandas as pd
 
 from .and_composer import ANDComposer
 from .classifier import TypeClassifier
-from .consistency_gate import ConsistencyGate, _monthly_counts
+from .consistency_gate import ConsistencyGate, _build_month_index, _monthly_counts
 from .event_generator import EventGenerator
 from .feature_generator import FeatureGenerator
 from .models import (
@@ -25,9 +25,12 @@ from .models import (
     ColumnType,
     EventCandidate,
     EventComponent,
+    FoldResult,
     GateParams,
     GateResult,
     RawEvent,
+    ValidationResult,
+    WalkForwardConfig,
 )
 from .transform_layer import TransformLayer
 
@@ -56,6 +59,23 @@ class DiscoveryConfig:
         Maximum number of single events to combine in one AND composition
         (2 or 3).  Values above 3 are technically accepted but strongly
         discouraged — they risk structural overfitting.
+    train_ratio : float
+        Fraction of bars (0 < train_ratio ≤ 1.0) used for the in-sample
+        discovery pipeline.  The remaining ``1 - train_ratio`` fraction
+        is reserved as OOS data for walk-forward validation.  Default
+        ``1.0`` uses all available data (no split).
+
+        The split is **temporal** — the first ``train_ratio`` rows are IS
+        and the remainder are OOS.  All pipeline steps (classification,
+        feature generation, threshold calibration, gate) operate on IS
+        data only; the OOS period is never seen during discovery.
+    walk_forward : WalkForwardConfig or None
+        Walk-forward validation settings.  When set (and ``train_ratio <
+        1.0``), every discovered candidate is replayed on ``n_splits``
+        equal OOS windows and evaluated against a scaled Consistency Gate.
+        Candidates that pass in at least ``min_pass_rate`` windows are
+        marked ``validation.passed = True``.  When ``None`` (default) or
+        when ``train_ratio == 1.0``, no OOS validation is performed.
     """
 
     gate_params: GateParams = field(default_factory=GateParams)
@@ -63,6 +83,8 @@ class DiscoveryConfig:
     scale_free_overrides: Optional[dict[str, bool]] = None
     timestamp_col: str = "open_dt"
     max_and_components: int = 2
+    train_ratio: float = 1.0
+    walk_forward: Optional[WalkForwardConfig] = None
 
 
 class EventDiscovery:
@@ -88,6 +110,7 @@ class EventDiscovery:
         self._classifications: Optional[dict] = None
         self._candidates: Optional[list[EventCandidate]] = None
         self._timestamps: Optional[pd.Series] = None
+        self._split_idx: int = 0
 
     # ------------------------------------------------------------------
     # Public interface
@@ -131,10 +154,27 @@ class EventDiscovery:
         """
         cfg = self.config
 
+        # Parse timestamps on the full df (sets DatetimeIndex, drops ts_col)
         timestamps = self._prepare_timestamps()
         self._timestamps = timestamps
+        n = len(self.df)
 
-        # Step 0 — classify columns
+        # Determine IS boundary — temporal split, never random
+        split_idx = max(1, int(n * cfg.train_ratio)) if cfg.train_ratio < 1.0 else n
+        self._split_idx = split_idx
+
+        # Save the full native df (DatetimeIndex set, original feature columns)
+        # before FeatureGenerator adds derived columns.  Used to supply rolling
+        # context to apply() calls during walk-forward validation.
+        full_df_native = self.df.copy() if split_idx < n else None
+        full_timestamps = timestamps.copy() if split_idx < n else None
+
+        # Restrict pipeline to IS
+        if split_idx < n:
+            self.df = self.df.iloc[:split_idx].copy()
+            timestamps = timestamps.iloc[:split_idx].reset_index(drop=True)
+
+        # Step 0 — classify columns (IS only)
         classifier = TypeClassifier(
             max_categorical_classes=cfg.max_categorical_classes,
             scale_free_overrides=cfg.scale_free_overrides or {},
@@ -156,18 +196,17 @@ class EventDiscovery:
             and cls.n_distinct <= cfg.max_categorical_classes
         }
 
-        # Step 1 — generate derived features for continuous columns
+        # Step 1 — generate derived features for continuous columns (IS)
         fg = FeatureGenerator()
         extended_df, derived_meta = fg.generate(self.df, classifications)
-        # expose the full derived feature table (with DatetimeIndex) for debugging
         extended_df.index = self.df.index
         self.df = extended_df
 
-        # Step 2 — apply temporal transforms
+        # Step 2 — apply temporal transforms (IS)
         transformer = TransformLayer()
         transformed_series = transformer.transform_all(extended_df, derived_meta)
 
-        # Step 3 — generate boolean events
+        # Step 3 — generate boolean events (IS)
         ev_gen = EventGenerator()
         raw_events: list[RawEvent] = []
 
@@ -186,11 +225,11 @@ class EventDiscovery:
                     )
                 )
 
-        # Step 4 — Consistency Gate on single events
+        # Step 4 — Consistency Gate on single events (IS)
         gate = ConsistencyGate(cfg.gate_params)
         passing_single = gate.filter(raw_events, timestamps)
 
-        # Step 5 — AND composition + gate on composed events
+        # Step 5 — AND composition + gate on composed events (IS)
         composer = ANDComposer(gate)
         passing_composed = composer.compose(
             passing_single, timestamps, max_components=cfg.max_and_components
@@ -203,6 +242,18 @@ class EventDiscovery:
             self._to_candidate(ev, idx, timestamps)
             for idx, ev in enumerate(all_passing)
         ]
+
+        # Walk-forward OOS validation
+        if full_df_native is not None and cfg.walk_forward is not None:
+            oos_df = full_df_native.iloc[split_idx:]
+            oos_ts = full_timestamps.iloc[split_idx:].reset_index(drop=True)
+            # Provide IS tail as rolling context (max window = 168 bars)
+            is_context = full_df_native.iloc[max(0, split_idx - _MAX_CONTEXT_BARS) : split_idx]
+            for cand in candidates:
+                cand.validation = self._run_walk_forward(
+                    cand, oos_df, oos_ts, is_context, cfg
+                )
+
         self._candidates = candidates
         return candidates
 
@@ -244,16 +295,65 @@ class EventDiscovery:
         """
         if self._candidates is None:
             raise RuntimeError("Call run() before summary().")
-        _summary_cols = [
+        _base_cols = [
             "event_id", "status", "expression",
             "n_activations", "n_active_months", "zero_months",
             "max_monthly_share", "mean_tpm", "gate_passed",
         ]
+        _oos_cols = ["oos_pass_rate", "oos_n_passed", "oos_n_folds", "oos_stable"]
         rows = [c.to_dict() for c in self._candidates]
+        has_validation = any(c.validation is not None for c in self._candidates)
+        _summary_cols = _base_cols + (_oos_cols if has_validation else [])
         if not rows:
             return pd.DataFrame(columns=_summary_cols)
         flat = [{k: v for k, v in row.items() if k != "components"} for row in rows]
         return pd.DataFrame(flat)
+
+    def validated_candidates(self) -> list[EventCandidate]:
+        """Return only the candidates that passed walk-forward OOS validation.
+
+        Requires ``DiscoveryConfig(train_ratio=..., walk_forward=WalkForwardConfig(...))``.
+        Call ``run()`` first.
+
+        Returns
+        -------
+        list[EventCandidate]
+            Subset of ``self._candidates`` with ``validation.passed == True``.
+
+        Raises
+        ------
+        RuntimeError
+            If ``run()`` has not been called, or if walk-forward validation was
+            not configured.
+        """
+        if self._candidates is None:
+            raise RuntimeError("Call run() first.")
+        if self.config.walk_forward is None or self.config.train_ratio >= 1.0:
+            raise RuntimeError(
+                "Walk-forward validation was not configured. "
+                "Set DiscoveryConfig(train_ratio=<float<1>, walk_forward=WalkForwardConfig(...))"
+                " and call run() again."
+            )
+        return [c for c in self._candidates if c.validation is not None and c.validation.passed]
+
+    @property
+    def is_period(self) -> Optional[tuple]:
+        """(start, end) timestamps of the in-sample period, or None before run()."""
+        if self._timestamps is None or self._split_idx == 0:
+            return None
+        ts = self._timestamps
+        end_idx = min(self._split_idx, len(ts)) - 1
+        return (ts.iloc[0], ts.iloc[end_idx])
+
+    @property
+    def oos_period(self) -> Optional[tuple]:
+        """(start, end) timestamps of the OOS period, or None when no split was made."""
+        if self._timestamps is None:
+            return None
+        ts = self._timestamps
+        if self._split_idx >= len(ts):
+            return None
+        return (ts.iloc[self._split_idx], ts.iloc[-1])
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -400,10 +500,89 @@ class EventDiscovery:
             event_series=series_dt,
         )
 
+    def _run_walk_forward(
+        self,
+        cand: EventCandidate,
+        oos_df: pd.DataFrame,
+        oos_ts: pd.Series,
+        is_context: pd.DataFrame,
+        cfg: "DiscoveryConfig",
+    ) -> Optional[ValidationResult]:
+        """Evaluate a candidate on N equal OOS windows and return aggregated result.
+
+        Each fold is evaluated independently:
+
+        1. A context window (last ``_MAX_CONTEXT_BARS`` IS bars) is prepended
+           to the fold so that rolling transforms at the fold start have IS
+           lookback — avoiding artificial NaN warmup.
+        2. ``EventCandidate.apply()`` reconstructs the event series from native
+           columns using stored parameters (no IS data leakage).
+        3. The Consistency Gate is evaluated with proportionally scaled params
+           (unless ``wf.oos_gate_params`` is set explicitly).
+
+        Parameters
+        ----------
+        cand : EventCandidate
+        oos_df : pd.DataFrame
+            OOS portion of the native df (DatetimeIndex, no ts_col).
+        oos_ts : pd.Series
+            Datetime series aligned to ``oos_df`` with RangeIndex.
+        is_context : pd.DataFrame
+            Last ≤ ``_MAX_CONTEXT_BARS`` IS bars used as rolling warmup.
+        cfg : DiscoveryConfig
+
+        Returns
+        -------
+        ValidationResult or None
+            None when OOS data is too short to form even one fold.
+        """
+        wf = cfg.walk_forward
+        n_oos = len(oos_df)
+        fold_size = n_oos // wf.n_splits
+        if fold_size < 2:
+            return None
+
+        gate = ConsistencyGate(cfg.gate_params)  # reused; params overridden per fold
+        fold_results: list[FoldResult] = []
+
+        for i in range(wf.n_splits):
+            start = i * fold_size
+            end = start + fold_size if i < wf.n_splits - 1 else n_oos
+
+            # Prepend IS context for rolling warmup, then take fold rows only
+            fold_with_ctx = pd.concat([is_context, oos_df.iloc[start:end]])
+            full_series = cand.apply(fold_with_ctx)
+            fold_series = full_series.iloc[len(is_context):].reset_index(drop=True)
+            fold_ts = oos_ts.iloc[start:end].reset_index(drop=True)
+
+            # Scale gate params proportionally to fold size
+            oos_params = wf.oos_gate_params or _scale_gate_params(
+                cfg.gate_params, n_oos_bars=end - start, n_is_bars=self._split_idx
+            )
+            month_index, n_months = _build_month_index(fold_ts)
+            gate_result = ConsistencyGate(oos_params).evaluate_series(
+                fold_series, month_index, n_months
+            )
+            fold_results.append(FoldResult(fold_idx=i, n_rows=end - start, gate_result=gate_result))
+
+        n_passed = sum(f.passed for f in fold_results)
+        pass_rate = n_passed / len(fold_results)
+        return ValidationResult(
+            n_folds=len(fold_results),
+            n_passed=n_passed,
+            pass_rate=pass_rate,
+            passed=pass_rate >= wf.min_pass_rate,
+            fold_results=fold_results,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Maximum rolling window across all transforms; used as IS context size for
+# OOS apply() calls to avoid warmup NaN at the start of each fold.
+_MAX_CONTEXT_BARS: int = 168
 
 def _infer_timestamp_unit(series: pd.Series) -> str:
     """Infer the Unix timestamp unit from the median value of a numeric series.
@@ -499,3 +678,34 @@ def _make_event_id(components: list[EventComponent], idx: int) -> str:
     feature = components[0].source_feature[:20].replace(" ", "_")
     transform_str = "x".join(parts)
     return f"EVT-{feature}-{transform_str}-{idx:04d}"
+
+
+def _scale_gate_params(is_params: GateParams, n_oos_bars: int, n_is_bars: int) -> GateParams:
+    """Scale IS gate thresholds proportionally to an OOS window length.
+
+    ``min_act`` and ``min_months`` shrink with the ratio ``n_oos / n_is``,
+    floored at sensible minimums.  ``max_conc`` and ``min_tpm`` are kept
+    unchanged — concentration and per-month frequency are rates, not counts,
+    so they remain meaningful at any window size.
+
+    Parameters
+    ----------
+    is_params : GateParams
+        Thresholds calibrated on the full IS period.
+    n_oos_bars : int
+        Number of bars in the OOS fold being evaluated.
+    n_is_bars : int
+        Number of bars in the IS period.
+
+    Returns
+    -------
+    GateParams
+        Scaled thresholds for use in ``ConsistencyGate`` on the OOS fold.
+    """
+    ratio = n_oos_bars / max(n_is_bars, 1)
+    return GateParams(
+        min_act=max(5, int(is_params.min_act * ratio)),
+        min_months=max(1, int(is_params.min_months * ratio)),
+        max_conc=is_params.max_conc,
+        min_tpm=is_params.min_tpm,
+    )
