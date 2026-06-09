@@ -528,6 +528,72 @@ class EventCandidate:
 # Replay helpers
 # ---------------------------------------------------------------------------
 
+def build_feature_series(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
+    """Reconstruct the *continuous underlying feature* of a component on ``df``.
+
+    This is step 1 of the event replay — feature construction only, before
+    any temporal transform or threshold is applied.  It returns the raw
+    scale-free feature series (e.g. ``close_rsi_25``, a ``ratio_…``, a
+    ``spread_…`` or a ternary position feature), which is exactly the
+    "feature continua sottostante" that Alpha Discovery measures the
+    Information Coefficient on.
+
+    For ``binary_native`` and ``categorical_onehot`` components there is no
+    continuous feature underneath; the raw source column is returned as-is so
+    callers can still rank it if they choose to.
+
+    Parameters
+    ----------
+    comp : EventComponent
+        A fully populated component (``source_cols`` and ``transform_params``
+        must contain all values stored during training).
+    df : pd.DataFrame
+        DataFrame with the native source columns referenced by ``comp``.
+
+    Returns
+    -------
+    pd.Series
+        The continuous feature series aligned to ``df.index`` (before any
+        temporal transform).
+
+    Raises
+    ------
+    KeyError
+        If a required source column is missing, or if a ``diffnorm`` feature
+        was created without its stored in-sample standard deviation.
+    """
+    sf = comp.source_feature
+
+    if comp.transform in ("binary_native", "categorical_onehot"):
+        # No continuous feature underneath — return the raw column.
+        return df[sf]
+
+    sc = comp.source_cols
+    if sf.startswith("ratio_") and len(sc) == 2:
+        return df[sc[0]] / df[sc[1]]
+    if sf.startswith("spread_") and len(sc) == 2:
+        return (df[sc[0]] - df[sc[1]]) / df[sc[1]]
+    if sf.startswith("diffnorm_") and len(sc) == 2:
+        std = comp.transform_params.get("diffnorm_std")
+        if not std:
+            raise KeyError(
+                f"'diffnorm_std' missing from transform_params of component "
+                f"'{comp.expression}'. Was this candidate created with an older "
+                "version of EventDiscovery?"
+            )
+        return (df[sc[0]] - df[sc[1]]) / std
+    if sf.startswith("bb_pct_b_") and len(sc) == 3:
+        val, lower, upper = sc
+        denom = df[upper] - df[lower]
+        return (df[val] - df[lower]) / denom.replace(0, float("nan"))
+    if sf.startswith("pos_") and len(sc) == 3:
+        val, mn, mx = sc
+        denom = df[mx] - df[mn]
+        return (df[val] - df[mn]) / denom.replace(0, float("nan"))
+    # Arity-1 native feature — use source_feature name directly
+    return df[sf]
+
+
 def _apply_component(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
     """Reconstruct a single EventComponent's boolean series on ``df``.
 
@@ -563,31 +629,7 @@ def _apply_component(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
         raw = df[sf]
         return (raw == cls).astype(float).where(raw.notna(), float("nan"))
 
-    sc = comp.source_cols
-    if sf.startswith("ratio_") and len(sc) == 2:
-        series = df[sc[0]] / df[sc[1]]
-    elif sf.startswith("spread_") and len(sc) == 2:
-        series = (df[sc[0]] - df[sc[1]]) / df[sc[1]]
-    elif sf.startswith("diffnorm_") and len(sc) == 2:
-        std = comp.transform_params.get("diffnorm_std")
-        if not std:
-            raise KeyError(
-                f"'diffnorm_std' missing from transform_params of component "
-                f"'{comp.expression}'. Was this candidate created with an older "
-                "version of EventDiscovery?"
-            )
-        series = (df[sc[0]] - df[sc[1]]) / std
-    elif sf.startswith("bb_pct_b_") and len(sc) == 3:
-        val, lower, upper = sc
-        denom = df[upper] - df[lower]
-        series = (df[val] - df[lower]) / denom.replace(0, float("nan"))
-    elif sf.startswith("pos_") and len(sc) == 3:
-        val, mn, mx = sc
-        denom = df[mx] - df[mn]
-        series = (df[val] - df[mn]) / denom.replace(0, float("nan"))
-    else:
-        # Arity-1 native feature — use source_feature name directly
-        series = df[sf]
+    series = build_feature_series(comp, df)
 
     # ── 2. Temporal transform ────────────────────────────────────────────
     # Use the same min_periods heuristic as TransformLayer to match NaN positions.
