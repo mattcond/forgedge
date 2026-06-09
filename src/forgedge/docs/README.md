@@ -205,8 +205,14 @@ durante la sessione.
 **v1.0 — EMAProxyClassifier:** ratio EMA veloce / EMA lenta discretizzato
 in cinque label (`STRONG_BEAR` → `STRONG_BULL`). Le colonne EMA vengono
 cercate nella KPI Table per nome (`{col}_ema_{period:02d}`) — se presenti
-vengono usate direttamente, altrimenti calcolate inline senza lasciare
-traccia nella KPI Table.
+vengono usate direttamente, altrimenti calcolate inline (dal solo `close`)
+senza lasciare traccia nella KPI Table.
+
+Le finestre EMA `fast`/`slow` vengono **decise dai dati**: il modulo stima
+l'half-life del processo Ornstein-Uhlenbeck (analisi di Hurst) e ne ricava
+le due finestre per ogni asset. I valori `9` / `25` restano come **fallback**,
+usati solo quando l'half-life non converge (serie trending o storia troppo
+corta). La risoluzione effettiva è tracciata in `window_resolution`.
 
 **Estensibilità:** interfaccia `RegimeClassifier` pluggabile — in v2.0
 si sostituisce `ema_proxy` con `hmm`, `kmeans` o un classificatore custom

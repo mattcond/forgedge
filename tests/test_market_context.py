@@ -272,6 +272,20 @@ class TestAutoWindow:
         # Strong drift, short series → should not converge
         assert derive_ema_windows(price, min_estimates=10) is None
 
+    def test_run_robust_to_nonpositive_close(self):
+        """A zero/negative-prefixed close must not crash the OU window fit."""
+        prices = _ou_prices(1500, theta=0.05)
+        prices[:50] = 0.0  # invalid prices in the first window
+        df = pd.DataFrame(
+            {"open_dt": pd.date_range("2024-01-01", periods=len(prices), freq="1h"),
+             "close": prices}
+        )
+        mc = MarketContext(df)
+        out = mc.run()  # must not raise LinAlgError
+        assert mc.window_resolution["source"] in {"hurst_ou", "fallback"}
+        # Regime is still produced on the valid region.
+        assert out["regime"].iloc[100:].notna().any()
+
 
 # ---------------------------------------------------------------------------
 # regime_stable logic
@@ -338,6 +352,13 @@ class TestHurstTooling:
         price = 100 * np.cumprod(1 + rng.normal(0.002, 0.003, 2000))
         # Strong positive drift → not mean reverting → None
         assert ou_halflife(price) is None
+
+    def test_log_functions_handle_nonpositive_without_crashing(self):
+        bad = np.array([1.0, 1.1, 0.0, -2.0, 1.2] * 40, dtype=float)
+        assert ou_halflife(bad) is None
+        assert np.isnan(hurst_dfa(bad))
+        vr = variance_ratio_profile(bad, lags_candles=[4, 8])
+        assert all(np.isnan(v) for v in vr.values())
 
     def test_rolling_halflife_shape(self):
         prices = pd.Series(self._ou_series(2000))

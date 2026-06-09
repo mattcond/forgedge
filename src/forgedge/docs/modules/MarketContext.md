@@ -111,6 +111,11 @@ Calcola il ratio tra una EMA veloce e una EMA lenta come proxy
 del trend di mercato, e lo discretizza in regime tramite soglie
 configurabili.
 
+> `short_period` e `long_period` non sono fissi: vengono risolti a monte dal
+> Market Context Module a partire dall'analisi Hurst/OU dei dati (vedi
+> [Scelta delle finestre EMA](#scelta-delle-finestre-ema-fastslow--automatica)).
+> Quando `classify` viene invocato, le due finestre sono già state decise.
+
 ### Logica
 
 ```
@@ -135,7 +140,7 @@ FUNCTION classify(kpi_table):
     ratio = ema_short / ema_long
 
     // Step 4: classifica per soglie
-    regime = pd.cut(ratio, bins=[0] + thresholds + [99], labels=labels)
+    regime = pd.cut(ratio, bins=[0] + thresholds + [+inf], labels=labels)
 
     RETURN regime
 ```
@@ -417,6 +422,13 @@ I default `short_period=9` / `long_period=25` restano nella configurazione
 **solo come fallback**, usati quando il coefficiente non converge (serie
 puramente trending o storia troppo corta). Per forzare finestre fisse si
 imposta `ema_proxy.auto_window: false`.
+
+> **Nota:** con `auto_window: true` le finestre derivate possono non
+> coincidere con eventuali EMA precomputate nella KPI Table (es. `close_ema_25`):
+> in tal caso la EMA della finestra derivata viene calcolata inline dal `close`.
+> Le colonne precomputate restano comunque inalterate nella tabella. Per usare
+> esattamente le EMA precomputate si imposta `auto_window: false` con i
+> `short_period` / `long_period` corrispondenti.
 
 La risoluzione effettiva (`source`, spans usati, half-life stimata) è esposta
 in `MarketContext.window_resolution` e in `get_config()` per la tracciabilità
