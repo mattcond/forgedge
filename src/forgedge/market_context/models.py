@@ -70,18 +70,23 @@ class EMAProxyConfig:
         Unit in which the estimation window/stride (``window_estimation`` and
         ``window_stride``) are expressed:
 
-        * ``"bar"`` (default) — measured in candles (timeframe-agnostic).
-          ``W = 168`` means 168 bars regardless of timeframe: one week on 1H,
-          168 days on 1D.  The derived spans are therefore *not* comparable in
-          wall-clock terms across timeframes.
-        * ``"day"`` — measured in calendar days and converted to bars using the
-          candle duration.  ``W = 168`` means 168 days on *every* timeframe
-          (even 1H), so the estimation horizon — and the derived spans — line
-          up in wall-clock terms.  The same single value of ``window_estimation``
-          is simply reinterpreted from bars to days by this flag.
+        * ``"day"`` (default) — measured in calendar days and converted to bars
+          using the candle duration.  ``W = 168`` means 168 days on *every*
+          timeframe (even 1H), so the estimation horizon — and the derived
+          spans — line up in wall-clock terms across timeframes.  Requires a
+          DatetimeIndex / datetime column (or an explicit ``bar_hours``) and
+          enough history (> ``window_estimation`` days); otherwise the module
+          falls back to ``short_period`` / ``long_period``.
+        * ``"bar"`` — measured in candles (timeframe-agnostic).  ``W = 168``
+          means 168 bars regardless of timeframe: one week on 1H, 168 days on
+          1D.  The derived spans are *not* comparable in wall-clock terms across
+          timeframes, but no time information is needed.
+
+        The same single value of ``window_estimation`` is simply reinterpreted
+        from days to bars by this flag.
     window_estimation : float
         Width of the rolling estimation window, expressed in the unit selected
-        by ``window_unit`` (bars when ``"bar"``, days when ``"day"``).
+        by ``window_unit`` (days when ``"day"``, bars when ``"bar"``).
     window_stride : float
         Step between successive estimates, in the same unit as
         ``window_estimation``.
@@ -105,9 +110,9 @@ class EMAProxyConfig:
     thresholds: List[float] = field(
         default_factory=lambda: [0.975, 0.990, 1.010, 1.025]
     )
-    window_unit: str = "bar"
+    window_unit: str = "day"
     window_estimation: float = 168
-    window_stride: float = 24
+    window_stride: float = 1
     bar_hours: Optional[float] = None
     fast_ratio: float = 1 / 2.3
     min_window_estimates: int = 10
