@@ -62,10 +62,27 @@ class EMAProxyConfig:
         Fallback span of the slow EMA.  The default of ``25`` ≈ the observed
         intraday OU half-life on crypto 1H data.
     thresholds : list[float]
-        Ascending cut points applied to the ``ema_short / ema_long`` ratio.
+        Ascending cut points applied to the ``ema_short / ema_long`` ratio when
+        ``threshold_mode == "fixed"`` (and the fallback for ``"balanced"``).
         Their number must be exactly ``len(labels) - 1``.  The defaults
         ``[0.975, 0.990, 1.010, 1.025]`` are calibrated empirically on
         crypto 1H data.
+    threshold_mode : str
+        How the ratio is cut into regimes:
+
+        * ``"fixed"`` (default) — the absolute ``thresholds`` above (e.g. a
+          ``STRONG_BULL`` is literally fast EMA > 2.5% above the slow EMA).
+        * ``"balanced"`` — the thresholds are recomputed per asset as the
+          quantiles of the EMA ratio at the cumulative boundaries of
+          ``target_distribution``, so the regime frequencies match that target
+          (two populated tails).  The span is left untouched, so its
+          mean-reversion meaning is preserved; only the cut adapts.  Falls back
+          to ``"fixed"`` if the ratio is degenerate.
+    target_distribution : list[float]
+        Target regime frequencies for ``threshold_mode == "balanced"``, one per
+        label.  Need not sum to 1 (interpreted as relative weights and
+        normalised); all entries must be > 0.  Default
+        ``[0.10, 0.20, 0.40, 0.20, 0.10]`` (a bell with two 10% tails).
     window_unit : str
         Unit in which the estimation window/stride (``window_estimation`` and
         ``window_stride``) are expressed:
@@ -109,6 +126,10 @@ class EMAProxyConfig:
     long_period: int = 25
     thresholds: List[float] = field(
         default_factory=lambda: [0.975, 0.990, 1.010, 1.025]
+    )
+    threshold_mode: str = "fixed"
+    target_distribution: List[float] = field(
+        default_factory=lambda: [0.10, 0.20, 0.40, 0.20, 0.10]
     )
     window_unit: str = "day"
     window_estimation: float = 168

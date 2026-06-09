@@ -139,6 +139,106 @@ class TestEMAProxyClassifier:
 
 
 # ---------------------------------------------------------------------------
+# threshold_mode: fixed (absolute) vs balanced (distributional)
+# ---------------------------------------------------------------------------
+
+class TestThresholdMode:
+    def _varied_close(self, n=6000, seed=7):
+        # A series whose EMA ratio has a wide spread, so quantile cuts are
+        # well-defined across all five buckets.
+        rng = np.random.default_rng(seed)
+        steps = rng.normal(0, 0.01, n)
+        steps[: n // 2] += 0.0004   # an up-leg then a down-leg → both tails
+        steps[n // 2 :] -= 0.0004
+        return 100 * np.cumprod(1 + steps)
+
+    def test_fixed_is_default(self):
+        assert EMAProxyConfig().threshold_mode == "fixed"
+
+    def test_balanced_matches_target_distribution(self):
+        df = pd.DataFrame({"close": self._varied_close()})
+        target = [0.10, 0.20, 0.40, 0.20, 0.10]
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        cfg = EMAProxyConfig(
+            auto_window=False, short_period=20, long_period=120,
+            threshold_mode="balanced", target_distribution=target,
+        )
+        regime = EMAProxyClassifier(cfg, labels).classify(df)
+        shares = regime.value_counts(normalize=True).reindex(
+            ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        ).to_numpy()
+        # Quantile cut → each share within a small tolerance of the target.
+        assert np.allclose(shares, target, atol=0.03)
+
+    def test_balanced_uniform_target(self):
+        df = pd.DataFrame({"close": self._varied_close()})
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        cfg = EMAProxyConfig(
+            auto_window=False, short_period=20, long_period=120,
+            threshold_mode="balanced", target_distribution=[1, 1, 1, 1, 1],
+        )
+        regime = EMAProxyClassifier(cfg, labels).classify(df)
+        shares = regime.value_counts(normalize=True).reindex(labels).to_numpy()
+        assert np.allclose(shares, [0.2] * 5, atol=0.03)
+
+    def test_balanced_records_resolved_thresholds(self):
+        df = pd.DataFrame({"close": self._varied_close()})
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        clf = EMAProxyClassifier(
+            EMAProxyConfig(auto_window=False, threshold_mode="balanced"), labels
+        )
+        clf.classify(df)
+        cfg = clf.get_config()
+        assert cfg["resolved_threshold_mode"] == "balanced"
+        assert len(cfg["resolved_thresholds"]) == 4
+        # data-driven cut points differ from the fixed defaults
+        assert cfg["resolved_thresholds"] != list(EMAProxyConfig().thresholds)
+
+    def test_balanced_falls_back_on_degenerate_ratio(self):
+        # Constant price → ratio ≡ 1 → quantiles collapse → fixed fallback
+        df = pd.DataFrame({"close": np.full(500, 100.0)})
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        clf = EMAProxyClassifier(
+            EMAProxyConfig(auto_window=False, threshold_mode="balanced"), labels
+        )
+        clf.classify(df)
+        assert clf.resolved_threshold_mode == "fixed"
+
+    def test_invalid_threshold_mode_raises(self):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        with pytest.raises(ValueError):
+            EMAProxyClassifier(EMAProxyConfig(threshold_mode="quantile"), labels)
+
+    def test_bad_target_distribution_length_raises(self):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        cfg = EMAProxyConfig(threshold_mode="balanced",
+                             target_distribution=[0.5, 0.5])
+        with pytest.raises(ValueError):
+            EMAProxyClassifier(cfg, labels)
+
+    def test_nonpositive_target_weight_raises(self):
+        labels = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+        cfg = EMAProxyConfig(threshold_mode="balanced",
+                             target_distribution=[0.3, 0.3, 0.4, 0.0, 0.0])
+        with pytest.raises(ValueError):
+            EMAProxyClassifier(cfg, labels)
+
+    def test_balanced_via_market_context(self):
+        df = pd.DataFrame(
+            {"open_dt": pd.date_range("2024-01-01", periods=6000, freq="1h"),
+             "close": self._varied_close()}
+        )
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="bar", threshold_mode="balanced")
+        )
+        mc = MarketContext(df, cfg)
+        mc.run()
+        # Every label populated → two non-empty tails.
+        dist = mc.distribution()
+        assert (dist["n_bars"].fillna(0) > 0).all()
+
+
+# ---------------------------------------------------------------------------
 # MarketContext orchestrator
 # ---------------------------------------------------------------------------
 

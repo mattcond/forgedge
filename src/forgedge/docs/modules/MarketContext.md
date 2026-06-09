@@ -174,6 +174,41 @@ nella KPI Table — il valore intermedio viene scartato dopo la classificazione.
 Le soglie `[0.975, 0.990, 1.010, 1.025]` sono calibrate empiricamente
 su crypto 1H. Sono configurabili.
 
+### Modo di taglio — `threshold_mode`
+
+Il taglio del ratio in regimi può avvenire in due modi (`ema_proxy.threshold_mode`),
+**senza toccare lo span EMA** (che resta quello dinamico dell'half-life — la
+finestra `W` è sempre fissa a 168):
+
+- **`"fixed"` (default)** — usa le soglie assolute sopra. Un `STRONG_BULL`
+  significa letteralmente *EMA veloce > 2.5% sopra la lenta*. Semplice e
+  interpretabile, ma la distribuzione dei regimi non è controllata e può
+  collassare su un'unica label (es. su un asset in forte trend).
+- **`"balanced"`** — le soglie sono ricalcolate per asset come **quantili del
+  ratio** ai cumulati di `target_distribution`, così le frequenze dei regimi
+  corrispondono al target (due code popolate). Coerente col principio FORGE
+  delle *soglie distribuzionali*. Lo span non cambia, quindi il suo significato
+  di mean-reversion resta intatto; adatta solo il taglio. Ricade su `"fixed"`
+  se il ratio è degenere.
+
+`target_distribution` (default `[0.10, 0.20, 0.40, 0.20, 0.10]`, una campana con
+due code da 10%) è interpretato come pesi relativi (normalizzati); usare
+`[1,1,1,1,1]` per una distribuzione uniforme. Le soglie effettivamente usate
+sono esposte in `get_config()['classifier']['resolved_thresholds']`.
+
+Esempio su ADAUSDC 1H (span 545 invariato):
+
+| | SB | BE | NE | BU | SU |
+|---|--|--|--|--|--|
+| `fixed` | 0.43 | 0.13 | 0.20 | 0.09 | 0.15 |
+| `balanced` | 0.10 | 0.20 | 0.40 | 0.20 | 0.10 |
+
+> **Perché soglie e non ricerca dello span?** Spostare lo span per bilanciare la
+> distribuzione (a) raggiunge solo approssimativamente il target e su timeframe
+> grossi non ci arriva, (b) produce span privi di senso fisico (es. 5 su 1D), e
+> (c) distrugge il legame con l'half-life. Le soglie distribuzionali centrano
+> qualsiasi target in modo esatto, su ogni timeframe, preservando lo span.
+
 ---
 
 ## 5. Configurazione
@@ -193,7 +228,9 @@ market_context:
     window_stride:  1        # passo tra le stime, stessa unità di W
     short_period:  9         # fallback EMA veloce (se l'analisi non converge)
     long_period:   25        # fallback EMA lenta  (se l'analisi non converge)
-    thresholds:    [0.975, 0.990, 1.010, 1.025]
+    threshold_mode: "fixed"  # "fixed" (default) | "balanced" (soglie distribuzionali)
+    thresholds:    [0.975, 0.990, 1.010, 1.025]   # usate da "fixed"
+    target_distribution: [0.10, 0.20, 0.40, 0.20, 0.10]  # target di "balanced"
 
   labels:
     - "STRONG_BEAR"
@@ -216,7 +253,9 @@ market_context:
 | `ema_proxy.bar_hours` | `null` | Durata candela (h) per `"day"`; inferita dall'indice se assente |
 | `ema_proxy.short_period` | `9` | EMA veloce — fallback se l'analisi non converge |
 | `ema_proxy.long_period` | `25` | EMA lenta — fallback se l'analisi non converge |
-| `ema_proxy.thresholds` | `[0.975, 0.990, 1.010, 1.025]` | Soglie di discretizzazione del ratio |
+| `ema_proxy.threshold_mode` | `"fixed"` | Modo di taglio: `"fixed"` (soglie assolute) o `"balanced"` (quantili) |
+| `ema_proxy.thresholds` | `[0.975, 0.990, 1.010, 1.025]` | Soglie assolute usate da `"fixed"` |
+| `ema_proxy.target_distribution` | `[0.10, 0.20, 0.40, 0.20, 0.10]` | Frequenze target per `"balanced"` (pesi relativi) |
 | `labels` | `["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]` | Label regime (ordinate dal più ribassista) |
 
 ---
