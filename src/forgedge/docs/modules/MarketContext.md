@@ -384,6 +384,34 @@ Classificazione: regime-conditional
 
 ---
 
+### Scelta delle finestre EMA (fast/slow)
+
+I default `short_period=9` e `long_period=25` sono giustificati dall'analisi
+del coefficiente di Hurst e dell'half-life del processo OU (vedi
+`forgedge.market_context.hurst` e `notebooks/hurst.ipynb`).
+
+Sui dati 1H forniti (ADAUSDC, DOGEUSDC):
+
+- il coefficiente di Hurst rolling è ben sotto 0.5 → regime mean-reverting;
+- l'half-life OU **locale** (stimata su finestra di ~1 settimana) è ~20-21h,
+  stabile su entrambi gli asset.
+
+Seguendo la convenzione *EMA lenta ≈ half-life, EMA veloce ≈ half-life / 2-3*:
+
+```
+long_period  = 25  ≈ half-life OU (~21h)   → la EMA lenta traccia il livello
+                                              di mean-reversion
+short_period =  9  ≈ half-life / 2.3        → la EMA veloce traccia lo
+                                              scostamento di breve da quel livello
+```
+
+Il rapporto `ema_short / ema_long` è quindi un proxy di *quanto il prezzo è
+sopra/sotto il proprio livello di mean-reversion* — esattamente il segnale di
+trend che il classificatore discretizza. La tooling
+`suggest_ema_windows()` ricalcola queste finestre per qualsiasi asset/timeframe.
+
+---
+
 *Market Context Module — FORGE (Feature-Oriented Rule Generation Engine)*
 *Versione 1.0 · Maggio 2026 · Parte di FORGE v1.0*
-*Status: Specifica · Da implementare*
+*Status: Implementato — `forgedge.market_context`*
