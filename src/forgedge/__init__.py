@@ -3,5 +3,20 @@
 __version__ = "0.1.0"
 
 from .event_discovery import DiscoveryConfig, EventDiscovery
+from .market_context import (
+    EMAProxyClassifier,
+    EMAProxyConfig,
+    MarketContext,
+    MarketContextConfig,
+    RegimeClassifier,
+)
 
-__all__ = ["EventDiscovery", "DiscoveryConfig"]
+__all__ = [
+    "EventDiscovery",
+    "DiscoveryConfig",
+    "MarketContext",
+    "MarketContextConfig",
+    "EMAProxyConfig",
+    "EMAProxyClassifier",
+    "RegimeClassifier",
+]
