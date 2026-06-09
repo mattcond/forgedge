@@ -188,9 +188,9 @@ market_context:
   ema_proxy:
     source_col:    "close"   # colonna OHLCV su cui calcolare le EMA
     auto_window:   true      # decide short/long dai dati (Hurst/OU)
-    window_unit:   "bar"     # "bar" (default) | "day" (coerente tra timeframe)
-    window_estimation: 168   # W: 168 barre se unit="bar", 168 giorni se unit="day"
-    window_stride:  24       # passo tra le stime, stessa unità di W
+    window_unit:   "day"     # "day" (default, coerente tra timeframe) | "bar"
+    window_estimation: 168   # W: 168 giorni se unit="day", 168 barre se unit="bar"
+    window_stride:  1        # passo tra le stime, stessa unità di W
     short_period:  9         # fallback EMA veloce (se l'analisi non converge)
     long_period:   25        # fallback EMA lenta  (se l'analisi non converge)
     thresholds:    [0.975, 0.990, 1.010, 1.025]
@@ -210,9 +210,9 @@ market_context:
 | `classifier` | `"ema_proxy"` | Implementazione del RegimeClassifier |
 | `ema_proxy.source_col` | `"close"` | Colonna su cui calcolare le EMA |
 | `ema_proxy.auto_window` | `true` | Decide `short`/`long` dall'analisi Hurst/OU dei dati |
-| `ema_proxy.window_unit` | `"bar"` | Unità di `window_estimation`/`window_stride`: `"bar"` (per-TF) o `"day"` (coerente tra TF) |
-| `ema_proxy.window_estimation` | `168` | Ampiezza finestra di stima — barre se `"bar"`, giorni se `"day"` |
-| `ema_proxy.window_stride` | `24` | Passo tra le stime, stessa unità di `window_estimation` |
+| `ema_proxy.window_unit` | `"day"` | Unità di `window_estimation`/`window_stride`: `"day"` (coerente tra TF) o `"bar"` (per-TF) |
+| `ema_proxy.window_estimation` | `168` | Ampiezza finestra di stima — giorni se `"day"`, barre se `"bar"` |
+| `ema_proxy.window_stride` | `1` | Passo tra le stime, stessa unità di `window_estimation` |
 | `ema_proxy.bar_hours` | `null` | Durata candela (h) per `"day"`; inferita dall'indice se assente |
 | `ema_proxy.short_period` | `9` | EMA veloce — fallback se l'analisi non converge |
 | `ema_proxy.long_period` | `25` | EMA lenta — fallback se l'analisi non converge |
@@ -441,33 +441,40 @@ La risoluzione effettiva (`source`, spans usati, half-life stimata) è esposta
 in `MarketContext.window_resolution` e in `get_config()` per la tracciabilità
 nel report.
 
-#### Esempio sui dati 1H forniti
+#### Esempio sui dati forniti
 
-| Asset | Hurst median | Half-life OU locale | Finestre decise |
-|---|---:|---:|---:|
-| ADAUSDC | 0.07 | ~21h | short=9 / long=21 |
-| DOGEUSDC | 0.08 | ~20h | short=9 / long=20 |
+Con il default (`window_unit="day"`, `W=168` giorni) le finestre derivate sono
+coerenti tra 1H e 1D — riflettono la mean-reversion alla scala dell'orizzonte
+di stima (168 giorni):
 
-Entrambi mean-reverting (Hurst ≪ 0.5), half-life intraday stabile ~20-21h:
-le finestre derivate sono vicine ai default storici, confermandone la
-calibrazione, ma vengono ora ricalcolate per ogni asset.
+| Asset | 1H slow | 1D slow | coerenza |
+|---|---:|---:|---|
+| ADAUSDC | 545h | 552h | ✅ |
+| DOGEUSDC | 643h | 648h | ✅ |
+
+Restringendo l'orizzonte a `window_unit="bar"`, `W=168` (1 settimana su 1H) si
+recupera invece la scala intraday: ADAUSDC → short=9 / long=21 (~21h),
+DOGEUSDC → short=9 / long=20 (~20h). Entrambi mean-reverting (Hurst ≪ 0.5),
+half-life intraday ~20-21h.
 
 #### Coerenza tra timeframe — `window_unit`
 
 La finestra di stima è **un unico valore** (`ema_proxy.window_estimation`, 168)
 la cui *unità* dipende da `ema_proxy.window_unit`:
 
-- **`"bar"` (default)** — `W = 168` significa 168 **candele**, indipendentemente
-  dal timeframe: 1 settimana su 1H, ma 168 giorni su 1D. È *timeframe-agnostica*,
-  quindi le finestre derivate **non sono confrontabili in tempo reale** tra
-  timeframe diversi.
-- **`"day"`** — `W = 168` significa 168 **giorni** su *ogni* timeframe (anche
-  1H), convertiti in barre tramite la durata candela (inferita dall'indice
-  datetime o impostata con `bar_hours`). Lo stesso valore di `window_estimation`
-  viene semplicemente reinterpretato da barre a giorni. L'orizzonte di stima è
+- **`"day"` (default)** — `W = 168` significa 168 **giorni** su *ogni* timeframe
+  (anche 1H), convertiti in barre tramite la durata candela (inferita
+  dall'indice datetime o impostata con `bar_hours`). L'orizzonte di stima è
   identico in wall-clock su ogni timeframe, quindi l'half-life — e le EMA
-  derivate — risultano coerenti in tempo reale.
-  `window_stride` segue la stessa unità di `W`.
+  derivate — risultano coerenti in tempo reale. `window_stride` segue la stessa
+  unità di `W` (default 1 giorno). Richiede informazione temporale (indice o
+  colonna datetime, oppure `bar_hours`) e storia sufficiente (> `W` giorni):
+  in mancanza si ricade sui fallback `9` / `25`.
+- **`"bar"`** — `W = 168` significa 168 **candele**, indipendentemente dal
+  timeframe: 1 settimana su 1H, ma 168 giorni su 1D. È *timeframe-agnostica* e
+  non richiede informazione temporale, ma le finestre derivate **non sono
+  confrontabili in tempo reale** tra timeframe diversi. Lo stesso valore di
+  `window_estimation` viene semplicemente reinterpretato da giorni a barre.
 
 Aggregando ADAUSDC 1H → 1D, con `W = 168`:
 

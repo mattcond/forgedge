@@ -222,8 +222,16 @@ class TestAutoWindow:
              "close": prices}
         )
 
+    def _bar_cfg(self, **ema):
+        # Exercise the derivation engine in bar mode (W=168 bars) so it converges
+        # on the short synthetic series; the day-mode default is covered in
+        # TestWindowUnit.
+        params = dict(window_unit="bar", window_estimation=168, window_stride=24)
+        params.update(ema)
+        return MarketContextConfig(ema_proxy=EMAProxyConfig(**params))
+
     def test_windows_derived_from_data(self):
-        mc = MarketContext(self._ou_kpi())
+        mc = MarketContext(self._ou_kpi(), self._bar_cfg())
         mc.run()
         res = mc.window_resolution
         assert res["source"] == "hurst_ou"
@@ -236,7 +244,7 @@ class TestAutoWindow:
 
     def test_derived_windows_differ_from_default_when_warranted(self):
         # theta=0.2 → half-life ≈ -ln2/ln(0.8) ≈ 3.1 bars → spans ≠ 9/25
-        mc = MarketContext(self._ou_kpi(theta=0.2))
+        mc = MarketContext(self._ou_kpi(theta=0.2), self._bar_cfg())
         mc.run()
         assert mc.window_resolution["source"] == "hurst_ou"
         assert mc.window_resolution["long_period"] != 25
@@ -244,16 +252,14 @@ class TestAutoWindow:
     def test_fallback_when_not_enough_data(self):
         # Only ~6 estimation windows possible < min_window_estimates=10 → fallback
         df = self._ou_kpi(n=300)
-        mc = MarketContext(df)
+        mc = MarketContext(df, self._bar_cfg())
         mc.run()
         res = mc.window_resolution
         assert res["source"] == "fallback"
         assert (res["short_period"], res["long_period"]) == (9, 25)
 
     def test_auto_window_disabled_uses_configured(self):
-        cfg = MarketContextConfig(
-            ema_proxy=EMAProxyConfig(auto_window=False, short_period=5, long_period=20)
-        )
+        cfg = self._bar_cfg(auto_window=False, short_period=5, long_period=20)
         mc = MarketContext(self._ou_kpi(), cfg)
         mc.run()
         res = mc.window_resolution
@@ -262,7 +268,7 @@ class TestAutoWindow:
         assert mc.classifier.get_config()["long_period"] == 20
 
     def test_get_config_reports_window_resolution(self):
-        mc = MarketContext(self._ou_kpi())
+        mc = MarketContext(self._ou_kpi(), self._bar_cfg())
         mc.run()
         assert mc.get_config()["window_resolution"]["source"] == "hurst_ou"
 
@@ -280,7 +286,8 @@ class TestAutoWindow:
             {"open_dt": pd.date_range("2024-01-01", periods=len(prices), freq="1h"),
              "close": prices}
         )
-        mc = MarketContext(df)
+        # Bar mode so the OU path actually runs on the bad-prefixed series.
+        mc = MarketContext(df, self._bar_cfg())
         out = mc.run()  # must not raise LinAlgError
         assert mc.window_resolution["source"] in {"hurst_ou", "fallback"}
         # Regime is still produced on the valid region.
@@ -299,12 +306,17 @@ class TestWindowUnit:
              "close": prices}
         )
 
-    def test_bar_is_default(self):
-        assert EMAProxyConfig().window_unit == "bar"
+    def test_day_is_default(self):
+        cfg = EMAProxyConfig()
+        assert cfg.window_unit == "day"
+        assert cfg.window_estimation == 168  # 168 days by default
 
     def test_bar_mode_uses_bar_window(self):
-        # window_estimation = 168 interpreted as 168 *bars*.
-        mc = MarketContext(self._ou_kpi())
+        # window_estimation = 168 interpreted as 168 *bars* in bar mode.
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="bar", window_estimation=168)
+        )
+        mc = MarketContext(self._ou_kpi(), cfg)
         mc.run()
         assert mc.window_resolution["unit"] == "bar"
         assert mc.window_resolution["estimation_window_bars"] == 168
