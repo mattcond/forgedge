@@ -190,6 +190,47 @@ class TestMarketContext:
         assert cfg["classifier"]["classifier"] == "ema_proxy"
         assert cfg["stable_window"] == 12
 
+    def test_unsorted_column_input_same_as_sorted(self):
+        """EMA, regime and stability must be identical regardless of input row order (datetime column path)."""
+        df_sorted = _make_kpi_table(n=2000)
+        df_shuffled = df_sorted.sample(frac=1, random_state=7).reset_index(drop=True)
+
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="day", window_estimation=30, window_stride=1)
+        )
+        out_sorted = MarketContext(df_sorted, cfg).run()
+        out_shuffled = MarketContext(df_shuffled, cfg).run()
+
+        # Both outputs must be in the same (chronological) order and produce
+        # identical regime assignments.
+        pd.testing.assert_series_equal(
+            out_sorted["regime"].reset_index(drop=True),
+            out_shuffled["regime"].reset_index(drop=True),
+            check_names=False,
+        )
+        pd.testing.assert_series_equal(
+            out_sorted["regime_stable"].reset_index(drop=True),
+            out_shuffled["regime_stable"].reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_unsorted_datetimeindex_same_as_sorted(self):
+        """DatetimeIndex path also sorts rows before calculations."""
+        df = _make_kpi_table(n=2000).set_index("open_dt")
+        df_shuffled = df.sample(frac=1, random_state=13)
+
+        cfg = MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="day", window_estimation=30, window_stride=1)
+        )
+        out_sorted = MarketContext(df, cfg).run()
+        out_shuffled = MarketContext(df_shuffled, cfg).run()
+
+        pd.testing.assert_series_equal(
+            out_sorted["regime"].sort_index(),
+            out_shuffled["regime"].sort_index(),
+            check_names=False,
+        )
+
     def test_unknown_classifier_raises(self):
         with pytest.raises(ValueError):
             MarketContext(_make_kpi_table(), MarketContextConfig(classifier="hmm"))

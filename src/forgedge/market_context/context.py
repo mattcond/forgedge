@@ -102,6 +102,7 @@ class MarketContext:
             Copy of the KPI Table with ``regime`` (ordered categorical) and
             ``regime_stable`` (bool) appended.
         """
+        self.df = _sort_by_time(self.df)
         self._resolve_ema_windows()
         regime = self.classifier.classify(self.df)
         # Align defensively to the table index in case the classifier reset it.
@@ -301,6 +302,21 @@ class MarketContext:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _sort_by_time(df: pd.DataFrame) -> pd.DataFrame:
+    """Return *df* sorted in chronological order.
+
+    Tries, in order: DatetimeIndex, first datetime-typed column.  Falls back
+    to the original order when no time information is available (e.g. a pure
+    numeric index with no datetime columns), so callers are always safe.
+    """
+    if isinstance(df.index, pd.DatetimeIndex):
+        return df.sort_index()
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            return df.sort_values(col).reset_index(drop=True)
+    return df
+
 
 def _rolling_stability(regime: pd.Series, window: int) -> pd.Series:
     """Flag bars whose regime has been unchanged for the last ``window`` bars.

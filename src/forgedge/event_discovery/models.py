@@ -197,8 +197,8 @@ class EventComponent:
     ``rank(pct=True)`` exactly.  For zscore and delta, standard window
     functions (``AVG``, ``STDDEV_SAMP``, ``LAG``) are used.  Rolling
     transforms reproduce ``min_periods = max(2, window // 2)`` via a
-    ``CASE WHEN`` guard.  The ``ORDER BY open_dt`` clause assumes the
-    timestamp column is named ``open_dt``; substitute as needed.
+    ``CASE WHEN`` guard.  The ``ORDER BY`` clause uses the timestamp column
+    name from ``DiscoveryConfig.timestamp_col`` (defaults to ``"open_dt"``).
 
     Example usage in DuckDB::
 

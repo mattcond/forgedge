@@ -172,7 +172,7 @@ class EventDiscovery:
         raw_events: list[RawEvent] = []
 
         for ts in transformed_series:
-            raw_events.extend(ev_gen.generate_from_transformed(ts))
+            raw_events.extend(ev_gen.generate_from_transformed(ts, ts_col=cfg.timestamp_col))
 
         for col in binary_cls:
             if col in self.df.columns:
@@ -312,7 +312,8 @@ class EventDiscovery:
             # keep DatetimeIndex on self.df (drop=True avoids duplicate col)
             self.df = self.df.reset_index(drop=True)
             self.df.index = pd.DatetimeIndex(ts.values, name=ts_col)
-            return ts
+            self.df = self.df.sort_index()
+            return self.df.index.to_series().reset_index(drop=True)
 
         # ── Case 2 / 3 / 4: column-based ─────────────────────────────────
         if ts_col not in self.df.columns:
@@ -336,7 +337,8 @@ class EventDiscovery:
 
         self.df = self.df.drop(columns=[ts_col]).reset_index(drop=True)
         self.df.index = pd.DatetimeIndex(parsed.values, name=ts_col)
-        return parsed
+        self.df = self.df.sort_index()
+        return self.df.index.to_series().reset_index(drop=True)
 
     def _to_candidate(
         self,
