@@ -254,6 +254,24 @@ Le colonne EMA intermedie usate per calcolare il ratio **non vengono
 aggiunte** alla KPI Table se non erano già presenti — solo `regime`
 e `regime_stable` sono nuove.
 
+### Accesso al solo regime — `regime_table()`
+
+Oltre alla KPI Table arricchita restituita da `run()`, il modulo espone
+`regime_table()`, che ritorna un DataFrame compatto
+`[timestamp, regime, regime_stable]` pronto per il join con il dato di origine:
+
+```python
+mc = MarketContext(kpi)
+mc.run()
+
+rt = mc.regime_table()          # colonne: open_dt | regime | regime_stable
+joined = source_df.merge(rt, on="open_dt", how="left")
+```
+
+Il nome della colonna timestamp è inferito (DatetimeIndex o prima colonna
+datetime, default `open_dt`) ed è sovrascrivibile con
+`regime_table(timestamp_col="...")`. `regime` resta un categorical ordinato.
+
 ---
 
 ## 7. Come viene usato dai moduli successivi

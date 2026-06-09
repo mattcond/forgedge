@@ -211,6 +211,63 @@ class TestMarketContext:
 
 
 # ---------------------------------------------------------------------------
+# regime_table() — compact frame for joining back onto the source data
+# ---------------------------------------------------------------------------
+
+class TestRegimeTable:
+    def test_columns_and_length_from_datetime_column(self):
+        df = _make_kpi_table()  # has open_dt column, RangeIndex
+        mc = MarketContext(df)
+        mc.run()
+        rt = mc.regime_table()
+        assert list(rt.columns) == ["open_dt", "regime", "regime_stable"]
+        assert len(rt) == len(df)
+        assert isinstance(rt["regime"].dtype, pd.CategoricalDtype)
+        assert rt["regime"].cat.ordered
+        assert rt["regime_stable"].dtype == bool
+
+    def test_uses_datetimeindex(self):
+        df = _make_kpi_table().set_index("open_dt")
+        mc = MarketContext(df)
+        mc.run()
+        rt = mc.regime_table()
+        assert rt.columns[0] == "open_dt"
+        assert pd.api.types.is_datetime64_any_dtype(rt["open_dt"])
+        assert len(rt) == len(df)
+
+    def test_joins_back_onto_source(self):
+        df = _make_kpi_table()
+        mc = MarketContext(df)
+        mc.run()
+        joined = df.merge(mc.regime_table(), on="open_dt", how="left")
+        assert "regime" in joined.columns
+        assert "regime_stable" in joined.columns
+        assert len(joined) == len(df)
+        assert joined["regime"].notna().any()
+        # The join must align row-for-row with run()'s in-place output.
+        assert (joined["regime"].astype(str) == mc._result["regime"].astype(str)).all()
+
+    def test_custom_timestamp_col_name(self):
+        df = _make_kpi_table().rename(columns={"open_dt": "ts"})
+        mc = MarketContext(df, MarketContextConfig(
+            ema_proxy=EMAProxyConfig(window_unit="bar")))
+        mc.run()
+        rt = mc.regime_table(timestamp_col="ts")
+        assert list(rt.columns) == ["ts", "regime", "regime_stable"]
+
+    def test_before_run_raises(self):
+        with pytest.raises(RuntimeError):
+            MarketContext(_make_kpi_table()).regime_table()
+
+    def test_unknown_timestamp_col_raises(self):
+        df = _make_kpi_table()
+        mc = MarketContext(df)
+        mc.run()
+        with pytest.raises(KeyError):
+            mc.regime_table(timestamp_col="does_not_exist")
+
+
+# ---------------------------------------------------------------------------
 # Automatic EMA window selection (Hurst/OU) with fallback
 # ---------------------------------------------------------------------------
 
