@@ -172,7 +172,7 @@ class EventDiscovery:
         raw_events: list[RawEvent] = []
 
         for ts in transformed_series:
-            raw_events.extend(ev_gen.generate_from_transformed(ts))
+            raw_events.extend(ev_gen.generate_from_transformed(ts, ts_col=cfg.timestamp_col))
 
         for col in binary_cls:
             if col in self.df.columns:

@@ -30,7 +30,7 @@ class EventGenerator:
     """Generates raw boolean events from transformed series and native columns."""
 
     def generate_from_transformed(
-        self, ts: TransformedSeries
+        self, ts: TransformedSeries, ts_col: str = "open_dt"
     ) -> list[RawEvent]:
         """Convert one TransformedSeries into a list of RawEvent objects.
 
@@ -55,6 +55,10 @@ class EventGenerator:
         ----------
         ts : TransformedSeries
             One output from TransformLayer.transform_one().
+        ts_col : str
+            Name of the timestamp/ordering column passed through to the SQL
+            expression builder.  Must match ``DiscoveryConfig.timestamp_col``
+            of the originating pipeline.  Defaults to ``"open_dt"``.
 
         Returns
         -------
@@ -90,6 +94,7 @@ class EventGenerator:
                 sql_expression=_build_sql_expression(
                     ts.source_feature, ts.source_cols, ts.transform,
                     merged_params, threshold, direction, "threshold",
+                    ts_col=ts_col,
                 ),
             )
             events.append(RawEvent(series=bool_series, component=comp))
@@ -114,6 +119,7 @@ class EventGenerator:
                     sql_expression=_build_sql_expression(
                         ts.source_feature, ts.source_cols, ts.transform,
                         merged_params, threshold, direction, "crossing",
+                        ts_col=ts_col,
                     ),
                 )
                 events.append(RawEvent(series=cross_series, component=cross_comp))
