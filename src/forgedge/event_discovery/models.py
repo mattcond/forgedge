@@ -268,6 +268,20 @@ class EventComponent:
     Used by ``EventCandidate.apply()`` to reconstruct the feature series on
     new data without requiring the full FeatureGenerator to run.
     """
+    event_formula: str = ""
+    """Human-readable mathematical formula for this component.
+
+    Shows the explicit computation chain from raw columns to boolean condition,
+    using standard mathematical notation rather than SQL or encoded names.
+
+    Examples::
+
+        "close - rsi14 < 0.05"
+        "pctrank(close - rsi14, w=168) < 0.10"
+        "zscore(close / rsi14, w=48) > 1.5"
+        "Δ(close, lag=1) crosses ↓ 0.0"
+        "bb_pct_b(close, bb_lower, bb_upper) < 0.20"
+    """
     sql_expression: str = ""
     """DuckDB-compatible SQL boolean expression that replicates this component.
 
@@ -441,6 +455,28 @@ class EventCandidate:
             return parts[0]
         return " AND ".join(f"({p})" for p in parts)
 
+    @property
+    def event_formula(self) -> str:
+        """Human-readable mathematical formula for the full event.
+
+        For single-component events, returns the component's ``event_formula``
+        directly.  For AND-composed events, joins each component's formula
+        with ``AND``.
+
+        Returns an empty string if no component has a populated ``event_formula``.
+
+        Examples::
+
+            "pctrank(close - rsi14, w=168) < 0.10"
+            "(pctrank(close - rsi14, w=168) < 0.10) AND (zscore(close / open, w=48) > 1.5)"
+        """
+        parts = [c.event_formula for c in self.components if c.event_formula]
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+        return " AND ".join(f"({p})" for p in parts)
+
     def apply(self, df: pd.DataFrame) -> pd.Series:
         """Reconstruct the event boolean series on new (out-of-sample) data.
 
@@ -517,6 +553,7 @@ class EventCandidate:
                 "direction": c.direction,
                 "event_type": c.event_type,
                 "expression": c.expression,
+                "event_formula": c.event_formula,
                 "sql_expression": c.sql_expression,
             }
             for c in self.components
