@@ -322,7 +322,15 @@ def _monthly_counts(active: pd.Series, timestamps: pd.Series) -> pd.Series:
         for months where the event never fired.
     """
     periods = timestamps.dt.to_period("M")
-    all_months = periods.unique()
-    counts = active.astype(int).groupby(periods).sum()
-    full_index = pd.period_range(all_months.min(), all_months.max(), freq="M")
+    # Use positional groupby to avoid index-alignment surprises when `active`
+    # carries a DatetimeIndex and `periods` carries a RangeIndex.
+    counts = (
+        pd.Series(active.values.astype(np.int32))
+        .groupby(pd.Series(periods.values))
+        .sum()
+    )
+    p_min, p_max = periods.min(), periods.max()
+    if pd.isnull(p_min) or pd.isnull(p_max):
+        return pd.Series(dtype=np.int32)
+    full_index = pd.period_range(p_min, p_max, freq="M")
     return counts.reindex(full_index, fill_value=0)

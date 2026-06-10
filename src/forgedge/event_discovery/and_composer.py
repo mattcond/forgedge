@@ -200,11 +200,10 @@ class ANDComposer:
             if len(sub_idx) == 0:
                 continue
 
-            counts_sub = and_chunk[sub_idx].astype(np.float32) @ one_hot  # (S, n_months)
-            n_act_sub = n_act[sub_idx]
+            counts_sub = and_chunk[sub_idx].astype(np.float64) @ one_hot  # (S, n_months)
+            n_act_sub = n_act[sub_idx].astype(np.float64)
             n_active_sub = (counts_sub > 0).sum(axis=1)
-            safe_sub = np.maximum(n_act_sub, 1).astype(np.float32)
-            max_conc_sub = counts_sub.max(axis=1) / safe_sub
+            max_conc_sub = counts_sub.max(axis=1) / n_act_sub
             mean_tpm_sub = n_act_sub / n_total_months
 
             gate_pass = (
@@ -265,11 +264,10 @@ class ANDComposer:
                         continue
 
                     # Pass 2: full gate on volume-passing subset
-                    counts_t = and_ijk[sub_t].astype(np.float32) @ one_hot
-                    n_act_s = n_act_t[sub_t]
+                    counts_t = and_ijk[sub_t].astype(np.float64) @ one_hot
+                    n_act_s = n_act_t[sub_t].astype(np.float64)
                     n_active_s = (counts_t > 0).sum(axis=1)
-                    safe_s = np.maximum(n_act_s, 1).astype(np.float32)
-                    max_conc_s = counts_t.max(axis=1) / safe_s
+                    max_conc_s = counts_t.max(axis=1) / n_act_s
                     mean_tpm_s = n_act_s / n_total_months
 
                     gate_t = (
