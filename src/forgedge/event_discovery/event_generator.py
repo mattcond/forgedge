@@ -593,10 +593,14 @@ def _formula_feature(source_feature: str, source_cols: list, transform_params: d
     if sf.startswith("spread_") and len(sc) == 2:
         return f"({sc[0]} - {sc[1]}) / {sc[1]}"
     if sf.startswith("diffnorm_") and len(sc) == 2:
+        # Denominator is the in-sample std of the difference series, frozen at
+        # discovery time.  Show the function that produced it (with the actual
+        # value annotated) rather than just the opaque constant.
         std = transform_params.get("diffnorm_std", 1.0)
+        diff = f"{sc[0]} - {sc[1]}"
         if std != 1.0:
-            return f"({sc[0]} - {sc[1]}) / {std:.4g}"
-        return f"{sc[0]} - {sc[1]}"
+            return f"({diff}) / std({diff})  [std={std:.4g}]"
+        return diff
     if sf.startswith("bb_pct_b_") and len(sc) == 3:
         val, lower, upper = sc
         return f"bb_pct_b({val}, {lower}, {upper})"
