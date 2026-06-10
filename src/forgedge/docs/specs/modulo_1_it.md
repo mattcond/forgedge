@@ -3,8 +3,9 @@
 > **Riferimento codice:** `src/forgedge/event_discovery/`
 > **Analisi funzionale:** `docs/modules/EventDiscovery.md`
 > **Stato:** ✅ Implementato. Logica core allineata con analisi funzionale;
-> presenti funzionalità aggiuntive non documentate (SQL export, apply OOS,
-> walk-forward dettagliato).
+> presenti funzionalità aggiuntive non documentate (SQL export, formula
+> matematica leggibile, apply OOS, walk-forward dettagliato).
+> Aggiornato a `main` dopo commit `f21b454` (5 bug fix) e `88908ce` (`event_formula`).
 
 ---
 
@@ -172,6 +173,7 @@ Artefatto di output del Modulo 1.
 | `consistency_gate` | `GateResult` | Sempre `passed=True` per candidati restituiti da `run()` |
 | `event_series` | `pd.Series` | Serie booleana 0/1/NaN con DatetimeIndex |
 | `validation` | `ValidationResult | None` | Risultato walk-forward OOS; None se non configurato |
+| `event_formula` | `str` (property) | Formula matematica leggibile (notazione standard) |
 | `sql_expression` | `str` (property) | Espressione booleana DuckDB-compatibile |
 
 **Metodo `apply(df)`:** ricostruisce la serie booleana su nuovi dati OOS,
@@ -193,6 +195,7 @@ Per feature `diffnorm`, usa `transform_params["diffnorm_std"]` dell'in-sample.
 | `event_type` | `str` | `"threshold"` o `"crossing"` |
 | `expression` | `str` | Stringa leggibile della condizione |
 | `source_cols` | `list` | Colonne native originali (per feature arity 2/3) |
+| `event_formula` | `str` | Formula matematica leggibile (notazione standard) |
 | `sql_expression` | `str` | Espressione SQL DuckDB-compatibile |
 
 ### `GateResult` (`models.py`)
@@ -276,7 +279,36 @@ ValidationResult:
 
 ---
 
-## 7. SQL export (`sql_expression`)
+## 7. Export degli eventi
+
+### 7.1 Formula matematica leggibile (`event_formula`)
+
+Ogni `EventComponent` contiene un campo `event_formula`:
+una rappresentazione in notazione matematica standard della condizione,
+generata dai builder `_formula_feature`, `_formula_transform`, `_formula_condition`
+in `event_generator.py`.
+
+La logica di costruzione segue la stessa struttura del builder SQL:
+
+| Fase | Funzione | Esempi di output |
+|---|---|---|
+| Feature | `_formula_feature` | `rsi14`, `close / open`, `(sma_09 - sma_25) / 0.0032`, `bb_pct_b(close, bb_lower, bb_upper)` |
+| Transform | `_formula_transform` | `pctrank(rsi14, w=168)`, `zscore(close / open, w=48)`, `Δ(rsi14, lag=1)` |
+| Condizione | `_formula_condition` | `... < 0.10`, `... > 1.5`, `... crosses ↓ -0.03` |
+
+Esempi di formule complete:
+```
+close - rsi14 < 0.05
+pctrank(close - rsi14, w=168) < 0.10
+zscore(close / open, w=48) > 1.5
+Δ(rsi14, lag=1) crosses ↓ -0.03
+(pctrank(rsi14, w=48) < 0.10) AND (zscore(close, w=96) > 1.5)
+```
+
+La property `EventCandidate.event_formula` unisce le formule dei componenti con ` AND `.
+Inclusa nella serializzazione `to_dict()`.
+
+### 7.2 SQL export (`sql_expression`)
 
 Ogni `EventComponent` contiene un campo `sql_expression`:
 un'espressione booleana DuckDB-compatibile che replica la condizione
@@ -297,7 +329,23 @@ rel.query("df", f"SELECT *, ({candidate.sql_expression})::INT AS active FROM df"
 
 ---
 
-## 8. Configurazione
+## 8. Note di robustezza (bug fix `f21b454`)
+
+Correzioni di correttezza che non cambiano l'interfaccia pubblica ma che
+alterano il comportamento in casi limite. Rilevanti per la comprensione
+del comportamento runtime.
+
+| Bug | File | Comportamento prima | Comportamento dopo |
+|---|---|---|---|
+| **#1 — ±inf in ratio/spread** | `feature_generator.py`, `models.py` | Divisione per zero produceva `±inf`, che upcasta `float64→object` via `pd.NA` | `±inf` rimpiazzati con `float('nan')` — dtype rimane `float64` |
+| **#2 — float32 in ANDComposer** | `and_composer.py` | Accumulatori `float32` causavano errore di precisione nel calcolo `max_conc` | Accumulatori portati a `float64` su entrambi i path (pair e triple) |
+| **#3 — `diffnorm_std=0`** | `models.py` | `if not std` confondeva `None` con `0.0`; `std=0` sollevava `KeyError` con messaggio fuorviante | `if std is None` per chiave mancante; `std==0` restituisce serie all-NaN invece di errore |
+| **#4 — Allineamento indice in ConsistencyGate** | `consistency_gate.py` | Groupby con `DatetimeIndex` vs `RangeIndex` causava misalignment silenzioso | Groupby su `.values` per entrambi (`active` e `periods`) — allineamento posizionale |
+| **#5 — NaT crash in `pd.period_range`** | `discovery.py`, `consistency_gate.py` | Input tutto-NaT causava crash in `pd.period_range` | Null-guard su `p_min`/`p_max` prima di chiamare `period_range`; restituisce 0/serie vuota |
+
+---
+
+## 9. Configurazione
 
 ### `DiscoveryConfig` (`discovery.py`)
 
@@ -322,7 +370,7 @@ rel.query("df", f"SELECT *, ({candidate.sql_expression})::INT AS active FROM df"
 
 ---
 
-## 9. Parsing del timestamp
+## 10. Parsing del timestamp
 
 Il `DiscoveryConfig.timestamp_col` può provenire da:
 1. **DatetimeIndex** — usato direttamente
@@ -335,7 +383,7 @@ La colonna timestamp viene **rimossa** da `self.df` dopo il parsing
 
 ---
 
-## 10. Allineamento con l'analisi funzionale
+## 11. Allineamento con l'analisi funzionale
 
 ### ✅ Allineato
 
@@ -363,6 +411,7 @@ La colonna timestamp viene **rimossa** da `self.df` dopo il parsing
 - **`is_period` e `oos_period`** — proprietà per le date dei periodi IS/OOS
 - **`source_cols`** su `EventComponent` — colonne native originali per feature arity-2/3
 - **`diffnorm_std`** salvato in `transform_params` — normalizzatore IS preservato per OOS
+- **`event_formula`** su `EventComponent` e `EventCandidate` — formula matematica leggibile in notazione standard (parallela a `sql_expression`)
 
 ### ⚠️ Divergenze rispetto all'analisi funzionale
 
