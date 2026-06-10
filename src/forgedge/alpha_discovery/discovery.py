@@ -446,10 +446,11 @@ class AlphaDiscovery:
             version="1.0",
             discovery_date=self._discovery_date(),
             status="HYPOTHESIS" if promoted else "REJECTED",
-            asset=tgt.asset,
-            exchange=tgt.exchange,
-            timeframe=tgt.timeframe,
+            asset=cfg.asset,
+            exchange=cfg.exchange,
+            timeframe=cfg.timeframe,
             direction=tgt.direction,
+            fee_per_side=cfg.fee_per_side,
             event_candidate_id=cand.event_id,
             event_expression=cand.expression,
             pattern_family=self._pattern_family(ms),
@@ -563,9 +564,9 @@ class AlphaDiscovery:
         return 24.0
 
     def _alpha_id(self, idx: int) -> str:
-        tgt = self.config.target
+        cfg = self.config
         stamp = self._discovery_date().replace("-", "")[2:]
-        return f"ALPHA-{tgt.asset}-{tgt.timeframe}-{stamp}-{idx:03d}"
+        return f"ALPHA-{cfg.asset}-{cfg.timeframe}-{stamp}-{idx:03d}"
 
     def _discovery_date(self) -> str:
         return self.config.discovery_date or date.today().isoformat()

@@ -87,14 +87,16 @@ print(f"\nEvent Candidates: {len(candidates)}")
 # ---------------------------------------------------------------------------
 
 config = AlphaConfig(
+    # Target economico — gli unici parametri che entrano nel calcolo
     target=TargetDefinition(
         holding_period_h=24,    # orizzonte di 24 barre
         sell_pct=0.04,          # target binario +4%
         direction="long",
-        asset=SYMBOL,
-        exchange="binance_spot",
-        timeframe="1H",
     ),
+    # Metadati di tracciabilità — copiati nel contratto, nessun ruolo nel calcolo
+    asset=SYMBOL,
+    exchange="binance_spot",
+    timeframe="1H",
     thresholds=PromotionThresholds(
         min_lift=0.08,          # almeno +8pp sopra il base rate
         min_cohens_d=0.15,      # effect size minimo

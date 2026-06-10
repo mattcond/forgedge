@@ -23,8 +23,9 @@ from typing import Dict, List, Optional, Tuple
 class TargetDefinition:
     """The economic target every candidate is measured against (Step 1).
 
-    These parameters do not change within a discovery session — changing them
-    is a new session.  Event Discovery never sees them; Alpha Discovery is the
+    Contains **only** the parameters that enter the computation — nothing
+    else.  These do not change within a discovery session — changing them is
+    a new session.  Event Discovery never sees them; Alpha Discovery is the
     first module that knows what "a useful event" means.
 
     Attributes
@@ -37,23 +38,14 @@ class TargetDefinition:
         forward maximum must reach at least +4% for a ``long``; for a
         ``short`` the forward minimum must reach at least -4%).
     direction : {'long', 'short'}
-        Trade direction.  ``long`` looks for upside within the horizon,
-        ``short`` for downside.
-    fee_per_side : float
-        Informational only — recorded in the contract so Rule Discovery knows
-        the assumed cost basis.  Alpha Discovery does not net it out (that is
-        Rule Discovery's job).
-    asset, exchange, timeframe : str
-        Scope metadata copied verbatim into the contract.
+        Trade direction.  Computationally relevant: it selects which forward
+        extreme defines the binary target (max for long, min for short) and
+        orients the forward return so that "favourable" is always positive.
     """
 
     holding_period_h: int = 24
     sell_pct: float = 0.04
     direction: str = "long"
-    fee_per_side: float = 0.002
-    asset: str = "ASSET"
-    exchange: str = ""
-    timeframe: str = "1H"
 
 
 @dataclass
@@ -105,6 +97,15 @@ class AlphaConfig:
         The economic target (required).
     thresholds : PromotionThresholds
         Admission / promotion gates.
+    asset, exchange, timeframe : str
+        **Traceability metadata only** — copied verbatim into the contract's
+        SCOPE section (and into the ``alpha_id``) so Rule Discovery and the
+        Registry can attribute the alpha.  They have no effect whatsoever on
+        any measurement.
+    fee_per_side : float
+        Informational only — recorded in the contract so Rule Discovery knows
+        the assumed cost basis.  Alpha Discovery does not net it out (that is
+        Rule Discovery's job).
     close_col : str
         Name of the close-price column used to build forward returns.
     timestamp_col : str
@@ -138,6 +139,10 @@ class AlphaConfig:
 
     target: TargetDefinition = field(default_factory=TargetDefinition)
     thresholds: PromotionThresholds = field(default_factory=PromotionThresholds)
+    asset: str = "ASSET"
+    exchange: str = ""
+    timeframe: str = "1H"
+    fee_per_side: float = 0.002
     close_col: str = "close"
     timestamp_col: str = "open_dt"
     regime_col: str = "regime"
@@ -257,10 +262,12 @@ class AlphaContract:
     discovery_date: str
     status: str  # "HYPOTHESIS" | "REJECTED"
 
+    # SCOPE — traceability metadata, no computational role
     asset: str
     exchange: str
     timeframe: str
     direction: str
+    fee_per_side: float
 
     event_candidate_id: str
     event_expression: str
@@ -336,6 +343,7 @@ class AlphaContract:
             "exchange": self.exchange,
             "timeframe": self.timeframe,
             "direction": self.direction,
+            "fee_per_side": self.fee_per_side,
             "event_candidate_id": self.event_candidate_id,
             "event_expression": self.event_expression,
             "pattern_family": self.pattern_family,

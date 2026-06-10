@@ -198,7 +198,8 @@ class TestAlphaDiscoveryEndToEnd:
             df.copy(),
             cands,
             AlphaConfig(
-                target=TargetDefinition(holding_period_h=12, sell_pct=0.01, asset="SYN"),
+                target=TargetDefinition(holding_period_h=12, sell_pct=0.01),
+                asset="SYN",
             ),
         )
         contracts = ad.run()
@@ -281,6 +282,47 @@ class TestPromotionGates:
             thresholds=PromotionThresholds(min_lift=0.95, min_cohens_d=5.0)))
         ad.run()
         assert ad.promoted_contracts() == []
+
+
+# ---------------------------------------------------------------------------
+# Scope metadata is traceability-only
+# ---------------------------------------------------------------------------
+
+class TestScopeMetadataInert:
+    def test_metadata_does_not_affect_measurements(self):
+        """asset/exchange/timeframe/fee are stamped into the contract but must
+        leave every statistical measure untouched."""
+        df = _predictive_kpi_table()
+        ed, cands = _make_candidates(df)
+        target = TargetDefinition(holding_period_h=12, sell_pct=0.01)
+
+        a = AlphaDiscovery(ed.df, cands, AlphaConfig(
+            target=target, asset="AAA", exchange="ex1", timeframe="1H",
+            fee_per_side=0.001))
+        b = AlphaDiscovery(ed.df, cands, AlphaConfig(
+            target=target, asset="ZZZ", exchange="ex2", timeframe="4H",
+            fee_per_side=0.009))
+        a.run(); b.run()
+
+        sa = a.summary().drop(columns=["alpha_id"])
+        sb = b.summary().drop(columns=["alpha_id"])
+        pd.testing.assert_frame_equal(sa, sb)
+
+        ca, cb = a._contracts[0], b._contracts[0]
+        assert (ca.asset, ca.timeframe, ca.fee_per_side) == ("AAA", "1H", 0.001)
+        assert (cb.asset, cb.timeframe, cb.fee_per_side) == ("ZZZ", "4H", 0.009)
+
+    def test_direction_does_affect_measurements(self):
+        """direction is part of the economic target, not metadata: flipping it
+        changes the binary target and therefore the measurements."""
+        df = _predictive_kpi_table()
+        ed, cands = _make_candidates(df)
+        long_ad = AlphaDiscovery(ed.df, cands, AlphaConfig(
+            target=TargetDefinition(holding_period_h=12, sell_pct=0.01, direction="long")))
+        short_ad = AlphaDiscovery(ed.df, cands, AlphaConfig(
+            target=TargetDefinition(holding_period_h=12, sell_pct=0.01, direction="short")))
+        long_ad.run(); short_ad.run()
+        assert long_ad.base_rate != pytest.approx(short_ad.base_rate)
 
 
 # ---------------------------------------------------------------------------
