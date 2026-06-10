@@ -94,6 +94,7 @@ class EventGenerator:
                 event_formula=_build_event_formula(
                     ts.source_feature, ts.source_cols, ts.transform,
                     merged_params, threshold, direction, "threshold",
+                    threshold_type=t_type,
                 ),
                 sql_expression=_build_sql_expression(
                     ts.source_feature, ts.source_cols, ts.transform,
@@ -123,6 +124,7 @@ class EventGenerator:
                     event_formula=_build_event_formula(
                         ts.source_feature, ts.source_cols, ts.transform,
                         merged_params, threshold, direction, "crossing",
+                        threshold_type=t_type,
                     ),
                     sql_expression=_build_sql_expression(
                         ts.source_feature, ts.source_cols, ts.transform,
@@ -578,11 +580,12 @@ def _build_event_formula(
     threshold: float,
     direction: str,
     event_type: str,
+    threshold_type: str = "",
 ) -> str:
     """Build a human-readable mathematical formula for one event component."""
     feat = _formula_feature(source_feature, source_cols, transform_params)
     t = _formula_transform(feat, transform, transform_params)
-    return _formula_condition(t, threshold, direction, event_type)
+    return _formula_condition(t, threshold, direction, event_type, threshold_type)
 
 
 def _formula_feature(source_feature: str, source_cols: list, transform_params: dict) -> str:
@@ -626,10 +629,33 @@ def _formula_transform(feat: str, transform: str, transform_params: dict) -> str
     return feat
 
 
-def _formula_condition(t: str, threshold: float, direction: str, event_type: str) -> str:
-    thr = f"{threshold:.4g}"
+def _formula_condition(
+    t: str, threshold: float, direction: str, event_type: str, threshold_type: str = ""
+) -> str:
+    thr = _formula_threshold(threshold, threshold_type)
     if event_type == "crossing":
         arrow = "↓" if direction == "below" else "↑"
         return f"{t} crosses {arrow} {thr}"
     op = "<" if direction == "below" else ">"
     return f"{t} {op} {thr}"
+
+
+def _formula_threshold(threshold: float, threshold_type: str) -> str:
+    """Render a threshold showing the function that produced it.
+
+    Distributional thresholds are in-sample percentiles of the transformed
+    feature distribution, so they are shown as ``P<n> [P<n>=value]`` following
+    the same ``FORMULA [VALUE]`` convention used for the diffnorm denominator.
+    Theoretical z-score thresholds are fixed constants (not data-derived), so
+    only the plain value is shown.
+    """
+    val = f"{threshold:.4g}"
+    if threshold_type.startswith("distributional_p"):
+        # e.g. "distributional_p10" -> "P10", "distributional_p05" -> "P5"
+        pct = threshold_type.split("_p", 1)[1]
+        try:
+            pct = str(int(pct))
+        except ValueError:
+            pass
+        return f"P{pct} [P{pct}={val}]"
+    return val
