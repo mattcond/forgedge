@@ -10,9 +10,15 @@ Catena completa della pipeline — strettamente sequenziale:
 Market Context etichetta ogni barra per regime; Event Discovery genera gli
 Event Candidate (senza guardare il forward return); Alpha Discovery riceve
 entrambi gli output — la tabella post-pipeline ``ed.df`` (regime + feature
-derivate) e i candidati con le loro ``event_series`` — e non ricalcola nulla:
-misura il potere predittivo di ciascun candidato rispetto al target economico
-e promuove quelli con evidenza statistica sufficiente in Alpha Contract.
+derivate) e i candidati con le loro ``event_series`` — e non ricalcola nulla.
+
+Alpha Discovery non riceve alcun target economico in input: per ogni evento
+**deriva dai dati** l'orizzonte h* (massima separazione statistica
+attivi/inattivi sulla griglia di orizzonti), il sell_pct candidato (vantaggio
+medio quando l'evento è attivo a h*) e la direzione (segno del vantaggio).
+Il target derivato viene poi confermato out-of-sample sulla coda temporale
+mai usata nella derivazione — solo i candidati confermati sono promossi in
+Alpha Contract.
 
 Prerequisiti
 ------------
@@ -35,7 +41,6 @@ from forgedge import (
     DiscoveryConfig,
     EventDiscovery,
     MarketContext,
-    TargetDefinition,
 )
 from forgedge.alpha_discovery.models import PromotionThresholds
 from forgedge.event_discovery.models import GateParams
@@ -87,12 +92,9 @@ print(f"\nEvent Candidates: {len(candidates)}")
 # ---------------------------------------------------------------------------
 
 config = AlphaConfig(
-    # Target economico — gli unici parametri che entrano nel calcolo
-    target=TargetDefinition(
-        holding_period_h=24,    # orizzonte di 24 barre
-        sell_pct=0.04,          # target binario +4%
-        direction="long",
-    ),
+    # Derivazione del target — griglia di orizzonti candidati e split IS/OOS
+    horizon_grid=(1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48),
+    train_ratio=0.7,            # 70% derivazione+misure, 30% conferma OOS
     # Metadati di tracciabilità — copiati nel contratto, nessun ruolo nel calcolo
     asset=SYMBOL,
     exchange="binance_spot",
@@ -103,6 +105,8 @@ config = AlphaConfig(
         min_activations=30,
         use_fdr=True,           # controllo del False Discovery Rate (Benjamini-Hochberg)
         fdr_q=0.10,
+        oos_max_p=0.10,         # conferma OOS del target derivato
+        min_oos_activations=10,
     ),
 )
 
@@ -117,7 +121,7 @@ print("\n─── Struttura di mercato (Step 2) ───")
 print(f"Hurst       : {ms.hurst:.3f}  ({ms.hurst_interpretation})")
 print(f"Famiglia    : {ms.expected_family}")
 print(f"ACF return  : " + "  ".join(f"lag{l}={v:+.3f}" for l, v in ms.autocorr.items()))
-print(f"\nBase rate   : {ad.base_rate:.1%}")
+print(f"Split IS/OOS: {ad.split_idx} / {len(ed.df) - ad.split_idx} barre")
 
 promoted = ad.promoted_contracts()
 print(f"\nContratti valutati : {len(contracts)}")
@@ -130,8 +134,9 @@ print(f"Promossi (HYPOTHESIS): {len(promoted)}")
 
 summary = ad.summary()
 cols = [
-    "expression", "feature", "ic", "n_activations", "win_rate", "lift",
-    "cohens_d", "p_value", "regime_dependency", "composite_score", "grade",
+    "expression", "feature", "holding_period_h", "sell_pct", "direction",
+    "ic", "n_activations", "win_rate", "lift", "cohens_d", "p_value",
+    "oos_passed", "regime_dependency", "composite_score", "grade",
 ]
 print("\n─── Top 10 Alpha promossi (per composite score) ───")
 print(summary[summary["promoted"]].head(10)[cols].to_string(index=False))
@@ -147,6 +152,13 @@ if promoted:
     print(f"alpha_id          : {best.alpha_id}")
     print(f"event_candidate_id: {best.event_candidate_id}")
     print(f"expression        : {best.event_expression}")
+    dt = best.derived_target
+    print(f"target derivato   : h*={dt.holding_period_h}  "
+          f"sell_pct={dt.sell_pct:.4f}  direction={dt.direction}")
+    oos = best.oos_validation
+    if oos is not None:
+        print(f"conferma OOS      : passed={oos.passed}  p={oos.p_value:.4f}  "
+              f"mean_adv={oos.mean_advantage:+.5f}  n_act={oos.n_activations}")
     print(f"IC                : {best.underlying_feature.ic:+.4f} "
           f"(p={best.underlying_feature.p_value:.2e}, "
           f"stable={best.underlying_feature.rolling_ic_stable})")

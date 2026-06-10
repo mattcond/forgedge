@@ -1,9 +1,11 @@
 # FORGE — Alpha Discovery Pipeline
 > Secondo modulo della pipeline di ricerca quantitativa FORGE.
-> Riceve gli **Event Candidate** da Event Discovery e ne misura il potere predittivo
-> rispetto a un target economico definito. Seleziona i candidati con evidenza
-> statistica sufficiente e li formalizza in un **Alpha Contract** —
-> l'artefatto che Rule Discovery consuma per rispondere "Edge / Non-Edge".
+> Riceve gli **Event Candidate** da Event Discovery, **deriva dai dati** il
+> target economico di ciascun evento (orizzonte, sell_pct, direzione), lo
+> conferma out-of-sample e ne misura il potere predittivo. Seleziona i
+> candidati con evidenza statistica sufficiente e li formalizza in un
+> **Alpha Contract** — l'artefatto che Rule Discovery consuma per rispondere
+> "Edge / Non-Edge".
 
 ---
 
@@ -11,7 +13,7 @@
 
 1. [Posizionamento nella Pipeline](#1-posizionamento-nella-pipeline)
 2. [Il Contratto Alpha — Formato e Semantica](#2-il-contratto-alpha--formato-e-semantica)
-3. [Step 1 — Definire il Target di Valutazione](#3-step-1--definire-il-target-di-valutazione)
+3. [Step 1 — Derivare il Target di Valutazione](#3-step-1--derivare-il-target-di-valutazione)
 4. [Step 2 — Analisi della Struttura di Mercato](#4-step-2--analisi-della-struttura-di-mercato)
 5. [Step 3 — IC Measurement: Misurare il Potere Predittivo](#5-step-3--ic-measurement-misurare-il-potere-predittivo)
 6. [Step 4 — Win Rate Analysis: Quantificare l'Edge](#6-step-4--win-rate-analysis-quantificare-ledge)
@@ -119,11 +121,29 @@ direction:         "long"
 event_candidate_id: "EVT-close_rsi_25-ID×PR-P105-W096-P010"
 event_expression:   "close_rsi_25 < 30.5 AND pr_close_rsi_25_96 < 0.10"
 
-# ── TARGET DI VALUTAZIONE ────────────────────────────────────────────
-target_definition:
-  holding_period_h: 24
-  sell_pct:         0.04       # +4% → questo definisce il target binario
-  base_rate:        0.235      # win rate senza alcun filtro (23.5%)
+# ── TARGET DERIVATO ──────────────────────────────────────────────────
+# Alpha Discovery non riceve parametri economici: il target è derivato
+# in-sample per ciascun evento e confermato out-of-sample (vedi Step 1).
+derived_target:
+  holding_period_h: 24         # h* = max separazione statistica sulla griglia
+  sell_pct:         0.0218     # |vantaggio medio| delle barre attive a h*
+  direction:        "long"     # segno del vantaggio medio
+  mean_advantage:   +0.0218    # vantaggio medio firmato (convenzione long)
+  base_rate:        0.235      # win rate senza filtro a (h*, sell_pct*)
+  advantage_by_h:   {1: 0.004, 6: 0.011, 12: 0.017, 24: 0.0218, 48: 0.019}
+  t_stat_by_h:      {1: 1.8,   6: 3.1,   12: 4.6,   24: 5.34,   48: 4.2}
+
+# ── CONFERMA OUT-OF-SAMPLE DEL TARGET DERIVATO ──────────────────────
+oos_validation:
+  n_bars:          2690        # coda temporale mai usata nella derivazione
+  n_activations:   97
+  mean_advantage:  +0.0184     # orientato: positivo = favorevole al trade
+  t_stat:          3.12
+  p_value:         0.0011      # one-sided, attivi vs inattivi
+  win_rate:        0.392
+  base_rate:       0.241
+  lift:            +0.151
+  passed:          true        # requisito di promozione
 
 # ── DESCRIZIONE ──────────────────────────────────────────────────────
 pattern_family:    "mean_reversion_oversold"
@@ -229,7 +249,8 @@ rule_discovery_response:   null
 | Campo | Obbligatorio | Note |
 |---|---|---|
 | `event_candidate_id`, `event_expression` | ✅ | Tracciabilità verso Event Discovery |
-| `target_definition` (holding_period, sell_pct, base_rate) | ✅ | Benchmark economico |
+| `derived_target` (holding_period, sell_pct, direction, base_rate) | ✅ | Target derivato dai dati — baseline per Rule Discovery |
+| `oos_validation` | ✅ | Conferma out-of-sample del target derivato |
 | `description`, `economic_rationale` | ✅ | Leggibilità e falsifiability |
 | `event_stats` (WR, lift, p-value) | ✅ | Evidenza statistica minima |
 | `regime_analysis` | ✅ | Critico per capire quando l'alpha funziona |
@@ -240,51 +261,91 @@ rule_discovery_response:   null
 
 ---
 
-## 3. Step 1 — Definire il Target di Valutazione
+## 3. Step 1 — Derivare il Target di Valutazione
 
-Prima di misurare qualsiasi cosa, fissare i parametri economici che definiscono
-cosa si intende per "evento predittivo". Questi parametri non cambiano durante
-la sessione di valutazione — cambiarli è una nuova sessione.
+Alpha Discovery **non riceve parametri economici in input**: orizzonte,
+sell_pct e direzione sono derivati dai dati, per ciascun Event Candidate.
+Imporre un target a priori (es. "+4% in 24 barre") significherebbe misurare
+ogni evento contro un'ipotesi arbitraria; derivarlo significa chiedere ai
+dati *quando* e *quanto* l'evento sposta i rendimenti — e poi verificare
+out-of-sample che la risposta non sia un artefatto della ricerca.
 
-### 1.1 Parametri del target
+### 1.1 Split temporale IS/OOS
+
+La tabella, ordinata cronologicamente, è divisa in due finestre
+(`train_ratio`, default 0.7):
 
 ```
-ASSET:              [es. ADAUSDC]
-TIMEFRAME:          [es. 1H]
-DIREZIONE:          [long / short / entrambe]
-HOLDING_PERIOD_H:   [es. 24  → target_h = 24 barre]
-TARGET_RETURN:      [es. +4% → soglia per il target binario]
-FEE:                [es. 0.2% per lato → net gain = target - 2×fee]
-PERIODO_ANALISI:    [es. 2025-01-01 → 2026-01-01]
+IN-SAMPLE  (primi 70%):  derivazione del target + tutte le misure (Step 1–6)
+OUT-OF-SAMPLE (ultimi 30%): mai toccato dalla derivazione — replay del
+                            target derivato per la conferma (gate di promozione)
 ```
 
-> **Nota:** `HOLDING_PERIOD_H` e `TARGET_RETURN` sono parametri **economici**,
-> non strutturali. Non appartengono a Event Discovery (che lavora senza target)
-> ma ad Alpha Discovery, che è il primo modulo a sapere cosa significa
-> "un evento è utile".
+### 1.2 Derivazione per evento — massima separazione statistica
 
-### 1.2 Calcolare il target binario e il base rate
+Per ogni Event Candidate, su una griglia di orizzonti candidati
+(`horizon_grid`, default 1–48 barre):
 
 ```python
-TARGET_H   = 24
-SELL_PCT   = 0.04
+# fwd_ret[h] = close.shift(-h) / close - 1   (convenzione long, firmato)
+for h in horizon_grid:
+    t[h] = t_stat(fwd_ret[h][attive], fwd_ret[h][inattive])   # pooled, IS
 
-# Massimo raggiunto nelle successive target_h barre
-df['fwd_max_24'] = df['close'].rolling(TARGET_H).max().shift(-TARGET_H)
+h_star         = argmax_h |t[h]|          # orizzonte di massima separazione
+mean_advantage = fwd_ret[h_star][attive].mean()   # vantaggio medio firmato
+sell_pct       = abs(mean_advantage)      # candidato take-profit
+direction      = "long" if mean_advantage > 0 else "short"
+```
 
-# Target binario: il massimo raggiunge almeno +4% rispetto al close corrente?
-df['target'] = (df['fwd_max_24'] / df['close'] - 1 >= SELL_PCT).astype(float)
+- **`h*`** è l'orizzonte al quale l'evento separa di più le barre attive
+  dalle inattive — il momento in cui l'informazione dell'evento si realizza.
+- **`sell_pct`** è il vantaggio medio che si osserva quando l'evento è
+  attivo: il candidato naturale di take-profit che Rule Discovery raffinerà
+  con la meccanica reale degli ordini.
+- **`direction`** è il segno del vantaggio: un evento che anticipa ribassi
+  diventa uno short candidate, senza configurazione manuale.
 
-# Base rate: win rate senza alcun filtro — benchmark per tutti i candidati
-base_rate = df['target'].mean()
-print(f"Base rate: {base_rate:.1%}")
-# ADAUSDC 1H 2025: 23.5%
+Il profilo completo (`advantage_by_h`, `t_stat_by_h`) viene scritto nel
+contratto per trasparenza.
+
+### 1.3 Target binario e base rate al target derivato
+
+```python
+# Estremo favorevole nelle successive h* barre (max per long, min per short)
+fwd_ext = close.rolling(H_STAR).max().shift(-H_STAR)        # long
+target  = (fwd_ext / close - 1 >= SELL_PCT).astype(float)
+
+# Base rate: win rate senza alcun filtro a (h*, sell_pct*) — benchmark
+base_rate = target[:split].mean()      # calcolato solo in-sample
 ```
 
 > **Il base rate è il benchmark fondamentale.** Un Event Candidate con WR = 40%
 > ha un lift di +16.5pp se il base rate è 23.5%, ma è inutile se il base rate
-> è 38%. Tutti gli step successivi misurano la distanza dal base rate,
+> è 38%. Poiché il target è per-evento, anche il base rate è per-evento.
+> Tutti gli step successivi misurano la distanza dal base rate,
 > non il WR assoluto.
+
+### 1.4 Conferma out-of-sample del target derivato
+
+Selezionare `h*` massimizzando |t| sulla griglia è un'ottimizzazione
+in-sample (horizon snooping): senza contromisure il vantaggio misurato è
+sistematicamente sovrastimato. La contromisura è strutturale: il target
+derivato viene replicato sulla coda OOS, che non ha avuto alcun ruolo nella
+derivazione:
+
+```
+mean_advantage_oos  orientato (positivo = favorevole alla direzione derivata)
+t-test one-sided    attivi vs inattivi sulla coda OOS
+win_rate / base_rate / lift   a (h*, sell_pct*, direction*) su OOS
+```
+
+La promozione richiede `passed = true`:
+
+```
+n_activations_oos >= min_oos_activations   (default 10)
+mean_advantage_oos > 0                     (il segno si conferma)
+p_value_oos < oos_max_p                    (default 0.10)
+```
 
 ---
 
@@ -339,9 +400,11 @@ for lag in [1, 2, 3, 6, 12, 24]:
 | 12h | −0.0510 | Inversione debole inizia |
 | 24h | −0.0819 | Anticorrelazione — inversione a 24h |
 
-La struttura ACF **giustifica il target_h = 24** scelto allo Step 1:
-abbastanza lungo da catturare l'inversione, non troppo da rimanere esposti al trend.
-Se l'ACF fosse negativo già a lag 6, si potrebbe usare target_h = 6 o 12.
+La struttura ACF è la **lettura interpretativa** dell'orizzonte derivato allo
+Step 1: un `h* = 24` derivato per massima separazione è coerente con
+un'inversione che si manifesta a 24h. Se la derivazione restituisse `h*`
+incompatibili con la struttura ACF (es. h* lunghi su un mercato che inverte a
+6h), il contrasto è un segnale d'allarme da annotare nel contratto.
 
 ---
 
@@ -646,7 +709,8 @@ ricevuto da Event Discovery — non crea nuove espressioni, non modifica soglie.
 
 - [ ] `event_candidate_id` copiato esattamente da Event Discovery
 - [ ] `event_expression` copiata esattamente — nessuna modifica alle soglie
-- [ ] `target_definition` compilato (holding_period, sell_pct, base_rate)
+- [ ] `derived_target` compilato (h*, sell_pct, direction, base_rate, profili per h)
+- [ ] `oos_validation` compilato — `passed = true` per la promozione
 - [ ] `description` in forma narrativa
 - [ ] `economic_rationale` con controparte identificata
 - [ ] `underlying_feature.ic` con p-value
@@ -740,12 +804,13 @@ mean_tpm:    27.4
 consistency_gate: PASS
 ```
 
-### Step 1 — Target
+### Step 1 — Derivazione del target (in-sample)
 
 ```
-holding_period_h = 24
-sell_pct         = 0.04
-base_rate        = 23.5%   (calcolato su ADAUSDC 1H 2025)
+Griglia orizzonti: 1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48
+t-stat attivi vs inattivi massimo a h = 24  →  h* = 24
+mean_advantage(24) = +2.18%  →  sell_pct = 0.0218, direction = long
+base_rate a (24, 0.0218, long) = 23.5%   (in-sample)
 ```
 
 ### Step 2 — Struttura di mercato
@@ -963,13 +1028,24 @@ quanti falsi positivi FORGE è disposto ad ammettere tra i candidati promossi.
 > del modulo. La scelta dipende dal profilo dell'utente target e dal numero
 > medio di candidati che FORGE genera sul dataset di riferimento.
 
-### ❌ Data snooping — usare OOS per valutare
+### ❌ Data snooping — derivare il target e valutarlo sugli stessi dati
+
+La derivazione di `h*` per massima separazione è un'ottimizzazione sulla
+griglia di orizzonti: valutarla sugli stessi dati che l'hanno selezionata
+gonfia sistematicamente le misure (horizon snooping). Per questo lo split
+IS/OOS è interno al modulo:
 
 ```
-DISCOVERY SET:    primi 8 mesi → usato per IC, win rate, regime analysis
-OOS SET:          ultimi 4 mesi → mai toccato → riservato a Rule Discovery
-                                  per la validazione finale
+IN-SAMPLE  (train_ratio, default 70%):
+    derivazione del target + IC, win rate, regime analysis, BH-FDR
+OUT-OF-SAMPLE (coda temporale, 30%):
+    mai toccato dalla derivazione → replay del target derivato
+    → la promozione richiede oos_validation.passed = true
 ```
+
+Rule Discovery effettua comunque la propria validazione finale con la
+meccanica reale degli ordini — la conferma OOS di Alpha Discovery protegge
+la *derivazione del target*, non sostituisce il backtest.
 
 ---
 

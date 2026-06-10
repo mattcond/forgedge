@@ -6,8 +6,9 @@ from .alpha_discovery import (
     AlphaConfig,
     AlphaContract,
     AlphaDiscovery,
+    DerivedTarget,
+    OOSValidation,
     PromotionThresholds,
-    TargetDefinition,
 )
 from .event_discovery import DiscoveryConfig, EventDiscovery
 from .market_context import (
@@ -28,7 +29,8 @@ __all__ = [
     "RegimeClassifier",
     "AlphaDiscovery",
     "AlphaConfig",
-    "TargetDefinition",
+    "DerivedTarget",
+    "OOSValidation",
     "PromotionThresholds",
     "AlphaContract",
 ]

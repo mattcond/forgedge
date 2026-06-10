@@ -11,24 +11,27 @@ from forgedge import (
     DiscoveryConfig,
     EventDiscovery,
     PromotionThresholds,
-    TargetDefinition,
 )
 from forgedge.alpha_discovery import stats
 from forgedge.alpha_discovery.market_structure import analyse_market_structure
-from forgedge.alpha_discovery.target import build_target
+from forgedge.alpha_discovery.target import binary_target, forward_returns
 
 
 # ---------------------------------------------------------------------------
 # Synthetic data
 # ---------------------------------------------------------------------------
 
-def _predictive_kpi_table(n: int = 6000, seed: int = 7) -> pd.DataFrame:
+def _predictive_kpi_table(
+    n: int = 6000, seed: int = 7, include_noise: bool = False
+) -> pd.DataFrame:
     """KPI table with a genuine mean-reversion signal in ``feat``.
 
     The one-step-ahead return is driven by ``-k * (feat - 0.5)``, so a low
     ``feat`` predicts a positive forward return.  Event Discovery should pick
-    up ``feat < <low>`` events and Alpha Discovery should measure a strong
-    negative IC and a high win rate on them.
+    up ``feat < <low>`` events; Alpha Discovery should derive a *long* target
+    at a short horizon for them (the advantage is injected at lag 1, so the
+    statistical separation decays as the horizon grows) and confirm it OOS —
+    the signal is stationary across the whole table.
     """
     rng = np.random.default_rng(seed)
     feat = rng.uniform(0.0, 1.0, n)
@@ -42,14 +45,17 @@ def _predictive_kpi_table(n: int = 6000, seed: int = 7) -> pd.DataFrame:
     close = 100.0 * np.exp(np.cumsum(r))
 
     dates = pd.date_range("2024-01-01", periods=n, freq="1h")
-    return pd.DataFrame(
-        {
-            "open_dt": dates,
-            "close": close,
-            "volume": np.abs(rng.normal(1e6, 1e5, n)),
-            "feat": feat,
-        }
-    )
+    data = {
+        "open_dt": dates,
+        "close": close,
+        "volume": np.abs(rng.normal(1e6, 1e5, n)),
+        "feat": feat,
+    }
+    if include_noise:
+        # Same distribution as 'feat' but with no effect on returns: its
+        # events pass Event Discovery's structural gates yet carry no alpha.
+        data["nfeat"] = rng.uniform(0.0, 1.0, n)
+    return pd.DataFrame(data)
 
 
 def _make_candidates(df: pd.DataFrame):
@@ -124,42 +130,52 @@ class TestStats:
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — target
+# Step 1 — forward returns and the binary target
 # ---------------------------------------------------------------------------
 
-class TestTarget:
-    def test_base_rate_in_unit_interval(self):
-        df = _predictive_kpi_table()
-        fwd, tgt, base = build_target(
-            df.set_index("open_dt")["close"], TargetDefinition(holding_period_h=24, sell_pct=0.04)
-        )
-        assert 0.0 <= base <= 1.0
+class TestTargetPrimitives:
+    def test_forward_returns_columns_match_grid(self):
+        close = pd.Series(np.linspace(100, 110, 200))
+        fwd = forward_returns(close, [1, 6, 24])
+        assert list(fwd.columns) == [1, 6, 24]
 
-    def test_no_lookahead_tail_is_nan(self):
+    def test_forward_returns_no_lookahead_tail_is_nan(self):
         close = pd.Series(np.linspace(100, 110, 100))
-        fwd, tgt, _ = build_target(close, TargetDefinition(holding_period_h=10, sell_pct=0.01))
-        # Last h bars cannot see a full forward window.
+        fwd = forward_returns(close, [10])
+        assert fwd[10].iloc[-10:].isna().all()
+        assert fwd[10].iloc[:-10].notna().all()
+
+    def test_forward_returns_values(self):
+        close = pd.Series([100.0, 110.0, 121.0])
+        fwd = forward_returns(close, [1])
+        assert fwd[1].iloc[0] == pytest.approx(0.10)
+        assert fwd[1].iloc[1] == pytest.approx(0.10)
+
+    def test_forward_returns_rejects_nonpositive_horizon(self):
+        with pytest.raises(ValueError):
+            forward_returns(pd.Series([1.0, 2.0]), [0])
+
+    def test_binary_target_no_lookahead_tail_is_nan(self):
+        close = pd.Series(np.linspace(100, 110, 100))
+        tgt, _ = binary_target(close, 10, 0.01, "long")
         assert tgt.iloc[-10:].isna().all()
-        assert fwd.iloc[-10:].isna().all()
 
     def test_long_target_triggers_on_rise(self):
         # Monotonic +2%/bar rise: every early bar reaches +4% within 24 bars.
         close = pd.Series(100.0 * (1.02 ** np.arange(60)))
-        _, tgt, base = build_target(close, TargetDefinition(holding_period_h=24, sell_pct=0.04))
+        tgt, base = binary_target(close, 24, 0.04, "long")
         assert tgt.iloc[0] == 1.0
         assert base > 0.9
 
     def test_short_direction_triggers_on_fall(self):
         close = pd.Series(100.0 * (0.98 ** np.arange(60)))
-        _, tgt, base = build_target(
-            close, TargetDefinition(holding_period_h=24, sell_pct=0.04, direction="short")
-        )
+        tgt, base = binary_target(close, 24, 0.04, "short")
         assert tgt.iloc[0] == 1.0
         assert base > 0.9
 
     def test_invalid_direction_raises(self):
         with pytest.raises(ValueError):
-            build_target(pd.Series([1.0, 2.0, 3.0]), TargetDefinition(direction="sideways"))
+            binary_target(pd.Series([1.0, 2.0, 3.0]), 24, 0.04, "sideways")
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +202,28 @@ class TestMarketStructure:
 
 
 # ---------------------------------------------------------------------------
+# Config validation
+# ---------------------------------------------------------------------------
+
+class TestConfigValidation:
+    def test_invalid_train_ratio_raises(self):
+        with pytest.raises(ValueError):
+            AlphaConfig(train_ratio=0.0)
+        with pytest.raises(ValueError):
+            AlphaConfig(train_ratio=1.2)
+
+    def test_invalid_horizon_grid_raises(self):
+        with pytest.raises(ValueError):
+            AlphaConfig(horizon_grid=())
+        with pytest.raises(ValueError):
+            AlphaConfig(horizon_grid=(0, 4))
+
+    def test_horizon_grid_sorted_and_deduplicated(self):
+        cfg = AlphaConfig(horizon_grid=(24, 1, 24, 6))
+        assert cfg.horizon_grid == (1, 6, 24)
+
+
+# ---------------------------------------------------------------------------
 # End-to-end — Alpha Discovery over Event Discovery output
 # ---------------------------------------------------------------------------
 
@@ -194,14 +232,7 @@ class TestAlphaDiscoveryEndToEnd:
     def fitted(self):
         df = _predictive_kpi_table()
         ed, cands = _make_candidates(df)
-        ad = AlphaDiscovery(
-            df.copy(),
-            cands,
-            AlphaConfig(
-                target=TargetDefinition(holding_period_h=12, sell_pct=0.01),
-                asset="SYN",
-            ),
-        )
+        ad = AlphaDiscovery(df.copy(), cands, AlphaConfig(asset="SYN"))
         contracts = ad.run()
         return df, cands, ad, contracts
 
@@ -221,33 +252,82 @@ class TestAlphaDiscoveryEndToEnd:
         # The injected signal lives in 'feat' (or features derived from it).
         assert any("feat" in f for f in feats)
 
-    def test_promoted_alpha_has_negative_ic_and_lift(self, fitted):
+    def test_derived_target_matches_injected_signal(self, fitted):
+        """The signal is injected at lag 1, so the derived horizon must be
+        short and the direction must follow the sign of the advantage."""
+        _, _, ad, _ = fitted
+        long_promoted = [c for c in ad.promoted_contracts() if c.direction == "long"]
+        assert long_promoted
+        for c in long_promoted:
+            dt = c.derived_target
+            assert dt.holding_period_h <= 8
+            assert dt.sell_pct > 0
+            assert dt.mean_advantage > 0
+
+    def test_direction_is_sign_of_mean_advantage(self, fitted):
+        _, _, _, contracts = fitted
+        for c in contracts:
+            dt = c.derived_target
+            if dt.direction == "long":
+                assert dt.mean_advantage > 0
+                assert dt.sell_pct == pytest.approx(dt.mean_advantage)
+            elif dt.direction == "short":
+                assert dt.mean_advantage < 0
+                assert dt.sell_pct == pytest.approx(-dt.mean_advantage)
+
+    def test_target_profile_covers_grid(self, fitted):
+        _, _, ad, contracts = fitted
+        grid = set(ad.config.horizon_grid)
+        for c in contracts[:10]:
+            assert set(c.derived_target.advantage_by_h) == grid
+            assert set(c.derived_target.t_stat_by_h) == grid
+            assert c.derived_target.holding_period_h in grid
+
+    def test_promoted_alpha_has_lift_and_oos_confirmation(self, fitted):
         _, _, ad, _ = fitted
         c = ad.promoted_contracts()[0]
-        assert c.underlying_feature.ic < 0          # mean-reversion signal
         assert c.event_stats.lift >= 0.08
         assert c.event_stats.cohens_d >= 0.15
         assert c.event_stats.win_rate > c.event_stats.base_rate
+        assert c.oos_validation is not None
+        assert c.oos_validation.passed
+        assert c.oos_validation.mean_advantage > 0
 
     def test_summary_sorted_by_score(self, fitted):
         _, _, ad, _ = fitted
         s = ad.summary()
         assert list(s.columns)[:3] == ["alpha_id", "status", "promoted"]
+        assert {"holding_period_h", "sell_pct", "direction", "oos_passed"} <= set(s.columns)
         scores = s["composite_score"].to_numpy()
         assert np.all(np.diff(scores) <= 1e-9)       # descending
 
     def test_contract_dict_serialises(self, fitted):
         _, _, ad, _ = fitted
-        d = ad.promoted_contracts()[0].to_contract_dict()
+        c = ad.promoted_contracts()[0]
+        d = c.to_contract_dict()
         assert d["status"] == "HYPOTHESIS"
         assert d["event_expression"]
         assert "statistical_evidence" in d
-        assert d["target_definition"]["base_rate"] == pytest.approx(ad.base_rate)
+        assert d["derived_target"]["holding_period_h"] == c.derived_target.holding_period_h
+        assert d["derived_target"]["base_rate"] == pytest.approx(c.base_rate)
+        assert d["oos_validation"]["passed"] is True
 
-    def test_rejected_contracts_carry_reasons(self, fitted):
-        _, _, ad, contracts = fitted
-        rejected = [c for c in contracts if not c.promoted]
-        assert rejected  # the predictive table also yields many weak candidates
+    def test_noise_candidates_are_rejected_with_reasons(self):
+        """Candidates built on a feature with no effect on returns must be
+        overwhelmingly rejected, and every rejection must carry reasons.
+
+        Note: on the fixture table every candidate is genuinely predictive
+        (``feat`` drives the return at *all* thresholds), so rejection is
+        exercised with an added pure-noise feature."""
+        df = _predictive_kpi_table(include_noise=True)
+        _, cands = _make_candidates(df)
+        ad = AlphaDiscovery(df.copy(), cands, AlphaConfig())
+        contracts = ad.run()
+
+        noise = [c for c in contracts if "nfeat" in c.underlying_feature.feature]
+        assert noise
+        rejected = [c for c in noise if not c.promoted]
+        assert len(rejected) >= 0.9 * len(noise)
         assert all(c.rejection_reasons for c in rejected)
 
     def test_expression_is_propagated_unchanged(self, fitted):
@@ -256,21 +336,24 @@ class TestAlphaDiscoveryEndToEnd:
         for contract in contracts:
             assert contract.event_expression == by_id[contract.event_candidate_id]
 
+    def test_split_respects_train_ratio(self, fitted):
+        df, _, ad, _ = fitted
+        assert ad.split_idx == int(round(len(df) * ad.config.train_ratio))
+
 
 # ---------------------------------------------------------------------------
-# Promotion / FDR behaviour
+# Promotion / FDR / OOS behaviour
 # ---------------------------------------------------------------------------
 
 class TestPromotionGates:
     def test_raw_pvalue_mode_is_more_permissive_than_fdr(self):
         df = _predictive_kpi_table()
         _, cands = _make_candidates(df)
-        target = TargetDefinition(holding_period_h=12, sell_pct=0.01)
 
         fdr = AlphaDiscovery(df.copy(), cands, AlphaConfig(
-            target=target, thresholds=PromotionThresholds(use_fdr=True, fdr_q=0.05)))
+            thresholds=PromotionThresholds(use_fdr=True, fdr_q=0.05)))
         raw = AlphaDiscovery(df.copy(), cands, AlphaConfig(
-            target=target, thresholds=PromotionThresholds(use_fdr=False, max_p_value=0.05)))
+            thresholds=PromotionThresholds(use_fdr=False, max_p_value=0.05)))
         fdr.run(); raw.run()
         assert len(raw.promoted_contracts()) >= len(fdr.promoted_contracts())
 
@@ -278,10 +361,31 @@ class TestPromotionGates:
         df = _predictive_kpi_table()
         _, cands = _make_candidates(df)
         ad = AlphaDiscovery(df.copy(), cands, AlphaConfig(
-            target=TargetDefinition(holding_period_h=12, sell_pct=0.01),
             thresholds=PromotionThresholds(min_lift=0.95, min_cohens_d=5.0)))
         ad.run()
         assert ad.promoted_contracts() == []
+
+    def test_train_ratio_one_disables_oos(self):
+        """With no held-out tail there is no OOS validation — contracts carry
+        ``oos_validation=None`` and the OOS gate is skipped."""
+        df = _predictive_kpi_table()
+        _, cands = _make_candidates(df)
+        ad = AlphaDiscovery(df.copy(), cands, AlphaConfig(train_ratio=1.0))
+        contracts = ad.run()
+        assert all(c.oos_validation is None for c in contracts)
+        assert ad.promoted_contracts()  # promotion still possible
+
+    def test_impossible_oos_threshold_rejects_everything(self):
+        df = _predictive_kpi_table()
+        _, cands = _make_candidates(df)
+        ad = AlphaDiscovery(df.copy(), cands, AlphaConfig(
+            thresholds=PromotionThresholds(oos_max_p=0.0)))
+        ad.run()
+        assert ad.promoted_contracts() == []
+        rejected = [c for c in ad._contracts if c.oos_validation is not None]
+        assert any(
+            any("OOS" in r for r in c.rejection_reasons) for c in rejected
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -294,14 +398,11 @@ class TestScopeMetadataInert:
         leave every statistical measure untouched."""
         df = _predictive_kpi_table()
         ed, cands = _make_candidates(df)
-        target = TargetDefinition(holding_period_h=12, sell_pct=0.01)
 
         a = AlphaDiscovery(ed.df, cands, AlphaConfig(
-            target=target, asset="AAA", exchange="ex1", timeframe="1H",
-            fee_per_side=0.001))
+            asset="AAA", exchange="ex1", timeframe="1H", fee_per_side=0.001))
         b = AlphaDiscovery(ed.df, cands, AlphaConfig(
-            target=target, asset="ZZZ", exchange="ex2", timeframe="4H",
-            fee_per_side=0.009))
+            asset="ZZZ", exchange="ex2", timeframe="4H", fee_per_side=0.009))
         a.run(); b.run()
 
         sa = a.summary().drop(columns=["alpha_id"])
@@ -312,18 +413,6 @@ class TestScopeMetadataInert:
         assert (ca.asset, ca.timeframe, ca.fee_per_side) == ("AAA", "1H", 0.001)
         assert (cb.asset, cb.timeframe, cb.fee_per_side) == ("ZZZ", "4H", 0.009)
 
-    def test_direction_does_affect_measurements(self):
-        """direction is part of the economic target, not metadata: flipping it
-        changes the binary target and therefore the measurements."""
-        df = _predictive_kpi_table()
-        ed, cands = _make_candidates(df)
-        long_ad = AlphaDiscovery(ed.df, cands, AlphaConfig(
-            target=TargetDefinition(holding_period_h=12, sell_pct=0.01, direction="long")))
-        short_ad = AlphaDiscovery(ed.df, cands, AlphaConfig(
-            target=TargetDefinition(holding_period_h=12, sell_pct=0.01, direction="short")))
-        long_ad.run(); short_ad.run()
-        assert long_ad.base_rate != pytest.approx(short_ad.base_rate)
-
 
 # ---------------------------------------------------------------------------
 # Regime sensitivity
@@ -333,8 +422,7 @@ class TestRegimeSensitivity:
     def test_no_regime_column_yields_unknown_dependency(self):
         df = _predictive_kpi_table()
         _, cands = _make_candidates(df)
-        ad = AlphaDiscovery(df.copy(), cands, AlphaConfig(
-            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        ad = AlphaDiscovery(df.copy(), cands, AlphaConfig())
         ad.run()
         c = ad.summary().iloc[0]
         assert c["regime_dependency"] == "unknown"
@@ -353,8 +441,7 @@ class TestRegimeSensitivity:
         df = df.copy()
         df["regime"] = regime.values
         _, cands = _make_candidates(df)
-        ad = AlphaDiscovery(df, cands, AlphaConfig(
-            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        ad = AlphaDiscovery(df, cands, AlphaConfig())
         ad.run()
         promoted = ad.promoted_contracts()
         assert promoted
@@ -380,8 +467,7 @@ class TestNoRecompute:
         from forgedge.event_discovery.models import EventCandidate
         monkeypatch.setattr(EventCandidate, "apply", _boom)
 
-        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(
-            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig())
         contracts = ad.run()
         assert len(contracts) == len(cands)
 
@@ -400,8 +486,7 @@ class TestNoRecompute:
 
         monkeypatch.setattr(disc, "build_feature_series", _boom)
 
-        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(
-            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig())
         contracts = ad.run()
         assert len(contracts) == len(cands)
 
@@ -413,27 +498,25 @@ class TestNoRecompute:
         for c in stripped:
             c.event_series = None
 
-        ad = AlphaDiscovery(ed.df, stripped, AlphaConfig(
-            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        ad = AlphaDiscovery(ed.df, stripped, AlphaConfig())
         contracts = ad.run()
         assert len(contracts) == 5
 
     def test_activation_counts_match_event_discovery(self):
-        """The activations Alpha Discovery sees are Event Discovery's, bar for bar."""
+        """The activations Alpha Discovery sees are Event Discovery's, bar for
+        bar, restricted to the in-sample window."""
         df = _predictive_kpi_table()
         ed, cands = _make_candidates(df)
-        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(
-            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig())
         ad.run()
-        # n_activations in the contract differs from the gate count only by the
-        # bars whose forward target is incomplete (the last h bars).
-        h = 12
+        split = ad.split_idx
+        n = len(df)
         for cand, contract in zip(cands, ad._contracts):
             stored = cand.event_series.fillna(0).astype(bool)
-            tail_active = int(stored.iloc[-h:].sum())
-            expected_min = cand.activation_stats.n_activations - tail_active
-            assert expected_min <= contract.event_stats.n_activations \
-                <= cand.activation_stats.n_activations
+            # The forward window of every IS bar is complete (split + h < n),
+            # so n_activations equals the stored IS activation count exactly.
+            assert split + contract.derived_target.holding_period_h < n
+            assert contract.event_stats.n_activations == int(stored.iloc[:split].sum())
 
 
 # ---------------------------------------------------------------------------
@@ -445,14 +528,12 @@ class TestInputHandling:
         df = _predictive_kpi_table(n=500).drop(columns=["open_dt"])
         _, cands = _make_candidates(_predictive_kpi_table(n=500))
         with pytest.raises(ValueError):
-            AlphaDiscovery(df, cands, AlphaConfig(
-                target=TargetDefinition(), timestamp_col="open_dt"))
+            AlphaDiscovery(df, cands, AlphaConfig(timestamp_col="open_dt"))
 
     def test_accepts_datetime_index(self):
         df = _predictive_kpi_table(n=2000)
         _, cands = _make_candidates(df)
         indexed = df.set_index("open_dt")
-        ad = AlphaDiscovery(indexed, cands, AlphaConfig(
-            target=TargetDefinition(holding_period_h=12, sell_pct=0.01)))
+        ad = AlphaDiscovery(indexed, cands, AlphaConfig())
         contracts = ad.run()
         assert len(contracts) == len(cands)
