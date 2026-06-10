@@ -91,6 +91,10 @@ class EventGenerator:
                 event_type="threshold",
                 expression=_make_expr(ts.col, direction, threshold),
                 source_cols=ts.source_cols,
+                event_formula=_build_event_formula(
+                    ts.source_feature, ts.source_cols, ts.transform,
+                    merged_params, threshold, direction, "threshold",
+                ),
                 sql_expression=_build_sql_expression(
                     ts.source_feature, ts.source_cols, ts.transform,
                     merged_params, threshold, direction, "threshold",
@@ -116,6 +120,10 @@ class EventGenerator:
                     event_type="crossing",
                     expression=_make_crossing_expr(ts.col, direction, threshold),
                     source_cols=ts.source_cols,
+                    event_formula=_build_event_formula(
+                        ts.source_feature, ts.source_cols, ts.transform,
+                        merged_params, threshold, direction, "crossing",
+                    ),
                     sql_expression=_build_sql_expression(
                         ts.source_feature, ts.source_cols, ts.transform,
                         merged_params, threshold, direction, "crossing",
@@ -165,6 +173,7 @@ class EventGenerator:
             direction="above",
             event_type="threshold",
             expression=f"{col_name} == {high_val}",
+            event_formula=f"{col_name} = {high_val}",
             sql_expression=f'"{col_name}" = {high_val}',
         )
         return [RawEvent(series=bool_series, component=comp)]
@@ -220,6 +229,7 @@ class EventGenerator:
                 direction="above",
                 event_type="threshold",
                 expression=f"{col_name} == '{cls}'",
+                event_formula=f"{col_name} = '{cls}'",
                 sql_expression=f'"{col_name}" = \'{cls}\'',
             )
             events.append(RawEvent(series=bool_series, component=comp))
@@ -554,3 +564,68 @@ def _sql_condition(
             f" AND LAG(({t_sql})) OVER (ORDER BY {ts_col}) {opp} {thr})"
         )
     return f"({t_sql}) {op} {thr}"
+
+
+# ---------------------------------------------------------------------------
+# Human-readable formula builders
+# ---------------------------------------------------------------------------
+
+def _build_event_formula(
+    source_feature: str,
+    source_cols: list,
+    transform: str,
+    transform_params: dict,
+    threshold: float,
+    direction: str,
+    event_type: str,
+) -> str:
+    """Build a human-readable mathematical formula for one event component."""
+    feat = _formula_feature(source_feature, source_cols, transform_params)
+    t = _formula_transform(feat, transform, transform_params)
+    return _formula_condition(t, threshold, direction, event_type)
+
+
+def _formula_feature(source_feature: str, source_cols: list, transform_params: dict) -> str:
+    sf = source_feature
+    sc = source_cols
+    if sf.startswith("ratio_") and len(sc) == 2:
+        return f"{sc[0]} / {sc[1]}"
+    if sf.startswith("spread_") and len(sc) == 2:
+        return f"({sc[0]} - {sc[1]}) / {sc[1]}"
+    if sf.startswith("diffnorm_") and len(sc) == 2:
+        std = transform_params.get("diffnorm_std", 1.0)
+        if std != 1.0:
+            return f"({sc[0]} - {sc[1]}) / {std:.4g}"
+        return f"{sc[0]} - {sc[1]}"
+    if sf.startswith("bb_pct_b_") and len(sc) == 3:
+        val, lower, upper = sc
+        return f"bb_pct_b({val}, {lower}, {upper})"
+    if sf.startswith("pos_") and len(sc) == 3:
+        val, mn, mx = sc
+        return f"pos({val}, {mn}, {mx})"
+    # arity-1: native column
+    return sc[0] if sc else sf
+
+
+def _formula_transform(feat: str, transform: str, transform_params: dict) -> str:
+    if transform == "identity":
+        return feat
+    if transform == "rolling_pctrank":
+        w = transform_params.get("window", "?")
+        return f"pctrank({feat}, w={w})"
+    if transform == "rolling_zscore":
+        w = transform_params.get("window", "?")
+        return f"zscore({feat}, w={w})"
+    if transform == "delta":
+        lag = transform_params.get("lag", 1)
+        return f"Δ({feat}, lag={lag})"
+    return feat
+
+
+def _formula_condition(t: str, threshold: float, direction: str, event_type: str) -> str:
+    thr = f"{threshold:.4g}"
+    if event_type == "crossing":
+        arrow = "↓" if direction == "below" else "↑"
+        return f"{t} crosses {arrow} {thr}"
+    op = "<" if direction == "below" else ">"
+    return f"{t} {op} {thr}"

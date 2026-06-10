@@ -561,6 +561,9 @@ def _make_composed_event(
     sql_parts = [c.sql_expression for c in components if c.sql_expression]
     sql_expr = " AND ".join(f"({s})" for s in sql_parts) if sql_parts else ""
 
+    formula_parts = [c.event_formula for c in components if c.event_formula]
+    formula_expr = " AND ".join(f"({f})" for f in formula_parts) if formula_parts else ""
+
     comp = EventComponent(
         source_feature=source,
         transform="and_composition",
@@ -571,6 +574,7 @@ def _make_composed_event(
         direction="n/a",
         event_type="threshold",
         expression=expr,
+        event_formula=formula_expr,
         sql_expression=sql_expr,
     )
     comp._components = components  # type: ignore[attr-defined]
