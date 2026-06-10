@@ -1,424 +1,522 @@
-# Modulo 1 — Event Discovery (Spec da Codebase)
+# Modulo 1 — Event Discovery
 
-> **Riferimento codice:** `src/forgedge/event_discovery/`
-> **Analisi funzionale:** `docs/modules/EventDiscovery.md`
-> **Stato:** ✅ Implementato. Logica core allineata con analisi funzionale;
-> presenti funzionalità aggiuntive non documentate (SQL export, formula
-> matematica leggibile, apply OOS, walk-forward dettagliato).
-> Aggiornato a `main` dopo commit `f21b454` (5 bug fix) e `88908ce` (`event_formula`).
+Il Modulo 1 scopre eventi booleani dalla struttura temporale degli indicatori
+nella KPI Table. Un **evento** è una condizione booleana (es. `RSI < 30.5 AND pctrank_96 < 0.10`)
+che si attiva su un sottoinsieme di barre. Il modulo lavora **senza mai vedere il
+forward return**: valuta solo se un evento ha un pattern di attivazione temporale
+stabile e statisticamente plausibile.
 
----
-
-## 1. Posizione nella pipeline
-
-```
-KPI Table + regime (da Modulo 0)
-        │
-        ▼
-  EventDiscovery.run()
-        │
-        ▼
-   list[EventCandidate]  ──► Alpha Discovery (Modulo 2)
-```
-
-Il Modulo 1 non vede mai il forward return. Opera esclusivamente sulla struttura
-temporale degli indicatori nella KPI Table.
+L'output è una lista di `EventCandidate`, uno per ogni evento che supera il
+ConsistencyGate. Questi candidati vengono poi passati al Modulo 2 per misurare
+il loro potere predittivo.
 
 ---
 
-## 2. Interfaccia pubblica
-
-### `EventDiscovery` (`discovery.py`)
+## Utilizzo di base
 
 ```python
-EventDiscovery(kpi_table, config=None)
+from forgedge import EventDiscovery
+from forgedge.event_discovery.discovery import DiscoveryConfig
+from forgedge.event_discovery.models import GateParams
+
+ed = EventDiscovery(enriched_kpi)       # kpi già arricchita con regime da Modulo 0
+candidates = ed.run()
+
+print(f"Trovati {len(candidates)} candidati")
+print(ed.summary().sort_values("mean_tpm", ascending=False).head(10))
 ```
 
-| Metodo / Proprietà | Descrizione |
-|---|---|
-| `run() → list[EventCandidate]` | Esegue la pipeline completa; restituisce tutti i candidati che passano il gate |
-| `summary() → pd.DataFrame` | Riepilogo tabellare di tutti i candidati (post `run()`) |
-| `validated_candidates() → list[EventCandidate]` | Solo i candidati che passano la walk-forward OOS validation |
-| `get_classifications() → dict` | Classificazioni delle colonne da Step 0 (debug) |
-| `is_period → tuple or None` | (inizio, fine) del periodo in-sample |
-| `oos_period → tuple or None` | (inizio, fine) del periodo OOS, o None se nessun split |
-| `df` | KPI Table post-pipeline (con colonne derivate aggiunte da Step 1) |
+La configurazione di default usa i parametri di produzione (`min_act=50`,
+`min_months=8`, ecc.). Per esplorare con soglie più permissive:
+
+```python
+config = DiscoveryConfig(
+    gate_params=GateParams(min_act=30, min_months=6, max_conc=0.50, min_tpm=1.5),
+    max_and_components=2,
+)
+ed = EventDiscovery(enriched_kpi, config=config)
+candidates = ed.run()
+```
 
 ---
 
-## 3. Pipeline a 5 step
+## La pipeline a 5 step
 
-### Step 0 — TypeClassifier (`classifier.py`)
+### Step 0 — Classificazione delle colonne (`TypeClassifier`)
 
-Classifica ogni colonna non-timestamp del DataFrame:
+Ogni colonna del DataFrame (escluso il timestamp) viene classificata in uno
+di tre tipi:
 
-| Tipo | Criterio |
-|---|---|
-| `BINARY` | Esattamente 2 valori distinti non-null |
-| `CATEGORICAL` | Non numerica, o numerica con valori distinti ≤ `max_categorical_classes` |
-| `CONTINUOUS` | Numerica con più di 2 valori distinti |
+| Tipo | Criterio | Trattamento downstream |
+|---|---|---|
+| `CONTINUOUS` | Numerica, > 2 valori distinti | Pipeline completa (Step 1–3) |
+| `BINARY` | Esattamente 2 valori distinti | Salta Step 1–2, va direttamente a Step 3 |
+| `CATEGORICAL` | Non numerica, o ≤ `max_categorical_classes` valori | One-hot in Step 3; se > limite, esclusa |
 
-Per le colonne CONTINUOUS, viene eseguita anche la rilevazione **scale-free**
-(euristica asimmetrica conservativa — falso negativo costa meno di falso positivo).
-Il risultato può essere sovrascritto via `scale_free_overrides`.
+Per le colonne CONTINUOUS viene rilevata anche la proprietà **scale-free**:
+una serie è scale-free se i suoi valori sono intrinsecamente delimitati
+(es. RSI in [0,100], percentuali) e non dipendono dal livello di prezzo
+dell'asset. Questa proprietà determina se la trasformazione `identity`
+viene inclusa nel Step 2.
 
-Output per colonna: `ColumnClassification` con:
-- `col_type: ColumnType`
-- `n_distinct: int`
-- `is_scale_free: bool | None`
-- `scale_free_override: bool | None`
-- `effective_scale_free: bool` (property: override > automatico > False)
-- `scale_free_overridden: bool` (property: True se override contraddice l'automatico)
+Il rilevamento è un'euristica asimmetrica e conservativa: preferisce il falso
+negativo (classificare come non-scale-free una serie che lo è) al falso positivo
+(classificare come scale-free una serie che non lo è, generando eventi con
+soglie dipendenti dal livello assoluto del prezzo).
 
-Le colonne CATEGORICAL con `n_distinct > max_categorical_classes` (default: 20)
-vengono classificate ma escluse dalla generazione degli eventi.
+**Override manuale:** se l'euristica produce un risultato errato su una colonna
+specifica, è possibile correggerla:
+
+```python
+config = DiscoveryConfig(
+    scale_free_overrides={"close_rsi_14": True, "volume": False}
+)
+```
+
+Dopo `run()`, le classificazioni sono ispezionabili via `ed.get_classifications()`:
+
+```python
+cls = ed.get_classifications()
+for col, c in cls.items():
+    print(f"{col}: {c.col_type.value}, scale_free={c.effective_scale_free}")
+```
 
 ---
 
-### Step 1 — FeatureGenerator (`feature_generator.py`)
+### Step 1 — Generazione delle feature (`FeatureGenerator`)
 
-Genera le feature derivate dal catalogo di feature native.
+A partire dalle feature native della KPI Table, vengono generate feature derivate
+di arietà 1, 2 e 3:
 
-| Arietà | Operazione | Esempio | Condizione |
+| Arietà | Operazione | Formula | Esempio |
 |---|---|---|---|
-| 1 (pass-through) | Identità | `close_rsi_25` | Solo scale-free |
-| 2 (ratio) | `a / b` | `ratio_close_ema_09_ema_25` | Stessa famiglia, stesso source |
-| 2 (spread%) | `(a - b) / b` | `spread_close_bb_upper_lower` | Stessa famiglia |
-| 2 (diffnorm) | `(a - b) / std(a-b)` | `diffnorm_close_sma_09_sma_25` | Stessa famiglia, stesso source |
-| 3 (bb_pct_b) | `(val - lo) / (hi - lo)` | `bb_pct_b_close_bb_lower_upper` | Bande di Bollinger |
-| 3 (pos) | `(val - min) / (max - min)` | `pos_close_min_24_max_48` | Rolling min/max |
+| 1 | Pass-through | `f` | `close_rsi_25` (solo scale-free) |
+| 2 | Ratio | `a / b` | `ratio_close_ema_09_ema_25` |
+| 2 | Spread percentuale | `(a - b) / b` | `spread_close_bb_upper_lower` |
+| 2 | Diffnorm | `(a - b) / σ(a-b)` | `diffnorm_close_sma_09_sma_25` |
+| 3 | %B Bollinger | `(val - lo) / (hi - lo)` | `bb_pct_b_close_bb_lower_upper` |
+| 3 | Posizione in range | `(val - min) / (max - min)` | `pos_close_min_24_max_48` |
 
-Per le feature `diffnorm`, la deviazione standard viene calcolata sull'insieme
-in-sample e salvata in `transform_params["diffnorm_std"]` per il replay OOS.
+Le feature di arietà 2 vengono generate solo tra colonne della stessa famiglia
+(es. due EMA sullo stesso source, non EMA e RSI). I denominatori nulli producono
+`NaN` (non `±inf` o `pd.NA`), preservando il dtype `float64`.
+
+Per la feature `diffnorm`, la deviazione standard `σ(a-b)` viene calcolata
+sul periodo in-sample e salvata in `transform_params["diffnorm_std"]`.
+Questo valore viene riutilizzato per il replay OOS in modo da preservare
+la stessa scala dell'in-sample: la feature OOS viene normalizzata con la
+stessa deviazione standard IS, non ricalcolata.
 
 ---
 
-### Step 2 — TransformLayer (`transform_layer.py`)
+### Step 2 — Trasformazioni temporali (`TransformLayer`)
 
-Applica i 4 transform temporali a ogni feature del catalogo:
+Ogni feature del catalogo riceve le seguenti trasformazioni:
 
-| Transform | Codice | Finestre | Applicabile a |
+| Transform | Codice | Finestre | Applica a |
 |---|---|---|---|
 | Identità | `identity` | — | Solo scale-free |
-| Rolling pctrank | `rolling_pctrank` | 48, 96, 168 barre | Tutte le continue |
-| Rolling zscore | `rolling_zscore` | 48, 96, 168 barre | Tutte le continue |
+| Rolling percentile rank | `rolling_pctrank` | 48, 96, 168 barre | Tutte le continue |
+| Rolling z-score | `rolling_zscore` | 48, 96, 168 barre | Tutte le continue |
 | Delta (differenza) | `delta` | 1, 3, 6, 12 barre | Tutte le continue |
 
 `min_periods` per le finestre rolling: `max(2, window // 2)`.
+Questo significa che la finestra da 96 barre inizia a produrre valori già dopo
+48 barre, anche se la stima è meno stabile.
+
+**Perché queste trasformazioni?**
+- `identity`: per feature già scale-free e stazionarie (RSI, %B), il valore
+  grezzo è direttamente comparabile su tutto il dataset.
+- `rolling_pctrank`: converte qualsiasi serie in un range [0,1] relativo alla
+  storia recente. È robusta agli outlier e non richiede stazionarietà.
+- `rolling_zscore`: sensibile alla distribuzione locale. Utile per rilevare
+  deviazioni statistiche dalla media recente.
+- `delta`: cattura le variazioni di breve periodo (momentum o reversal su lag specifici).
 
 ---
 
-### Step 3 — EventGenerator (`event_generator.py`)
+### Step 3 — Generazione degli eventi (`EventGenerator`)
 
-Converte ogni serie trasformata in eventi booleani:
+Ogni serie trasformata viene convertita in eventi booleani applicando soglie.
+Il Threshold Catalog distingue due famiglie di soglie:
 
-| Tipo evento | Descrizione |
-|---|---|
-| `threshold` | Persistente: serie < soglia o serie > soglia |
-| `crossing` | Transizione: la barra t attraversa la soglia rispetto a t-1 |
+**Soglie distribuzionali** (basate sui percentili della serie trasformata):
+```
+p3, p5, p10, p20, p25    (code basse — condizioni estreme al ribasso)
+p75, p80, p90, p95, p97  (code alte — condizioni estreme al rialzo)
+```
 
-**Soglie dal Threshold Catalog (distribuzionali):**
-- Percentili della serie trasformata: p3, p5, p10, p20, p25, p75, p80, p90, p95, p97
-- Soglie teoriche z-score: -2.0, -1.5, -1.0, 0, +1.0, +1.5, +2.0 (per zscore transform)
+**Soglie teoriche** (per la trasformazione zscore):
+```
+-2.0, -1.5, -1.0, 0.0, +1.0, +1.5, +2.0
+```
 
-**Colonne BINARY:** un evento per ogni valore (0 o 1) — transform: `binary_native`.
-**Colonne CATEGORICAL:** un evento per classe (one-hot) — transform: `categorical_onehot`.
+Per ciascuna soglia vengono generati due tipi di evento:
+
+| Tipo | Descrizione | Quando attivo |
+|---|---|---|
+| `threshold` | Stato persistente | Ogni barra in cui la condizione è vera |
+| `crossing` | Transizione istantanea | Solo la barra in cui la serie attraversa la soglia |
+
+Gli eventi di tipo `crossing` segnalano "il segnale è appena entrato in zona",
+utile per logiche di entry. Gli eventi `threshold` catturano "il segnale è in
+zona da un numero arbitrario di barre", più appropriato per filtri di regime.
+
+**Colonne BINARY:** genera un evento `binary_native` per ciascuno dei due valori
+(0 e 1) — non richiede trasformazioni.
+
+**Colonne CATEGORICAL:** genera un evento `categorical_onehot` per ogni classe
+con `n_distinct ≤ max_categorical_classes`. Le classi con troppi valori
+distinti vengono escluse perché assimilabili a identificatori.
 
 ---
 
-### Step 4 — ConsistencyGate (`consistency_gate.py`)
+### Step 4 — ConsistencyGate (`ConsistencyGate`)
 
-Filtra gli eventi per la loro distribuzione temporale.
-Un evento **passa** se e solo se soddisfa tutti e 4 i criteri:
+Il gate filtra gli eventi in base alla loro distribuzione temporale di attivazione.
+La logica è: un evento con struttura temporale instabile (es. tutti i trigger
+concentrati in un solo mese) non è candidato affidabile per l'alpha discovery.
 
-| Criterio | Parametro | Default | Descrizione |
+Un evento **passa** se e solo se soddisfa **tutti** i 4 criteri:
+
+| Criterio | Parametro | Default | Razionale |
 |---|---|---|---|
-| Volume | `min_act` | 50 | Attivazioni totali su tutto il dataset |
-| Copertura | `min_months` | 8 | Mesi di calendario con almeno un'attivazione |
-| Concentrazione | `max_conc` | 0.40 | Quota massima di attivazioni in un singolo mese |
-| Frequenza | `min_tpm` | 2.0 | Media attivazioni per mese (totale / n_mesi) |
+| Volume minimo | `min_act` | 50 | Stima statistica affidabile richiede campione sufficiente |
+| Copertura temporale | `min_months` | 8 | L'evento deve essersi attivato in almeno 8 mesi distinti |
+| Concentrazione | `max_conc` | 0.40 | Nessun singolo mese può contenere > 40% delle attivazioni |
+| Frequenza media | `min_tpm` | 2.0 | Almeno 2 attivazioni al mese in media |
 
-Il `fail_reason` nel `GateResult` riporta il primo criterio fallito.
+Il `GateResult` include il campo `fail_reason` con il primo criterio fallito
+(utile per debug e tuning dei parametri).
 
----
+```python
+# Analisi degli eventi che non passano il gate
+for candidate in ed.run():
+    pass  # già solo quelli che passano
 
-### Step 5 — ANDComposer (`and_composer.py`)
-
-Combina gli eventi che passano il gate con AND logico.
-La composizione è consentita tra:
-- **Stesso feature, transform diversi** (es. identity + pctrank96 sulla stessa RSI)
-- **Feature semanticamente distinte**
-
-La composizione è **vietata** tra:
-- Stesso transform + soglie diverse sullo stesso feature (una è sottoinsieme dell'altra)
-
-Gli eventi composti vengono sottoposti nuovamente al ConsistencyGate.
-`max_and_components` (default: 2) controlla il massimo numero di componenti.
+# Per vedere anche i falliti, inspezionare raw_events (non esposto pubblicamente)
+# ma si può abbassare le soglie del gate per esplorare
+```
 
 ---
 
-## 4. Strutture dati principali
+### Step 5 — AND Composition (`ANDComposer`)
 
-### `EventCandidate` (`models.py`)
+Il composer combina coppie (e opzionalmente triple) di eventi che passano il gate
+con l'operatore AND, cercando combinazioni che mantengano la coerenza temporale.
 
-Artefatto di output del Modulo 1.
+**Regole di ammissibilità per l'AND:**
+- ✅ Stesso feature, trasformazioni diverse (es. `identity` AND `pctrank_96` su RSI)
+- ✅ Feature semanticamente distinte (es. RSI AND volume)
+- ❌ Stessa trasformazione + soglie diverse sullo stesso feature (una è sottoinsieme dell'altra)
+
+Il composto `A AND B` viene poi ri-sottoposto al ConsistencyGate. Solo le
+composizioni che passano anche il gate composto vengono promosse a candidati.
+
+`max_and_components` (default 2) limita il numero di componenti. Valori > 3
+sono accettati ma fortemente sconsigliati per rischio di overfitting strutturale.
+
+**Esempio di AND composition valida:**
+```
+RSI25 < 30.5                          (identity threshold, p10)
+AND
+pctrank(RSI25, w=96) < 0.10           (rolling pctrank, p10)
+
+→ "RSI è in zona oversold AND lo è stato raramente nelle ultime 96 barre"
+→ Combinazione semanticamente ricca, non ridondante
+```
+
+---
+
+## Strutture dati
+
+### `EventCandidate`
+
+Artefatto finale prodotto da `run()`. Ogni candidato rappresenta un evento
+booleano che ha superato il ConsistencyGate.
+
+```python
+cand = candidates[0]
+print(cand.event_id)       # "EVT-close_rsi_25-PR-0042"
+print(cand.expression)     # "pr_close_rsi_25_96 < 0.10"
+print(cand.event_formula)  # "pctrank(close_rsi_25, w=96) < 0.10"
+print(cand.activation_stats.n_activations)    # 329
+print(cand.activation_stats.mean_tpm)         # 4.7
+print(cand.consistency_gate.max_monthly_share) # 0.18
+```
 
 | Campo | Tipo | Descrizione |
 |---|---|---|
-| `event_id` | `str` | ID nel formato `EVT-{feature}-{transform_abbr}-{idx:04d}` |
+| `event_id` | `str` | Identificatore unico nel formato `EVT-{feature}-{transform_abbr}-{idx:04d}` |
 | `status` | `str` | Sempre `"CANDIDATE"` a questo stadio |
 | `components` | `list[EventComponent]` | 1 per eventi semplici, 2-3 per AND composition |
-| `expression` | `str` | Espressione booleana leggibile (componenti unite con ` AND `) |
+| `expression` | `str` | Espressione booleana leggibile (nomi colonne trasformate) |
+| `event_formula` | `str` | Formula in notazione matematica standard |
 | `activation_stats` | `ActivationStats` | Statistiche di distribuzione temporale |
-| `consistency_gate` | `GateResult` | Sempre `passed=True` per candidati restituiti da `run()` |
+| `consistency_gate` | `GateResult` | Sempre `passed=True` per candidati da `run()` |
 | `event_series` | `pd.Series` | Serie booleana 0/1/NaN con DatetimeIndex |
-| `validation` | `ValidationResult | None` | Risultato walk-forward OOS; None se non configurato |
-| `event_formula` | `str` (property) | Formula matematica leggibile (notazione standard) |
-| `sql_expression` | `str` (property) | Espressione booleana DuckDB-compatibile |
+| `validation` | `ValidationResult \| None` | Risultato walk-forward OOS; None se non configurato |
+| `sql_expression` | `str` (property) | Espressione DuckDB-compatibile |
 
-**Metodo `apply(df)`:** ricostruisce la serie booleana su nuovi dati OOS,
-replicando feature construction + temporal transform + threshold usando i
-parametri salvati nelle componenti.
-Per feature `diffnorm`, usa `transform_params["diffnorm_std"]` dell'in-sample.
+#### Formato `event_id`
 
-### `EventComponent` (`models.py`)
+```
+EVT-{source_feature[:20]}-{transform_abbrs}-{idx:04d}
 
-| Campo | Tipo | Descrizione |
-|---|---|---|
-| `source_feature` | `str` | Nome della feature sorgente (es. `close_rsi_25`) |
-| `transform` | `str` | Tipo di transform applicato |
-| `transform_params` | `dict` | Parametri del transform (es. `{"window": 96}`) |
-| `transformed_col` | `str` | Nome colonna dopo il transform |
-| `threshold` | `float` | Soglia di binarizzazione |
-| `threshold_type` | `str` | Origine della soglia (es. `"distributional_p10"`) |
-| `direction` | `str` | `"below"` o `"above"` |
-| `event_type` | `str` | `"threshold"` o `"crossing"` |
-| `expression` | `str` | Stringa leggibile della condizione |
-| `source_cols` | `list` | Colonne native originali (per feature arity 2/3) |
-| `event_formula` | `str` | Formula matematica leggibile (notazione standard) |
-| `sql_expression` | `str` | Espressione SQL DuckDB-compatibile |
+Abbreviazioni:
+  ID  = identity
+  PR  = rolling_pctrank
+  ZS  = rolling_zscore
+  DL  = delta
+  BN  = binary_native
+  OH  = categorical_onehot
+  AND = and_composition
 
-### `GateResult` (`models.py`)
+Esempi:
+  EVT-close_rsi_25-PR-0042        (pctrank su RSI)
+  EVT-close_rsi_25-IDxPR-0117     (AND: identity × pctrank su RSI)
+```
+
+### `EventComponent`
+
+Ogni `EventCandidate` contiene uno o più componenti, uno per ciascuna condizione
+booleana nell'espressione AND.
+
+```python
+comp = cand.components[0]
+print(comp.source_feature)    # "close_rsi_25"
+print(comp.transform)         # "rolling_pctrank"
+print(comp.transform_params)  # {"window": 96}
+print(comp.threshold)         # 0.1
+print(comp.threshold_type)    # "distributional_p10"
+print(comp.direction)         # "below"
+print(comp.event_type)        # "threshold"
+print(comp.expression)        # "pr_close_rsi_25_96 < 0.10"
+print(comp.event_formula)     # "pctrank(close_rsi_25, w=96) < 0.10"
+print(comp.source_cols)       # [] per arity-1, ["col_a", "col_b"] per arity-2
+```
 
 | Campo | Descrizione |
 |---|---|
-| `passed: bool` | True se tutti i 4 criteri sono soddisfatti |
-| `n_activations: int` | Totale attivazioni |
-| `n_active_months: int` | Mesi con almeno un'attivazione |
-| `max_monthly_share: float` | Quota del mese più concentrato |
-| `mean_tpm: float` | Media attivazioni per mese |
-| `fail_reason: str | None` | Primo criterio fallito, o None se passato |
+| `source_feature` | Nome della feature sorgente (es. `close_rsi_25`, `ratio_close_ema_09_ema_25`) |
+| `transform` | Tipo di transform: `identity`, `rolling_pctrank`, `rolling_zscore`, `delta`, `binary_native`, `categorical_onehot` |
+| `transform_params` | Parametri del transform: `{"window": 96}` per pctrank/zscore, `{"lag": 3}` per delta, `{"diffnorm_std": 0.023}` per diffnorm |
+| `transformed_col` | Nome della colonna trasformata (es. `pr_close_rsi_25_96`) |
+| `threshold` | Valore numerico della soglia (es. `0.10`, `30.5`) |
+| `threshold_type` | Origine: `"distributional_p10"`, `"theoretical_z-1.5"`, ecc. |
+| `direction` | `"below"` o `"above"` |
+| `event_type` | `"threshold"` (persistente) o `"crossing"` (transizione) |
+| `expression` | Stringa leggibile della singola condizione |
+| `event_formula` | Formula in notazione standard (es. `pctrank(close_rsi_25, w=96) < 0.10`) |
+| `source_cols` | Colonne native originali (vuoto per arity-1; `[col_a, col_b]` per arity-2; `[val, lo, hi]` per arity-3) |
+| `sql_expression` | Espressione SQL DuckDB-compatibile |
 
-### `ActivationStats` (`models.py`)
+### `ActivationStats`
 
-Come `GateResult` ma include anche `zero_months` (mesi senza attivazioni).
-
----
-
-## 5. Format dell'event_id
-
-Il codice genera:
-```
-EVT-{source_feature[:20]}-{transform_abbrs}-{idx:04d}
-```
-
-Abbreviazioni transform:
 ```python
-"identity"          → "ID"
-"rolling_pctrank"   → "PR"
-"rolling_zscore"    → "ZS"
-"delta"             → "DL"
-"binary_native"     → "BN"
-"categorical_onehot"→ "OH"
-"and_composition"   → "AND"
-```
-
-Esempi:
-```
-EVT-close_rsi_25-PR-0042          # pctrank su RSI
-EVT-close_rsi_25-PRxZS-0117       # AND: pctrank × zscore su RSI
+stats = cand.activation_stats
+print(stats.n_activations)      # totale attivazioni
+print(stats.n_active_months)    # mesi con almeno un'attivazione
+print(stats.zero_months)        # mesi senza attivazioni
+print(stats.max_monthly_share)  # quota del mese più concentrato
+print(stats.mean_tpm)           # media attivazioni per mese
 ```
 
 ---
 
-## 6. Walk-forward OOS validation
+## Formula matematica (`event_formula`)
 
-Opzionale, configurabile via `DiscoveryConfig(train_ratio=..., walk_forward=WalkForwardConfig(...))`.
+Il campo `event_formula` su `EventComponent` e la property `event_formula`
+su `EventCandidate` forniscono una rappresentazione in notazione matematica
+standard, più leggibile rispetto ai nomi di colonna trasformata.
 
-### Flusso
+La formula viene costruita in tre fasi da `_build_event_formula`:
 
-1. Il dataset viene diviso temporalmente: prime `train_ratio` righe = IS, il resto = OOS.
-2. La pipeline completa (Step 0–5) opera solo sull'IS.
-3. Per ogni candidato, il periodo OOS viene diviso in `n_splits` finestre uguali.
-4. Su ogni finestra, `EventCandidate.apply()` ricostruisce la serie booleana.
-   Le ultime `_MAX_CONTEXT_BARS = 168` barre IS vengono preposte come contesto
-   rolling per evitare warmup NaN all'inizio di ogni fold.
-5. Il ConsistencyGate viene applicato con parametri scalati proporzionalmente alla dimensione della finestra OOS:
-   - `min_act` e `min_months` scalati proporzionalmente (floor: 5 e 1)
+| Fase | Esempi di output |
+|---|---|
+| Feature (`_formula_feature`) | `close_rsi_25`, `close / open`, `(sma_09 - sma_25) / 0.0032`, `bb_pct_b(close, bb_lower, bb_upper)` |
+| Transform (`_formula_transform`) | `pctrank(close_rsi_25, w=96)`, `zscore(close / open, w=48)`, `Δ(close_rsi_25, lag=1)` |
+| Condizione (`_formula_condition`) | `... < 0.10`, `... > 1.5`, `... crosses ↓ -0.03` |
+
+Esempi completi per un AND candidate:
+
+```python
+cand.event_formula
+# "(pctrank(close_rsi_25, w=48) < 0.10) AND (zscore(close_rsi_25, w=96) > -1.5)"
+```
+
+---
+
+## SQL export (`sql_expression`)
+
+Ogni `EventComponent` contiene un'espressione SQL DuckDB-compatibile che replica
+la condizione identicamente alla pipeline pandas, usando le stesse finestre rolling.
+
+```python
+import duckdb
+rel = duckdb.from_df(ed.df.reset_index())
+
+# Verifica event attivo per ogni barra
+query = f"SELECT open_dt, ({cand.sql_expression})::INT AS active FROM df"
+result = rel.query("df", query)
+```
+
+Caratteristiche dell'espressione SQL:
+- `pctrank`: usa `list_filter` lambdas (DuckDB ≥ 0.8) con average-method rank
+  per riprodurre esattamente `pandas.rank(pct=True)`.
+- `zscore` e `delta`: usa window functions standard (`AVG`, `STDDEV_SAMP`, `LAG`).
+- `min_periods = max(2, window // 2)` replicato tramite `CASE WHEN`.
+- Ordine garantito tramite `ORDER BY {timestamp_col}`.
+
+---
+
+## Replay su nuovi dati: `EventCandidate.apply(df)`
+
+Il metodo `apply(df)` ricostruisce la serie booleana su un DataFrame OOS
+usando esclusivamente i parametri salvati nelle componenti, senza richiedere
+una nuova esecuzione della pipeline.
+
+```python
+oos_kpi = pd.read_parquet("kpi_oos.parquet")
+oos_series = cand.apply(oos_kpi)
+print(oos_series.value_counts())
+```
+
+Per la ricostruzione corretta le colonne native (`source_cols`) devono essere
+presenti nel DataFrame. La funzione `build_feature_series(comp, df)` ricostruisce
+la feature continua sottostante (senza trasformazione), utile per passarla
+all'Alpha Discovery:
+
+```python
+from forgedge.event_discovery.models import build_feature_series
+
+feature_series = build_feature_series(cand.components[0], oos_kpi)
+```
+
+---
+
+## Walk-forward OOS validation
+
+La validazione walk-forward è opzionale e serve a verificare che un evento
+scoperto in-sample mantenga la stessa struttura di attivazione su dati
+mai visti. È una misura di stabilità, non di potere predittivo (quello
+è compito del Modulo 2).
+
+```python
+from forgedge.event_discovery.models import WalkForwardConfig
+
+config = DiscoveryConfig(
+    train_ratio=0.80,           # 80% IS, 20% OOS
+    walk_forward=WalkForwardConfig(
+        n_splits=3,             # divide l'OOS in 3 finestre
+        min_pass_rate=0.60,     # deve passare il gate in almeno 2/3 finestre
+    ),
+)
+ed = EventDiscovery(enriched_kpi, config=config)
+candidates = ed.run()
+
+# Solo i candidati OOS-stabili
+stable = ed.validated_candidates()
+print(f"{len(stable)} candidati stabili su {len(candidates)}")
+```
+
+### Come funziona
+
+1. Il dataset viene diviso: prime `train_ratio` righe = IS, il resto = OOS.
+2. L'intera pipeline (Step 0–5) gira **solo sull'IS**.
+3. Per ogni candidato, l'OOS viene diviso in `n_splits` finestre uguali.
+4. Su ogni finestra, `apply()` ricostruisce la serie booleana.
+   Le ultime 168 barre IS vengono preposte come contesto rolling per
+   evitare warmup NaN all'inizio di ogni fold.
+5. Il ConsistencyGate viene applicato con parametri scalati proporzionalmente
+   alla dimensione della finestra OOS:
+   - `min_act` e `min_months` scalati (floor: 5 e 1 rispettivamente)
    - `max_conc` e `min_tpm` invariati (sono rate, non conteggi)
-6. Un candidato è OOS-stabile se passa in almeno `min_pass_rate` (default 0.6) delle finestre.
+6. Un candidato è OOS-stabile se passa in almeno `min_pass_rate` delle finestre.
+
+### Output `ValidationResult`
+
+```python
+for cand in candidates:
+    if cand.validation:
+        v = cand.validation
+        print(f"{cand.event_id}: {v.n_passed}/{v.n_folds} folds, "
+              f"pass_rate={v.pass_rate:.2f}, stable={v.passed}")
+        for fold in v.fold_results:
+            print(f"  fold {fold.fold_idx}: {fold.n_rows} barre, "
+                  f"passed={fold.passed}, "
+                  f"{'OK' if fold.passed else fold.gate_result.fail_reason}")
+```
+
+---
+
+## Configurazione completa
+
+### `DiscoveryConfig`
+
+| Parametro | Default | Descrizione |
+|---|---|---|
+| `gate_params` | `GateParams()` | Soglie ConsistencyGate |
+| `max_categorical_classes` | 20 | Colonne categoriali con più classi vengono escluse dalla pipeline |
+| `scale_free_overrides` | `None` | Override manuale: `{"col": True/False}` |
+| `timestamp_col` | `"open_dt"` | Nome della colonna datetime (o nome del DatetimeIndex) |
+| `max_and_components` | 2 | Massimo componenti per AND composition (2 o 3; > 3 sconsigliato) |
+| `train_ratio` | 1.0 | Frazione IS (1.0 = nessun split OOS, walk-forward disabilitato) |
+| `walk_forward` | `None` | Config walk-forward; `None` = nessuna validazione OOS |
+
+### `GateParams`
+
+| Parametro | Default | Descrizione |
+|---|---|---|
+| `min_act` | 50 | Attivazioni totali minime nel periodo IS |
+| `min_months` | 8 | Mesi di calendario con almeno un'attivazione |
+| `max_conc` | 0.40 | Quota massima di attivazioni concentrate in un singolo mese |
+| `min_tpm` | 2.0 | Media attivazioni per mese (totale / n_mesi_totali_nel_range) |
 
 ### `WalkForwardConfig`
 
 | Parametro | Default | Descrizione |
 |---|---|---|
 | `n_splits` | 3 | Numero di finestre OOS |
-| `min_pass_rate` | 0.6 | Quota minima di finestre che devono passare |
-| `oos_gate_params` | None | Gate OOS esplicito; se None, parametri scalati automaticamente |
+| `min_pass_rate` | 0.60 | Quota minima di finestre che devono passare il gate |
+| `oos_gate_params` | `None` | Gate OOS esplicito; se `None`, i parametri IS vengono scalati proporzionalmente |
 
-### Output in `EventCandidate.validation`
+---
+
+## Parsing del timestamp
+
+La colonna timestamp accetta tutti i formati comuni:
+
+| Formato | Comportamento |
+|---|---|
+| `DatetimeIndex` sul DataFrame | Usato direttamente |
+| Colonna `datetime64` | Parsata con `pd.to_datetime` |
+| Colonna numerica (Unix epoch) | Unità inferita dal valore mediano: `<1e10`=s, `<1e13`=ms, `<1e16`=µs, altrimenti ns |
+| Colonna stringa | Parsata come ISO 8601 |
+
+La colonna timestamp viene **rimossa** da `df` dopo il parsing per non
+entrare nel TypeClassifier. `ed.df` ha sempre un `DatetimeIndex`.
+
+---
+
+## Leggere e filtrare i risultati
 
 ```python
-ValidationResult:
-    n_folds: int
-    n_passed: int
-    pass_rate: float
-    passed: bool
-    fold_results: list[FoldResult]   # dettaglio per fold
+# Riepilogo tabellare di tutti i candidati
+summary = ed.summary()
+print(summary.columns.tolist())
+# ['event_id', 'status', 'expression', 'n_activations', 'n_active_months',
+#  'zero_months', 'max_monthly_share', 'mean_tpm', 'gate_passed',
+#  'oos_pass_rate', 'oos_n_passed', 'oos_n_folds', 'oos_stable']  # OOS cols solo se walk-forward configurato
+
+# I candidati con arietà 2 (AND composition)
+and_candidates = [c for c in candidates if len(c.components) == 2]
+
+# Candidati con pctrank
+pctrank_cands = [c for c in candidates if any(comp.transform == "rolling_pctrank"
+                                               for comp in c.components)]
+
+# Serie booleana di un candidato
+series = cand.event_series   # pd.Series con DatetimeIndex
+print(series.resample("ME").sum())  # attivazioni per mese
 ```
-
----
-
-## 7. Export degli eventi
-
-### 7.1 Formula matematica leggibile (`event_formula`)
-
-Ogni `EventComponent` contiene un campo `event_formula`:
-una rappresentazione in notazione matematica standard della condizione,
-generata dai builder `_formula_feature`, `_formula_transform`, `_formula_condition`
-in `event_generator.py`.
-
-La logica di costruzione segue la stessa struttura del builder SQL:
-
-| Fase | Funzione | Esempi di output |
-|---|---|---|
-| Feature | `_formula_feature` | `rsi14`, `close / open`, `(sma_09 - sma_25) / 0.0032`, `bb_pct_b(close, bb_lower, bb_upper)` |
-| Transform | `_formula_transform` | `pctrank(rsi14, w=168)`, `zscore(close / open, w=48)`, `Δ(rsi14, lag=1)` |
-| Condizione | `_formula_condition` | `... < 0.10`, `... > 1.5`, `... crosses ↓ -0.03` |
-
-Esempi di formule complete:
-```
-close - rsi14 < 0.05
-pctrank(close - rsi14, w=168) < 0.10
-zscore(close / open, w=48) > 1.5
-Δ(rsi14, lag=1) crosses ↓ -0.03
-(pctrank(rsi14, w=48) < 0.10) AND (zscore(close, w=96) > 1.5)
-```
-
-La property `EventCandidate.event_formula` unisce le formule dei componenti con ` AND `.
-Inclusa nella serializzazione `to_dict()`.
-
-### 7.2 SQL export (`sql_expression`)
-
-Ogni `EventComponent` contiene un campo `sql_expression`:
-un'espressione booleana DuckDB-compatibile che replica la condizione
-applicando le stesse finestre rolling, pctrank, zscore, delta.
-
-Caratteristiche:
-- Usa `list_filter` lambdas per pctrank (DuckDB ≥ 0.8)
-- Usa window functions standard (`AVG`, `STDDEV_SAMP`, `LAG`) per zscore e delta
-- `min_periods = max(2, window // 2)` replicato via `CASE WHEN`
-- `ORDER BY` usa `DiscoveryConfig.timestamp_col` (default `"open_dt"`)
-
-Utilizzo esempio:
-```python
-import duckdb
-rel = duckdb.from_df(ed.df.reset_index())
-rel.query("df", f"SELECT *, ({candidate.sql_expression})::INT AS active FROM df")
-```
-
----
-
-## 8. Note di robustezza (bug fix `f21b454`)
-
-Correzioni di correttezza che non cambiano l'interfaccia pubblica ma che
-alterano il comportamento in casi limite. Rilevanti per la comprensione
-del comportamento runtime.
-
-| Bug | File | Comportamento prima | Comportamento dopo |
-|---|---|---|---|
-| **#1 — ±inf in ratio/spread** | `feature_generator.py`, `models.py` | Divisione per zero produceva `±inf`, che upcasta `float64→object` via `pd.NA` | `±inf` rimpiazzati con `float('nan')` — dtype rimane `float64` |
-| **#2 — float32 in ANDComposer** | `and_composer.py` | Accumulatori `float32` causavano errore di precisione nel calcolo `max_conc` | Accumulatori portati a `float64` su entrambi i path (pair e triple) |
-| **#3 — `diffnorm_std=0`** | `models.py` | `if not std` confondeva `None` con `0.0`; `std=0` sollevava `KeyError` con messaggio fuorviante | `if std is None` per chiave mancante; `std==0` restituisce serie all-NaN invece di errore |
-| **#4 — Allineamento indice in ConsistencyGate** | `consistency_gate.py` | Groupby con `DatetimeIndex` vs `RangeIndex` causava misalignment silenzioso | Groupby su `.values` per entrambi (`active` e `periods`) — allineamento posizionale |
-| **#5 — NaT crash in `pd.period_range`** | `discovery.py`, `consistency_gate.py` | Input tutto-NaT causava crash in `pd.period_range` | Null-guard su `p_min`/`p_max` prima di chiamare `period_range`; restituisce 0/serie vuota |
-
----
-
-## 9. Configurazione
-
-### `DiscoveryConfig` (`discovery.py`)
-
-| Parametro | Default | Descrizione |
-|---|---|---|
-| `gate_params` | `GateParams()` | Soglie ConsistencyGate (Step 4) |
-| `max_categorical_classes` | 20 | Soglia colonne categoriali (> N: escluse dalla pipeline) |
-| `scale_free_overrides` | `None` | Override manuali scale-free per colonna |
-| `timestamp_col` | `"open_dt"` | Nome della colonna datetime (o nome del DatetimeIndex) |
-| `max_and_components` | 2 | Massimo componenti per AND composition |
-| `train_ratio` | 1.0 | Frazione IS (1.0 = nessun split OOS) |
-| `walk_forward` | `None` | Config walk-forward; None = nessuna validazione OOS |
-
-### `GateParams` (`models.py`)
-
-| Parametro | Default | Descrizione |
-|---|---|---|
-| `min_act` | 50 | Attivazioni totali minime |
-| `min_months` | 8 | Mesi attivi minimi |
-| `max_conc` | 0.40 | Concentrazione mensile massima |
-| `min_tpm` | 2.0 | Attivazioni medie per mese minime |
-
----
-
-## 10. Parsing del timestamp
-
-Il `DiscoveryConfig.timestamp_col` può provenire da:
-1. **DatetimeIndex** — usato direttamente
-2. **Colonna datetime64** — parsata con `pd.to_datetime`
-3. **Colonna numerica** — unità inferita automaticamente dal valore mediano (s/ms/us/ns)
-4. **Colonna stringa** — parsata con `pd.to_datetime` (ISO 8601)
-
-La colonna timestamp viene **rimossa** da `self.df` dopo il parsing
-(ridondante, non deve entrare nel TypeClassifier).
-
----
-
-## 11. Allineamento con l'analisi funzionale
-
-### ✅ Allineato
-
-- 5 step + classificazione tipo (Step 0–5)
-- `GateParams` con i 4 criteri (min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0)
-- `ColumnType`: CONTINUOUS, BINARY, CATEGORICAL
-- `ColumnClassification` con `effective_scale_free` e `scale_free_override`
-- `max_categorical_classes = 20`
-- Generazione feature arity 1/2/3
-- 4 transform (identity/pctrank/zscore/delta) con finestre documentate
-- Eventi threshold e crossing con soglie distribuzionali e teoriche
-- AND composition con regole di ammissibilità
-- Gate riapplicato sugli eventi composti
-- Walk-forward OOS validation (`train_ratio`, `WalkForwardConfig`)
-- `EventCandidate` con tutti i campi documentati
-
-### ➕ Aggiunto nel codice (non nella documentazione funzionale)
-
-- **`sql_expression`** su `EventComponent` e `EventCandidate` — export DuckDB
-- **`EventCandidate.apply(df)`** — replay deterministico della serie booleana su nuovi dati
-- **`build_feature_series(comp, df)`** — funzione modulo per la feature continua sottostante
-- **`_MAX_CONTEXT_BARS = 168`** — coda IS usata come contesto rolling nella validazione OOS
-- **`_scale_gate_params()`** — scaling proporzionale dei parametri IS per le finestre OOS
-- **`validated_candidates()`** — metodo convenienza per i soli candidati OOS-stabili
-- **`is_period` e `oos_period`** — proprietà per le date dei periodi IS/OOS
-- **`source_cols`** su `EventComponent` — colonne native originali per feature arity-2/3
-- **`diffnorm_std`** salvato in `transform_params` — normalizzatore IS preservato per OOS
-- **`event_formula`** su `EventComponent` e `EventCandidate` — formula matematica leggibile in notazione standard (parallela a `sql_expression`)
-
-### ⚠️ Divergenze rispetto all'analisi funzionale
-
-- **Format `event_id`:** Il codice genera `EVT-close_rsi_25-PR-0042` (indice sequenziale).
-  L'analisi funzionale mostra un formato più dettagliato con finestra e soglia
-  encoded nell'ID (es. `EVT-close_rsi_25-ID×PR-P105-W096-P010`).
-  Il codice usa un indice progressivo invece di encodare i parametri.
-
-- **Separatore AND composition:** Il codice usa `x` minuscolo (`PRxZS`);
-  l'analisi funzionale usa `×` (moltiplicazione Unicode, `ID×PR`).
