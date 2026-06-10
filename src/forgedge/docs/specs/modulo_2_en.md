@@ -2,10 +2,12 @@
 
 Alpha Discovery is the third module in the FORGE pipeline and the **first that
 sees the forward return**. It receives the `EventCandidate` list produced by
-Event Discovery and measures the predictive power of each event against a
-user-defined economic target. The output is a list of `AlphaContract` — one per
-candidate — that records all statistical measurements and determines whether the
-candidate has been promoted as an actionable hypothesis.
+Event Discovery and, for each candidate, **derives the economic target directly
+from the data** — selecting the horizon that maximises the statistical separation
+between bars where the event is active and bars where it is not. The output is a
+list of `AlphaContract` — one per candidate — recording the derived target, all
+in-sample statistical measurements, the out-of-sample confirmation, and the
+promotion outcome.
 
 ---
 
@@ -15,7 +17,7 @@ candidate has been promoted as an actionable hypothesis.
 from forgedge import (
     MarketContext,
     EventDiscovery,
-    AlphaDiscovery, AlphaConfig, TargetDefinition,
+    AlphaDiscovery, AlphaConfig,
 )
 import pandas as pd
 
@@ -26,15 +28,11 @@ enriched = MarketContext(kpi).run()
 ed = EventDiscovery(enriched)
 candidates = ed.run()
 
-# Module 2: predictive measurement
+# Module 2: target derivation + predictive measurement
 config = AlphaConfig(
-    target=TargetDefinition(
-        holding_period_h=24,
-        sell_pct=0.04,
-        direction="long",
-        asset="BTC",
-        timeframe="1H",
-    )
+    asset="BTC",
+    timeframe="1H",
+    # horizon is derived automatically from the grid — no target to specify
 )
 ad = AlphaDiscovery(ed.df, candidates, config)
 contracts = ad.run()
@@ -44,9 +42,10 @@ print(f"{len(promoted)} promoted out of {len(contracts)} evaluated")
 print(ad.summary().head())
 ```
 
-`run()` returns the **full** list (promoted and rejected), so callers can audit
-why a candidate did not make it. `promoted_contracts()` filters to only the
-contracts with `status == "HYPOTHESIS"`.
+Unlike previous versions, `AlphaConfig` **does not require a `TargetDefinition`**:
+horizon, sell_pct, and direction are derived per event from the data itself.
+`asset` and `timeframe` are traceability metadata and have no effect on any
+measurement.
 
 ---
 
@@ -58,40 +57,66 @@ list[EventCandidate] (Module 1)
         │
         ▼
   AlphaDiscovery.run()
+  ├─ Step 1: per-event target derivation (IS)
+  ├─ Step 2: market structure (IS)
+  ├─ Step 3: IC and rolling stability (IS)
+  ├─ Step 4: win rate and Cohen's d (IS)
+  ├─ Step 5: regime sensitivity (IS)
+  ├─ OOS: confirmation of derived target (OOS tail)
+  ├─ Step 6: alpha scoring
+  └─ Step 7: contract compilation + FDR
         │
         ▼
   list[AlphaContract]   (all: HYPOTHESIS + REJECTED)
   promoted_contracts()  (HYPOTHESIS only) ──► Rule Discovery (not implemented)
 ```
 
-Alpha Discovery **does not recompute** event thresholds, windows, or derived
-features. It reads the `regime` column from Event Discovery's post-pipeline
-DataFrame (`ed.df`) and uses the `event_series` stored in each candidate
-without re-deriving it.
+The DataFrame is split chronologically into **in-sample (IS)** and
+**out-of-sample (OOS)** via `train_ratio` (default: 70/30). All statistical
+measurements (IC, win rate, regime) are computed on IS; the derived target is
+then confirmed on the OOS tail.
 
 ---
 
 ## 8-step pipeline
 
-### Step 1 — Target definition
+### Step 1 — Per-event target derivation
 
-The economic target is built from the `close` column via `build_target()`:
+Alpha Discovery **takes no economic parameters as input**. For each candidate
+it scans a horizon grid (`horizon_grid`, default: `(1, 2, 3, 4, 6, 8, 12, 16,
+24, 36, 48)` bars) on the IS window and selects:
 
-- **`fwd_return`**: maximum forward return over `holding_period_h` bars.
-  For `direction="long"`: `max(close[t+1..t+h]) / close[t] - 1`.
-  For `direction="short"`: `1 - min(close[t+1..t+h]) / close[t]`.
-- **`target_binary`**: 1 if `fwd_return >= sell_pct`, 0 otherwise.
-- **`base_rate`**: frequency of `target_binary == 1` over the entire valid
-  sample (unconditional win rate). Exposed as `ad.base_rate` after `run()`.
+- **`holding_period_h`** — the horizon that maximises `|t-stat|` of the
+  difference between active-bar and inactive-bar forward returns;
+- **`mean_advantage`** — the mean oriented forward return of active bars at
+  that horizon;
+- **`sell_pct`** — `abs(mean_advantage)`: the take-profit baseline;
+- **`direction`** — `"long"` when `mean_advantage > 0`, `"short"` when < 0,
+  `"undetermined"` when non-finite.
 
-`fee_per_side` is recorded in the contract for informational purposes — Alpha
-Discovery does not net it out. That is Rule Discovery's responsibility.
+The computation is **vectorised** over the grid: a set of sufficient statistics
+(count, sum, sum-of-squares) is precomputed once and reused across all
+candidates, keeping the cost linear in the number of candidates.
+
+Output — `DerivedTarget`:
+```python
+dt.holding_period_h  # int: selected horizon
+dt.sell_pct          # float: |mean_advantage| — take-profit baseline
+dt.direction         # str: "long" | "short" | "undetermined"
+dt.mean_advantage    # float: mean oriented return at h*
+dt.advantage_by_h    # dict[int, float]: mean active return per horizon
+dt.t_stat_by_h       # dict[int, float]: t-stat per horizon
+```
+
+All subsequent measurements (IC, win rate, regime) are computed **at the
+derived target** (`h*`, `sell_pct*`, `direction*`).
 
 ---
 
 ### Step 2 — Market structure analysis
 
-Computed **once per session** (not per candidate) on `close` and `fwd_return`:
+Computed **once per session** on the IS window, at the median horizon of the
+grid:
 
 ```python
 ad.market_structure.hurst                 # float: Hurst exponent (DFA)
@@ -101,186 +126,133 @@ ad.market_structure.autocorr              # dict[int, float]: ACF at selected la
 ```
 
 `expected_family` is copied into each contract as `pattern_family`
-(`"unspecified"` when `"none"`), providing interpretive context about the
-category of alpha the event is expected to belong to.
-
-The Hurst threshold is `0.5`: below → mean-reverting, above → trending.
+(`"unspecified"` when `"none"`). Hurst threshold: below 0.5 → mean-reverting,
+above → trending.
 
 ---
 
 ### Step 3 — IC (Information Coefficient) measurement
 
-For each candidate, the continuous feature underlying its first component
-(e.g. the raw RSI value before thresholding) is correlated with `fwd_return`
-using Spearman correlation:
+**On the IS window**, the continuous feature underlying the candidate's first
+component is correlated with the forward return at the derived `h*` using
+Spearman:
 
 ```
-IC = ρ(feature, fwd_return)   [Spearman]
+IC = ρ(feature, fwd_return_h*)   [Spearman, IS only]
 ```
 
-All statistical computations are implemented in **pure numpy** without any
-scipy dependency.
+The result is **cached per `(feature, horizon)`**: candidates sharing the same
+feature and `h*` reuse the cached `ICResult` without recomputation.
 
 #### IC admission gate
 
 A candidate passes the IC gate if **not** both of the following are true:
-
 - `|IC| < ic_min_abs` (default: 0.02) — IC is weak
 - `p_value > ic_max_p` (default: 0.05) — not statistically significant
 
-In other words: a candidate is **rejected at the IC gate only when the IC is
-weak AND the p-value is not significant**. If the IC is small but statistically
-significant (low p-value), the candidate still passes the gate.
+If the IC is small but statistically significant (low p-value), the candidate
+still passes the gate.
 
-#### Rolling IC stability
+#### Rolling IC stability (IS)
 
-Temporal stability of the IC is assessed over ≈20 evenly-spaced windows of
-width `rolling_ic_window` (default: 60 days expressed in bars, inferred from
-the median DatetimeIndex spacing):
+Stability assessed over ≈20 evenly-spaced windows of width `rolling_ic_window`
+(default: 60 days in bars):
 
 ```
-stride = max(1, (n - window) // 20)
+stride = max(1, (n_is - window) // 20)
 ```
 
-A candidate is stable (`rolling_ic_stable = True`) if the rolling IC sign
-matches the overall IC sign in at least 70% of windows
-(`rolling_sign_consistency >= 0.70`). The fixed ≈20-window design keeps the
-computational cost flat regardless of dataset length.
-
-Output — `ICResult`:
-```python
-ic.ic                       # float: global Spearman IC
-ic.p_value                  # float: IC p-value
-ic.n                        # int: valid observations
-ic.admitted                 # bool: passes the IC gate
-ic.rolling_ic_stable        # bool | None: sign consistent in ≥70% of windows
-ic.rolling_ic_mean          # float | None: mean rolling IC
-ic.rolling_sign_consistency # float | None: fraction of windows with matching sign
-```
+`rolling_ic_stable = True` when the rolling IC sign matches the overall sign in
+at least 70% of windows.
 
 ---
 
-### Step 4 — Win rate analysis
+### Step 4 — Win rate analysis (IS, at the derived target)
 
-Measures the **binary event's** predictive power against the target:
+Forward returns are **oriented** before measurement: for `direction="short"`,
+returns are multiplied by -1 so "favourable to the trade" is always positive.
+Cohen's d and the one-sided t-test then have the same interpretation for both
+long and short events.
 
-| Metric | Formula |
+| Metric | Description |
 |---|---|
-| `n_activations` | Bars with event active and valid target |
-| `win_rate` | `mean(target_binary)` on active bars |
-| `lift` | `win_rate - base_rate` |
-| `fwd_return_mean` | Mean forward return on active bars |
+| `n_activations` | IS bars with active event and valid target |
+| `win_rate` | `mean(target_binary_is)` on active bars |
+| `lift` | `win_rate - base_rate_is` |
+| `fwd_return_mean` | Mean oriented return on active bars (IS) |
 | `cohens_d` | `(mean_active - mean_inactive) / std_pooled` |
-| `t_stat`, `p_value` | One-sided independent t-test (`alternative="greater"`) |
+| `t_stat`, `p_value` | One-sided t-test (`alternative="greater"`) |
 
-The p-value uses a two-sample t-test with `alternative="greater"`: "the mean
-return on event-active bars is greater than on non-active bars". The incomplete
-beta function (Lentz continued-fraction algorithm, *Numerical Recipes*) produces
-p-values with ≈1e-6 precision vs scipy.
-
-Output — `EventStats`:
-```python
-ev.n_activations   # int
-ev.win_rate        # float: e.g. 0.38 → 38% of activations hit the target
-ev.base_rate       # float: unconditional win rate (copy of ad.base_rate)
-ev.lift            # float: e.g. 0.06 → +6pp over base rate
-ev.fwd_return_mean # float: mean return on active bars
-ev.cohens_d        # float: effect size
-ev.t_stat          # float
-ev.p_value         # float
-```
+`base_rate_is` is computed **on the IS** at the derived target — each candidate
+has its own base rate (different horizon and sell_pct yield a different base
+rate).
 
 ---
 
-### Step 5 — Regime sensitivity
+### Step 5 — Regime sensitivity (IS)
 
-For each regime defined in the `regime` column (from Module 0), with at least
-`min_regime_obs` observations (default: 10):
+For each regime, with at least `min_regime_obs` IS observations:
 
-1. Computes the Spearman IC of the continuous feature vs `fwd_return` in that regime
-2. Computes the conditional win rate of the event in that regime
+1. Spearman IC of feature vs `fwd_return_h*` in the regime (IS)
+2. Conditional win rate in the regime (IS)
 
-If `use_stable_regime_only = True` and `regime_stable` is present in the
-DataFrame, only bars with `regime_stable = True` are used for per-regime IC
-(excludes transition bars from the computation).
+Results per regime are **cached per `(feature, horizon, regime)`**, analogously
+to the global IC.
 
-#### Regime strength classification
+If `use_stable_regime_only = True`, only IS bars with `regime_stable = True` are
+used.
 
-| Strength | Condition |
-|---|---|
-| `"strong"` | `p < 0.05` and `\|IC\| ≥ 0.05` |
-| `"moderate"` | `p < 0.05` and `\|IC\| < 0.05` |
-| `"negligible"` | `p ≥ 0.05` (not significant) |
-| `"insufficient"` | Fewer than `min_regime_obs` observations |
+Strength classification and dependency type are unchanged: strong/moderate/
+negligible/insufficient; agnostic/conditional/specific/broken/unknown.
 
-#### Regime dependency classification
+---
 
-| `dependency_type` | Condition |
-|---|---|
-| `"agnostic"` | All evaluated regimes are significant (strong or moderate) and count ≥ 2 |
-| `"conditional"` | More than 1 significant regime, but not all |
-| `"specific"` | Exactly 1 significant regime |
-| `"broken"` | 0 significant regimes |
-| `"unknown"` | No regime column available |
+### OOS validation
 
-Output — `RegimeAnalysis`:
+After all IS measurements, the derived target `(h*, sell_pct*, direction*)` is
+**replayed on the OOS tail** (the last `1 - train_ratio` of the dataset):
+
+- OOS forward returns are oriented to the derived direction
+- Win rate, lift, mean_advantage, and the t-test are measured on the OOS window
+- The candidate **passes OOS confirmation** (`oos.passed = True`) when all three:
+  1. `n_oos_activations >= min_oos_activations` (default: 10)
+  2. `mean_advantage > 0` (oriented advantage stays positive on OOS)
+  3. `p_value < oos_max_p` (default: 0.10)
+
+Failing OOS confirmation is a rejection gate: a candidate is promoted only when
+all IS gates **and** OOS confirmation are cleared.
+
+Output — `OOSValidation`:
 ```python
-ra.per_regime       # list[RegimeStat]: measurements per regime
-ra.dependency_type  # str: dependency classification
-ra.active_regimes   # list[str]: significant regimes (strong or moderate)
-ra.weak_regimes     # list[str]: negligible regimes
-ra.regime_breadth   # float: len(active) / len(evaluated)
+oos.n_bars          # int: bars in the OOS window
+oos.n_activations   # int: activations with complete forward horizon in OOS
+oos.mean_advantage  # float: mean oriented return on OOS (> 0 = confirmed)
+oos.t_stat          # float
+oos.p_value         # float: one-sided t-test
+oos.win_rate        # float: OOS win rate at the derived target
+oos.base_rate       # float: OOS base rate at the derived target
+oos.lift            # float: OOS lift
+oos.passed          # bool: True when all three criteria are met
 ```
 
-Each `RegimeStat`:
-```python
-rs.regime    # str: regime name
-rs.n         # int: observations in regime
-rs.ic        # float: IC in regime
-rs.p_value   # float: IC p-value in regime
-rs.win_rate  # float: conditional win rate in regime
-rs.strength  # str: "strong" | "moderate" | "negligible" | "insufficient"
-```
+When `train_ratio = 1.0`, IS covers the full dataset and `oos_validation` is
+`None` (OOS split disabled — not recommended in production).
 
 ---
 
 ### Step 6 — Alpha scoring
 
-The **composite score** (0–1) is a weighted average of four normalised
-components:
+Composite score (0–1) unchanged from the previous version:
 
 | Component | Default weight | Normalisation |
 |---|---|---|
-| IC magnitude | 0.25 | `min(\|IC\| / 0.10, 1.0)` — saturates at IC=10% |
-| Lift | 0.30 | `min(lift / 0.30, 1.0)` — saturates at lift=30% |
-| Cohen's d | 0.25 | `min(d / 0.80, 1.0)` — saturates at d=0.80 |
-| Regime breadth | 0.20 | `regime_breadth` (already 0–1) |
+| IC magnitude | 0.25 | `min(\|IC\| / 0.10, 1.0)` |
+| Lift | 0.30 | `min(lift / 0.30, 1.0)` |
+| Cohen's d | 0.25 | `min(d / 0.80, 1.0)` |
+| Regime breadth | 0.20 | `regime_breadth` (0–1) |
 
-When the regime column is not available, the `regime_breadth` term is removed
-and the remaining weights are **renormalised** (not replaced with 0):
-
-```
-composite = Σ(w_i * norm_i) / Σ(w_i)   [over available terms only]
-```
-
-#### Grade from composite score
-
-| Grade | Score |
-|---|---|
-| `A` | ≥ 0.75 |
-| `B+` | ≥ 0.60 |
-| `B` | ≥ 0.45 |
-| `C` | < 0.45 |
-
-Output — `AlphaScore`:
-```python
-sc.ic_magnitude    # float: raw |IC|
-sc.lift            # float: raw lift
-sc.cohens_d        # float: raw Cohen's d
-sc.regime_breadth  # float: fraction of significant regimes
-sc.composite_score # float: 0–1, rounded to 4 decimal places
-sc.grade           # str: "A" | "B+" | "B" | "C"
-```
+When regime is unavailable, the breadth term is removed and remaining weights
+are renormalised. Grade: A ≥ 0.75, B+ ≥ 0.60, B ≥ 0.45, C < 0.45.
 
 ---
 
@@ -289,46 +261,25 @@ sc.grade           # str: "A" | "B+" | "B" | "C"
 A candidate is promoted (`status = "HYPOTHESIS"`) only when it passes **all**
 of the following gates:
 
-| Gate | Parameter | Default | Note |
-|---|---|---|---|
-| IC admitted | `ic_min_abs`, `ic_max_p` | 0.02, 0.05 | Logic: `not (weak_ic AND weak_p)` |
-| Lift ≥ threshold | `min_lift` | 0.08 | +8 percentage points above base rate |
-| Cohen's d ≥ threshold | `min_cohens_d` | 0.15 | Minimum effect size |
-| Activations ≥ threshold | `min_activations` | 30 | Stable win rate estimate |
-| Statistical significance | `use_fdr`/`fdr_q` or `max_p_value` | BH q=0.10 | See Step 8 |
+| Gate | Parameter | Default |
+|---|---|---|
+| Target derivable | — | direction ≠ "undetermined" |
+| IC admitted | `ic_min_abs`, `ic_max_p` | 0.02, 0.05 |
+| Lift ≥ threshold | `min_lift` | 0.08 |
+| Cohen's d ≥ threshold | `min_cohens_d` | 0.15 |
+| Activations ≥ threshold | `min_activations` | 30 |
+| Statistical significance | `use_fdr`/`fdr_q` or `max_p_value` | BH q=0.10 |
+| OOS confirmation | `oos_max_p`, `min_oos_activations` | 0.10, 10 |
 
-`rejection_reasons` lists **all** failed gates (not just the first), providing
-a complete picture of why a candidate was rejected:
-
+`rejection_reasons` lists all failed gates:
 ```python
 for c in contracts:
     if not c.promoted:
         print(c.event_candidate_id, c.rejection_reasons)
 ```
 
----
-
-### Step 8 — FDR control (Benjamini-Hochberg)
-
-When `use_fdr = True` (default), Benjamini-Hochberg (BH) multiple-testing
-correction is applied across **all candidates simultaneously** before compiling
-contracts, using the t-test p-values:
-
-```
-BH at q = fdr_q (default 0.10) → at most 10% false positives among promoted candidates
-```
-
-BH replaces the `max_p_value` threshold as the significance criterion.
-
-The `fdr_promoted` field records whether a candidate passes BH independently of
-the final promotion outcome — useful for auditing:
-
-```python
-# Candidates that passed BH but were rejected for other gates
-bh_ok_but_rejected = [c for c in contracts if c.fdr_promoted and not c.promoted]
-```
-
-When `use_fdr = False`, the raw `max_p_value` threshold is applied directly.
+BH FDR (Step 8) is applied to IS t-test p-values of all candidates
+simultaneously before compiling contracts.
 
 ---
 
@@ -340,44 +291,42 @@ c = promoted[0]
 # Identifiers
 c.alpha_id            # str: "ALPHA-BTC-1H-260610-000"
 c.version             # str: "1.0"
-c.discovery_date      # str: ISO date (today or AlphaConfig.discovery_date)
+c.discovery_date      # str: ISO date
 c.status              # str: "HYPOTHESIS" | "REJECTED"
 c.pattern_family      # str: "mean_reversion" | "momentum" | "unspecified"
 
-# Origin
-c.asset, c.exchange, c.timeframe, c.direction  # str
+# Scope metadata (traceability only)
+c.asset               # str
+c.exchange            # str
+c.timeframe           # str
+c.fee_per_side        # float: informational, not deducted
+
+# Origin and derived target
 c.event_candidate_id  # str: link to the source EventCandidate
-c.event_expression    # str: e.g. "rsi_14 < 30.5 AND spread_ema_9_25 < -0.012"
+c.event_expression    # str: boolean event expression
+c.direction           # str: "long" | "short" | "undetermined"
+c.derived_target      # DerivedTarget: target derived from data (Step 1)
+c.base_rate           # float: IS base rate at the derived target
 
-# Target
-c.target_definition   # TargetDefinition
-c.base_rate           # float: unconditional win rate
-
-# Statistical measurements
+# IS statistical measurements
 c.market_structure    # MarketStructure: Hurst + ACF (Step 2)
-c.underlying_feature  # ICResult: IC of the continuous feature (Step 3)
-c.event_stats         # EventStats: binary event metrics (Step 4)
-c.regime_analysis     # RegimeAnalysis: regime sensitivity (Step 5)
-c.alpha_score         # AlphaScore: composite score and grade (Step 6)
+c.underlying_feature  # ICResult: IS IC (Step 3)
+c.event_stats         # EventStats: IS win rate (Step 4)
+c.regime_analysis     # RegimeAnalysis: IS regime sensitivity (Step 5)
 
-# Promotion outcome
+# OOS confirmation
+c.oos_validation      # OOSValidation | None
+
+# Score and promotion
+c.alpha_score         # AlphaScore: composite score and grade (Step 6)
 c.promoted            # bool
 c.rejection_reasons   # list[str]: failed gates (empty if promoted)
 c.fdr_promoted        # bool | None
 
 # Handoff to Rule Discovery
 c.handoff_status      # str: "PENDING_RULE_DISCOVERY"
-c.rule_discovery_response  # dict | None (Rule Discovery not yet implemented)
+c.rule_discovery_response  # dict | None
 ```
-
-#### `alpha_id` format
-
-```
-ALPHA-{asset}-{timeframe}-{stamp}-{idx:03d}
-```
-
-Where `stamp` is the discovery date as `YYMMDD` (e.g. `260610` for 2026-06-10)
-and `idx` is the candidate's sequential index (000, 001, ...).
 
 ---
 
@@ -385,59 +334,64 @@ and `idx` is the candidate's sequential index (000, 001, ...).
 
 ### `ad.run() → list[AlphaContract]`
 
-Evaluates all candidates and returns the complete list (promoted + rejected).
-Must be called before any other method.
+Derives the target per event, runs all IS + OOS measurements, and returns the
+complete list (promoted + rejected). Must be called first.
+
+Properties populated by `run()`:
+- `ad.market_structure` — IS market structure
+- `ad.split_idx` — row index of the IS/OOS boundary
 
 ### `ad.promoted_contracts() → list[AlphaContract]`
 
-Returns only contracts with `status == "HYPOTHESIS"`.
-Requires `run()` to have been called.
+Only contracts with `status == "HYPOTHESIS"`.
 
 ### `ad.summary() → pd.DataFrame`
 
-Flat, sortable summary of every evaluated candidate, sorted by `composite_score`
-descending. Each row is a contract with all key metrics as columns:
+Flat summary sorted by `composite_score` descending. Includes OOS columns
+compared to the previous version:
 
-```python
-df = ad.summary()
-df.columns
-# alpha_id, status, promoted, event_candidate_id, expression, pattern_family,
-# feature, ic, ic_p_value, ic_admitted, rolling_ic_stable, n_activations,
-# win_rate, base_rate, lift, fwd_return_mean, cohens_d, t_stat, p_value,
-# fdr_promoted, regime_dependency, regime_breadth, composite_score, grade,
-# rejection_reasons
+```
+alpha_id, status, promoted, event_candidate_id, expression, pattern_family,
+holding_period_h, sell_pct, direction, mean_advantage,
+feature, ic, ic_p_value, ic_admitted, rolling_ic_stable,
+n_activations, win_rate, base_rate, lift, fwd_return_mean, cohens_d, t_stat, p_value,
+fdr_promoted, oos_passed, oos_p_value, oos_lift,
+regime_dependency, regime_breadth, composite_score, grade, rejection_reasons
 ```
 
 ### `c.to_dict() → dict`
 
-Flat dictionary equivalent to one row in `summary()`. Useful for building
-custom DataFrames from a subset of contracts.
+Flat dictionary (one row of `summary()`).
 
 ### `c.to_contract_dict() → dict`
 
-Full nested contract as a dictionary, ready for YAML/JSON serialisation:
-
-```python
-import json
-for c in promoted:
-    print(json.dumps(c.to_contract_dict(), indent=2))
-```
+Full nested contract as a dictionary, ready for YAML/JSON serialisation.
 
 ---
 
 ## Full configuration reference
 
-### `TargetDefinition`
+### `AlphaConfig`
 
 | Parameter | Default | Description |
 |---|---|---|
-| `holding_period_h` | `24` | Forward horizon in bars |
-| `sell_pct` | `0.04` | Return threshold for binary target (e.g. 0.04 = +4%) |
-| `direction` | `"long"` | `"long"` or `"short"` |
+| `horizon_grid` | `(1,2,3,4,6,8,12,16,24,36,48)` | Candidate holding horizons in bars |
+| `train_ratio` | `0.7` | IS fraction of the dataset (0 < x ≤ 1.0) |
+| `thresholds` | `PromotionThresholds()` | Admission and promotion gates |
+| `asset` | `"ASSET"` | Traceability metadata (copied to contract and alpha_id) |
+| `exchange` | `""` | Traceability metadata |
+| `timeframe` | `"1H"` | Traceability metadata |
 | `fee_per_side` | `0.002` | Informational only; not deducted from target |
-| `asset` | `"ASSET"` | Asset name |
-| `exchange` | `""` | Exchange name |
-| `timeframe` | `"1H"` | Bar timeframe |
+| `close_col` | `"close"` | Close price column |
+| `timestamp_col` | `"open_dt"` | Datetime column name (or DatetimeIndex name) |
+| `regime_col` | `"regime"` | Regime column (from Market Context) |
+| `regime_stable_col` | `"regime_stable"` | Regime stability column |
+| `use_stable_regime_only` | `False` | Restrict regime analysis to stable bars |
+| `min_regime_obs` | `10` | Minimum IS observations to evaluate a regime |
+| `rolling_ic_window` | `None` | Rolling IC window (None → 60 days in bars) |
+| `bars_per_day` | `None` | Bars per day (None → inferred from spacing) |
+| `score_weights` | `(0.25, 0.30, 0.25, 0.20)` | Weights: (IC, lift, cohens_d, breadth) |
+| `discovery_date` | `None` | ISO date for contracts (None → today) |
 
 ### `PromotionThresholds`
 
@@ -448,62 +402,91 @@ for c in promoted:
 | `min_lift` | `0.08` | Minimum lift (+8pp) |
 | `min_cohens_d` | `0.15` | Minimum Cohen's d |
 | `max_p_value` | `0.05` | Maximum p-value (when `use_fdr=False`) |
-| `min_activations` | `30` | Minimum activations for a stable estimate |
+| `min_activations` | `30` | Minimum IS activations |
 | `use_fdr` | `True` | Use BH instead of `max_p_value` |
 | `fdr_q` | `0.10` | Target false-discovery rate for BH |
-
-### `AlphaConfig`
-
-| Parameter | Default | Description |
-|---|---|---|
-| `target` | `TargetDefinition()` | Economic target |
-| `thresholds` | `PromotionThresholds()` | Admission and promotion gates |
-| `close_col` | `"close"` | Close price column |
-| `timestamp_col` | `"open_dt"` | Datetime column name (or DatetimeIndex name) |
-| `regime_col` | `"regime"` | Regime column (from Market Context) |
-| `regime_stable_col` | `"regime_stable"` | Regime stability column |
-| `use_stable_regime_only` | `False` | Restrict regime analysis to stable bars |
-| `min_regime_obs` | `10` | Minimum observations to evaluate a regime |
-| `rolling_ic_window` | `None` | Rolling IC window (None → 60 days in bars) |
-| `bars_per_day` | `None` | Bars per day (None → inferred from spacing) |
-| `score_weights` | `(0.25, 0.30, 0.25, 0.20)` | Weights: (IC, lift, cohens_d, breadth) |
-| `discovery_date` | `None` | ISO date for contracts (None → today) |
+| `oos_max_p` | `0.10` | Maximum p-value for OOS confirmation |
+| `min_oos_activations` | `10` | Minimum OOS activations for confirmation |
 
 ---
 
 ## Advanced usage patterns
 
-### Inspecting rejected candidates
+### Configuring the grid and IS/OOS split
 
 ```python
+config = AlphaConfig(
+    asset="ADAUSDC",
+    timeframe="4H",
+    horizon_grid=(4, 8, 12, 24, 48, 72),   # custom grid
+    train_ratio=0.75,                        # 75% IS / 25% OOS
+)
+ad = AlphaDiscovery(ed.df, candidates, config)
 contracts = ad.run()
-for c in contracts:
-    if not c.promoted:
-        print(f"{c.event_candidate_id}: {c.rejection_reasons}")
+print(f"IS bars: {ad.split_idx}, OOS bars: {len(ad._frame) - ad.split_idx}")
 ```
 
-Example output:
-```
-EV-BTC-1H-001: ['lift 0.0312 < 0.08']
-EV-BTC-1H-004: ['IC below admission (|IC|<0.02 and p>0.05)', 'n_activations 18 < 30']
-```
-
-### Filtering by grade
-
-```python
-df = ad.summary()
-grade_a = df[df["grade"] == "A"]
-grade_b_plus = df[df["grade"].isin(["A", "B+"])]
-```
-
-### Inspecting regime sensitivity
+### Inspecting the derived target
 
 ```python
 for c in promoted:
-    print(f"Event: {c.event_candidate_id}")
-    print(f"  Regime dependency: {c.regime_analysis.dependency_type}")
-    for rs in c.regime_analysis.per_regime:
-        print(f"  {rs.regime}: IC={rs.ic:.3f}, win_rate={rs.win_rate:.3f}, strength={rs.strength}")
+    dt = c.derived_target
+    print(f"{c.event_candidate_id}: h={dt.holding_period_h}, "
+          f"direction={dt.direction}, sell_pct={dt.sell_pct:.4f}")
+    # Full horizon profile
+    for h, adv in dt.advantage_by_h.items():
+        print(f"  h={h}: advantage={adv:.4f}, t={dt.t_stat_by_h[h]:.2f}")
+```
+
+### Inspecting OOS confirmation
+
+```python
+for c in contracts:
+    oos = c.oos_validation
+    if oos is not None:
+        print(f"{c.event_candidate_id}: OOS passed={oos.passed}, "
+              f"lift={oos.lift:.4f}, p={oos.p_value:.4f}")
+```
+
+### Candidates rejected only by OOS
+
+```python
+# Promising on IS but not confirmed OOS
+is_ok_oos_fail = [
+    c for c in contracts
+    if not c.promoted
+    and c.oos_validation is not None
+    and not c.oos_validation.passed
+    and all("OOS" not in r for r in c.rejection_reasons[:5])
+]
+```
+
+### Disabling the OOS split (not recommended)
+
+```python
+# train_ratio=1.0 disables the split; oos_validation will be None for every contract
+config = AlphaConfig(train_ratio=1.0, asset="BTC")
+```
+
+### Tightening promotion gates
+
+```python
+from forgedge.alpha_discovery.models import PromotionThresholds
+
+strict = AlphaConfig(
+    asset="BTC",
+    timeframe="1H",
+    horizon_grid=(6, 12, 24, 48),
+    train_ratio=0.75,
+    thresholds=PromotionThresholds(
+        min_lift=0.12,
+        min_cohens_d=0.20,
+        min_activations=50,
+        fdr_q=0.05,
+        oos_max_p=0.05,
+        min_oos_activations=15,
+    )
+)
 ```
 
 ### YAML export of promoted contracts
@@ -515,43 +498,11 @@ for c in promoted:
         yaml.dump(c.to_contract_dict(), f)
 ```
 
-### Running without Market Context
-
-If the DataFrame does not contain a `regime` column, regime sensitivity is
-skipped and the `regime_breadth` term is dropped from the score (weights
-renormalised):
-
-```python
-# Works without regime — regime_analysis.dependency_type will be "unknown"
-ad = AlphaDiscovery(kpi_without_regime, candidates, config)
-contracts = ad.run()
-# alpha_score.regime_breadth = NaN, composite_score still calculated
-# on (IC, lift, cohens_d) with weights renormalised to sum to 1.0
-```
-
-### Tightening promotion gates
-
-```python
-from forgedge.alpha_discovery.models import PromotionThresholds
-
-strict = AlphaConfig(
-    target=TargetDefinition(holding_period_h=48, sell_pct=0.06),
-    thresholds=PromotionThresholds(
-        min_lift=0.12,
-        min_cohens_d=0.20,
-        min_activations=50,
-        fdr_q=0.05,
-    )
-)
-ad = AlphaDiscovery(ed.df, candidates, strict)
-```
-
 ---
 
 ## Statistical primitives (`stats.py`)
 
-All statistical primitives are implemented in **pure numpy** with no scipy or
-statsmodels dependency:
+All implemented in **pure numpy** with no scipy or statsmodels dependency:
 
 | Function | Algorithm |
 |---|---|
@@ -560,10 +511,6 @@ statsmodels dependency:
 | `ttest_ind(x, y, alternative)` | Independent t-test, p-value via incomplete beta |
 | `benjamini_hochberg(p_values, q)` | Benjamini-Hochberg FDR control |
 | `betai(a, b, x)` | Regularised incomplete beta (Lentz continued-fraction) |
-
-Student-t probabilities are computed via the regularised incomplete beta
-function implemented with the Lentz continued-fraction algorithm (*Numerical
-Recipes*). Precision is ≈1e-6 relative to scipy values.
 
 ---
 
@@ -574,5 +521,8 @@ Rule Discovery (Module 3, not yet implemented) will consume the promoted
 contracts to run a realistic backtest with order mechanics, fees, and
 operational edge validation.
 
-The `rule_discovery_response` field is reserved for Rule Discovery's response
-and remains `None` until the module is implemented.
+The `derived_target` in promoted contracts is the starting point for Rule
+Discovery's calibration of operational parameters: `holding_period_h` and
+`sell_pct` are candidates, not validated parameters — they are the product of
+an IS grid optimisation, and the OOS confirmation shows the signal persists
+out-of-sample, but precise sizing is Rule Discovery's responsibility.
