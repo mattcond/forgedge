@@ -1,7 +1,9 @@
 """Core data structures for the Alpha Discovery module (FORGE Modulo 2).
 
-Alpha Discovery receives ``EventCandidate`` artifacts from Event Discovery and
-measures their predictive power against an economic target.  The output is the
+Alpha Discovery receives ``EventCandidate`` artifacts from Event Discovery,
+**derives** each candidate's economic target (horizon, sell percentage,
+direction) from the data, confirms it on a held-out temporal tail, and
+measures the candidate's predictive power against it.  The output is the
 **Alpha Contract** — the formal interface consumed by Rule Discovery.
 
 The dataclasses here mirror, field by field, the contract format documented in
@@ -20,40 +22,90 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 @dataclass
-class TargetDefinition:
-    """The economic target every candidate is measured against (Step 1).
+class DerivedTarget:
+    """The per-event economic target *derived* by Alpha Discovery (Step 1).
 
-    These parameters do not change within a discovery session — changing them
-    is a new session.  Event Discovery never sees them; Alpha Discovery is the
-    first module that knows what "a useful event" means.
+    Alpha Discovery receives no economic parameters: for every Event
+    Candidate it scans a grid of candidate horizons and derives the target
+    from the data —
+
+    * ``holding_period_h`` — the horizon that maximises the statistical
+      separation (|t-stat|) between active-bar and inactive-bar forward
+      returns;
+    * ``mean_advantage``   — the signed mean forward return realised when the
+      event is active, at that horizon;
+    * ``sell_pct``         — ``abs(mean_advantage)``: the candidate take-profit
+      baseline handed to Rule Discovery;
+    * ``direction``        — the sign of the mean advantage (``long`` when
+      positive, ``short`` when negative).
+
+    These are **candidates**, not validated parameters: they are written into
+    the Alpha Contract as the baseline that Rule Discovery refines and
+    stress-tests with full order mechanics.
 
     Attributes
     ----------
     holding_period_h : int
-        Forward horizon, in bars, over which the target is evaluated
-        (``target_h``).
+        Selected horizon, in bars.
     sell_pct : float
-        Return threshold that defines the binary target (e.g. ``0.04`` → the
-        forward maximum must reach at least +4% for a ``long``; for a
-        ``short`` the forward minimum must reach at least -4%).
-    direction : {'long', 'short'}
-        Trade direction.  ``long`` looks for upside within the horizon,
-        ``short`` for downside.
-    fee_per_side : float
-        Informational only — recorded in the contract so Rule Discovery knows
-        the assumed cost basis.  Alpha Discovery does not net it out (that is
-        Rule Discovery's job).
-    asset, exchange, timeframe : str
-        Scope metadata copied verbatim into the contract.
+        ``abs(mean_advantage)`` at the selected horizon.
+    direction : str
+        ``"long"`` | ``"short"`` | ``"undetermined"`` (no finite advantage).
+    mean_advantage : float
+        Signed mean forward return of active bars at ``holding_period_h``.
+    advantage_by_h : dict[int, float]
+        Mean active-bar forward return (signed, long convention) for every
+        horizon scanned — the full profile, for transparency.
+    t_stat_by_h : dict[int, float]
+        Active-vs-inactive t-stat (signed, long convention) per horizon.
     """
 
-    holding_period_h: int = 24
-    sell_pct: float = 0.04
-    direction: str = "long"
-    fee_per_side: float = 0.002
-    asset: str = "ASSET"
-    exchange: str = ""
-    timeframe: str = "1H"
+    holding_period_h: int
+    sell_pct: float
+    direction: str
+    mean_advantage: float
+    advantage_by_h: Dict[int, float] = field(default_factory=dict)
+    t_stat_by_h: Dict[int, float] = field(default_factory=dict)
+
+
+@dataclass
+class OOSValidation:
+    """Out-of-sample confirmation of the derived target.
+
+    The derivation of ``DerivedTarget`` is an in-sample optimisation over the
+    horizon grid; to keep promotion honest, the derived target is replayed on
+    a held-out temporal tail (controlled by ``AlphaConfig.train_ratio``) that
+    played no part in the derivation or in any in-sample measure.
+
+    Attributes
+    ----------
+    n_bars : int
+        Bars in the OOS window.
+    n_activations : int
+        Event activations in the OOS window with a complete forward horizon.
+    mean_advantage : float
+        Mean *oriented* forward return of OOS active bars (positive =
+        favourable to the derived direction).
+    t_stat, p_value : float
+        One-sided active-vs-inactive t-test on the oriented OOS returns.
+    win_rate, base_rate, lift : float
+        Binary-target measures on OOS at the derived ``(h, sell_pct,
+        direction)``.
+    passed : bool
+        ``True`` when the OOS advantage keeps the derived sign and the t-test
+        clears ``PromotionThresholds.oos_max_p`` with at least
+        ``min_oos_activations`` activations.
+    """
+
+    n_bars: int
+    n_activations: int
+    mean_advantage: float
+    t_stat: float
+    p_value: float
+    win_rate: float
+    base_rate: float
+    lift: float
+    passed: bool
 
 
 @dataclass
@@ -83,6 +135,15 @@ class PromotionThresholds:
         evaluated candidates instead of the raw ``max_p_value`` threshold.
     fdr_q : float
         Target false-discovery rate for Benjamini-Hochberg (Section 13).
+    oos_max_p : float
+        Maximum one-sided p-value for the out-of-sample confirmation of the
+        derived target.  Selecting the horizon by maximum in-sample
+        separation is an optimisation; OOS confirmation is what keeps it
+        honest, so promotion additionally requires the held-out tail to
+        confirm the advantage at this level.
+    min_oos_activations : int
+        Minimum activations in the OOS window for the confirmation test to be
+        considered at all — below this the candidate cannot be promoted.
     """
 
     ic_min_abs: float = 0.02
@@ -93,18 +154,43 @@ class PromotionThresholds:
     min_activations: int = 30
     use_fdr: bool = True
     fdr_q: float = 0.10
+    oos_max_p: float = 0.10
+    min_oos_activations: int = 10
 
 
 @dataclass
 class AlphaConfig:
     """Top-level configuration for the Alpha Discovery pipeline.
 
+    Alpha Discovery takes **no economic target as input**: the target
+    (horizon, sell percentage, direction) is derived per event from the data
+    over ``horizon_grid`` and confirmed on a held-out temporal tail
+    (``train_ratio``).
+
     Attributes
     ----------
-    target : TargetDefinition
-        The economic target (required).
+    horizon_grid : tuple of int
+        Candidate holding horizons, in bars, scanned by the target
+        derivation (Step 1).  For every Event Candidate the horizon with the
+        maximum |t-stat| separation between active and inactive forward
+        returns is selected.
+    train_ratio : float
+        Fraction of the (chronologically sorted) table used to derive the
+        target and compute every in-sample measure; the remaining tail is
+        reserved for the out-of-sample confirmation of the derived target.
+        ``1.0`` disables the internal OOS split (not recommended — the
+        derived horizon is then never validated out-of-sample).
     thresholds : PromotionThresholds
         Admission / promotion gates.
+    asset, exchange, timeframe : str
+        **Traceability metadata only** — copied verbatim into the contract's
+        SCOPE section (and into the ``alpha_id``) so Rule Discovery and the
+        Registry can attribute the alpha.  They have no effect whatsoever on
+        any measurement.
+    fee_per_side : float
+        Informational only — recorded in the contract so Rule Discovery knows
+        the assumed cost basis.  Alpha Discovery does not net it out (that is
+        Rule Discovery's job).
     close_col : str
         Name of the close-price column used to build forward returns.
     timestamp_col : str
@@ -136,8 +222,13 @@ class AlphaConfig:
         ISO date stamped onto every contract.  ``None`` → today's date.
     """
 
-    target: TargetDefinition = field(default_factory=TargetDefinition)
+    horizon_grid: Tuple[int, ...] = (1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48)
+    train_ratio: float = 0.7
     thresholds: PromotionThresholds = field(default_factory=PromotionThresholds)
+    asset: str = "ASSET"
+    exchange: str = ""
+    timeframe: str = "1H"
+    fee_per_side: float = 0.002
     close_col: str = "close"
     timestamp_col: str = "open_dt"
     regime_col: str = "regime"
@@ -148,6 +239,13 @@ class AlphaConfig:
     bars_per_day: Optional[float] = None
     score_weights: Tuple[float, float, float, float] = (0.25, 0.30, 0.25, 0.20)
     discovery_date: Optional[str] = None
+
+    def __post_init__(self):
+        if not self.horizon_grid or any(int(h) <= 0 for h in self.horizon_grid):
+            raise ValueError("horizon_grid must contain positive horizons (bars).")
+        self.horizon_grid = tuple(sorted({int(h) for h in self.horizon_grid}))
+        if not (0.0 < self.train_ratio <= 1.0):
+            raise ValueError(f"train_ratio must be in (0, 1], got {self.train_ratio}.")
 
 
 # ---------------------------------------------------------------------------
@@ -257,16 +355,18 @@ class AlphaContract:
     discovery_date: str
     status: str  # "HYPOTHESIS" | "REJECTED"
 
+    # SCOPE — traceability metadata, no computational role
     asset: str
     exchange: str
     timeframe: str
     direction: str
+    fee_per_side: float
 
     event_candidate_id: str
     event_expression: str
     pattern_family: str
 
-    target_definition: TargetDefinition
+    derived_target: DerivedTarget
     base_rate: float
 
     underlying_feature: ICResult
@@ -274,6 +374,7 @@ class AlphaContract:
     market_structure: MarketStructure
     regime_analysis: RegimeAnalysis
     alpha_score: AlphaScore
+    oos_validation: Optional[OOSValidation]
 
     promoted: bool
     rejection_reasons: List[str] = field(default_factory=list)
@@ -294,6 +395,8 @@ class AlphaContract:
         es = self.event_stats
         sc = self.alpha_score
         ra = self.regime_analysis
+        dt = self.derived_target
+        oos = self.oos_validation
         return {
             "alpha_id": self.alpha_id,
             "status": self.status,
@@ -301,6 +404,10 @@ class AlphaContract:
             "event_candidate_id": self.event_candidate_id,
             "expression": self.event_expression,
             "pattern_family": self.pattern_family,
+            "holding_period_h": dt.holding_period_h,
+            "sell_pct": dt.sell_pct,
+            "direction": dt.direction,
+            "mean_advantage": dt.mean_advantage,
             "feature": ic.feature,
             "ic": ic.ic,
             "ic_p_value": ic.p_value,
@@ -315,6 +422,9 @@ class AlphaContract:
             "t_stat": es.t_stat,
             "p_value": es.p_value,
             "fdr_promoted": self.fdr_promoted,
+            "oos_passed": oos.passed if oos is not None else None,
+            "oos_p_value": oos.p_value if oos is not None else float("nan"),
+            "oos_lift": oos.lift if oos is not None else float("nan"),
             "regime_dependency": ra.dependency_type,
             "regime_breadth": ra.regime_breadth,
             "composite_score": sc.composite_score,
@@ -336,11 +446,12 @@ class AlphaContract:
             "exchange": self.exchange,
             "timeframe": self.timeframe,
             "direction": self.direction,
+            "fee_per_side": self.fee_per_side,
             "event_candidate_id": self.event_candidate_id,
             "event_expression": self.event_expression,
             "pattern_family": self.pattern_family,
-            "target_definition": {
-                **asdict(self.target_definition),
+            "derived_target": {
+                **asdict(self.derived_target),
                 "base_rate": self.base_rate,
             },
             "statistical_evidence": {
@@ -361,6 +472,9 @@ class AlphaContract:
                     "p_value": self.event_stats.p_value,
                 },
             },
+            "oos_validation": (
+                asdict(self.oos_validation) if self.oos_validation is not None else None
+            ),
             "market_structure": asdict(self.market_structure),
             "regime_analysis": [asdict(r) for r in self.regime_analysis.per_regime],
             "regime_dependency": {

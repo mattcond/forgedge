@@ -250,15 +250,17 @@ il Consistency Gate, con statistiche di attivazione temporale
 
 ### Modulo 2 — Alpha Discovery
 
-Misura il potere predittivo degli Event Candidate rispetto al target
-economico. Seleziona i candidati con evidenza statistica sufficiente
+Deriva dai dati il target economico di ciascun Event Candidate (orizzonte
+di massima separazione statistica, sell_pct = vantaggio medio, direzione =
+segno del vantaggio), lo conferma out-of-sample e ne misura il potere
+predittivo. Seleziona i candidati con evidenza statistica sufficiente
 e li formalizza in un Alpha Contract.
 
-**Domanda:** *"questo evento predice il target economico con
-significatività statistica?"*
+**Domanda:** *"questo evento predice un target economico — e quale — con
+significatività statistica confermata out-of-sample?"*
 
-**Input:** Event Candidates + definizione del target (`holding_period`,
-`target_return`)
+**Input:** Event Candidates (nessun parametro economico: il target è
+derivato)
 
 **Output:** Alpha Contract — specifica formale con IC, win rate,
 lift, Cohen's d, regime sensitivity, alpha score
@@ -530,10 +532,14 @@ consistency_gate: "PASS"
 alpha_id:              "ALPHA-ADAUSDC-1H-250101-003"
 event_candidate_id:    "EVT-close_rsi_25-ID×PR-P105-W096-P010"
 event_expression:      "close_rsi_25 < 30.5 AND pr_close_rsi_25_96 < 0.10"
-target_definition:
-  holding_period_h:    24
-  target_return:       0.04
+derived_target:                # derivato dai dati, per evento
+  holding_period_h:    24      # h* = max separazione statistica
+  sell_pct:            0.0218  # |vantaggio medio| a h*
+  direction:           "long"  # segno del vantaggio
   base_rate:           0.235
+oos_validation:
+  p_value:             0.0011
+  passed:              true
 statistical_evidence:
   ic:                  -0.0316
   p_value_ic:          0.0029
