@@ -134,6 +134,89 @@ class GateResult:
 
 
 @dataclass
+class WalkForwardConfig:
+    """Parameters for walk-forward out-of-sample validation.
+
+    After in-sample discovery, the OOS portion (controlled by
+    ``DiscoveryConfig.train_ratio``) is divided into ``n_splits`` equal
+    windows.  Each discovered event is replayed on every window via
+    ``EventCandidate.apply()`` and evaluated against the Consistency Gate.
+    An event is declared OOS-stable when it passes in at least
+    ``min_pass_rate`` fraction of the windows.
+
+    Attributes
+    ----------
+    n_splits : int
+        Number of OOS windows to evaluate.  More splits → finer-grained
+        stability signal but shorter individual windows.  The OOS period
+        is divided equally; the last window absorbs any remainder.
+    min_pass_rate : float
+        Minimum fraction of OOS windows in which an event must pass the gate
+        to be considered OOS-stable (0–1).  Default 0.6 means at least 3 out
+        of 5 (or 2 out of 3) windows must pass.
+    oos_gate_params : GateParams or None
+        Gate thresholds to use for OOS evaluation.  When ``None`` (default),
+        thresholds are scaled automatically from the IS ``gate_params``
+        proportional to the OOS window length relative to IS length —
+        ``min_act`` and ``min_months`` shrink, ``max_conc`` and ``min_tpm``
+        are unchanged.
+    """
+
+    n_splits: int = 3
+    min_pass_rate: float = 0.6
+    oos_gate_params: Optional[GateParams] = None
+
+
+@dataclass
+class FoldResult:
+    """Consistency gate outcome for one OOS validation fold.
+
+    Attributes
+    ----------
+    fold_idx : int
+        Zero-based index of this fold within the walk-forward sequence.
+    n_rows : int
+        Number of bars in this fold.
+    gate_result : GateResult
+        Full gate evaluation on the fold, including fail_reason when failed.
+    """
+
+    fold_idx: int
+    n_rows: int
+    gate_result: GateResult
+
+    @property
+    def passed(self) -> bool:
+        """True when the gate passed on this fold."""
+        return self.gate_result.passed
+
+
+@dataclass
+class ValidationResult:
+    """Aggregated walk-forward OOS validation result for one event.
+
+    Attributes
+    ----------
+    n_folds : int
+        Total number of OOS folds evaluated.
+    n_passed : int
+        Number of folds in which the event passed the gate.
+    pass_rate : float
+        ``n_passed / n_folds``.
+    passed : bool
+        True when ``pass_rate >= WalkForwardConfig.min_pass_rate``.
+    fold_results : list[FoldResult]
+        Per-fold detail, ordered chronologically.
+    """
+
+    n_folds: int
+    n_passed: int
+    pass_rate: float
+    passed: bool
+    fold_results: list[FoldResult]
+
+
+@dataclass
 class EventComponent:
     """Metadata describing a single boolean condition within an event.
 
@@ -197,8 +280,8 @@ class EventComponent:
     ``rank(pct=True)`` exactly.  For zscore and delta, standard window
     functions (``AVG``, ``STDDEV_SAMP``, ``LAG``) are used.  Rolling
     transforms reproduce ``min_periods = max(2, window // 2)`` via a
-    ``CASE WHEN`` guard.  The ``ORDER BY open_dt`` clause assumes the
-    timestamp column is named ``open_dt``; substitute as needed.
+    ``CASE WHEN`` guard.  The ``ORDER BY`` clause uses the timestamp column
+    name from ``DiscoveryConfig.timestamp_col`` (defaults to ``"open_dt"``).
 
     Example usage in DuckDB::
 
@@ -326,6 +409,12 @@ class EventCandidate:
     activation_stats: ActivationStats
     consistency_gate: GateResult
     event_series: Optional[pd.Series] = field(default=None, repr=False)
+    validation: Optional[ValidationResult] = field(default=None, repr=False)
+    """Walk-forward OOS validation result.
+
+    ``None`` when ``DiscoveryConfig.walk_forward`` was not set.
+    Populated by ``EventDiscovery.run()`` after IS discovery completes.
+    """
 
     @property
     def sql_expression(self) -> str:
@@ -399,8 +488,10 @@ class EventCandidate:
 
         The ``components`` key contains a list of per-component dicts.
         All other keys are scalar values suitable for a summary DataFrame row.
+        OOS validation columns (``oos_*``) are included only when
+        ``self.validation`` is populated.
         """
-        return {
+        d: dict = {
             "event_id": self.event_id,
             "status": self.status,
             "expression": self.expression,
@@ -410,26 +501,98 @@ class EventCandidate:
             "max_monthly_share": self.activation_stats.max_monthly_share,
             "mean_tpm": self.activation_stats.mean_tpm,
             "gate_passed": self.consistency_gate.passed,
-            "components": [
-                {
-                    "source_feature": c.source_feature,
-                    "transform": c.transform,
-                    "transform_params": c.transform_params,
-                    "threshold": c.threshold,
-                    "threshold_type": c.threshold_type,
-                    "direction": c.direction,
-                    "event_type": c.event_type,
-                    "expression": c.expression,
-                    "sql_expression": c.sql_expression,
-                }
-                for c in self.components
-            ],
         }
+        if self.validation is not None:
+            d["oos_pass_rate"] = self.validation.pass_rate
+            d["oos_n_passed"] = self.validation.n_passed
+            d["oos_n_folds"] = self.validation.n_folds
+            d["oos_stable"] = self.validation.passed
+        d["components"] = [
+            {
+                "source_feature": c.source_feature,
+                "transform": c.transform,
+                "transform_params": c.transform_params,
+                "threshold": c.threshold,
+                "threshold_type": c.threshold_type,
+                "direction": c.direction,
+                "event_type": c.event_type,
+                "expression": c.expression,
+                "sql_expression": c.sql_expression,
+            }
+            for c in self.components
+        ]
+        return d
 
 
 # ---------------------------------------------------------------------------
 # Replay helpers
 # ---------------------------------------------------------------------------
+
+def build_feature_series(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
+    """Reconstruct the *continuous underlying feature* of a component on ``df``.
+
+    This is step 1 of the event replay — feature construction only, before
+    any temporal transform or threshold is applied.  It returns the raw
+    scale-free feature series (e.g. ``close_rsi_25``, a ``ratio_…``, a
+    ``spread_…`` or a ternary position feature), which is exactly the
+    "feature continua sottostante" that Alpha Discovery measures the
+    Information Coefficient on.
+
+    For ``binary_native`` and ``categorical_onehot`` components there is no
+    continuous feature underneath; the raw source column is returned as-is so
+    callers can still rank it if they choose to.
+
+    Parameters
+    ----------
+    comp : EventComponent
+        A fully populated component (``source_cols`` and ``transform_params``
+        must contain all values stored during training).
+    df : pd.DataFrame
+        DataFrame with the native source columns referenced by ``comp``.
+
+    Returns
+    -------
+    pd.Series
+        The continuous feature series aligned to ``df.index`` (before any
+        temporal transform).
+
+    Raises
+    ------
+    KeyError
+        If a required source column is missing, or if a ``diffnorm`` feature
+        was created without its stored in-sample standard deviation.
+    """
+    sf = comp.source_feature
+
+    if comp.transform in ("binary_native", "categorical_onehot"):
+        # No continuous feature underneath — return the raw column.
+        return df[sf]
+
+    sc = comp.source_cols
+    if sf.startswith("ratio_") and len(sc) == 2:
+        return df[sc[0]] / df[sc[1]]
+    if sf.startswith("spread_") and len(sc) == 2:
+        return (df[sc[0]] - df[sc[1]]) / df[sc[1]]
+    if sf.startswith("diffnorm_") and len(sc) == 2:
+        std = comp.transform_params.get("diffnorm_std")
+        if not std:
+            raise KeyError(
+                f"'diffnorm_std' missing from transform_params of component "
+                f"'{comp.expression}'. Was this candidate created with an older "
+                "version of EventDiscovery?"
+            )
+        return (df[sc[0]] - df[sc[1]]) / std
+    if sf.startswith("bb_pct_b_") and len(sc) == 3:
+        val, lower, upper = sc
+        denom = df[upper] - df[lower]
+        return (df[val] - df[lower]) / denom.replace(0, float("nan"))
+    if sf.startswith("pos_") and len(sc) == 3:
+        val, mn, mx = sc
+        denom = df[mx] - df[mn]
+        return (df[val] - df[mn]) / denom.replace(0, float("nan"))
+    # Arity-1 native feature — use source_feature name directly
+    return df[sf]
+
 
 def _apply_component(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
     """Reconstruct a single EventComponent's boolean series on ``df``.
@@ -466,31 +629,7 @@ def _apply_component(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
         raw = df[sf]
         return (raw == cls).astype(float).where(raw.notna(), float("nan"))
 
-    sc = comp.source_cols
-    if sf.startswith("ratio_") and len(sc) == 2:
-        series = df[sc[0]] / df[sc[1]]
-    elif sf.startswith("spread_") and len(sc) == 2:
-        series = (df[sc[0]] - df[sc[1]]) / df[sc[1]]
-    elif sf.startswith("diffnorm_") and len(sc) == 2:
-        std = comp.transform_params.get("diffnorm_std")
-        if not std:
-            raise KeyError(
-                f"'diffnorm_std' missing from transform_params of component "
-                f"'{comp.expression}'. Was this candidate created with an older "
-                "version of EventDiscovery?"
-            )
-        series = (df[sc[0]] - df[sc[1]]) / std
-    elif sf.startswith("bb_pct_b_") and len(sc) == 3:
-        val, lower, upper = sc
-        denom = df[upper] - df[lower]
-        series = (df[val] - df[lower]) / denom.replace(0, float("nan"))
-    elif sf.startswith("pos_") and len(sc) == 3:
-        val, mn, mx = sc
-        denom = df[mx] - df[mn]
-        series = (df[val] - df[mn]) / denom.replace(0, float("nan"))
-    else:
-        # Arity-1 native feature — use source_feature name directly
-        series = df[sf]
+    series = build_feature_series(comp, df)
 
     # ── 2. Temporal transform ────────────────────────────────────────────
     # Use the same min_periods heuristic as TransformLayer to match NaN positions.

@@ -2,6 +2,13 @@
 
 __version__ = "0.1.0"
 
+from .alpha_discovery import (
+    AlphaConfig,
+    AlphaContract,
+    AlphaDiscovery,
+    PromotionThresholds,
+    TargetDefinition,
+)
 from .event_discovery import DiscoveryConfig, EventDiscovery
 from .market_context import (
     EMAProxyClassifier,
@@ -19,4 +26,9 @@ __all__ = [
     "EMAProxyConfig",
     "EMAProxyClassifier",
     "RegimeClassifier",
+    "AlphaDiscovery",
+    "AlphaConfig",
+    "TargetDefinition",
+    "PromotionThresholds",
+    "AlphaContract",
 ]
