@@ -1,140 +1,171 @@
-# FORGE — Manuale Tecnico della Libreria (v0.1.0)
+# FORGE — Feature-Oriented Rule Generation Engine
 
-FORGE (**Feature-Oriented Rule Generation Engine**) è un sistema di ricerca
-quantitativa che scopre, valida e formalizza regole di trading algoritmico a
-partire da dati storici di mercato.
-
-Il sistema è organizzato come una pipeline modulare a 5 stadi. I moduli si
-eseguono in sequenza: ogni stadio consuma l'output del precedente e produce
-un artefatto formale che diventa l'input del successivo.
+FORGE è un sistema di ricerca quantitativa per la **scoperta sistematica di regole
+di trading algoritmico** da dati storici di mercato. A partire da una KPI Table
+(OHLCV + indicatori tecnici), FORGE identifica eventi booleani con struttura
+temporale stabile, ne misura il potere predittivo rispetto a un target economico
+derivato dai dati, e produce contratti formali pronti per la validazione operativa.
 
 ---
 
-## Pipeline e moduli
+## Cos'è FORGE
+
+La ricerca sistematica di edge di trading soffre di tre problemi ricorrenti:
+look-ahead bias nella selezione dei segnali, ottimizzazione delle soglie sullo
+stesso campione usato per valutare il segnale, e mancanza di separazione tra la
+fase statistica e quella operativa.
+
+FORGE affronta questi problemi con un'architettura a pipeline rigidamente
+separata:
+
+- **Modulo 1 non vede mai il forward return.** Gli eventi vengono scoperti
+  unicamente dalla struttura temporale degli indicatori — distribuzione, frequenza,
+  stabilità — senza alcuna esposizione al rendimento futuro.
+- **Le soglie sono immutabili.** Una volta fissate da Event Discovery, le soglie
+  degli eventi (`RSI < 30.5`, `spread_ema < -0.012`) attraversano la pipeline
+  invariate. Nessun modulo successivo può ricalibrarle.
+- **Il target è derivato dai dati per evento.** Alpha Discovery non riceve
+  parametri economici in input: per ogni evento scansiona una grid di orizzonti
+  e seleziona quello che massimizza la separazione statistica tra barre attive
+  e inattive. Il target non è un'assunzione, è una misura.
+- **La conferma out-of-sample è un gate, non un check.** La validazione OOS
+  sull'ultimo 30% del dataset è un requisito formale per la promozione — non un
+  check opzionale a posteriori.
+
+---
+
+## Pipeline
 
 ```
 KPI Table (OHLCV + indicatori tecnici)
     │
     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Modulo 0 — Market Context                                      │
-│  Classifica ogni barra per regime di mercato.                   │
-│  Output: KPI Table + colonne 'regime' e 'regime_stable'         │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Modulo 0 — Market Context                                       │
+│  Classifica ogni barra per regime di mercato (5 livelli).        │
+│  Output: KPI Table + colonne 'regime' e 'regime_stable'          │
+└──────────────────────────────────────────────────────────────────┘
     │
     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Modulo 1 — Event Discovery                                     │
-│  Scopre eventi booleani dalla struttura temporale degli         │
-│  indicatori. Non vede mai il forward return.                    │
-│  Output: list[EventCandidate]                                   │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Modulo 1 — Event Discovery                                      │
+│  Scopre eventi booleani dalla struttura temporale degli          │
+│  indicatori. Non vede mai il forward return.                     │
+│  Output: list[EventCandidate]                                    │
+└──────────────────────────────────────────────────────────────────┘
     │
     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Modulo 2 — Alpha Discovery                                     │
-│  Misura il potere predittivo degli eventi rispetto a un         │
-│  target economico. Prima esposizione al forward return.         │
-│  Output: list[AlphaContract]                                    │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Modulo 2 — Alpha Discovery                                      │
+│  Deriva il target per evento, misura il potere predittivo IS,    │
+│  e confirma sull'OOS tail. Prima esposizione al forward return.  │
+│  Output: list[AlphaContract]                                     │
+└──────────────────────────────────────────────────────────────────┘
     │
     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Modulo 3 — Rule Discovery            [non implementato v0.1.0] │
-│  Backtest realistico con order mechanics (limit order, fee).    │
-│  Output: Edge/Non-Edge + parametri operativi                    │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Modulo 3 — Rule Discovery                [non implementato]     │
+│  Backtest realistico con order mechanics (limit order, fee).     │
+│  Output: Edge/Non-Edge + parametri operativi                     │
+└──────────────────────────────────────────────────────────────────┘
     │
     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Modulo 4 — Rule Registry             [non implementato v0.1.0] │
-│  Deduplicazione, backtest cross-asset, export CSV/report HTML.  │
-│  Output: Regole validate pronte per il sistema di esecuzione    │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Modulo 4 — Rule Registry                 [non implementato]     │
+│  Deduplicazione, backtest cross-asset, export report.            │
+│  Output: Regole validate pronte per il sistema di esecuzione     │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Installazione e dipendenze
+## Stato implementazione
 
-FORGE dipende unicamente da `numpy` e `pandas`.
-Non è richiesto `scipy` o `statsmodels`: tutte le primitive statistiche
-(Spearman, t-test, regressione OU, FDR Benjamini-Hochberg) sono implementate
-in puro numpy.
+| Modulo | Stato |
+|---|---|
+| 0 — Market Context | ✅ Implementato |
+| 1 — Event Discovery | ✅ Implementato |
+| 2 — Alpha Discovery | ✅ Implementato |
+| 3 — Rule Discovery | 🔲 Non implementato |
+| 4 — Rule Registry | 🔲 Non implementato |
 
-```python
+---
+
+## Installazione
+
+FORGE dipende unicamente da `numpy` e `pandas`. Nessuna dipendenza da `scipy`,
+`statsmodels` o librerie di ML: tutte le primitive statistiche (Spearman, t-test,
+regressione OU, FDR Benjamini-Hochberg, funzione beta incompleta) sono
+implementate in puro numpy.
+
+```bash
 pip install numpy pandas
 ```
 
 ---
 
-## Esempio minimo end-to-end
+## Quick start
 
 ```python
 import pandas as pd
-from forgedge import (
-    MarketContext,
-    EventDiscovery,
-    AlphaDiscovery, AlphaConfig, TargetDefinition,
-)
+from forgedge import MarketContext, EventDiscovery, AlphaDiscovery, AlphaConfig
 
-# KPI Table con OHLCV + indicatori tecnici
-kpi = pd.read_parquet("kpi_table.parquet")   # deve avere colonna 'close'
+# KPI Table con OHLCV + indicatori tecnici (colonna 'close' richiesta)
+kpi = pd.read_parquet("kpi_table.parquet")
 
 # Modulo 0 — regime di mercato
-enriched = MarketContext(kpi).run()            # aggiunge 'regime' e 'regime_stable'
+enriched = MarketContext(kpi).run()
 
 # Modulo 1 — scoperta eventi
 ed = EventDiscovery(enriched)
-candidates = ed.run()                          # list[EventCandidate]
-print(f"{len(candidates)} candidati trovati")
-print(ed.summary().head())
+candidates = ed.run()
+print(f"{len(candidates)} eventi candidati trovati")
 
-# Modulo 2 — misura alpha
+# Modulo 2 — misurazione alpha con target derivato dai dati
 ad = AlphaDiscovery(
     ed.df,
     candidates,
-    AlphaConfig(target=TargetDefinition(holding_period_h=24, sell_pct=0.04)),
+    AlphaConfig(asset="BTC", timeframe="1H"),
 )
 contracts = ad.run()
-promoted = ad.promoted_contracts()             # list[AlphaContract] con status "HYPOTHESIS"
-print(f"{len(promoted)} candidati promossi su {len(contracts)}")
+promoted = ad.promoted_contracts()
+print(f"{len(promoted)} ipotesi promosse su {len(contracts)} valutate")
 print(ad.summary().head())
 ```
 
 ---
 
-## Struttura della documentazione
+## Principi di design
 
-| File | Modulo | Argomenti trattati |
-|---|---|---|
-| `modulo_0_it.md` | Market Context (0) | Classificazione regime, EMAProxy, configurazione, metodi di output |
-| `modulo_1_it.md` | Event Discovery (1) | Pipeline 5-step, strutture dati, walk-forward, SQL/formula export |
-| `modulo_2_it.md` | Alpha Discovery (2) | Misurazione IC, win rate, regime, scoring, Alpha Contract |
+**Separazione dei domini.** Ogni modulo risponde a una sola domanda. Modulo 1:
+"questo evento ha struttura temporale stabile?" Modulo 2: "questo evento predice
+il target?" Modulo 3: "questo pattern è operativamente tradabile?" Nessun modulo
+risponde alla domanda del successivo, nessuno accede ai dati del precedente al
+di là dell'artefatto formale prodotto.
 
-Le versioni inglesi sono nei file `modulo_0_en.md`, `modulo_1_en.md`, `modulo_2_en.md`.
+**Soglie immutabili.** Le soglie degli eventi vengono fissate da Event Discovery
+sulla base della distribuzione in-sample dell'asset e non vengono mai modificate
+dai moduli a valle. Ricalibrarle richiederebbe una nuova sessione di scoperta.
+
+**Soglie distribuzionali.** Le soglie non sono valori assoluti ma percentili della
+distribuzione della feature sull'asset specifico. Lo stesso pattern strutturale
+produce soglie diverse su asset diversi (`RSI p10 = 30.5` su ADA, `27.8` su BTC)
+mantenendo la stessa semantica statistica.
+
+**No look-ahead bias.** Il forward return non entra mai in Event Discovery.
+Il target economico è derivato da Alpha Discovery **per ogni evento** su una
+finestra IS, e confermato su un tail OOS che non ha partecipato a nessun calcolo
+precedente.
 
 ---
 
-## Principi architetturali fondamentali
+## Documentazione
 
-**Separazione dei domini.** Ogni modulo risponde a una sola domanda:
-il Modulo 1 chiede solo "questo evento ha struttura temporale stabile?"
-senza mai vedere il forward return. Il Modulo 2 chiede "questo evento predice
-il target?" senza ottimizzare le soglie. Il Modulo 3 chiede "questo pattern è
-operativamente tradabile?" senza riapplicare la ricerca statistica.
+| File | Contenuto |
+|---|---|
+| `how_to_use_it.md` | Guida pratica alla pipeline end-to-end per produzione |
+| `modulo_0_it.md` | Market Context: regime, EMAProxy, configurazione |
+| `modulo_1_it.md` | Event Discovery: pipeline 5-step, EventCandidate, walk-forward |
+| `modulo_2_it.md` | Alpha Discovery: target derivato, OOS, AlphaContract |
 
-**Soglie immutabili.** Le soglie degli eventi (es. `RSI < 30.5`) vengono fissate
-dal Modulo 1 e propagate invariate attraverso tutta la pipeline. Né il Modulo 2
-né il Modulo 3 possono modificarle. Una nuova soglia richiede una nuova sessione
-di Event Discovery.
-
-**Soglie distribuzionali.** Le soglie non sono valori fissi ma percentili della
-distribuzione della serie trasformata sull'asset specifico. Lo stesso pattern
-strutturale genera soglie diverse su asset diversi (es. RSI p10 = 30.5 su ADA,
-27.8 su BTC) mantenendo la stessa semantica statistica.
-
-**No look-ahead bias.** Il forward return non entra mai nel Modulo 1.
-La classificazione scale-free è volutamente conservativa (il falso negativo
-costa meno del falso positivo). Le soglie distribuzionali sono calcolate sulla
-serie in-sample.
+Le versioni inglesi sono nei file corrispondenti `*_en.md`.
