@@ -50,11 +50,17 @@ class BacktestParams:
         bar's close if the take-profit was never reached.
     target_col : str
         Price column used for the close-at-horizon exit (default ``"close"``).
+    target_hit_col : str
+        Price column scanned to detect the take-profit during the exit window.
+        ``"close"`` (default) reproduces the certified reference engine — the
+        target is hit only when a bar *closes* at or above ``sell_price``
+        (conservative).  ``"high"`` uses the intrabar touch described in the
+        Rule Discovery spec (a limit-sell fill), which is more optimistic.
     fee : float
         Fee per side (e.g. ``0.002``).  The round-trip cost applied is ``fee * 2``.
     early_stopping : bool
-        ``True`` — scan ``high`` in the exit window and exit at ``sell_price``
-        on the first bar that reaches the take-profit (realistic limit sell).
+        ``True`` — scan ``target_hit_col`` in the exit window and exit at
+        ``sell_price`` on the first bar that reaches the take-profit.
         ``False`` — always exit at the target bar's close.
     """
 
@@ -65,6 +71,7 @@ class BacktestParams:
     sell_pct: float = 0.040
     target_h: int = 24
     target_col: str = "close"
+    target_hit_col: str = "close"
     fee: float = 0.002
     early_stopping: bool = True
 

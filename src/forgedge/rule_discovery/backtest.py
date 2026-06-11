@@ -20,8 +20,16 @@ Fill / exit mechanics (Rule Discovery spec, Section 2.1)
 * bars ``t+1 .. t+buy_delay_bar`` — fill window: filled on the first bar whose
   ``low <= buy_price`` (``limit``); ``market`` always fills at ``t+1`` open;
 * bars ``fill+1 .. fill+target_h`` — exit window: with ``early_stopping`` the
-  position closes at ``sell_price`` on the first bar whose ``high >= sell_price``
-  (a realistic limit-sell fill), otherwise at the horizon bar's ``close``.
+  position closes at ``sell_price`` on the first bar whose
+  ``target_hit_col >= sell_price``, otherwise at the horizon bar's ``close``.
+
+The take-profit detection column is configurable (``BacktestParams.target_hit_col``):
+``"close"`` (default) reproduces the certified reference ``backtest_module`` — a
+bar must *close* at or above the target — and ``"high"`` uses the optimistic
+intrabar touch of the Rule Discovery spec.  This engine reproduces the reference
+``run_backtest`` summary (total_signals, total_trades, win_rate, profit_factor,
+expectancy, total_net_gain, best/worst trade, target_hit_rate) bit-for-bit with
+``target_hit_col="close"``.
 """
 from __future__ import annotations
 
@@ -92,10 +100,10 @@ def run_backtest(
 
     dt = pd.to_datetime(c[timestamp_col]).to_numpy()
     low = c["low"].to_numpy(dtype=float)
-    high = c["high"].to_numpy(dtype=float)
     open_ = c["open"].to_numpy(dtype=float)
     close = c["close"].to_numpy(dtype=float)
     target_arr = c[params.target_col].to_numpy(dtype=float)
+    hit_arr = c[params.target_hit_col].to_numpy(dtype=float)
     signal = c[signal_col].fillna(0).to_numpy()
 
     if params.buy_type == "limit" and params.buy_price_anchor not in c.columns:
@@ -151,7 +159,7 @@ def run_backtest(
     # ── exit scan ────────────────────────────────────────────────────────
     sell_price = buy_price * (1.0 + params.sell_pct)
     exit_price, exit_rn, target_hit = _scan_exit(
-        fill_rn, target_rn, sell_price, high, close, target_arr, valid, params
+        fill_rn, target_rn, sell_price, hit_arr, target_arr, valid, params
     )
 
     # ── per-trade frame ──────────────────────────────────────────────────
@@ -221,13 +229,16 @@ def _scan_exit(
     fill_rn: np.ndarray,
     target_rn: np.ndarray,
     sell_price: np.ndarray,
-    high: np.ndarray,
-    close: np.ndarray,
+    hit_arr: np.ndarray,
     target_arr: np.ndarray,
     valid: np.ndarray,
     params: BacktestParams,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Resolve exit price / bar / hit flag for every valid trade."""
+    """Resolve exit price / bar / hit flag for every valid trade.
+
+    The take-profit is detected on ``hit_arr`` (``params.target_hit_col`` —
+    ``close`` by default, ``high`` for the optimistic intrabar fill).
+    """
     size = fill_rn.size
     exit_price = np.full(size, np.nan)
     exit_rn = np.full(size, -1, dtype=np.int64)
@@ -249,7 +260,7 @@ def _scan_exit(
         hi = trn + 1  # exclusive
         if lo >= hi:
             continue
-        window = high[lo:hi]
+        window = hit_arr[lo:hi]
         mask = window >= sp
         if mask.any():
             hit_rn = lo + int(np.argmax(mask))

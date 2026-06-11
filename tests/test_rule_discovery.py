@@ -146,6 +146,48 @@ class TestBacktestEngine:
         with pytest.raises(ValueError):
             run_backtest(df, "__sig__", BacktestParams(buy_type="stop"))
 
+    def test_exit_convention_close_vs_high_handcrafted(self):
+        """Deterministic case isolating the take-profit detection column.
+
+        Signal on bar 0 (close=100); limit buy at -2% = 98 fills on bar 1
+        (low=97). target_h=3, sell_pct=6% → sell_price=103.88. In the exit
+        window one bar's *high* reaches 104 but no bar *closes* above 103.88,
+        so 'high' books a TARGET_HIT while 'close' closes at the horizon.
+        """
+        dates = pd.date_range("2023-01-01", periods=6, freq="1h")
+        df = pd.DataFrame({
+            "open_dt": dates,
+            "open":  [100, 98.5, 101, 100, 100, 100.0],
+            "high":  [100, 99.0, 104, 102,  101, 100.0],
+            "low":   [100, 97.0, 100, 99.0, 99.0, 100.0],
+            "close": [100, 98.5, 101, 99.0, 100, 100.0],
+            "__sig__": [1, 0, 0, 0, 0, 0],
+        })
+        common = dict(buy_type="limit", buy_drop_pct=0.02, buy_delay_bar=4,
+                      sell_pct=0.06, target_h=3, fee=0.002, early_stopping=True)
+        s_hi, t_hi = run_backtest(
+            df, "__sig__", BacktestParams(target_hit_col="high", **common),
+            return_trades=True,
+        )
+        s_cl, t_cl = run_backtest(
+            df, "__sig__", BacktestParams(target_hit_col="close", **common),
+            return_trades=True,
+        )
+        assert s_hi.total_trades == 1 and s_cl.total_trades == 1
+        # high convention → target hit at sell_price; close → close at horizon.
+        assert bool(t_hi["target_hit"].iloc[0]) is True
+        assert bool(t_cl["target_hit"].iloc[0]) is False
+        assert t_hi["exit_price"].iloc[0] == pytest.approx(98 * 1.06)
+        assert t_cl["exit_price"].iloc[0] == pytest.approx(100.0)  # horizon close
+
+    def test_high_hit_rate_at_least_close_hit_rate(self):
+        df = _candle_with_signal(n=3000, signal_every=40, drift_after_signal=0.05)
+        common = dict(buy_drop_pct=0.005, sell_pct=0.03, target_h=24)
+        hi = run_backtest(df, "__sig__", BacktestParams(target_hit_col="high", **common))
+        cl = run_backtest(df, "__sig__", BacktestParams(target_hit_col="close", **common))
+        # Intrabar touch can only book *more* target hits than a close check.
+        assert hi.target_hit_rate_pct >= cl.target_hit_rate_pct
+
     def test_return_trades_shape(self):
         df = _candle_with_signal(n=2000, signal_every=40, drift_after_signal=0.06)
         s, trades = run_backtest(
