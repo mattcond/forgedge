@@ -334,15 +334,23 @@ La formula viene costruita in tre fasi da `_build_event_formula`:
 
 | Fase | Esempi di output |
 |---|---|
-| Feature (`_formula_feature`) | `close_rsi_25`, `close / open`, `(sma_09 - sma_25) / 0.0032`, `bb_pct_b(close, bb_lower, bb_upper)` |
+| Feature (`_formula_feature`) | `close_rsi_25`, `close / open`, `(sma_09 - sma_25) / std(sma_09 - sma_25)  [std=0.0032]`, `bb_pct_b(close, bb_lower, bb_upper)` |
 | Transform (`_formula_transform`) | `pctrank(close_rsi_25, w=96)`, `zscore(close / open, w=48)`, `Δ(close_rsi_25, lag=1)` |
-| Condizione (`_formula_condition`) | `... < 0.10`, `... > 1.5`, `... crosses ↓ -0.03` |
+| Condizione (`_formula_condition`) | `... < P10 [P10=0.10]`, `... > -1.5`, `... crosses ↓ P5 [P5=-0.03]` |
+
+**Convenzione `FORMULA [VALORE]`:** le soglie distribuzionali (derivate dai
+percentili in-sample della serie trasformata) sono mostrate come `P10 [P10=0.10]`,
+dove `P10` indica il percentile e `0.10` è il valore effettivo su quel dataset.
+Le soglie teoriche degli zscore (`-2.0`, `-1.5`, ecc.) sono costanti fisse e
+vengono mostrate senza annotazione. La stessa convenzione si applica al denominatore
+della feature `diffnorm`: `std(x-y)  [std=0.0032]` indica che la deviazione
+standard IS usata per normalizzare vale `0.0032`.
 
 Esempi completi per un AND candidate:
 
 ```python
 cand.event_formula
-# "(pctrank(close_rsi_25, w=48) < 0.10) AND (zscore(close_rsi_25, w=96) > -1.5)"
+# "(pctrank(close_rsi_25, w=48) < P10 [P10=0.10]) AND (zscore(close_rsi_25, w=96) > -1.5)"
 ```
 
 ---

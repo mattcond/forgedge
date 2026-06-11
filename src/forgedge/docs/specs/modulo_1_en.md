@@ -322,15 +322,23 @@ The formula is built in three phases by `_build_event_formula`:
 
 | Phase | Example outputs |
 |---|---|
-| Feature (`_formula_feature`) | `close_rsi_25`, `close / open`, `(sma_09 - sma_25) / 0.0032`, `bb_pct_b(close, bb_lower, bb_upper)` |
+| Feature (`_formula_feature`) | `close_rsi_25`, `close / open`, `(sma_09 - sma_25) / std(sma_09 - sma_25)  [std=0.0032]`, `bb_pct_b(close, bb_lower, bb_upper)` |
 | Transform (`_formula_transform`) | `pctrank(close_rsi_25, w=96)`, `zscore(close / open, w=48)`, `Δ(close_rsi_25, lag=1)` |
-| Condition (`_formula_condition`) | `... < 0.10`, `... > 1.5`, `... crosses ↓ -0.03` |
+| Condition (`_formula_condition`) | `... < P10 [P10=0.10]`, `... > -1.5`, `... crosses ↓ P5 [P5=-0.03]` |
+
+**`FORMULA [VALUE]` convention:** distributional thresholds (derived from
+in-sample percentiles of the transformed series) are displayed as `P10 [P10=0.10]`,
+where `P10` is the percentile label and `0.10` is the actual value on that dataset.
+Theoretical z-score thresholds (`-2.0`, `-1.5`, etc.) are fixed constants and are
+shown without annotation. The same convention applies to the `diffnorm` feature
+denominator: `std(x-y)  [std=0.0032]` indicates the IS standard deviation used
+for normalisation is `0.0032`.
 
 Complete examples for an AND candidate:
 
 ```python
 cand.event_formula
-# "(pctrank(close_rsi_25, w=48) < 0.10) AND (zscore(close_rsi_25, w=96) > -1.5)"
+# "(pctrank(close_rsi_25, w=48) < P10 [P10=0.10]) AND (zscore(close_rsi_25, w=96) > -1.5)"
 ```
 
 ---
