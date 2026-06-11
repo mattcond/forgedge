@@ -158,7 +158,7 @@ def run_backtest(
     # ── fill scan ────────────────────────────────────────────────────────
     # Long limit fills when low ≤ entry; short limit fills when high ≥ entry.
     fill_probe = high if is_short else low
-    fill_rn = _scan_fill(signal_rn, buy_price, fill_probe, n, params)
+    fill_rn = _scan_fill(signal_rn, buy_price, fill_probe, n, params, is_short=is_short)
 
     valid_fill = fill_rn >= 0
     target_rn = np.where(valid_fill, fill_rn + params.target_h, -1)

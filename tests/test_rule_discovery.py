@@ -253,6 +253,26 @@ class TestShortDirection:
         assert s.fill_rate == pytest.approx(1.0)
         assert s.total_trades == s.total_signals
 
+    def test_short_limit_fill_mirrors_long_on_symmetric_data(self):
+        """On a driftless symmetric random walk the short's limit fill rate must
+        mirror the long's. Guards against the short reusing the long fill
+        comparison (which pins the short fill near 1.0)."""
+        rng = np.random.default_rng(3)
+        n = 6000
+        close = 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.01, n)))
+        intr = np.abs(rng.normal(0.0, 0.005, n))
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2023-01-01", periods=n, freq="1h"),
+            "open": close, "high": close * (1 + intr), "low": close * (1 - intr),
+            "close": close, "volume": 1.0,
+            "__sig__": (rng.random(n) < 0.1).astype(int),
+        })
+        common = dict(buy_type="limit", buy_drop_pct=0.02, buy_delay_bar=4, sell_pct=0.06)
+        fl = run_backtest(df, "__sig__", BacktestParams(direction="long", **common)).fill_rate
+        fs = run_backtest(df, "__sig__", BacktestParams(direction="short", **common)).fill_rate
+        assert abs(fl - fs) < 0.10        # symmetric fills
+        assert fs < 0.6                   # NOT pinned near 1.0 (the bug symptom)
+
     def test_short_envelope_and_excursion(self):
         df = _candle_with_short_signal(n=4000, signal_every=40, drop_after_signal=0.06)
         params = BacktestParams(direction="short", buy_drop_pct=0.005,
@@ -286,6 +306,9 @@ class TestShortDirection:
         s, t = run_backtest(df, "__sig__", params, return_trades=True)
         assert s.total_trades == 1
         assert t["buy_price"].iloc[0] == pytest.approx(102.0)
+        # Fill is the first bar whose HIGH reaches the +2% premium: bar 1 (high=103).
+        # (Before the is_short fix this filled on bar 2 via the long comparison.)
+        assert int(t["fill_rn"].iloc[0]) == 1
         assert bool(t["target_hit"].iloc[0]) is True
         assert t["exit_price"].iloc[0] == pytest.approx(102 * 0.94)
         # net = (entry - exit)/entry = 6%.
