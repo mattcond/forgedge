@@ -199,6 +199,100 @@ class TestBacktestEngine:
 
 
 # ---------------------------------------------------------------------------
+# Short direction
+# ---------------------------------------------------------------------------
+
+def _candle_with_short_signal(n=4000, seed=21, signal_every=40,
+                              drop_after_signal=0.06, intrabar=0.01):
+    """Mirror of ``_candle_with_signal``: a signal precedes a real *down* move,
+    so a short entered at a small premium fills and the downside target is hit."""
+    rng = np.random.default_rng(seed)
+    close = np.empty(n)
+    close[0] = 100.0
+    signal = np.zeros(n, dtype=int)
+    drag = np.zeros(n)
+    for i in range(0, n, signal_every):
+        signal[i] = 1
+        for j in range(i + 1, min(i + 21, n)):
+            drag[j] -= drop_after_signal / 20.0
+    noise = rng.normal(0.0, 0.002, n)
+    for i in range(1, n):
+        close[i] = close[i - 1] * (1.0 + drag[i] + noise[i])
+    high = close * (1.0 + intrabar)
+    low = close * (1.0 - intrabar)
+    open_ = close * (1.0 + rng.normal(0.0, 0.001, n))
+    dates = pd.date_range("2023-01-01", periods=n, freq="1h")
+    return pd.DataFrame({
+        "open_dt": dates, "open": open_, "high": high, "low": low,
+        "close": close, "volume": np.abs(rng.normal(1e6, 1e5, n)), "__sig__": signal,
+    })
+
+
+class TestShortDirection:
+    def test_default_is_long(self):
+        assert BacktestParams().direction == "long"
+
+    def test_invalid_direction_raises(self):
+        df = _candle_with_signal(n=200)
+        with pytest.raises(ValueError):
+            run_backtest(df, "__sig__", BacktestParams(direction="sideways"))
+
+    def test_short_profits_on_downmove(self):
+        df = _candle_with_short_signal(n=4000, signal_every=40, drop_after_signal=0.06)
+        params = BacktestParams(direction="short", buy_type="limit",
+                                buy_drop_pct=0.005, buy_delay_bar=6,
+                                sell_pct=0.03, target_h=24)
+        s = run_backtest(df, "__sig__", params)
+        assert s.total_trades > 20
+        assert s.profit_factor > 1.0
+        assert s.win_rate_pct > 0.5
+
+    def test_short_market_fills_every_signal(self):
+        df = _candle_with_short_signal(n=2000, signal_every=50)
+        s = run_backtest(df, "__sig__", BacktestParams(direction="short", buy_type="market"))
+        assert s.fill_rate == pytest.approx(1.0)
+        assert s.total_trades == s.total_signals
+
+    def test_short_envelope_and_excursion(self):
+        df = _candle_with_short_signal(n=4000, signal_every=40, drop_after_signal=0.06)
+        params = BacktestParams(direction="short", buy_drop_pct=0.005,
+                                sell_pct=0.03, target_h=24)
+        env = execution_envelope(df, "__sig__", params)
+        # Optimistic short hits the target via low → at least as many hits.
+        assert env.optimistic.target_hit_rate_pct >= env.conservative.target_hit_rate_pct
+        _, trades = run_backtest(df, "__sig__", params, return_trades=True)
+        ex = excursion_stats(df, trades)
+        assert ex is not None
+        # P&L-framed: adverse ≤ favourable for the short too.
+        assert ex.mae_mean <= ex.mfe_mean
+
+    def test_short_handcrafted_fill_and_target(self):
+        """Short entry at +2% premium fills on a high spike; target at -6% is hit
+        when a later bar's low reaches it."""
+        dates = pd.date_range("2023-01-01", periods=6, freq="1h")
+        # entry = 100*1.02 = 102 (short). target = 102*0.94 = 95.88.
+        df = pd.DataFrame({
+            "open_dt": dates,
+            "open":  [100, 101, 100, 97, 96, 96.0],
+            "high":  [100, 103, 101, 98, 97, 96.0],   # bar1 high=103 ≥ 102 → fill
+            "low":   [100, 101, 96, 95, 95, 96.0],     # bar3 low=95 ≤ 95.88 → TP (high conv)
+            "close": [100, 102, 99, 96, 96, 96.0],
+            "__sig__": [1, 0, 0, 0, 0, 0],
+        })
+        params = BacktestParams(direction="short", buy_type="limit",
+                                buy_drop_pct=0.02, buy_delay_bar=4,
+                                sell_pct=0.06, target_h=3, fee=0.0,
+                                target_hit_col="low")
+        s, t = run_backtest(df, "__sig__", params, return_trades=True)
+        assert s.total_trades == 1
+        assert t["buy_price"].iloc[0] == pytest.approx(102.0)
+        assert bool(t["target_hit"].iloc[0]) is True
+        assert t["exit_price"].iloc[0] == pytest.approx(102 * 0.94)
+        # net = (entry - exit)/entry = 6%.
+        assert t["net_pct_gain"].iloc[0] == pytest.approx(0.06, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # Scoring metrics
 # ---------------------------------------------------------------------------
 

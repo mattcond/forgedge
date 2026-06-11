@@ -6,7 +6,7 @@ out-of-sample with a walk-forward scheme, and emits a verdict
 (``EDGE`` / ``PARTIAL-EDGE`` / ``NON-EDGE``).
 """
 from .analysis import excursion_stats, execution_envelope
-from .backtest import run_backtest
+from .backtest import optimistic_hit_col, run_backtest
 from .discovery import RuleDiscovery
 from .grid import build_grid, grid_dataframe, run_grid, select_best
 from .models import (
@@ -50,6 +50,7 @@ __all__ = [
     "ExcursionStats",
     "ValidatedRule",
     "run_backtest",
+    "optimistic_hit_col",
     "run_grid",
     "build_grid",
     "grid_dataframe",

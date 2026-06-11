@@ -24,7 +24,7 @@ from typing import List, Optional
 import pandas as pd
 
 from .analysis import excursion_stats
-from .backtest import run_backtest
+from .backtest import optimistic_hit_col, run_backtest
 from .grid import run_grid, select_best
 from .models import (
     BacktestParams,
@@ -154,7 +154,7 @@ def walk_forward(
             te_from_s, te_to_s, scoring, timestamp_col, return_trades=True,
         )
         _, test_tr_high = run_backtest(
-            candle, signal_col, params.merged(target_hit_col="high"),
+            candle, signal_col, params.merged(target_hit_col=optimistic_hit_col(params.direction)),
             te_from_s, te_to_s, scoring, timestamp_col, return_trades=True,
         )
         close_trades.append(test_tr)
