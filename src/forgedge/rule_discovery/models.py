@@ -32,19 +32,27 @@ class BacktestParams:
 
     Attributes
     ----------
+    direction : str
+        ``"long"`` (default) or ``"short"``.  The short side is the exact mirror
+        of the long: the limit entry sits *above* the anchor at
+        ``anchor * (1 + buy_drop_pct)`` and fills when ``high`` reaches it; the
+        take-profit sits *below* at ``entry * (1 - sell_pct)`` and is reached
+        when the price falls to it; the net gain is ``(entry - exit) / entry``.
     buy_type : str
-        ``"limit"`` — place a limit order at ``anchor * (1 - buy_drop_pct)``,
-        filled if touched within ``buy_delay_bar`` bars; ``"market"`` — buy at
-        the next bar's open.
+        ``"limit"`` — place a limit order at ``anchor * (1 ∓ buy_drop_pct)``
+        (below for long, above for short), filled if touched within
+        ``buy_delay_bar`` bars; ``"market"`` — enter at the next bar's open.
     buy_drop_pct : float
-        Discount applied to the anchor price for the limit order (e.g. ``0.01``
-        = -1%).  Ignored when ``buy_type == "market"``.
+        Magnitude of the limit offset from the anchor (e.g. ``0.01`` = 1%): a
+        discount for a long entry, a premium for a short entry.  Ignored when
+        ``buy_type == "market"``.
     buy_delay_bar : int
         Number of bars the limit order stays live.  Ignored for market orders.
     buy_price_anchor : str
         Column used as the anchor for the limit price (default ``"close"``).
     sell_pct : float
-        Take-profit target as a fraction of the fill price (e.g. ``0.04`` = +4%).
+        Take-profit target as a fraction of the fill price (e.g. ``0.04`` = 4%):
+        above the entry for a long, below it for a short.
     target_h : int
         Maximum holding horizon in bars; the position is closed at the target
         bar's close if the take-profit was never reached.
@@ -53,9 +61,9 @@ class BacktestParams:
     target_hit_col : str
         Price column scanned to detect the take-profit during the exit window.
         ``"close"`` (default) reproduces the certified reference engine — the
-        target is hit only when a bar *closes* at or above ``sell_price``
-        (conservative).  ``"high"`` uses the intrabar touch described in the
-        Rule Discovery spec (a limit-sell fill), which is more optimistic.
+        target is hit only when a bar *closes* past ``sell_price`` (conservative).
+        The optimistic intrabar convention is ``"high"`` for a long and ``"low"``
+        for a short (resolve it with :func:`forgedge.rule_discovery.optimistic_hit_col`).
     fee : float
         Fee per side (e.g. ``0.002``).  The round-trip cost applied is ``fee * 2``.
     early_stopping : bool
@@ -64,6 +72,7 @@ class BacktestParams:
         ``False`` — always exit at the target bar's close.
     """
 
+    direction: str = "long"
     buy_type: str = "limit"
     buy_drop_pct: float = 0.010
     buy_delay_bar: int = 6
@@ -472,6 +481,7 @@ class ValidatedRule:
         return {
             "expression": self.expression,
             "event_candidate_id": self.event_candidate_id,
+            "direction": self.params.direction,
             "entry_mode": self.params.buy_type,
             "buy_drop_pct": self.params.buy_drop_pct,
             "buy_delay_bar": self.params.buy_delay_bar,

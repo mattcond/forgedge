@@ -32,6 +32,7 @@ def text_report(resp: RuleDiscoveryResponse) -> str:
         p = vr.params
         add("VALIDATED RULE")
         add(f"  expression : {vr.expression}")
+        add(f"  direction  : {p.direction}")
         add(f"  entry      : {p.buy_type}  drop={p.buy_drop_pct}  delay={p.buy_delay_bar}")
         add(f"  exit       : sell_pct={p.sell_pct}  target_h={p.target_h}  fee={p.fee}")
         add("-" * 64)
@@ -151,9 +152,9 @@ def html_report(resp: RuleDiscoveryResponse) -> str:
         add("<h2>Validated rule</h2>")
         add(f"<p><code>{html.escape(vr.expression)}</code></p>")
         add(_kv_table({
-            "entry mode": p.buy_type, "buy_drop_pct": p.buy_drop_pct,
-            "buy_delay_bar": p.buy_delay_bar, "sell_pct": p.sell_pct,
-            "target_h": p.target_h, "fee": p.fee,
+            "direction": p.direction, "entry mode": p.buy_type,
+            "buy_drop_pct": p.buy_drop_pct, "buy_delay_bar": p.buy_delay_bar,
+            "sell_pct": p.sell_pct, "target_h": p.target_h, "fee": p.fee,
         }))
 
     add("<h2>In-sample</h2>")

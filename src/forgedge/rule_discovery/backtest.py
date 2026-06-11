@@ -90,8 +90,11 @@ def run_backtest(
     """
     if params.buy_type not in ("limit", "market"):
         raise ValueError(f"buy_type must be 'limit' or 'market', got {params.buy_type!r}")
+    if params.direction not in ("long", "short"):
+        raise ValueError(f"direction must be 'long' or 'short', got {params.direction!r}")
 
     scoring = scoring or ScoringParams()
+    is_short = params.direction == "short"
 
     c = candle
     n = len(c)
@@ -100,6 +103,7 @@ def run_backtest(
 
     dt = pd.to_datetime(c[timestamp_col]).to_numpy()
     low = c["low"].to_numpy(dtype=float)
+    high = c["high"].to_numpy(dtype=float)
     open_ = c["open"].to_numpy(dtype=float)
     close = c["close"].to_numpy(dtype=float)
     target_arr = c[params.target_col].to_numpy(dtype=float)
@@ -143,30 +147,36 @@ def run_backtest(
         empty = _empty_summary(n_months)
         return (empty, _empty_trades()) if return_trades else empty
 
-    # ── buy price ────────────────────────────────────────────────────────
+    # ── entry (buy/short) price ──────────────────────────────────────────
+    # Long: limit below the anchor (discount); short: above it (premium).
+    offset = (1.0 + params.buy_drop_pct) if is_short else (1.0 - params.buy_drop_pct)
     if params.buy_type == "limit":
-        buy_price = anchor[signal_rn] * (1.0 - params.buy_drop_pct)
+        buy_price = anchor[signal_rn] * offset
     else:  # market: fill at the next bar's open
         buy_price = open_[np.minimum(signal_rn + 1, n - 1)]
 
     # ── fill scan ────────────────────────────────────────────────────────
-    fill_rn = _scan_fill(signal_rn, buy_price, low, n, params)
+    # Long limit fills when low ≤ entry; short limit fills when high ≥ entry.
+    fill_probe = high if is_short else low
+    fill_rn = _scan_fill(signal_rn, buy_price, fill_probe, n, params, is_short=is_short)
 
     valid_fill = fill_rn >= 0
     target_rn = np.where(valid_fill, fill_rn + params.target_h, -1)
     valid = valid_fill & (target_rn < n)
 
     # ── exit scan ────────────────────────────────────────────────────────
-    sell_price = buy_price * (1.0 + params.sell_pct)
+    # Take-profit below the entry for a short, above for a long.
+    sell_price = buy_price * ((1.0 - params.sell_pct) if is_short else (1.0 + params.sell_pct))
     exit_price, exit_rn, target_hit = _scan_exit(
-        fill_rn, target_rn, sell_price, hit_arr, target_arr, valid, params
+        fill_rn, target_rn, sell_price, hit_arr, target_arr, valid, is_short, params
     )
 
     # ── per-trade frame ──────────────────────────────────────────────────
     fee_rt = params.fee * 2.0
     bp = buy_price[valid]
     ep = exit_price[valid]
-    net = (ep - bp) / bp - fee_rt
+    # Long gains when price rises, short when it falls.
+    net = ((bp - ep) if is_short else (ep - bp)) / bp - fee_rt
 
     trades = pd.DataFrame(
         {
@@ -176,6 +186,7 @@ def run_backtest(
             "exit_rn": exit_rn[valid],
             "fill_dt": dt[fill_rn[valid]],
             "exit_dt": dt[exit_rn[valid]],
+            "direction": params.direction,
             "buy_price": bp,
             "sell_price": sell_price[valid],
             "exit_price": ep,
@@ -195,11 +206,16 @@ def run_backtest(
 def _scan_fill(
     signal_rn: np.ndarray,
     buy_price: np.ndarray,
-    low: np.ndarray,
+    probe: np.ndarray,
     n: int,
     params: BacktestParams,
+    is_short: bool = False,
 ) -> np.ndarray:
-    """Return the fill row index per signal (``-1`` when never filled)."""
+    """Return the fill row index per signal (``-1`` when never filled).
+
+    ``probe`` is ``low`` for a long (fills when ``low ≤ entry``) and ``high``
+    for a short (fills when ``high ≥ entry``).
+    """
     fill_rn = np.full(signal_rn.size, -1, dtype=np.int64)
 
     if params.buy_type == "market":
@@ -218,8 +234,8 @@ def _scan_fill(
         hi = min(srn + delay, n - 1)
         if lo > hi:
             continue
-        window = low[lo : hi + 1]
-        mask = window <= bp
+        window = probe[lo : hi + 1]
+        mask = (window >= bp) if is_short else (window <= bp)
         if mask.any():
             fill_rn[i] = lo + int(np.argmax(mask))
     return fill_rn
@@ -232,12 +248,14 @@ def _scan_exit(
     hit_arr: np.ndarray,
     target_arr: np.ndarray,
     valid: np.ndarray,
+    is_short: bool,
     params: BacktestParams,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Resolve exit price / bar / hit flag for every valid trade.
 
-    The take-profit is detected on ``hit_arr`` (``params.target_hit_col`` —
-    ``close`` by default, ``high`` for the optimistic intrabar fill).
+    The take-profit is detected on ``hit_arr`` (``params.target_hit_col``).  A
+    long hits when the price rises to ``sell_price`` (``hit_arr ≥ sell_price``);
+    a short hits when it falls to it (``hit_arr ≤ sell_price``).
     """
     size = fill_rn.size
     exit_price = np.full(size, np.nan)
@@ -261,7 +279,7 @@ def _scan_exit(
         if lo >= hi:
             continue
         window = hit_arr[lo:hi]
-        mask = window >= sp
+        mask = (window <= sp) if is_short else (window >= sp)
         if mask.any():
             hit_rn = lo + int(np.argmax(mask))
             exit_price[i] = sp
@@ -384,6 +402,16 @@ def _empty_trades() -> pd.DataFrame:
     return pd.DataFrame(
         columns=[
             "signal_rn", "fill_rn", "target_rn", "exit_rn", "fill_dt", "exit_dt",
-            "buy_price", "sell_price", "exit_price", "net_pct_gain", "target_hit",
+            "direction", "buy_price", "sell_price", "exit_price", "net_pct_gain",
+            "target_hit",
         ]
     )
+
+
+def optimistic_hit_col(direction: str) -> str:
+    """Resolve the optimistic intrabar take-profit column for a direction.
+
+    A long take-profit fills when ``high`` reaches it; a short when ``low`` does.
+    The conservative convention is always ``close`` for both.
+    """
+    return "low" if direction == "short" else "high"

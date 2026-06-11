@@ -123,11 +123,10 @@ class RuleDiscovery:
         notes: List[str] = []
         base = self._seed_base_params(notes)
 
-        # Short targets cannot be expressed by the long-only limit-buy engine.
-        if self.contract.derived_target.direction == "short":
+        if self.contract.derived_target.direction not in ("long", "short"):
             return self._reject(
-                ["derived target direction is 'short' — unsupported by the "
-                 "long-only limit-buy backtest engine"],
+                [f"contract direction {self.contract.derived_target.direction!r} "
+                 "is not tradeable ('long' or 'short' required)"],
                 base, notes,
             )
 
@@ -233,6 +232,8 @@ class RuleDiscovery:
 
         dt = self.contract.derived_target
         overrides = {}
+        if dt.direction in ("long", "short"):
+            overrides["direction"] = dt.direction
         if dt.holding_period_h and dt.holding_period_h > 0:
             overrides["target_h"] = int(dt.holding_period_h)
         if dt.sell_pct and np.isfinite(dt.sell_pct) and dt.sell_pct > 0:

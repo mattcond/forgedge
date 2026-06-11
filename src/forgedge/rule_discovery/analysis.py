@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .backtest import run_backtest
+from .backtest import optimistic_hit_col, run_backtest
 from .models import (
     BacktestParams,
     ExcursionStats,
@@ -38,11 +38,12 @@ def execution_envelope(
     timerange_from: Optional[str] = None,
     timerange_to: Optional[str] = None,
 ) -> ExecutionEnvelope:
-    """Backtest ``params`` under the close (conservative) and high (optimistic)
-    take-profit conventions and return both summaries as a bracket.
+    """Backtest ``params`` under the conservative (``close``) and optimistic
+    (intrabar) take-profit conventions and return both summaries as a bracket.
 
-    Two backtests total — independent of the grid size — so it is cheap to run
-    once on the selected configuration.
+    The optimistic column is direction-aware — ``high`` for a long, ``low`` for
+    a short.  Two backtests total — independent of the grid size — so it is
+    cheap to run once on the selected configuration.
     """
     scoring = scoring or ScoringParams()
     conservative = run_backtest(
@@ -51,7 +52,7 @@ def execution_envelope(
         scoring=scoring, timestamp_col=timestamp_col,
     )
     optimistic = run_backtest(
-        candle, signal_col, params.merged(target_hit_col="high"),
+        candle, signal_col, params.merged(target_hit_col=optimistic_hit_col(params.direction)),
         timerange_from=timerange_from, timerange_to=timerange_to,
         scoring=scoring, timestamp_col=timestamp_col,
     )
@@ -91,8 +92,10 @@ def excursion_stats(
     fill = trades["fill_rn"].to_numpy(dtype=np.int64)
     exit_ = trades["exit_rn"].to_numpy(dtype=np.int64)
     bp = trades["buy_price"].to_numpy(dtype=float)
-    # Per-trade take-profit target as a fraction of the buy price.
-    target = trades["sell_price"].to_numpy(dtype=float) / np.where(bp > 0, bp, np.nan) - 1.0
+    # Per-trade take-profit target as a (positive) fraction of the entry price.
+    target = np.abs(trades["sell_price"].to_numpy(dtype=float) / np.where(bp > 0, bp, np.nan) - 1.0)
+    # Excursion is expressed in P&L terms, so MAE ≤ MFE for both directions.
+    is_short = "direction" in trades.columns and (trades["direction"] == "short").any()
 
     mae = np.full(fill.size, np.nan)
     mfe = np.full(fill.size, np.nan)
@@ -105,8 +108,14 @@ def excursion_stats(
         wh = high[lo : hi + 1]
         if wl.size == 0:
             continue
-        mae[i] = (wl.min() - bp[i]) / bp[i]
-        mfe[i] = (wh.max() - bp[i]) / bp[i]
+        if is_short:
+            # Short P&L = (entry - price)/entry: adverse when price rises (high),
+            # favourable when it falls (low).
+            mae[i] = (bp[i] - wh.max()) / bp[i]
+            mfe[i] = (bp[i] - wl.min()) / bp[i]
+        else:
+            mae[i] = (wl.min() - bp[i]) / bp[i]
+            mfe[i] = (wh.max() - bp[i]) / bp[i]
 
     finite = np.isfinite(mae)
     mae = mae[finite]
