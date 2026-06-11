@@ -64,7 +64,7 @@ KPI Table (OHLCV + indicatori tecnici)
     │
     ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  Modulo 3 — Rule Discovery                [non implementato]     │
+│  Modulo 3 — Rule Discovery                                       │
 │  Backtest realistico con order mechanics (limit order, fee).     │
 │  Output: Edge/Non-Edge + parametri operativi                     │
 └──────────────────────────────────────────────────────────────────┘
@@ -86,7 +86,7 @@ KPI Table (OHLCV + indicatori tecnici)
 | 0 — Market Context | ✅ Implementato |
 | 1 — Event Discovery | ✅ Implementato |
 | 2 — Alpha Discovery | ✅ Implementato |
-| 3 — Rule Discovery | 🔲 Non implementato |
+| 3 — Rule Discovery | ✅ Implementato |
 | 4 — Rule Registry | 🔲 Non implementato |
 
 ---
@@ -167,5 +167,6 @@ precedente.
 | `modulo_0_it.md` | Market Context: regime, EMAProxy, configurazione |
 | `modulo_1_it.md` | Event Discovery: pipeline 5-step, EventCandidate, walk-forward |
 | `modulo_2_it.md` | Alpha Discovery: target derivato, OOS, AlphaContract |
+| `modulo_3_it.md` | Rule Discovery: backtest, verdetto EDGE, walk-forward OOS, report |
 
 Le versioni inglesi sono nei file corrispondenti `*_en.md`.

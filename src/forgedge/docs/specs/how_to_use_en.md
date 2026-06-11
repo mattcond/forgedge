@@ -293,7 +293,80 @@ for c in contracts:
 
 ---
 
-## 5. Full production pipeline
+## 5. Module 3 — Rule Discovery
+
+### Minimal configuration (production)
+
+```python
+from forgedge import RuleDiscovery, RuleDiscoveryConfig
+
+# by_id built after ed.run() and ad.run()
+by_id = {c.event_id: c for c in candidates}
+
+for contract in promoted:
+    cand = by_id[contract.event_candidate_id]
+    rd   = RuleDiscovery(ed.df, contract, cand)
+    resp = rd.run()
+
+    print(f"{contract.alpha_id}: {resp.verdict}")
+    if resp.is_edge:
+        vr = resp.validated_rule
+        print(f"  drop={vr.params.buy_drop_pct}  sell={vr.params.sell_pct}"
+              f"  h={vr.params.target_h}  PF={resp.in_sample_summary.profit_factor:.2f}")
+```
+
+### Reading the response
+
+```python
+resp = rd.run()
+
+# Main verdict
+print(resp.verdict)           # "EDGE" | "PARTIAL-EDGE" | "NON-EDGE"
+print(resp.is_edge)           # True for EDGE and PARTIAL-EDGE
+print(resp.rejection_reasons) # list of failed gates (empty if EDGE)
+
+# IS metrics
+s = resp.in_sample_summary
+print(f"Trades: {s.total_trades}, PF: {s.profit_factor:.2f}, WR: {s.win_rate_pct:.2%}")
+print(f"Expectancy: {s.expectancy:.4f}, tpm: {s.tpm_mu:.1f}")
+
+# Execution envelope (conservative vs optimistic)
+env = resp.execution_envelope
+print(f"PF conservative: {env.conservative.profit_factor:.2f}")
+print(f"PF optimistic:   {env.optimistic.profit_factor:.2f}")
+
+# Walk-forward OOS
+wf = resp.walk_forward
+print(f"OOS PF: {wf.oos_summary.profit_factor:.2f}, consistency: {wf.consistency:.0%}")
+
+# Compact text report
+from forgedge.rule_discovery import text_report
+print(text_report(resp))
+```
+
+### Generating HTML reports for review
+
+```python
+from forgedge.rule_discovery import html_report
+import json
+
+for contract in promoted:
+    cand = by_id[contract.event_candidate_id]
+    rd   = RuleDiscovery(ed.df, contract, cand)
+    resp = rd.run()
+
+    if resp.is_edge:
+        with open(f"reports/{resp.alpha_id}.html", "w") as f:
+            f.write(html_report(resp))
+        with open(f"reports/{resp.alpha_id}.json", "w") as f:
+            json.dump(resp.to_dict(), f, indent=2)
+    else:
+        print(f"NON-EDGE: {resp.alpha_id} — {resp.rejection_reasons}")
+```
+
+---
+
+## 6. Full production pipeline
 
 The recommended pattern is a single function encapsulating the entire session:
 
@@ -303,9 +376,11 @@ from forgedge import (
     MarketContext, MarketContextConfig, EMAProxyConfig,
     EventDiscovery, DiscoveryConfig,
     AlphaDiscovery, AlphaConfig,
+    RuleDiscovery,
 )
 from forgedge.event_discovery.models import WalkForwardConfig, GateParams
 from forgedge.alpha_discovery.models import PromotionThresholds
+from forgedge.rule_discovery import html_report
 
 
 def run_forge_pipeline(
@@ -314,7 +389,7 @@ def run_forge_pipeline(
     timeframe: str,
     bar_hours: float,
 ) -> tuple:
-    """Run the full FORGE pipeline and return (promoted_contracts, ad).
+    """Run the full FORGE pipeline and return (rule_responses, ad, ed).
 
     Parameters
     ----------
@@ -327,10 +402,12 @@ def run_forge_pipeline(
 
     Returns
     -------
-    promoted : list[AlphaContract]
-        Promoted contracts (status="HYPOTHESIS").
+    rule_responses : list[tuple[AlphaContract, RuleDiscoveryResponse]]
+        Pairs of (contract, response) for every promoted contract.
     ad : AlphaDiscovery
         Instance with access to summary(), market_structure, split_idx.
+    ed : EventDiscovery
+        Instance with access to df (enriched DataFrame) and candidates.
     """
 
     # ── Module 0: regime ────────────────────────────────────────────────
@@ -372,22 +449,34 @@ def run_forge_pipeline(
     )
     ad = AlphaDiscovery(ed.df, candidates, alpha_config)
     ad.run()
-
     promoted = ad.promoted_contracts()
-    return promoted, ad
+
+    # ── Module 3: rule discovery ─────────────────────────────────────────
+    by_id = {c.event_id: c for c in candidates}
+    rule_responses = []
+    for contract in promoted:
+        cand = by_id[contract.event_candidate_id]
+        rd   = RuleDiscovery(ed.df, contract, cand)
+        resp = rd.run()
+        rule_responses.append((contract, resp))
+
+    return rule_responses, ad, ed
 
 
 # Usage
 kpi = pd.read_parquet("btc_1h.parquet")
-promoted, ad = run_forge_pipeline(kpi, asset="BTC", timeframe="1H", bar_hours=1.0)
+rule_responses, ad, ed = run_forge_pipeline(kpi, asset="BTC", timeframe="1H", bar_hours=1.0)
 
-print(f"{len(promoted)} promoted hypotheses")
-print(ad.summary()[["expression", "direction", "holding_period_h", "grade"]].head())
+for contract, resp in rule_responses:
+    print(f"{contract.alpha_id}: {resp.verdict}")
+    if resp.is_edge:
+        print(f"  PF={resp.in_sample_summary.profit_factor:.2f}"
+              f"  OOS={resp.walk_forward.oos_summary.profit_factor:.2f}")
 ```
 
 ---
 
-## 6. Multi-asset workflow
+## 7. Multi-asset workflow
 
 Run an independent session per asset — sessions share no state. Each asset
 gets its own distributional thresholds, OU half-lives, and contracts.
@@ -424,7 +513,7 @@ print(cross)
 
 ---
 
-## 7. OOS replay: applying discovered events to new data
+## 8. OOS replay: applying discovered events to new data
 
 `EventCandidate.apply(df)` deterministically replays the event on any DataFrame
 with the same native columns, using the thresholds fixed at discovery time. This
@@ -447,7 +536,7 @@ it requires no access to the original session and re-optimises nothing.
 
 ---
 
-## 8. Persisting artefacts
+## 9. Persisting artefacts
 
 ### Saving promoted contracts
 
@@ -491,14 +580,27 @@ pd.DataFrame(candidates_data).to_csv("event_candidates.csv", index=False)
 
 ---
 
-## 9. Pre-production checklist
+## 10. Pre-production checklist
 
-Before handing results to Rule Discovery (not yet implemented), verify:
+Before promoting a `ValidatedRule` to the Rule Registry (not yet implemented),
+verify:
 
+**Module 0**
 - [ ] `mc.window_resolution["source"] == "hurst_ou"` — adaptive EMAs derived from data
 - [ ] `mc.distribution()` shows at least 3 regimes with share > 5% — non-degenerate distribution
+
+**Module 1**
 - [ ] All candidates passed to AlphaDiscovery have `c.validation.passed == True` (walk-forward)
+
+**Module 2**
 - [ ] `len(promoted) >= 3` — enough hypotheses for diversification; if 0, loosen gates or add features
 - [ ] No promoted contract with `oos.n_activations < 15` — unstable OOS estimate
 - [ ] At least one promoted contract with grade ≥ B (`composite_score >= 0.45`)
 - [ ] Check `regime_analysis.dependency_type` — avoid `"broken"` for cross-regime robustness
+
+**Module 3**
+- [ ] At least one contract with `resp.verdict == "EDGE"` — if only PARTIAL-EDGE, investigate the failed gates
+- [ ] `resp.walk_forward.consistency >= 0.50` — half the OOS windows have positive net gain
+- [ ] `resp.statistical_validation.temporal_stability != "FAIL"` — edge is not concentrated in time
+- [ ] `resp.regime_analysis.avoid_in` is a short list — edge works across multiple regimes
+- [ ] Check execution envelope: `env.conservative.profit_factor > 1.5` — edge holds in the conservative case
