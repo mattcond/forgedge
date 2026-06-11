@@ -18,6 +18,15 @@ from .market_context import (
     MarketContextConfig,
     RegimeClassifier,
 )
+from .rule_discovery import (
+    BacktestParams,
+    RuleDiscovery,
+    RuleDiscoveryConfig,
+    RuleDiscoveryResponse,
+    SelectionCriteria,
+    ValidatedRule,
+    WalkForwardConfig,
+)
 
 __all__ = [
     "EventDiscovery",
@@ -33,4 +42,11 @@ __all__ = [
     "OOSValidation",
     "PromotionThresholds",
     "AlphaContract",
+    "RuleDiscovery",
+    "RuleDiscoveryConfig",
+    "RuleDiscoveryResponse",
+    "BacktestParams",
+    "SelectionCriteria",
+    "WalkForwardConfig",
+    "ValidatedRule",
 ]
