@@ -426,12 +426,28 @@ class WalkForwardResult:
         Number of test windows with a positive net gain.
     consistency : float
         ``n_profitable_splits / n_splits`` — fraction of OOS windows in profit.
+    oos_envelope : ExecutionEnvelope or None
+        Execution bracket (close↔high) over the concatenated OOS trades — the
+        out-of-sample twin of the in-sample envelope.
+    oos_excursion : ExcursionStats or None
+        MAE/MFE over the concatenated OOS trades.
+    oos_validation : StatisticalValidation or None
+        Win-rate / expectancy t-tests and Sharpe on the OOS trades.  The Sharpe
+        is **not** deflated (``n_trials=1``): out-of-sample data played no part
+        in the parameter selection, so no multiple-testing haircut applies.
+    oos_trades : pd.DataFrame or None
+        The concatenated per-trade ledger of every test window (close
+        convention), excluded from ``repr`` to keep logs readable.
     """
 
     splits: List[WalkForwardSplit]
     oos_summary: BacktestSummary
     n_profitable_splits: int
     consistency: float
+    oos_envelope: Optional["ExecutionEnvelope"] = None
+    oos_excursion: Optional["ExcursionStats"] = None
+    oos_validation: Optional["StatisticalValidation"] = None
+    oos_trades: Optional["pd.DataFrame"] = field(default=None, repr=False)
 
 
 @dataclass
@@ -514,6 +530,15 @@ class RuleDiscoveryResponse:
                     "consistency": wf.consistency,
                     "n_profitable_splits": wf.n_profitable_splits,
                     "oos_results": wf.oos_summary.to_dict(),
+                    "oos_execution_envelope": (
+                        wf.oos_envelope.to_dict() if wf.oos_envelope else None
+                    ),
+                    "oos_excursion": (
+                        wf.oos_excursion.to_dict() if wf.oos_excursion else None
+                    ),
+                    "oos_statistical_validation": (
+                        wf.oos_validation.to_dict() if wf.oos_validation else None
+                    ),
                     "splits": [
                         {
                             "split_idx": s.split_idx,

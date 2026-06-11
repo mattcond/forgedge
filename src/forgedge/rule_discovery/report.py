@@ -57,7 +57,7 @@ def text_report(resp: RuleDiscoveryResponse) -> str:
         env = resp.execution_envelope
         c, o = env.conservative, env.optimistic
         add("-" * 64)
-        add("EXECUTION ENVELOPE (range d'azione, no target choice)")
+        add("EXECUTION ENVELOPE — in-sample (range d'azione, no target choice)")
         add(f"  conservative (close): PF={_f(c.profit_factor)}  WR={_pct(c.win_rate_pct)}  "
             f"exp={_pct(c.expectancy)}  hit={_f(c.target_hit_rate_pct)}%")
         add(f"  optimistic   (high) : PF={_f(o.profit_factor)}  WR={_pct(o.win_rate_pct)}  "
@@ -66,7 +66,7 @@ def text_report(resp: RuleDiscoveryResponse) -> str:
     if resp.excursion:
         ex = resp.excursion
         add("-" * 64)
-        add("MAE / MFE (intra-trade excursion)")
+        add("MAE / MFE — in-sample (intra-trade excursion)")
         add(f"  MAE adverse  : mean={_pct(ex.mae_mean)}  median={_pct(ex.mae_median)}  "
             f"worst={_pct(ex.mae_worst)}")
         add(f"  MFE favoured : mean={_pct(ex.mfe_mean)}  median={_pct(ex.mfe_median)}  "
@@ -86,6 +86,22 @@ def text_report(resp: RuleDiscoveryResponse) -> str:
             add(f"    [{sp.split_idx}] {sp.test_from}→{sp.test_to}  "
                 f"PF={_f(ts.profit_factor)}  WR={_pct(ts.win_rate_pct)}  "
                 f"T={ts.total_trades}  net={_pct(ts.total_net_gain)}")
+        if wf.oos_envelope:
+            ce, oe = wf.oos_envelope.conservative, wf.oos_envelope.optimistic
+            add("  OOS envelope:")
+            add(f"    conservative (close): PF={_f(ce.profit_factor)}  "
+                f"WR={_pct(ce.win_rate_pct)}  exp={_pct(ce.expectancy)}")
+            add(f"    optimistic   (high) : PF={_f(oe.profit_factor)}  "
+                f"WR={_pct(oe.win_rate_pct)}  exp={_pct(oe.expectancy)}")
+        if wf.oos_excursion:
+            ex = wf.oos_excursion
+            add(f"  OOS MAE/MFE: MAE mean={_pct(ex.mae_mean)} worst={_pct(ex.mae_worst)}  "
+                f"MFE mean={_pct(ex.mfe_mean)} best={_pct(ex.mfe_best)}  "
+                f"reached_target={_f(ex.mfe_reached_target_pct)}%")
+        if wf.oos_validation:
+            sv = wf.oos_validation
+            add(f"  OOS t-test: WR p={_f(sv.ttest_winrate_p)}  "
+                f"exp p={_f(sv.ttest_expectancy_p)}  Sharpe={_f(sv.sharpe_ratio)}")
 
     if resp.regime_analysis:
         ra = resp.regime_analysis
@@ -163,7 +179,7 @@ def html_report(resp: RuleDiscoveryResponse) -> str:
     if resp.execution_envelope:
         env = resp.execution_envelope
         c, o = env.conservative, env.optimistic
-        add("<h2>Execution envelope</h2>")
+        add("<h2>Execution envelope — in-sample</h2>")
         add("<table><tr><th class='l'>convention</th><th>PF</th><th>WR</th>"
             "<th>expectancy</th><th>hit rate</th></tr>"
             f"<tr><td class='l'>conservative (close)</td><td>{_f(c.profit_factor)}</td>"
@@ -175,7 +191,7 @@ def html_report(resp: RuleDiscoveryResponse) -> str:
 
     if resp.excursion:
         ex = resp.excursion
-        add("<h2>MAE / MFE excursion</h2>")
+        add("<h2>MAE / MFE excursion — in-sample</h2>")
         add("<table><tr><th class='l'></th><th>mean</th><th>median</th><th>extreme</th></tr>"
             f"<tr><td class='l'>MAE (adverse)</td><td>{_pct(ex.mae_mean)}</td>"
             f"<td>{_pct(ex.mae_median)}</td><td>{_pct(ex.mae_worst)}</td></tr>"
@@ -204,6 +220,28 @@ def html_report(resp: RuleDiscoveryResponse) -> str:
         )
         add("<table><tr><th>#</th><th class='l'>test window</th><th>PF</th>"
             f"<th>WR</th><th>T</th><th>net</th></tr>{rows}</table>")
+
+        if wf.oos_envelope:
+            ce, oe = wf.oos_envelope.conservative, wf.oos_envelope.optimistic
+            add("<h3 style='font-size:13px'>OOS execution envelope</h3>")
+            add("<table><tr><th class='l'>convention</th><th>PF</th><th>WR</th>"
+                "<th>expectancy</th></tr>"
+                f"<tr><td class='l'>conservative (close)</td><td>{_f(ce.profit_factor)}</td>"
+                f"<td>{_pct(ce.win_rate_pct)}</td><td>{_pct(ce.expectancy)}</td></tr>"
+                f"<tr><td class='l'>optimistic (high)</td><td>{_f(oe.profit_factor)}</td>"
+                f"<td>{_pct(oe.win_rate_pct)}</td><td>{_pct(oe.expectancy)}</td></tr></table>")
+        if wf.oos_excursion or wf.oos_validation:
+            ex = wf.oos_excursion
+            sv = wf.oos_validation
+            d = {}
+            if ex:
+                d.update({"OOS MAE mean": _pct(ex.mae_mean), "OOS MAE worst": _pct(ex.mae_worst),
+                          "OOS MFE mean": _pct(ex.mfe_mean), "OOS MFE best": _pct(ex.mfe_best)})
+            if sv:
+                d.update({"OOS t-test WR p": _f(sv.ttest_winrate_p),
+                          "OOS t-test exp p": _f(sv.ttest_expectancy_p),
+                          "OOS Sharpe": _f(sv.sharpe_ratio)})
+            add(_kv_table(d))
 
     if resp.regime_analysis and resp.regime_analysis.per_regime:
         add("<h2>Regime breakdown</h2>")

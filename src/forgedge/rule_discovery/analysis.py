@@ -61,7 +61,6 @@ def execution_envelope(
 def excursion_stats(
     candle: pd.DataFrame,
     trades: pd.DataFrame,
-    params: BacktestParams,
 ) -> Optional[ExcursionStats]:
     """Compute MAE/MFE over the realised holding window of each trade.
 
@@ -72,9 +71,10 @@ def excursion_stats(
         ``fill_rn`` / ``exit_rn`` are positional indices into it.
     trades : pd.DataFrame
         Executed trades from :func:`run_backtest` (``return_trades=True``).
-    params : BacktestParams
-        Used for ``sell_pct`` (to report how often the favourable excursion
-        actually reached the take-profit).
+        The per-trade take-profit is read from ``sell_price`` / ``buy_price`` so
+        the favourable-excursion-reached-target metric is correct even for a
+        concatenation of trades with different ``sell_pct`` (e.g. walk-forward
+        OOS windows that each re-selected their parameters).
 
     Returns
     -------
@@ -91,6 +91,8 @@ def excursion_stats(
     fill = trades["fill_rn"].to_numpy(dtype=np.int64)
     exit_ = trades["exit_rn"].to_numpy(dtype=np.int64)
     bp = trades["buy_price"].to_numpy(dtype=float)
+    # Per-trade take-profit target as a fraction of the buy price.
+    target = trades["sell_price"].to_numpy(dtype=float) / np.where(bp > 0, bp, np.nan) - 1.0
 
     mae = np.full(fill.size, np.nan)
     mfe = np.full(fill.size, np.nan)
@@ -106,12 +108,14 @@ def excursion_stats(
         mae[i] = (wl.min() - bp[i]) / bp[i]
         mfe[i] = (wh.max() - bp[i]) / bp[i]
 
-    mae = mae[np.isfinite(mae)]
-    mfe = mfe[np.isfinite(mfe)]
+    finite = np.isfinite(mae)
+    mae = mae[finite]
+    mfe = mfe[finite]
+    tgt = target[finite]
     if mae.size == 0:
         return ExcursionStats(0, *(float("nan"),) * 6, 0.0)
 
-    reached = float((mfe >= params.sell_pct).mean()) * 100.0
+    reached = float((mfe >= tgt).mean()) * 100.0
     return ExcursionStats(
         n_trades=int(mae.size),
         mae_mean=round(float(mae.mean()), 6),

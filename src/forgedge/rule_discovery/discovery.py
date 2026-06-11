@@ -169,6 +169,7 @@ class RuleDiscovery:
         wf = walk_forward(
             self._frame, cfg.signal_col, base, cfg.grid, cfg.walk_forward,
             scoring=cfg.scoring, criteria=cfg.criteria, timestamp_col=cfg.timestamp_col,
+            base_rate=float(self.contract.base_rate or 0.0),
         )
         if wf is None:
             notes.append("walk-forward skipped — data span too short for a split")
@@ -178,7 +179,7 @@ class RuleDiscovery:
             self._frame, cfg.signal_col, best_params,
             scoring=cfg.scoring, timestamp_col=cfg.timestamp_col,
         )
-        excursion = excursion_stats(self._frame, is_trades, best_params)
+        excursion = excursion_stats(self._frame, is_trades)
 
         # ── Step 5 — regime dependency ───────────────────────────────────
         regime = self._regime_breakdown(is_trades)

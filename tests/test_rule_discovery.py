@@ -240,7 +240,7 @@ class TestRangeOfAction:
         df = _candle_with_signal(n=4000, signal_every=40, drift_after_signal=0.06)
         params = BacktestParams(buy_drop_pct=0.005, sell_pct=0.03, target_h=24)
         _, trades = run_backtest(df, "__sig__", params, return_trades=True)
-        ex = excursion_stats(df, trades, params)
+        ex = excursion_stats(df, trades)
         assert ex is not None and ex.n_trades > 0
         # MAE (deepest point) never exceeds MFE (highest point) of the window.
         assert ex.mae_worst <= ex.mae_mean
@@ -264,7 +264,7 @@ class TestRangeOfAction:
         params = BacktestParams(buy_type="limit", buy_drop_pct=0.02, buy_delay_bar=4,
                                 sell_pct=0.06, target_h=3, fee=0.002)
         _, trades = run_backtest(df, "__sig__", params, return_trades=True)
-        ex = excursion_stats(df, trades, params)
+        ex = excursion_stats(df, trades)
         assert ex is not None and ex.n_trades == 1
         # buy_price=98, deepest low=94 → MAE = (94-98)/98 ≈ -4.08%.
         assert ex.mae_worst == pytest.approx((94 - 98) / 98, abs=1e-6)
@@ -273,7 +273,7 @@ class TestRangeOfAction:
         df = _candle_with_signal(n=300)
         df["__sig__"] = 0
         _, trades = run_backtest(df, "__sig__", BacktestParams(), return_trades=True)
-        assert excursion_stats(df, trades, BacktestParams()) is None
+        assert excursion_stats(df, trades) is None
 
     def test_response_carries_envelope_and_excursion(self):
         df = _predictive_kpi_table()
@@ -396,6 +396,33 @@ class TestWalkForward:
             WalkForwardConfig(n_splits=4, min_train_months=6),
         )
         assert wf is None
+
+    def test_oos_diagnostics_present_and_bracketed(self):
+        df = _candle_with_signal(n=12000, signal_every=30, drift_after_signal=0.05)
+        spec = GridSpec(buy_drop_pct=[0.005], sell_pct=[0.03], target_h=[24])
+        cfg = WalkForwardConfig(n_splits=3, min_train_months=4)
+        wf = walk_forward(df, "__sig__", BacktestParams(), spec, cfg, base_rate=0.3)
+        assert wf is not None
+        # OOS twins of the in-sample diagnostics are populated.
+        assert wf.oos_envelope is not None
+        assert wf.oos_excursion is not None
+        assert wf.oos_validation is not None
+        # The conservative OOS envelope equals the headline OOS summary (close).
+        assert wf.oos_envelope.conservative.profit_factor == wf.oos_summary.profit_factor
+        # Optimistic (high) books at least as many target hits as conservative.
+        assert (wf.oos_envelope.optimistic.target_hit_rate_pct
+                >= wf.oos_envelope.conservative.target_hit_rate_pct)
+        # OOS Sharpe is not deflated (no selection bias on OOS data).
+        assert wf.oos_validation.n_trials_tested == 1
+
+    def test_oos_trades_match_concatenated_splits(self):
+        df = _candle_with_signal(n=12000, signal_every=30, drift_after_signal=0.05)
+        spec = GridSpec(buy_drop_pct=[0.005], sell_pct=[0.03], target_h=[24])
+        cfg = WalkForwardConfig(n_splits=3, min_train_months=4)
+        wf = walk_forward(df, "__sig__", BacktestParams(), spec, cfg)
+        total = sum(s.test_summary.total_trades for s in wf.splits)
+        assert wf.oos_trades is not None
+        assert len(wf.oos_trades) == total
 
 
 # ---------------------------------------------------------------------------
