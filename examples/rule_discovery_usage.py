@@ -138,3 +138,10 @@ edges.sort(key=lambda r: r.walk_forward.oos_summary.profit_factor
 
 for resp in edges[:5]:
     print("\n" + text_report(resp))
+
+# Il report mostra anche, per ogni regola validata:
+#   · EXECUTION ENVELOPE — bracket PF/WR/expectancy tra convenzione conservativa
+#     (close, riproduce il backtest certificato) e ottimistica (high, touch
+#     intrabar). La performance reale sta tra le due, senza scegliere il target.
+#   · MAE / MFE — escursione avversa/favorevole intra-trade: il "range d'azione"
+#     della regola, indipendente dalla regola di uscita.

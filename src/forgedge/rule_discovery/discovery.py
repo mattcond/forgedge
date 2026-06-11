@@ -55,6 +55,7 @@ import pandas as pd
 from ..alpha_discovery.models import AlphaContract
 from ..event_discovery.discovery import _infer_timestamp_unit
 from ..event_discovery.models import EventCandidate
+from .analysis import excursion_stats, execution_envelope
 from .backtest import run_backtest
 from .grid import grid_dataframe, run_grid, select_best
 from .models import (
@@ -172,6 +173,13 @@ class RuleDiscovery:
         if wf is None:
             notes.append("walk-forward skipped — data span too short for a split")
 
+        # ── execution envelope + MAE/MFE (range of action, no target choice) ──
+        envelope = execution_envelope(
+            self._frame, cfg.signal_col, best_params,
+            scoring=cfg.scoring, timestamp_col=cfg.timestamp_col,
+        )
+        excursion = excursion_stats(self._frame, is_trades, best_params)
+
         # ── Step 5 — regime dependency ───────────────────────────────────
         regime = self._regime_breakdown(is_trades)
 
@@ -198,6 +206,8 @@ class RuleDiscovery:
             walk_forward=wf,
             statistical_validation=stat_val,
             regime_analysis=regime,
+            execution_envelope=envelope,
+            excursion=excursion,
             grid_results=grid_results,
             rejection_reasons=reasons,
             notes=notes,

@@ -53,6 +53,25 @@ def text_report(resp: RuleDiscoveryResponse) -> str:
         add(f"  temporal stability: {sv.temporal_stability}  "
             f"(PF {_f(sv.pf_first_half)} → {_f(sv.pf_second_half)})")
 
+    if resp.execution_envelope:
+        env = resp.execution_envelope
+        c, o = env.conservative, env.optimistic
+        add("-" * 64)
+        add("EXECUTION ENVELOPE (range d'azione, no target choice)")
+        add(f"  conservative (close): PF={_f(c.profit_factor)}  WR={_pct(c.win_rate_pct)}  "
+            f"exp={_pct(c.expectancy)}  hit={_f(c.target_hit_rate_pct)}%")
+        add(f"  optimistic   (high) : PF={_f(o.profit_factor)}  WR={_pct(o.win_rate_pct)}  "
+            f"exp={_pct(o.expectancy)}  hit={_f(o.target_hit_rate_pct)}%")
+
+    if resp.excursion:
+        ex = resp.excursion
+        add("-" * 64)
+        add("MAE / MFE (intra-trade excursion)")
+        add(f"  MAE adverse  : mean={_pct(ex.mae_mean)}  median={_pct(ex.mae_median)}  "
+            f"worst={_pct(ex.mae_worst)}")
+        add(f"  MFE favoured : mean={_pct(ex.mfe_mean)}  median={_pct(ex.mfe_median)}  "
+            f"best={_pct(ex.mfe_best)}  reached_target={_f(ex.mfe_reached_target_pct)}%")
+
     if resp.walk_forward:
         wf = resp.walk_forward
         o = wf.oos_summary
@@ -140,6 +159,30 @@ def html_report(resp: RuleDiscoveryResponse) -> str:
             "temporal_stability": sv.temporal_stability,
             "PF 1st→2nd half": f"{_f(sv.pf_first_half)} → {_f(sv.pf_second_half)}",
         }))
+
+    if resp.execution_envelope:
+        env = resp.execution_envelope
+        c, o = env.conservative, env.optimistic
+        add("<h2>Execution envelope</h2>")
+        add("<table><tr><th class='l'>convention</th><th>PF</th><th>WR</th>"
+            "<th>expectancy</th><th>hit rate</th></tr>"
+            f"<tr><td class='l'>conservative (close)</td><td>{_f(c.profit_factor)}</td>"
+            f"<td>{_pct(c.win_rate_pct)}</td><td>{_pct(c.expectancy)}</td>"
+            f"<td>{_f(c.target_hit_rate_pct)}%</td></tr>"
+            f"<tr><td class='l'>optimistic (high)</td><td>{_f(o.profit_factor)}</td>"
+            f"<td>{_pct(o.win_rate_pct)}</td><td>{_pct(o.expectancy)}</td>"
+            f"<td>{_f(o.target_hit_rate_pct)}%</td></tr></table>")
+
+    if resp.excursion:
+        ex = resp.excursion
+        add("<h2>MAE / MFE excursion</h2>")
+        add("<table><tr><th class='l'></th><th>mean</th><th>median</th><th>extreme</th></tr>"
+            f"<tr><td class='l'>MAE (adverse)</td><td>{_pct(ex.mae_mean)}</td>"
+            f"<td>{_pct(ex.mae_median)}</td><td>{_pct(ex.mae_worst)}</td></tr>"
+            f"<tr><td class='l'>MFE (favourable)</td><td>{_pct(ex.mfe_mean)}</td>"
+            f"<td>{_pct(ex.mfe_median)}</td><td>{_pct(ex.mfe_best)}</td></tr></table>"
+            f"<p class='muted'>MFE reached take-profit in "
+            f"{_f(ex.mfe_reached_target_pct)}% of trades</p>")
 
     if resp.walk_forward:
         wf = resp.walk_forward

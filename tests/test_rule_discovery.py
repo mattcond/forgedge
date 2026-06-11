@@ -29,6 +29,7 @@ from forgedge.rule_discovery import (
     validate,
     walk_forward,
 )
+from forgedge.rule_discovery import excursion_stats, execution_envelope
 from forgedge.rule_discovery.validation import _ttest_1samp_greater
 
 
@@ -219,6 +220,76 @@ class TestScoring:
             scoring=ScoringParams(pf_tpm_target=3),
         )
         assert s.c_norm > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Execution envelope & MAE/MFE
+# ---------------------------------------------------------------------------
+
+class TestRangeOfAction:
+    def test_envelope_brackets_performance(self):
+        df = _candle_with_signal(n=4000, signal_every=40, drift_after_signal=0.06)
+        params = BacktestParams(buy_drop_pct=0.005, sell_pct=0.03, target_h=24)
+        env = execution_envelope(df, "__sig__", params)
+        # Same fills, same trade count — only the exit detection differs.
+        assert env.conservative.total_trades == env.optimistic.total_trades
+        # Optimistic (high) can only book at least as many target hits as close.
+        assert env.optimistic.target_hit_rate_pct >= env.conservative.target_hit_rate_pct
+
+    def test_excursion_signs_and_bounds(self):
+        df = _candle_with_signal(n=4000, signal_every=40, drift_after_signal=0.06)
+        params = BacktestParams(buy_drop_pct=0.005, sell_pct=0.03, target_h=24)
+        _, trades = run_backtest(df, "__sig__", params, return_trades=True)
+        ex = excursion_stats(df, trades, params)
+        assert ex is not None and ex.n_trades > 0
+        # MAE (deepest point) never exceeds MFE (highest point) of the window.
+        assert ex.mae_worst <= ex.mae_mean
+        assert ex.mfe_mean <= ex.mfe_best
+        assert ex.mae_worst <= ex.mfe_best
+        assert ex.mae_mean <= ex.mfe_mean
+        assert 0.0 <= ex.mfe_reached_target_pct <= 100.0
+
+    def test_excursion_negative_mae_when_underwater(self):
+        """A trade that dips below the fill price must show a negative MAE."""
+        dates = pd.date_range("2023-01-01", periods=6, freq="1h")
+        # Fill at 98 on bar 1; bar 2 dips to low=94 (underwater), then recovers.
+        df = pd.DataFrame({
+            "open_dt": dates,
+            "open":  [100, 98.5, 96, 99, 100, 100.0],
+            "high":  [100, 99.0, 97, 101, 101, 100.0],
+            "low":   [100, 97.0, 94, 98, 99, 100.0],
+            "close": [100, 98.5, 96, 100, 100, 100.0],
+            "__sig__": [1, 0, 0, 0, 0, 0],
+        })
+        params = BacktestParams(buy_type="limit", buy_drop_pct=0.02, buy_delay_bar=4,
+                                sell_pct=0.06, target_h=3, fee=0.002)
+        _, trades = run_backtest(df, "__sig__", params, return_trades=True)
+        ex = excursion_stats(df, trades, params)
+        assert ex is not None and ex.n_trades == 1
+        # buy_price=98, deepest low=94 → MAE = (94-98)/98 ≈ -4.08%.
+        assert ex.mae_worst == pytest.approx((94 - 98) / 98, abs=1e-6)
+
+    def test_excursion_none_when_no_trades(self):
+        df = _candle_with_signal(n=300)
+        df["__sig__"] = 0
+        _, trades = run_backtest(df, "__sig__", BacktestParams(), return_trades=True)
+        assert excursion_stats(df, trades, BacktestParams()) is None
+
+    def test_response_carries_envelope_and_excursion(self):
+        df = _predictive_kpi_table()
+        ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))
+        cands = ed.run()
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(asset="SYN"))
+        ad.run()
+        promoted = ad.promoted_contracts()
+        by_id = {c.event_id: c for c in cands}
+        c = promoted[0]
+        resp = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id]).run()
+        if resp.in_sample_summary.total_trades > 0:
+            assert resp.execution_envelope is not None
+            assert resp.excursion is not None
+            d = resp.to_dict()
+            assert "execution_envelope" in d and "excursion" in d
 
 
 # ---------------------------------------------------------------------------

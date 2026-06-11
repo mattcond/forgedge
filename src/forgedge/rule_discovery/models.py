@@ -295,6 +295,63 @@ class BacktestSummary:
 
 
 @dataclass
+class ExecutionEnvelope:
+    """Best/worst-case execution bracket for the selected configuration.
+
+    The same rule is backtested under the two meaningful take-profit
+    conventions, bracketing realistic execution without forcing a single
+    choice:
+
+    * ``conservative`` — ``target_hit_col="close"``: the target counts only when
+      a bar *closes* at or above ``sell_price`` (understates — a real limit sell
+      would fill intrabar).  Matches the certified reference engine.
+    * ``optimistic`` — ``target_hit_col="high"``: the target fills on the first
+      intrabar touch (overstates — assumes the limit sell always fills).
+
+    The true performance of the rule lies between the two.
+    """
+
+    conservative: "BacktestSummary"
+    optimistic: "BacktestSummary"
+
+    def to_dict(self) -> dict:
+        return {
+            "conservative_close": self.conservative.to_dict(),
+            "optimistic_high": self.optimistic.to_dict(),
+        }
+
+
+@dataclass
+class ExcursionStats:
+    """MAE / MFE — intra-trade adverse and favourable excursion.
+
+    For every executed trade, over its realised holding window
+    ``[fill+1 .. exit]``:
+
+    * **MAE** (Maximum Adverse Excursion) — the deepest drawdown reached,
+      ``(min low - buy_price) / buy_price`` (negative);
+    * **MFE** (Maximum Favourable Excursion) — the highest run-up reached,
+      ``(max high - buy_price) / buy_price`` (positive).
+
+    These describe the rule's "range of action" — how far each trade swings
+    against and in favour of the position before it closes — independently of
+    which exit convention is chosen.  All values are fractions of the buy price.
+    """
+
+    n_trades: int
+    mae_mean: float
+    mae_median: float
+    mae_worst: float
+    mfe_mean: float
+    mfe_median: float
+    mfe_best: float
+    mfe_reached_target_pct: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class GridResult:
     """A single grid combination and the metrics it produced."""
 
@@ -427,6 +484,8 @@ class RuleDiscoveryResponse:
     walk_forward: Optional[WalkForwardResult]
     statistical_validation: Optional[StatisticalValidation]
     regime_analysis: Optional[RegimeBreakdown]
+    execution_envelope: Optional[ExecutionEnvelope] = None
+    excursion: Optional[ExcursionStats] = None
     grid_results: List[GridResult] = field(default_factory=list)
     rejection_reasons: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
@@ -472,6 +531,10 @@ class RuleDiscoveryResponse:
                 else None
             ),
             "statistical_validation": sv.to_dict() if sv else None,
+            "execution_envelope": (
+                self.execution_envelope.to_dict() if self.execution_envelope else None
+            ),
+            "excursion": self.excursion.to_dict() if self.excursion else None,
             "regime_analysis": (
                 {
                     "dependency_score": ra.dependency_score,

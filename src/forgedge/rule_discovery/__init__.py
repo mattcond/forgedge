@@ -5,12 +5,15 @@ parametrises realistic limit-order mechanics, backtests them, confirms the edge
 out-of-sample with a walk-forward scheme, and emits a verdict
 (``EDGE`` / ``PARTIAL-EDGE`` / ``NON-EDGE``).
 """
+from .analysis import excursion_stats, execution_envelope
 from .backtest import run_backtest
 from .discovery import RuleDiscovery
 from .grid import build_grid, grid_dataframe, run_grid, select_best
 from .models import (
     BacktestParams,
     BacktestSummary,
+    ExcursionStats,
+    ExecutionEnvelope,
     GridResult,
     GridSpec,
     RegimeBreakdown,
@@ -43,6 +46,8 @@ __all__ = [
     "WalkForwardSplit",
     "StatisticalValidation",
     "RegimeBreakdown",
+    "ExecutionEnvelope",
+    "ExcursionStats",
     "ValidatedRule",
     "run_backtest",
     "run_grid",
@@ -52,6 +57,8 @@ __all__ = [
     "walk_forward",
     "validate",
     "deflated_sharpe",
+    "execution_envelope",
+    "excursion_stats",
     "text_report",
     "html_report",
 ]
