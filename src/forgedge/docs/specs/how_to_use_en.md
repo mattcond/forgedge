@@ -368,7 +368,69 @@ for contract in promoted:
 
 ## 6. Full production pipeline
 
-The recommended pattern is a single function encapsulating the entire session:
+### One-call orchestrator: `forge`
+
+The four modules are wired together by the built-in `forge` orchestrator, so the
+whole session is a single call. It accepts the KPI Table plus the configuration
+object of each module and returns a `ForgeResult` carrying every artefact:
+
+```python
+from forgedge import forge
+
+result = forge(kpi, asset="BTC", timeframe="1H")
+
+print(result.summary())                      # one row per candidate + rule_verdict
+for contract, response in result.edges():    # EDGE / PARTIAL-EDGE only
+    print(contract.alpha_id, response.verdict)
+```
+
+Per-module configuration is passed through dedicated keyword arguments:
+
+```python
+from forgedge import (
+    forge, MarketContextConfig, EMAProxyConfig,
+    DiscoveryConfig, AlphaConfig,
+)
+from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+from forgedge.alpha_discovery.models import PromotionThresholds
+
+result = forge(
+    kpi,
+    asset="BTC",
+    timeframe="1H",
+    market_context_config=MarketContextConfig(
+        ema_proxy=EMAProxyConfig(auto_window=True, window_unit="day", bar_hours=1.0),
+    ),
+    event_discovery_config=DiscoveryConfig(
+        train_ratio=0.80,
+        walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
+        gate_params=GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0),
+    ),
+    alpha_config=AlphaConfig(
+        train_ratio=0.70,
+        thresholds=PromotionThresholds(min_lift=0.08, min_cohens_d=0.15),
+    ),
+)
+```
+
+Useful switches:
+
+- `run_market_context=False` — feed a table that already carries `regime` (Module 0 is
+  also skipped automatically when the `regime` column is present).
+- `run_rule_discovery=False` — stop after Alpha Discovery to get the promoted hypotheses
+  (`result.promoted`) without backtesting them.
+- `only_validated_events=True` — hand Alpha Discovery only the walk-forward-validated
+  candidates (when Event Discovery ran with `walk_forward`).
+
+`ForgeResult` exposes the live module instances (`result.market_context`,
+`result.event_discovery`, `result.alpha_discovery`) for drill-down, plus
+`result.candidates`, `result.contracts`, `result.promoted` and
+`result.rule_responses`.
+
+### Building it by hand
+
+If you need finer control, the same flow can be written explicitly — this is
+exactly what `forge` runs internally:
 
 ```python
 import pandas as pd

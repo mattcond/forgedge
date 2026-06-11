@@ -11,6 +11,7 @@ from .alpha_discovery import (
     PromotionThresholds,
 )
 from .event_discovery import DiscoveryConfig, EventDiscovery
+from .forge import ForgeResult, forge
 from .market_context import (
     EMAProxyClassifier,
     EMAProxyConfig,
@@ -29,6 +30,8 @@ from .rule_discovery import (
 )
 
 __all__ = [
+    "forge",
+    "ForgeResult",
     "EventDiscovery",
     "DiscoveryConfig",
     "MarketContext",
