@@ -270,10 +270,10 @@ class TestAlphaDiscoveryEndToEnd:
             dt = c.derived_target
             if dt.direction == "long":
                 assert dt.mean_advantage > 0
-                assert dt.sell_pct == pytest.approx(dt.mean_advantage)
+                assert dt.sell_pct > 0          # MFE-based, always positive
             elif dt.direction == "short":
                 assert dt.mean_advantage < 0
-                assert dt.sell_pct == pytest.approx(-dt.mean_advantage)
+                assert dt.sell_pct > 0          # MFE-based, always positive
 
     def test_target_profile_covers_grid(self, fitted):
         _, _, ad, contracts = fitted
@@ -281,17 +281,16 @@ class TestAlphaDiscoveryEndToEnd:
         for c in contracts[:10]:
             assert set(c.derived_target.advantage_by_h) == grid
             assert set(c.derived_target.t_stat_by_h) == grid
+            assert set(c.derived_target.score_by_h) == grid
             assert c.derived_target.holding_period_h in grid
 
     def test_promoted_alpha_has_lift_and_oos_confirmation(self, fitted):
         _, _, ad, _ = fitted
-        c = ad.promoted_contracts()[0]
-        assert c.event_stats.lift >= 0.08
-        assert c.event_stats.cohens_d >= 0.15
-        assert c.event_stats.win_rate > c.event_stats.base_rate
-        assert c.oos_validation is not None
-        assert c.oos_validation.passed
-        assert c.oos_validation.mean_advantage > 0
+        # Best-scoring contract (by composite) should have strong evidence.
+        best = max(ad.promoted_contracts(), key=lambda c: c.alpha_score.composite_score)
+        assert best.event_stats.win_rate > best.event_stats.base_rate
+        assert best.oos_validation is not None
+        assert best.oos_validation.mean_advantage > 0
 
     def test_summary_sorted_by_score(self, fitted):
         _, _, ad, _ = fitted
@@ -310,15 +309,13 @@ class TestAlphaDiscoveryEndToEnd:
         assert "statistical_evidence" in d
         assert d["derived_target"]["holding_period_h"] == c.derived_target.holding_period_h
         assert d["derived_target"]["base_rate"] == pytest.approx(c.base_rate)
-        assert d["oos_validation"]["passed"] is True
+        # OOS recorded but not required to pass (non-blocking gate).
+        assert d["oos_validation"] is not None
 
-    def test_noise_candidates_are_rejected_with_reasons(self):
-        """Candidates built on a feature with no effect on returns must be
-        overwhelmingly rejected, and every rejection must carry reasons.
-
-        Note: on the fixture table every candidate is genuinely predictive
-        (``feat`` drives the return at *all* thresholds), so rejection is
-        exercised with an added pure-noise feature."""
+    def test_noise_candidates_get_low_scores_with_diagnostics(self):
+        """Candidates built on a feature with no effect on returns are promoted
+        (A-D grading; all directed contracts go to Rule Discovery) but must
+        score in the C/D range and carry non-blocking diagnostic notes."""
         df = _predictive_kpi_table(include_noise=True)
         _, cands = _make_candidates(df)
         ad = AlphaDiscovery(df.copy(), cands, AlphaConfig())
@@ -326,9 +323,15 @@ class TestAlphaDiscoveryEndToEnd:
 
         noise = [c for c in contracts if "nfeat" in c.underlying_feature.feature]
         assert noise
-        rejected = [c for c in noise if not c.promoted]
-        assert len(rejected) >= 0.9 * len(noise)
-        assert all(c.rejection_reasons for c in rejected)
+        # All directed noise candidates are promoted (non-blocking design).
+        directed = [c for c in noise if c.derived_target.direction in ("long", "short")]
+        assert all(c.promoted for c in directed)
+        # They must score poorly — noise has near-zero IC, lift, Cohen's d.
+        scores = [c.alpha_score.composite_score for c in noise]
+        assert np.mean(scores) < 0.35
+        # Diagnostics should flag weak evidence on most noise candidates.
+        with_diagnostics = [c for c in noise if c.rejection_reasons]
+        assert len(with_diagnostics) >= 0.5 * len(noise)
 
     def test_expression_is_propagated_unchanged(self, fitted):
         _, cands, ad, contracts = fitted
@@ -357,13 +360,22 @@ class TestPromotionGates:
         fdr.run(); raw.run()
         assert len(raw.promoted_contracts()) >= len(fdr.promoted_contracts())
 
-    def test_strict_thresholds_reject_everything(self):
+    def test_strict_thresholds_become_diagnostics(self):
+        """Strict IC/lift/Cohen's d thresholds are non-blocking: all directed
+        contracts are promoted but carry diagnostic notes."""
         df = _predictive_kpi_table()
         _, cands = _make_candidates(df)
         ad = AlphaDiscovery(df.copy(), cands, AlphaConfig(
             thresholds=PromotionThresholds(min_lift=0.95, min_cohens_d=5.0)))
         ad.run()
-        assert ad.promoted_contracts() == []
+        directed = [c for c in ad._contracts
+                    if c.derived_target.direction in ("long", "short")]
+        assert all(c.promoted for c in directed)
+        has_diagnostic = any(
+            any("[diagnostic]" in r for r in c.rejection_reasons)
+            for c in directed
+        )
+        assert has_diagnostic
 
     def test_train_ratio_one_disables_oos(self):
         """With no held-out tail there is no OOS validation — contracts carry
@@ -375,16 +387,20 @@ class TestPromotionGates:
         assert all(c.oos_validation is None for c in contracts)
         assert ad.promoted_contracts()  # promotion still possible
 
-    def test_impossible_oos_threshold_rejects_everything(self):
+    def test_impossible_oos_threshold_is_diagnostic_only(self):
+        """oos_max_p=0 makes every OOS confirmation fail; with non-blocking
+        design, all directed contracts are still promoted but carry OOS notes."""
         df = _predictive_kpi_table()
         _, cands = _make_candidates(df)
         ad = AlphaDiscovery(df.copy(), cands, AlphaConfig(
             thresholds=PromotionThresholds(oos_max_p=0.0)))
         ad.run()
-        assert ad.promoted_contracts() == []
-        rejected = [c for c in ad._contracts if c.oos_validation is not None]
+        directed = [c for c in ad._contracts
+                    if c.derived_target.direction in ("long", "short")]
+        assert all(c.promoted for c in directed)
+        with_oos = [c for c in ad._contracts if c.oos_validation is not None]
         assert any(
-            any("OOS" in r for r in c.rejection_reasons) for c in rejected
+            any("OOS" in r for r in c.rejection_reasons) for c in with_oos
         )
 
 
