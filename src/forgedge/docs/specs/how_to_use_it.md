@@ -371,7 +371,71 @@ for contract in promoted:
 
 ## 6. Pipeline completa per produzione
 
-Il pattern raccomandato è un'unica funzione che incapsula l'intera sessione:
+### Orchestratore one-call: `forge`
+
+I quattro moduli sono cablati insieme dall'orchestratore `forge`, che riduce
+l'intera sessione a una singola chiamata. Accetta la KPI Table più la
+configurazione di ogni modulo e restituisce un `ForgeResult` con tutti gli
+artefatti:
+
+```python
+from forgedge import forge
+
+result = forge(kpi, asset="BTC", timeframe="1H")
+
+print(result.summary())                         # una riga per candidato + rule_verdict
+for contract, response in result.edges():       # solo EDGE / PARTIAL-EDGE
+    print(contract.alpha_id, response.verdict)
+```
+
+La configurazione per modulo si passa come argomento keyword dedicato:
+
+```python
+from forgedge import (
+    forge, MarketContextConfig, EMAProxyConfig,
+    DiscoveryConfig, AlphaConfig,
+)
+from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+from forgedge.alpha_discovery.models import PromotionThresholds
+
+result = forge(
+    kpi,
+    asset="BTC",
+    timeframe="1H",
+    market_context_config=MarketContextConfig(
+        ema_proxy=EMAProxyConfig(auto_window=True, window_unit="day", bar_hours=1.0),
+    ),
+    event_discovery_config=DiscoveryConfig(
+        train_ratio=0.80,
+        walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
+        gate_params=GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0),
+    ),
+    alpha_config=AlphaConfig(
+        train_ratio=0.70,
+        thresholds=PromotionThresholds(min_lift=0.08, min_cohens_d=0.15),
+    ),
+)
+```
+
+Switch utili:
+
+- `run_market_context=False` — alimenta una tabella che porta già `regime`
+  (Modulo 0 viene saltato anche automaticamente quando la colonna `regime` è
+  presente).
+- `run_rule_discovery=False` — fermati dopo Alpha Discovery per ottenere le
+  ipotesi promosse (`result.promoted`) senza backtestare.
+- `only_validated_events=True` — passa ad Alpha Discovery solo i candidati
+  walk-forward-validati (quando Event Discovery ha usato `walk_forward`).
+
+`ForgeResult` espone le istanze vive dei moduli (`result.market_context`,
+`result.event_discovery`, `result.alpha_discovery`) per drill-down, più
+`result.candidates`, `result.contracts`, `result.promoted` e
+`result.rule_responses`.
+
+### Costruirla passo per passo
+
+Per un controllo più fine, lo stesso flusso può essere scritto esplicitamente —
+è esattamente ciò che `forge` esegue internamente:
 
 ```python
 import pandas as pd

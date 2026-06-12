@@ -107,30 +107,22 @@ pip install numpy pandas
 
 ```python
 import pandas as pd
-from forgedge import MarketContext, EventDiscovery, AlphaDiscovery, AlphaConfig
+from forgedge import forge
 
 # KPI Table with OHLCV + technical indicators ('close' column required)
 kpi = pd.read_parquet("kpi_table.parquet")
 
-# Module 0 — market regime
-enriched = MarketContext(kpi).run()
+# Full pipeline: from KPI Table to validated rules in a single call
+result = forge(kpi, asset="BTC", timeframe="1H")
 
-# Module 1 — event discovery
-ed = EventDiscovery(enriched)
-candidates = ed.run()
-print(f"{len(candidates)} event candidates found")
-
-# Module 2 — alpha measurement with data-derived target
-ad = AlphaDiscovery(
-    ed.df,
-    candidates,
-    AlphaConfig(asset="BTC", timeframe="1H"),
-)
-contracts = ad.run()
-promoted = ad.promoted_contracts()
-print(f"{len(promoted)} hypotheses promoted out of {len(contracts)} evaluated")
-print(ad.summary().head())
+print(result.summary())                         # one row per candidate + rule_verdict
+for contract, response in result.edges():       # EDGE / PARTIAL-EDGE only
+    print(contract.alpha_id, response.verdict)
 ```
+
+The orchestrator accepts each module's configuration as an optional keyword
+argument. For the step-by-step pipeline with full configuration options, see
+`how_to_use_en.md`.
 
 ---
 

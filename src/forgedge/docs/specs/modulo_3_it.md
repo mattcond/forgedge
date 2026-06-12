@@ -90,9 +90,14 @@ i parametri di backtest di partenza vengono inizializzati da:
 
 Questi diventano il centro della grid di screening, non parametri fissi.
 
-**Filtro direzione.** Il backtest è un motore long-only con limite di acquisto.
-Se `derived_target.direction == "short"`, il contratto viene rifiutato
-immediatamente con `NON-EDGE`.
+**Propagazione della direzione.** Il motore supporta `"long"` e `"short"`.
+La direzione viene letta da `derived_target.direction` e impostata su
+`BacktestParams.direction`. Il meccanismo short è il perfetto specchio del long:
+il limite di acquisto si trova *sopra* l'anchor (`anchor × (1 + buy_drop_pct)`),
+si riempie quando `high` lo raggiunge, e il take-profit è *sotto* il prezzo di
+fill (`fill × (1 − sell_pct)`), raggiunto quando il prezzo scende fino a esso.
+Il guadagno netto è `(fill − exit) / fill`. Solo direzioni diverse da `"long"`
+o `"short"` generano `NON-EDGE` immediato.
 
 ---
 
@@ -218,12 +223,18 @@ definendo un intervallo di esecuzione realistica:
 
 | Variante | `target_hit_col` | Descrizione |
 |---|---|---|
-| `conservative` | `"close"` | Il target conta solo quando una barra **chiude** ≥ sell_price. Sottostima (il limit sell reale potrebbe riempirsi intrabar). Corrisponde al motore di riferimento certificato. |
-| `optimistic` | `"high"` | Il target conta al primo tocco intrabar. Sovrastima (assume che il limit sell si riempia sempre). |
+| `conservative` | `"close"` | Il target conta solo quando una barra **chiude** oltre sell_price. Sottostima (il limit sell reale potrebbe riempirsi intrabar). Corrisponde al motore di riferimento certificato, sia per long che per short. |
+| `optimistic` | `"high"` (long) / `"low"` (short) | Il target conta al primo tocco intrabar. Sovrastima (assume che il limit sell si riempia sempre). |
 
-La performance reale si trova tra i due.
+La performance reale si trova tra i due. Per risolvere la colonna ottimistica
+in base alla direzione, usare l'utility `optimistic_hit_col`:
 
 ```python
+from forgedge.rule_discovery import optimistic_hit_col
+
+col = optimistic_hit_col("short")  # → "low"
+col = optimistic_hit_col("long")   # → "high"
+
 env = resp.execution_envelope
 print(f"conservative PF: {env.conservative.profit_factor:.2f}")
 print(f"optimistic   PF: {env.optimistic.profit_factor:.2f}")
@@ -373,14 +384,15 @@ with open(f"{resp.alpha_id}_rule_discovery.json", "w") as f:
 
 | Parametro | Default | Descrizione |
 |---|---|---|
+| `direction` | `"long"` | `"long"` o `"short"`. Short = specchio simmetrico del long: entry sopra anchor, take-profit sotto fill |
 | `buy_type` | `"limit"` | `"limit"` o `"market"` |
-| `buy_drop_pct` | `0.010` | Sconto per l'ordine limite (es. 0.01 = -1%) |
+| `buy_drop_pct` | `0.010` | Entità dello scostamento dal anchor (es. 0.01 = 1%): sconto per long, premio per short |
 | `buy_delay_bar` | `6` | Barre di vita dell'ordine limite |
 | `buy_price_anchor` | `"close"` | Colonna usata come anchor del limite |
 | `sell_pct` | `0.040` | Take-profit come frazione del prezzo di fill |
 | `target_h` | `24` | Orizzonte massimo in barre (close-at-horizon) |
 | `target_col` | `"close"` | Colonna per l'uscita a orizzonte |
-| `target_hit_col` | `"close"` | Colonna per rilevare il take-profit |
+| `target_hit_col` | `"close"` | Colonna per rilevare il take-profit. Conservative = `"close"` per entrambe le direzioni; ottimistico = `"high"` per long, `"low"` per short (usare `optimistic_hit_col(direction)`) |
 | `fee` | `0.002` | Fee per lato |
 | `early_stopping` | `True` | Esci al take-profit; se False, sempre a orizzonte |
 
@@ -499,13 +511,11 @@ contract.rule_discovery_response = resp.to_dict()
 
 ---
 
-## Limitazioni v0.1.0
+## Note operative
 
-- **Solo long:** il motore di backtest supporta esclusivamente operazioni long
-  (limite di acquisto + take-profit). Contratti con `direction="short"` vengono
-  rifiutati con `NON-EDGE`.
 - **`target_hit_col`:** il default `"close"` riproduce il motore certificato di
-  riferimento (conservativo). Per la convenzione intrabar, usare `"high"`.
+  riferimento (conservativo). Per la convenzione intrabar ottimistica, usare
+  `optimistic_hit_col(direction)` — `"high"` per long, `"low"` per short.
 - **Rule Registry:** Modulo 4 non ancora implementato. La `ValidatedRule`
   prodotta da Rule Discovery è già nella forma pronta per l'ingestion nel
   registry.

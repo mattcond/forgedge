@@ -91,9 +91,14 @@ the starting backtest parameters are initialised from:
 
 These become the centre of the screening grid, not fixed parameters.
 
-**Direction filter.** The backtest engine is long-only with a limit buy. If
-`derived_target.direction == "short"`, the contract is rejected immediately
-with `NON-EDGE`.
+**Direction propagation.** The engine supports both `"long"` and `"short"`.
+The direction is read from `derived_target.direction` and set on
+`BacktestParams.direction`. The short side is the exact symmetric mirror of
+long: the limit entry sits *above* the anchor at `anchor × (1 + buy_drop_pct)`,
+fills when `high` reaches it, and the take-profit is *below* the fill price at
+`fill × (1 − sell_pct)`, reached when the price falls to it. Net gain is
+`(fill − exit) / fill`. Only values other than `"long"` or `"short"` produce
+an immediate `NON-EDGE`.
 
 ---
 
@@ -219,12 +224,18 @@ defining a realistic execution range:
 
 | Variant | `target_hit_col` | Description |
 |---|---|---|
-| `conservative` | `"close"` | Target counts only when a bar **closes** ≥ sell_price. Understates (real limit sell could fill intrabar). Matches the certified reference engine. |
-| `optimistic` | `"high"` | Target counts on first intrabar touch. Overstates (assumes limit sell always fills). |
+| `conservative` | `"close"` | Target counts only when a bar **closes** past sell_price. Understates (real limit sell could fill intrabar). Matches the certified reference engine for both directions. |
+| `optimistic` | `"high"` (long) / `"low"` (short) | Target counts on first intrabar touch. Overstates (assumes limit sell always fills). |
 
-Real performance lies between the two.
+Real performance lies between the two. Use `optimistic_hit_col` to resolve the
+correct column for a given direction:
 
 ```python
+from forgedge.rule_discovery import optimistic_hit_col
+
+col = optimistic_hit_col("short")  # → "low"
+col = optimistic_hit_col("long")   # → "high"
+
 env = resp.execution_envelope
 print(f"conservative PF: {env.conservative.profit_factor:.2f}")
 print(f"optimistic   PF: {env.optimistic.profit_factor:.2f}")
@@ -376,14 +387,15 @@ with open(f"{resp.alpha_id}_rule_discovery.json", "w") as f:
 
 | Parameter | Default | Description |
 |---|---|---|
+| `direction` | `"long"` | `"long"` or `"short"`. Short is the exact mirror of long: entry above anchor, take-profit below fill |
 | `buy_type` | `"limit"` | `"limit"` or `"market"` |
-| `buy_drop_pct` | `0.010` | Limit order discount (e.g. 0.01 = -1%) |
+| `buy_drop_pct` | `0.010` | Magnitude of the limit offset from anchor (e.g. 0.01 = 1%): a discount for long, a premium for short |
 | `buy_delay_bar` | `6` | Lifetime of the limit order in bars |
 | `buy_price_anchor` | `"close"` | Column used as the limit anchor |
 | `sell_pct` | `0.040` | Take-profit as a fraction of fill price |
 | `target_h` | `24` | Maximum horizon in bars (close-at-horizon) |
 | `target_col` | `"close"` | Column used for the horizon exit |
-| `target_hit_col` | `"close"` | Column used to detect the take-profit |
+| `target_hit_col` | `"close"` | Column used to detect the take-profit. Conservative = `"close"` for both directions; optimistic = `"high"` for long, `"low"` for short (use `optimistic_hit_col(direction)`) |
 | `fee` | `0.002` | Fee per side |
 | `early_stopping` | `True` | Exit at take-profit; if False, always exit at horizon |
 
@@ -502,12 +514,10 @@ contract.rule_discovery_response = resp.to_dict()
 
 ---
 
-## Limitations v0.1.0
+## Operational notes
 
-- **Long only:** the backtest engine exclusively supports long operations
-  (limit buy + take-profit). Contracts with `direction="short"` are rejected
-  with `NON-EDGE`.
 - **`target_hit_col`:** the default `"close"` reproduces the certified reference
-  engine (conservative). For the intrabar convention, use `"high"`.
+  engine (conservative). For the optimistic intrabar convention, use
+  `optimistic_hit_col(direction)` — `"high"` for long, `"low"` for short.
 - **Rule Registry:** Module 4 not yet implemented. The `ValidatedRule` produced
   by Rule Discovery is already in the form ready for ingestion into the registry.
