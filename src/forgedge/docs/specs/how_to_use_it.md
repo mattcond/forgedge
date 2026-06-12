@@ -280,18 +280,27 @@ for rs in c.regime_analysis.per_regime:
 print(f"Dependency: {c.regime_analysis.dependency_type}")
 ```
 
-### Diagnostica sui rifiutati
+### Diagnostica su contratti rifiutati e promossi
 
 ```python
-for c in contracts:
-    if not c.promoted:
-        print(f"{c.event_candidate_id}: {c.rejection_reasons}")
+# L'unico rifiuto bloccante è la direzione indeterminata
+rejected = [c for c in contracts if not c.promoted]
+for c in rejected:
+    print(f"REJECTED {c.event_candidate_id}: {c.rejection_reasons}")
+# Unica causa: "no derivable target" → nessun orizzonte produce un vantaggio finito
 
-# Categorie di rifiuto frequenti:
-# "no derivable target" → evento troppo raro o ritorno medio nullo su tutti gli orizzonti
-# "lift X < 0.08" → win rate non supera il base rate di abbastanza
-# "derived target not confirmed OOS" → segnale IS non si replica sull'OOS tail
-# "not significant under BH FDR" → troppi candidati; il BH abbassa la soglia effettiva
+# I contratti promossi possono avere diagnostiche non bloccanti
+for c in promoted:
+    if c.rejection_reasons:
+        print(f"PROMOTED {c.event_candidate_id} (grade={c.alpha_score.grade}):")
+        for r in c.rejection_reasons:
+            print(f"  {r}")
+# Esempi di diagnostiche su contratti promossi (prefisso [diagnostic]):
+# "[diagnostic] IC weak (|IC|=0.012 < 0.02, p=0.083)"
+# "[diagnostic] lift 0.052 < 0.08"
+# "[diagnostic] OOS weak (p=0.143 vs 0.10, mean_adv=0.0021, n_act=7)"
+# "[diagnostic] not significant under BH FDR"
+# Queste debolezze statistiche informano il grade (A–D) ma non bloccano la promozione.
 ```
 
 ---
@@ -662,9 +671,9 @@ verificare:
 - [ ] Tutti i candidati passati ad AlphaDiscovery hanno `c.validation.passed == True` (walk-forward)
 
 **Modulo 2**
-- [ ] `len(promoted) >= 3` — abbastanza ipotesi per diversificazione; se 0, abbassare i gate o aggiungere feature
+- [ ] `len(promoted) >= 3` — abbastanza ipotesi per diversificazione; se 0, le feature non producono vantaggi finiti — aggiungere feature o allargare la grid
 - [ ] Nessun promosso con `oos.n_activations < 15` — stima OOS instabile
-- [ ] Score grade ≥ B (`composite_score >= 0.45`) su almeno uno dei promossi
+- [ ] Score grade ≥ B (`composite_score >= 0.50`) su almeno uno dei promossi
 - [ ] Verificare `regime_analysis.dependency_type` — evitare `"broken"` se si vuole robustezza cross-regime
 
 **Modulo 3**
