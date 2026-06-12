@@ -29,13 +29,14 @@ class DerivedTarget:
     Candidate it scans a grid of candidate horizons and derives the target
     from the data —
 
-    * ``holding_period_h`` — the horizon that maximises the statistical
-      separation (|t-stat|) between active-bar and inactive-bar forward
-      returns;
+    * ``holding_period_h`` — the horizon that maximises ``|mean_advantage| / √h``
+      (Sharpe-like deflation that favours persistent edges over noise-amplified
+      short-horizon t-stats);
     * ``mean_advantage``   — the signed mean forward return realised when the
       event is active, at that horizon;
-    * ``sell_pct``         — ``abs(mean_advantage)``: the candidate take-profit
-      baseline handed to Rule Discovery;
+    * ``sell_pct``         — ``q``-quantile of the Maximum Favorable Excursion
+      (MFE) at ``h*`` across active IS bars: the candidate take-profit baseline
+      handed to Rule Discovery;
     * ``direction``        — the sign of the mean advantage (``long`` when
       positive, ``short`` when negative).
 
@@ -48,7 +49,7 @@ class DerivedTarget:
     holding_period_h : int
         Selected horizon, in bars.
     sell_pct : float
-        ``abs(mean_advantage)`` at the selected horizon.
+        ``q``-quantile of the MFE at ``h*`` across active IS bars.
     direction : str
         ``"long"`` | ``"short"`` | ``"undetermined"`` (no finite advantage).
     mean_advantage : float
@@ -58,6 +59,9 @@ class DerivedTarget:
         horizon scanned — the full profile, for transparency.
     t_stat_by_h : dict[int, float]
         Active-vs-inactive t-stat (signed, long convention) per horizon.
+    score_by_h : dict[int, float]
+        ``|mean_advantage| / √h`` selection score per horizon — the criterion
+        used to choose ``h*``.
     """
 
     holding_period_h: int
@@ -66,6 +70,7 @@ class DerivedTarget:
     mean_advantage: float
     advantage_by_h: Dict[int, float] = field(default_factory=dict)
     t_stat_by_h: Dict[int, float] = field(default_factory=dict)
+    score_by_h: Dict[int, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -171,9 +176,15 @@ class AlphaConfig:
     ----------
     horizon_grid : tuple of int
         Candidate holding horizons, in bars, scanned by the target
-        derivation (Step 1).  For every Event Candidate the horizon with the
-        maximum |t-stat| separation between active and inactive forward
-        returns is selected.
+        derivation (Step 1).  For every Event Candidate the horizon that
+        maximises ``|mean_advantage| / √h`` is selected as ``h*``.
+    mfe_quantile : float
+        Quantile of the Maximum Favorable Excursion distribution (over active
+        IS bars at ``h*``) used to set ``sell_pct``.  Default ``0.5``
+        (median); increase toward 0.8 for a more aggressive TP seed.
+    mfe_floor : float
+        Minimum ``sell_pct`` (absolute), applied after the quantile
+        computation.  Default ``0.005`` (50 bp).
     train_ratio : float
         Fraction of the (chronologically sorted) table used to derive the
         target and compute every in-sample measure; the remaining tail is
@@ -223,6 +234,8 @@ class AlphaConfig:
     """
 
     horizon_grid: Tuple[int, ...] = (1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48)
+    mfe_quantile: float = 0.5
+    mfe_floor: float = 0.005
     train_ratio: float = 0.7
     thresholds: PromotionThresholds = field(default_factory=PromotionThresholds)
     asset: str = "ASSET"
@@ -246,6 +259,10 @@ class AlphaConfig:
         self.horizon_grid = tuple(sorted({int(h) for h in self.horizon_grid}))
         if not (0.0 < self.train_ratio <= 1.0):
             raise ValueError(f"train_ratio must be in (0, 1], got {self.train_ratio}.")
+        if not (0.0 < self.mfe_quantile <= 1.0):
+            raise ValueError(f"mfe_quantile must be in (0, 1], got {self.mfe_quantile}.")
+        if self.mfe_floor < 0:
+            raise ValueError(f"mfe_floor must be >= 0, got {self.mfe_floor}.")
 
 
 # ---------------------------------------------------------------------------

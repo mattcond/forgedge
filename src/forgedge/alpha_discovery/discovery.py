@@ -9,16 +9,17 @@ Alpha Discovery takes no economic parameters as input.  For every candidate it
 scans ``AlphaConfig.horizon_grid`` on the in-sample window (the first
 ``train_ratio`` of the table) and derives:
 
-* ``holding_period_h`` — the horizon with the maximum |t-stat| separation
-  between active-bar and inactive-bar forward returns;
-* ``sell_pct``         — the mean forward return realised when the event is
-  active at that horizon (its magnitude);
+* ``holding_period_h`` — the horizon with the maximum ``|mean_advantage| / √h``
+  score (Sharpe-like deflation of the horizon grid);
+* ``sell_pct``         — the ``q``-quantile of the Maximum Favorable Excursion
+  (MFE) at ``h*`` across active IS bars;
 * ``direction``        — the sign of that mean advantage.
 
 Every in-sample measure (IC, win rate, lift, Cohen's d, regime sensitivity)
-is computed at the derived target.  The held-out temporal tail then replays
-the derived target out-of-sample: promotion requires the OOS window to
-confirm the advantage.
+is computed at the derived target.  The held-out temporal tail replays the
+derived target out-of-sample, recording the OOS advantage.  All directed
+contracts receive a grade (A–D) and are handed to Rule Discovery; statistical
+measures inform the grade but do not gate promotion.
 
 The flow is strictly sequential and read-only: regimes come from Market
 Context, events come from Event Discovery — Alpha Discovery recomputes
@@ -111,9 +112,11 @@ class AlphaDiscovery:
     def run(self) -> List[AlphaContract]:
         """Evaluate every candidate and return one contract each.
 
-        Returns the **full** list (promoted and rejected) so callers can audit
-        why a candidate did not make it.  Use :meth:`promoted_contracts` for
-        the ``HYPOTHESIS`` subset that is handed to Rule Discovery.
+        Returns the **full** list.  All directed contracts have status
+        ``HYPOTHESIS`` and ``promoted=True``; undetermined-direction contracts
+        are ``REJECTED``.  Use :meth:`promoted_contracts` for the directed
+        subset handed to Rule Discovery, and :attr:`AlphaContract.alpha_score`
+        for the A–D grade.
         """
         cfg = self.config
         horizons = list(cfg.horizon_grid)
@@ -160,7 +163,8 @@ class AlphaDiscovery:
             comp0 = cand.components[0]
 
             derived = self._derive_target(
-                active[:split], valid_is, F0, F0sq, cnt_t, sum_t, sumsq_t, horizons
+                active[:split], valid_is, F0, F0sq, cnt_t, sum_t, sumsq_t, horizons,
+                close.iloc[:split].to_numpy(), cfg.mfe_quantile, cfg.mfe_floor,
             )
             h_star = derived.holding_period_h
             j_star = horizons.index(h_star)
@@ -253,14 +257,20 @@ class AlphaDiscovery:
         sum_t: np.ndarray,
         sumsq_t: np.ndarray,
         horizons: List[int],
+        close_is: Optional[np.ndarray] = None,
+        mfe_quantile: float = 0.5,
+        mfe_floor: float = 0.005,
     ) -> DerivedTarget:
         """Scan the horizon grid and derive ``(h*, sell_pct*, direction*)``.
 
-        For every horizon the pooled two-sample t-stat of active vs inactive
-        forward returns is computed from in-sample sufficient statistics
-        (vectorised across the grid).  ``h*`` maximises |t|; the mean active
-        return at ``h*`` provides the candidate ``sell_pct`` (its magnitude)
-        and the direction (its sign).
+        For every horizon the mean active-bar advantage and the pooled
+        two-sample t-stat are computed from in-sample sufficient statistics
+        (vectorised across the grid).  ``h*`` maximises ``|mean_advantage| / √h``
+        — a Sharpe-like criterion that deflates horizon variance without the
+        t-stat denominator inflation that systematically penalises long horizons.
+        ``sell_pct`` is the ``mfe_quantile``-quantile of the Maximum Favorable
+        Excursion at ``h*`` across active IS bars; direction follows the sign of
+        the mean advantage.
         """
         m_f = active_is.astype(float)
         cnt_a = m_f @ valid_is
@@ -282,14 +292,21 @@ class AlphaDiscovery:
             denom = np.sqrt(sp2 * (1.0 / np.maximum(cnt_a, 1) + 1.0 / np.maximum(cnt_b, 1)))
             t = (mean_a - mean_b) / denom
 
-        usable = (cnt_a >= 2) & (cnt_b >= 2) & (dof > 0) & np.isfinite(t)
+        usable = (cnt_a >= 2) & (cnt_b >= 2) & (dof > 0) & np.isfinite(mean_a)
         t = np.where(usable, t, np.nan)
+
+        # h* = argmax(|mean_advantage| / √h) — deflates only variance ∝ √h,
+        # preserving the signal-to-noise ratio across the horizon grid without
+        # the t-stat denominator inflation that penalises long horizons.
+        h_arr = np.array(horizons, dtype=float)
+        score = np.where(usable, np.abs(mean_a) / np.sqrt(h_arr), np.nan)
 
         advantage_by_h = {h: float(mean_a[j]) for j, h in enumerate(horizons)}
         t_stat_by_h = {h: float(t[j]) for j, h in enumerate(horizons)}
+        score_by_h = {h: float(score[j]) for j, h in enumerate(horizons)}
 
-        if np.isfinite(t).any():
-            j_star = int(np.nanargmax(np.abs(t)))
+        if np.isfinite(score).any():
+            j_star = int(np.nanargmax(np.where(np.isfinite(score), score, np.nan)))
         else:
             j_star = 0
 
@@ -302,16 +319,74 @@ class AlphaDiscovery:
                 mean_advantage=float("nan"),
                 advantage_by_h=advantage_by_h,
                 t_stat_by_h=t_stat_by_h,
+                score_by_h=score_by_h,
             )
 
+        direction = "long" if adv > 0 else "short"
+        h_star = horizons[j_star]
+        sell_pct = (
+            AlphaDiscovery._compute_mfe_quantile(
+                close_is, active_is, h_star, direction, mfe_quantile, mfe_floor,
+            )
+            if close_is is not None
+            else max(float(abs(adv)), mfe_floor)
+        )
+
         return DerivedTarget(
-            holding_period_h=horizons[j_star],
-            sell_pct=float(abs(adv)),
-            direction="long" if adv > 0 else "short",
+            holding_period_h=h_star,
+            sell_pct=sell_pct,
+            direction=direction,
             mean_advantage=float(adv),
             advantage_by_h=advantage_by_h,
             t_stat_by_h=t_stat_by_h,
+            score_by_h=score_by_h,
         )
+
+    @staticmethod
+    def _compute_mfe_quantile(
+        close_is: np.ndarray,
+        active_is: np.ndarray,
+        h: int,
+        direction: str,
+        q: float,
+        floor: float,
+    ) -> float:
+        """``q``-quantile of MFE over active IS bars at horizon ``h``.
+
+        MFE at bar *i* is the best oriented return achievable anywhere in
+        ``[i+1 .. i+h]``:
+          long:  ``max(close_is[i+1..i+h]) / close_is[i] - 1``
+          short: ``1 - min(close_is[i+1..i+h]) / close_is[i]``
+
+        Returns ``nan`` when fewer than two active bars have a complete
+        forward window, or when direction is undetermined.
+        """
+        n = len(close_is)
+        max_bars = n - h  # bars with a complete h-bar forward window
+        if max_bars <= 0 or direction not in ("long", "short"):
+            return float("nan")
+
+        # future[i, k] = close_is[i + 1 + k] for k in 0..h-1
+        future = np.stack(
+            [close_is[1 + k : max_bars + 1 + k] for k in range(h)], axis=1
+        )
+        c0 = close_is[:max_bars]
+        valid_c0 = (c0 > 0) & np.isfinite(c0)
+
+        if direction == "long":
+            extreme = np.nanmax(future, axis=1)
+            mfe = np.where(valid_c0, extreme / c0 - 1.0, np.nan)
+        else:
+            extreme = np.nanmin(future, axis=1)
+            mfe = np.where(valid_c0, 1.0 - extreme / c0, np.nan)
+
+        active_mask = active_is[:max_bars] & (mfe > 0) & np.isfinite(mfe)
+        active_mfe = mfe[active_mask]
+
+        if len(active_mfe) < 2:
+            return float("nan")
+
+        return max(float(np.quantile(active_mfe, q)), floor)
 
     def _binary_target_cached(
         self,
@@ -323,7 +398,7 @@ class AlphaDiscovery:
         """Binary target at the derived parameters, with the rolling forward
         extreme cached per ``(h, direction)`` (``sell_pct`` varies per
         candidate but the extreme does not)."""
-        if derived.direction not in ("long", "short"):
+        if derived.direction not in ("long", "short") or not np.isfinite(derived.sell_pct):
             return None, float("nan")
 
         h = derived.holding_period_h
@@ -692,39 +767,61 @@ class AlphaDiscovery:
         score: AlphaScore,
         fdr_ok: bool,
     ) -> AlphaContract:
-        """Assemble the AlphaContract and decide promotion."""
+        """Assemble the AlphaContract and grade it (A–D).
+
+        Only contracts with an undetermined direction are rejected.  All other
+        measures (IC, lift, Cohen's d, FDR, OOS) produce non-blocking
+        diagnostics that feed the grade but do not gate promotion.  Rule
+        Discovery is the sole economic judge.
+        """
         cfg = self.config
         th = cfg.thresholds
 
-        reasons: List[str] = []
+        # Hard gate: no actionable direction means nothing to hand off.
+        diagnostics: List[str] = []
         if derived.direction not in ("long", "short"):
-            reasons.append("no derivable target (no finite advantage on the grid)")
-        if not ic.admitted:
-            reasons.append(
-                f"IC below admission (|IC|<{th.ic_min_abs} and p>{th.ic_max_p})"
+            diagnostics.append(
+                "no derivable target (no finite advantage on the grid)"
             )
-        if not (np.isfinite(ev.lift) and ev.lift >= th.min_lift):
-            reasons.append(f"lift {ev.lift:.4f} < {th.min_lift}")
-        if not (np.isfinite(ev.cohens_d) and ev.cohens_d >= th.min_cohens_d):
-            reasons.append(f"cohens_d {ev.cohens_d:.4f} < {th.min_cohens_d}")
+
+        # Non-blocking diagnostics — inform the grade, do not gate promotion.
+        if not ic.admitted:
+            diagnostics.append(
+                f"[diagnostic] IC weak (|IC|={abs(ic.ic):.4f} < {th.ic_min_abs} "
+                f"or p={ic.p_value:.4f})"
+            )
+        if np.isfinite(ev.lift) and ev.lift < th.min_lift:
+            diagnostics.append(
+                f"[diagnostic] lift {ev.lift:.4f} < {th.min_lift}"
+            )
+        if np.isfinite(ev.cohens_d) and ev.cohens_d < th.min_cohens_d:
+            diagnostics.append(
+                f"[diagnostic] cohens_d {ev.cohens_d:.4f} < {th.min_cohens_d}"
+            )
         if ev.n_activations < th.min_activations:
-            reasons.append(f"n_activations {ev.n_activations} < {th.min_activations}")
+            diagnostics.append(
+                f"[diagnostic] n_activations {ev.n_activations} < {th.min_activations}"
+            )
 
         if th.use_fdr:
             if not fdr_ok:
-                reasons.append(f"not significant under BH FDR (q={th.fdr_q})")
+                diagnostics.append(
+                    f"[diagnostic] not significant under BH FDR (q={th.fdr_q})"
+                )
         else:
             if not (np.isfinite(ev.p_value) and ev.p_value < th.max_p_value):
-                reasons.append(f"p_value {ev.p_value:.6f} >= {th.max_p_value}")
+                diagnostics.append(
+                    f"[diagnostic] p_value {ev.p_value:.6f} >= {th.max_p_value}"
+                )
 
         if oos is not None and not oos.passed:
-            reasons.append(
-                f"derived target not confirmed OOS "
-                f"(p={oos.p_value:.4f} vs {th.oos_max_p}, "
+            diagnostics.append(
+                f"[diagnostic] OOS weak (p={oos.p_value:.4f} vs {th.oos_max_p}, "
                 f"mean_adv={oos.mean_advantage:.5f}, n_act={oos.n_activations})"
             )
 
-        promoted = not reasons
+        # All directed contracts are promoted — Rule Discovery is the economic judge.
+        promoted = derived.direction in ("long", "short")
         ms = self.market_structure
 
         return AlphaContract(
@@ -749,7 +846,7 @@ class AlphaDiscovery:
             alpha_score=score,
             oos_validation=oos,
             promoted=promoted,
-            rejection_reasons=reasons,
+            rejection_reasons=diagnostics,
             fdr_promoted=bool(fdr_ok),
         )
 
@@ -877,11 +974,15 @@ def _clamp01(x: float) -> float:
 
 
 def _grade(score: float) -> str:
-    """Map a composite score to a letter grade (doc Section 6.2)."""
+    """Map a composite score to a letter grade (doc Section 6.2).
+
+    A  — strong evidence (≥ 0.75); B — solid (≥ 0.50);
+    C  — moderate (≥ 0.25);        D — weak but still handed to Rule Discovery.
+    """
     if score >= 0.75:
         return "A"
-    if score >= 0.60:
-        return "B+"
-    if score >= 0.45:
+    if score >= 0.50:
         return "B"
-    return "C"
+    if score >= 0.25:
+        return "C"
+    return "D"
