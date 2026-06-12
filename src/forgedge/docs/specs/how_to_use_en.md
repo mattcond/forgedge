@@ -277,18 +277,27 @@ for rs in c.regime_analysis.per_regime:
 print(f"Dependency: {c.regime_analysis.dependency_type}")
 ```
 
-### Diagnosing rejections
+### Diagnosing rejected and promoted contracts
 
 ```python
-for c in contracts:
-    if not c.promoted:
-        print(f"{c.event_candidate_id}: {c.rejection_reasons}")
+# The only hard rejection gate is undetermined direction
+rejected = [c for c in contracts if not c.promoted]
+for c in rejected:
+    print(f"REJECTED {c.event_candidate_id}: {c.rejection_reasons}")
+# Only cause: "no derivable target" → no horizon produces a finite advantage
 
-# Common rejection categories:
-# "no derivable target"              → event too rare or zero mean return on all horizons
-# "lift X < 0.08"                    → win rate doesn't beat base rate enough
-# "derived target not confirmed OOS" → IS signal doesn't replicate on the OOS tail
-# "not significant under BH FDR"    → too many candidates; BH lowers the effective threshold
+# Promoted contracts may carry non-blocking diagnostics
+for c in promoted:
+    if c.rejection_reasons:
+        print(f"PROMOTED {c.event_candidate_id} (grade={c.alpha_score.grade}):")
+        for r in c.rejection_reasons:
+            print(f"  {r}")
+# Examples of diagnostics on promoted contracts ([diagnostic] prefix):
+# "[diagnostic] IC weak (|IC|=0.012 < 0.02, p=0.083)"
+# "[diagnostic] lift 0.052 < 0.08"
+# "[diagnostic] OOS weak (p=0.143 vs 0.10, mean_adv=0.0021, n_act=7)"
+# "[diagnostic] not significant under BH FDR"
+# These statistical weaknesses inform the grade (A–D) but do not block promotion.
 ```
 
 ---
@@ -655,9 +664,9 @@ verify:
 - [ ] All candidates passed to AlphaDiscovery have `c.validation.passed == True` (walk-forward)
 
 **Module 2**
-- [ ] `len(promoted) >= 3` — enough hypotheses for diversification; if 0, loosen gates or add features
+- [ ] `len(promoted) >= 3` — enough hypotheses for diversification; if 0, features produce no finite advantage — add features or widen the horizon grid
 - [ ] No promoted contract with `oos.n_activations < 15` — unstable OOS estimate
-- [ ] At least one promoted contract with grade ≥ B (`composite_score >= 0.45`)
+- [ ] At least one promoted contract with grade ≥ B (`composite_score >= 0.50`)
 - [ ] Check `regime_analysis.dependency_type` — avoid `"broken"` for cross-regime robustness
 
 **Module 3**
