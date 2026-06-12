@@ -123,17 +123,18 @@ event_expression:   "close_rsi_25 < 30.5 AND pr_close_rsi_25_96 < 0.10"
 
 # ── TARGET DERIVATO ──────────────────────────────────────────────────
 # Alpha Discovery non riceve parametri economici: il target è derivato
-# in-sample per ciascun evento e confermato out-of-sample (vedi Step 1).
+# in-sample per ciascun evento e replicato out-of-sample (vedi Step 1).
 derived_target:
-  holding_period_h: 24         # h* = max separazione statistica sulla griglia
-  sell_pct:         0.0218     # |vantaggio medio| delle barre attive a h*
+  holding_period_h: 24         # h* = argmax(|vantaggio medio| / √h) sulla griglia
+  sell_pct:         0.0420     # quantile MFE (mfe_quantile) a h*, barre attive IS
   direction:        "long"     # segno del vantaggio medio
   mean_advantage:   +0.0218    # vantaggio medio firmato (convenzione long)
   base_rate:        0.235      # win rate senza filtro a (h*, sell_pct*)
   advantage_by_h:   {1: 0.004, 6: 0.011, 12: 0.017, 24: 0.0218, 48: 0.019}
   t_stat_by_h:      {1: 1.8,   6: 3.1,   12: 4.6,   24: 5.34,   48: 4.2}
+  score_by_h:       {1: 0.004, 6: 0.0045, 12: 0.0049, 24: 0.00445, 48: 0.0027}
 
-# ── CONFERMA OUT-OF-SAMPLE DEL TARGET DERIVATO ──────────────────────
+# ── REPLAY OUT-OF-SAMPLE DEL TARGET DERIVATO ─────────────────────────
 oos_validation:
   n_bars:          2690        # coda temporale mai usata nella derivazione
   n_activations:   97
@@ -143,7 +144,7 @@ oos_validation:
   win_rate:        0.392
   base_rate:       0.241
   lift:            +0.151
-  passed:          true        # requisito di promozione
+  passed:          true        # diagnostica non bloccante — pesa sul voto A–D
 
 # ── DESCRIZIONE ──────────────────────────────────────────────────────
 pattern_family:    "mean_reversion_oversold"
@@ -237,7 +238,7 @@ alpha_score:
   cohens_d:        0.394
   regime_breadth:  0.75
   composite_score: 0.68
-  grade:           "B+"
+  grade:           "B"          # A ≥ 0.75 | B ≥ 0.50 | C ≥ 0.25 | D < 0.25
 
 # ── HANDOFF ──────────────────────────────────────────────────────────
 handoff_status:            "PENDING_RULE_DISCOVERY"
@@ -278,10 +279,10 @@ La tabella, ordinata cronologicamente, è divisa in due finestre
 ```
 IN-SAMPLE  (primi 70%):  derivazione del target + tutte le misure (Step 1–6)
 OUT-OF-SAMPLE (ultimi 30%): mai toccato dalla derivazione — replay del
-                            target derivato per la conferma (gate di promozione)
+                            target derivato (diagnostica per il voto A–D)
 ```
 
-### 1.2 Derivazione per evento — massima separazione statistica
+### 1.2 Derivazione per evento — vantaggio deflazionato per √h
 
 Per ogni Event Candidate, su una griglia di orizzonti candidati
 (`horizon_grid`, default 1–48 barre):
@@ -289,24 +290,34 @@ Per ogni Event Candidate, su una griglia di orizzonti candidati
 ```python
 # fwd_ret[h] = close.shift(-h) / close - 1   (convenzione long, firmato)
 for h in horizon_grid:
-    t[h] = t_stat(fwd_ret[h][attive], fwd_ret[h][inattive])   # pooled, IS
+    mean_adv[h] = fwd_ret[h][attive].mean()       # vantaggio medio firmato, IS
+    score[h]    = abs(mean_adv[h]) / sqrt(h)      # deflazione della varianza
 
-h_star         = argmax_h |t[h]|          # orizzonte di massima separazione
-mean_advantage = fwd_ret[h_star][attive].mean()   # vantaggio medio firmato
-sell_pct       = abs(mean_advantage)      # candidato take-profit
+h_star         = argmax_h score[h]
+mean_advantage = mean_adv[h_star]
 direction      = "long" if mean_advantage > 0 else "short"
+
+# sell_pct: quantile della Maximum Favorable Excursion a h* (barre attive IS)
+# MFE_i = max escursione favorevole nelle h* barre successive alla barra i
+sell_pct = max(quantile(MFE[attive], mfe_quantile), mfe_floor)
 ```
 
-- **`h*`** è l'orizzonte al quale l'evento separa di più le barre attive
-  dalle inattive — il momento in cui l'informazione dell'evento si realizza.
-- **`sell_pct`** è il vantaggio medio che si osserva quando l'evento è
-  attivo: il candidato naturale di take-profit che Rule Discovery raffinerà
-  con la meccanica reale degli ordini.
+- **`h*`** massimizza il vantaggio medio deflazionato per `√h`. La deflazione
+  compensa solo la crescita della varianza con l'orizzonte (∝ √h): a
+  differenza dell'argmax sul |t-stat| — il cui denominatore si gonfia con h e
+  penalizza sistematicamente gli orizzonti lunghi — questo criterio lascia
+  emergere gli edge persistenti (es. un rimbalzo oversold che si realizza in
+  24 barre).
+- **`sell_pct`** è il quantile (`mfe_quantile`, default 0.5 = mediana, con
+  floor `mfe_floor`, default 0.5%) della **Maximum Favorable Excursion** a h*
+  sulle barre attive IS: la migliore escursione *raggiungibile* dal trade, non
+  il rendimento medio a scadenza. È il candidato take-profit realistico che
+  Rule Discovery raffinerà con la meccanica reale degli ordini.
 - **`direction`** è il segno del vantaggio: un evento che anticipa ribassi
   diventa uno short candidate, senza configurazione manuale.
 
-Il profilo completo (`advantage_by_h`, `t_stat_by_h`) viene scritto nel
-contratto per trasparenza.
+Il profilo completo (`advantage_by_h`, `t_stat_by_h`, `score_by_h`) viene
+scritto nel contratto per trasparenza.
 
 ### 1.3 Target binario e base rate al target derivato
 
@@ -327,7 +338,7 @@ base_rate = target[:split].mean()      # calcolato solo in-sample
 
 ### 1.4 Conferma out-of-sample del target derivato
 
-Selezionare `h*` massimizzando |t| sulla griglia è un'ottimizzazione
+Selezionare `h*` ottimizzando sulla griglia è comunque un'ottimizzazione
 in-sample (horizon snooping): senza contromisure il vantaggio misurato è
 sistematicamente sovrastimato. La contromisura è strutturale: il target
 derivato viene replicato sulla coda OOS, che non ha avuto alcun ruolo nella
@@ -339,13 +350,18 @@ t-test one-sided    attivi vs inattivi sulla coda OOS
 win_rate / base_rate / lift   a (h*, sell_pct*, direction*) su OOS
 ```
 
-La promozione richiede `passed = true`:
+`passed = true` quando:
 
 ```
 n_activations_oos >= min_oos_activations   (default 10)
 mean_advantage_oos > 0                     (il segno si conferma)
 p_value_oos < oos_max_p                    (default 0.10)
 ```
+
+La conferma OOS **non è un gate di promozione**: una conferma mancata viene
+registrata come diagnostica non bloccante (`[diagnostic] OOS weak …`) e pesa
+sul voto A–D. Il contratto passa comunque al Modulo 3 — Rule Discovery, con
+walk-forward e meccanica reale degli ordini, è l'unico giudice economico.
 
 ---
 
@@ -580,16 +596,22 @@ quantile_profile = kpi_table.groupby('q').agg(
 > **anche** nel contesto recente. Il Q9 segnala un potenziale alpha momentum
 > separato da documentare negli hints del contratto per sessioni future.
 
-### 4.3 Soglia di promozione
+### 4.3 Soglie diagnostiche (non bloccanti)
 
-Un Event Candidate viene promosso ad Alpha Contract se:
+Le soglie alimentano il voto A–D ma **non scartano** il candidato — ogni
+violazione viene scritta come `[diagnostic]` nel contratto:
 
 ```
 lift      >= 0.08    (almeno +8pp sopra il base rate)
 cohens_d  >= 0.15    (effect size almeno piccolo)
-p_value   <  0.05    (significatività statistica)
+p_value   <  0.05    (significatività statistica / FDR)
 n_activations >= 30  (base statistica minima)
 ```
+
+Tutti i contratti con direzione determinata (long/short) passano al Modulo 3:
+Rule Discovery, con la meccanica reale degli ordini, è l'unico giudice
+economico. Solo i candidati senza vantaggio finito sulla griglia
+(direzione indeterminata) restano `REJECTED`.
 
 ---
 
@@ -679,12 +701,15 @@ def alpha_score(ic_abs, lift, cohens_d, regime_breadth):
 
 ### 6.2 Griglia di prioritizzazione
 
-| Grade | Score | Azione |
+| Grade | Score | Lettura |
 |---|---|---|
-| **A** | ≥ 0.75 | Priorità alta — Alpha Contract immediato |
-| **B+** | 0.60–0.74 | Priorità media — Alpha Contract con nota di cautela |
-| **B** | 0.45–0.59 | Esplorare — possibile edge parziale |
-| **C** | < 0.45 | Scartare — segnale troppo debole |
+| **A** | ≥ 0.75 | Evidenza forte — priorità alta in Rule Discovery |
+| **B** | 0.50–0.74 | Evidenza solida — priorità media |
+| **C** | 0.25–0.49 | Evidenza moderata — esplorare con cautela |
+| **D** | < 0.25 | Evidenza debole — comunque consegnato al Modulo 3, bassa priorità |
+
+Il voto **non è un gate**: tutti i contratti A–D vengono consegnati a Rule
+Discovery, che li ordina per priorità e li giudica economicamente.
 
 **Esempio — proto-RI_01:**
 
@@ -694,7 +719,7 @@ lift   = 0.180   → lift_norm = 0.60
 cohens_d = 0.394 → d_norm = 0.49
 regime_breadth = 0.75 (3/4 regimi significativi)
 
-Score = 0.25×0.32 + 0.30×0.60 + 0.25×0.49 + 0.20×0.75 = 0.68 → Grade B+
+Score = 0.25×0.32 + 0.30×0.60 + 0.25×0.49 + 0.20×0.75 = 0.68 → Grade B
 ```
 
 ---
@@ -710,7 +735,7 @@ ricevuto da Event Discovery — non crea nuove espressioni, non modifica soglie.
 - [ ] `event_candidate_id` copiato esattamente da Event Discovery
 - [ ] `event_expression` copiata esattamente — nessuna modifica alle soglie
 - [ ] `derived_target` compilato (h*, sell_pct, direction, base_rate, profili per h)
-- [ ] `oos_validation` compilato — `passed = true` per la promozione
+- [ ] `oos_validation` compilato — diagnostica non bloccante per il voto A–D
 - [ ] `description` in forma narrativa
 - [ ] `economic_rationale` con controparte identificata
 - [ ] `underlying_feature.ic` con p-value
@@ -808,9 +833,10 @@ consistency_gate: PASS
 
 ```
 Griglia orizzonti: 1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48
-t-stat attivi vs inattivi massimo a h = 24  →  h* = 24
-mean_advantage(24) = +2.18%  →  sell_pct = 0.0218, direction = long
-base_rate a (24, 0.0218, long) = 23.5%   (in-sample)
+score(h) = |vantaggio_medio(h)| / √h  massimo a h = 24  →  h* = 24
+mean_advantage(24) = +2.18%  →  direction = long
+sell_pct = mediana MFE(24h) barre attive IS = 0.042   (quantile configurabile)
+base_rate a (24, 0.042, long) = 23.5%   (in-sample)
 ```
 
 ### Step 2 — Struttura di mercato
@@ -848,7 +874,7 @@ Profilo curva win rate (close_rsi_25 per decili):
   Q9 (RSI~66): WR=29.2% → lift=+5.7pp   (potenziale alpha momentum separato)
   Forma a U → segnalato per future sessioni di discovery
 
-→ Promozione: lift 18pp >> soglia 8pp, Cohen's d = 0.394 >> soglia 0.15
+→ Nessuna diagnostica: lift 18pp >> soglia 8pp, Cohen's d = 0.394 >> 0.15
 ```
 
 ### Step 5 — Regime Sensitivity
@@ -866,7 +892,7 @@ Q4 (bear):    IC=-0.077  p=0.0003  WR=37.1%  → Strong ✅
 ### Step 6 — Score
 
 ```
-Score = 0.68 → Grade B+
+Score = 0.68 → Grade B
 → Priorità media → Alpha Contract compilato con nota di regime
 ```
 

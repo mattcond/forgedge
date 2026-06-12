@@ -137,8 +137,8 @@ KPI Table (input)
 │  Step 5 — Regime Sensitivity                                        │
 │           IC e WR per regime di mercato                             │
 │                                                                     │
-│  Step 6 — Alpha Scoring e selezione                                 │
-│           Composite score, grade A / B+ / B / C                     │
+│  Step 6 — Alpha Scoring (voto, non gate)                            │
+│           Composite score, grade A / B / C / D                      │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │ Alpha Contract
                            │
@@ -251,13 +251,15 @@ il Consistency Gate, con statistiche di attivazione temporale
 ### Modulo 2 — Alpha Discovery
 
 Deriva dai dati il target economico di ciascun Event Candidate (orizzonte
-di massima separazione statistica, sell_pct = vantaggio medio, direzione =
-segno del vantaggio), lo conferma out-of-sample e ne misura il potere
-predittivo. Seleziona i candidati con evidenza statistica sufficiente
-e li formalizza in un Alpha Contract.
+h* = argmax |vantaggio medio|/√h, sell_pct = quantile della Maximum
+Favorable Excursion a h*, direzione = segno del vantaggio), lo replica
+out-of-sample e ne misura il potere predittivo. Ogni candidato con
+direzione determinata diventa un Alpha Contract con voto A–D — le misure
+statistiche alimentano il voto, non scartano: Rule Discovery è l'unico
+giudice economico.
 
-**Domanda:** *"questo evento predice un target economico — e quale — con
-significatività statistica confermata out-of-sample?"*
+**Domanda:** *"questo evento predice un target economico — quale, in che
+direzione, e con quanta evidenza statistica?"*
 
 **Input:** Event Candidates (nessun parametro economico: il target è
 derivato)
@@ -533,8 +535,8 @@ alpha_id:              "ALPHA-ADAUSDC-1H-250101-003"
 event_candidate_id:    "EVT-close_rsi_25-ID×PR-P105-W096-P010"
 event_expression:      "close_rsi_25 < 30.5 AND pr_close_rsi_25_96 < 0.10"
 derived_target:                # derivato dai dati, per evento
-  holding_period_h:    24      # h* = max separazione statistica
-  sell_pct:            0.0218  # |vantaggio medio| a h*
+  holding_period_h:    24      # h* = argmax(|vantaggio medio| / √h)
+  sell_pct:            0.042   # quantile MFE a h*, barre attive IS
   direction:           "long"  # segno del vantaggio
   base_rate:           0.235
 oos_validation:
@@ -552,7 +554,7 @@ regime_analysis:
   weak_regimes: ["uptrend_continuous"]
 alpha_score:
   composite:   0.68
-  grade:       "B+"
+  grade:       "B"
 status:        "HYPOTHESIS"
 ```
 
@@ -600,7 +602,7 @@ IC measurement: close_rsi_25 → IC=-0.032, p=0.003
 Win Rate: WR=41.5%, lift=+18pp, d=0.394, p=0.000004
 Regime: valido in 3/4 regimi, debole in uptrend
 
-Score: 0.68 → Grade B+
+Score: 0.68 → Grade B
 
 Output: Alpha Contract                             ↓
 
