@@ -715,4 +715,4 @@ report.html:
 
 *Rule Registry Module — FORGE (Feature-Oriented Rule Generation Engine)*
 *Versione 1.1 · Maggio 2026 · Parte di FORGE v1.0*
-*Status: Specifica · Da implementare*
+*Status: Implementato — `forgedge.rule_registry`*
