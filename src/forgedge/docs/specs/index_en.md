@@ -153,6 +153,7 @@ confirmed on an OOS tail that has taken no part in any prior computation.
 
 | File | Contents |
 |---|---|
+| `concepts_en.md` | Conceptual guide: event, alpha, and rule — from market to signal |
 | `how_to_use_en.md` | Practical guide to the end-to-end production pipeline |
 | `modulo_0_en.md` | Market Context: regime, EMAProxy, configuration |
 | `modulo_1_en.md` | Event Discovery: 5-step pipeline, EventCandidate, walk-forward |
