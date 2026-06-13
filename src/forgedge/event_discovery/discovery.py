@@ -498,6 +498,7 @@ class EventDiscovery:
             activation_stats=stats,
             consistency_gate=g,
             event_series=series_dt,
+            gate_params=self.config.gate_params,
         )
 
     def _run_walk_forward(
