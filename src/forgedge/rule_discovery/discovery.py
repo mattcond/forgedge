@@ -152,8 +152,12 @@ class RuleDiscovery:
         )
 
         # ── early elimination (Step 2.3) ─────────────────────────────────
+        # A rule that fails the fast in-sample screen is definitively NON-EDGE.
+        # By default we short-circuit here to skip the expensive walk-forward and
+        # diagnostics; with criteria.early_elimination=False we run the full
+        # pipeline anyway and fold these reasons into the final verdict.
         elim = self._early_elimination(is_summary)
-        if elim:
+        if elim and cfg.criteria.early_elimination:
             return self._reject(elim, best_params, notes, grid_results, is_summary)
 
         # ── Step 4 — statistical validation ──────────────────────────────
@@ -185,6 +189,11 @@ class RuleDiscovery:
 
         # ── Step 8 — verdict ─────────────────────────────────────────────
         verdict, reasons = self._decide(is_summary, stat_val, wf, regime)
+        # If the fast screen flagged the rule but early elimination is disabled,
+        # the verdict is still NON-EDGE — now with the diagnostics computed above.
+        if elim:
+            verdict = "NON-EDGE"
+            reasons = elim + [r for r in reasons if r not in elim]
         validated = (
             ValidatedRule(
                 expression=self.contract.event_expression,
