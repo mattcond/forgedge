@@ -429,6 +429,12 @@ class EventCandidate:
     ``None`` when ``DiscoveryConfig.walk_forward`` was not set.
     Populated by ``EventDiscovery.run()`` after IS discovery completes.
     """
+    gate_params: Optional[GateParams] = field(default=None, repr=False)
+    """GateParams used during IS discovery.
+
+    Stored so that ``update_event()`` can re-evaluate ``consistency_gate.passed``
+    on new data without requiring the original ``DiscoveryConfig``.
+    """
 
     @property
     def sql_expression(self) -> str:
@@ -572,6 +578,77 @@ class EventCandidate:
         import pickle
         import pathlib
         pathlib.Path(path).write_bytes(pickle.dumps(self))
+
+    def update_event(self, df: pd.DataFrame) -> None:
+        """Re-evaluate the event on a new DataFrame, updating internal state in place.
+
+        Replays the event on ``df`` using the fixed IS parameters (thresholds,
+        windows, transform) and updates:
+
+        - ``event_series`` — new boolean activation series on ``df``
+        - ``activation_stats`` — recomputed from the new series
+        - ``consistency_gate`` — gate metrics and ``passed`` recomputed on the
+          new series using the original ``gate_params`` (if available; ``passed``
+          is set to ``None``-equivalent ``False`` when ``gate_params`` is absent)
+
+        Thresholds and transform parameters are **never** recalibrated — they
+        remain fixed from the original IS discovery run.  This makes the method
+        suitable for out-of-sample evaluation across different time horizons.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            DataFrame with the same source columns used during discovery.
+            Must contain a timestamp column or DatetimeIndex so that monthly
+            statistics can be recomputed.
+
+        Raises
+        ------
+        ValueError
+            If ``df`` is empty or lacks the required source columns.
+        """
+        from .consistency_gate import ConsistencyGate, _build_month_index
+
+        new_series = self.apply(df)
+        self.event_series = new_series
+
+        # Rebuild timestamp series from the DatetimeIndex set by apply()
+        timestamps = pd.Series(new_series.index, dtype="datetime64[ns]")
+        month_index, n_total_months = _build_month_index(timestamps)
+
+        if self.gate_params is not None:
+            self.consistency_gate = ConsistencyGate(self.gate_params).evaluate_series(
+                new_series, month_index, n_total_months
+            )
+        else:
+            # No gate_params stored: recompute metrics only, passed stays False
+            gate = ConsistencyGate(GateParams()).evaluate_series(
+                new_series, month_index, n_total_months
+            )
+            self.consistency_gate = GateResult(
+                passed=False,
+                n_activations=gate.n_activations,
+                n_active_months=gate.n_active_months,
+                max_monthly_share=gate.max_monthly_share,
+                mean_tpm=gate.mean_tpm,
+                fail_reason="gate_params not stored on this candidate",
+            )
+
+        g = self.consistency_gate
+        active = new_series.fillna(0).astype(bool)
+        month_counts = {}
+        for i, flag in enumerate(active):
+            if flag:
+                m = month_index[i]
+                month_counts[m] = month_counts.get(m, 0) + 1
+        zero_months = n_total_months - g.n_active_months
+        self.activation_stats = ActivationStats(
+            n_activations=g.n_activations,
+            n_active_months=g.n_active_months,
+            zero_months=zero_months,
+            max_monthly_share=g.max_monthly_share,
+            mean_tpm=g.mean_tpm,
+        )
 
 
 # ---------------------------------------------------------------------------
