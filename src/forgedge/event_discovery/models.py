@@ -560,6 +560,19 @@ class EventCandidate:
         ]
         return d
 
+    def persist(self, path) -> None:
+        """Save this candidate to disk as a pickle file.
+
+        Reload with::
+
+            import pickle
+            cand = pickle.load(open(path, "rb"))
+            cand.apply(df)
+        """
+        import pickle
+        import pathlib
+        pathlib.Path(path).write_bytes(pickle.dumps(self))
+
 
 # ---------------------------------------------------------------------------
 # Replay helpers
