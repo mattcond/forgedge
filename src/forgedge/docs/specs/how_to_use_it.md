@@ -376,6 +376,27 @@ for contract in promoted:
         print(f"NON-EDGE: {resp.alpha_id} — {resp.rejection_reasons}")
 ```
 
+### Diagnostica completa su NON-EDGE (`early_elimination=False`)
+
+Per default, una regola che fallisce lo screen rapido IS (< 20 trade, PF < 1,
+fill rate insufficiente) viene rifiutata immediatamente senza eseguire
+walk-forward e diagnostiche — risparmio di calcolo. Con
+`early_elimination=False` la pipeline gira per intero: il verdetto rimane
+`NON-EDGE` ma walk-forward, regime e MAE/MFE sono popolati, utile per
+confrontare report uniformi o analizzare il comportamento OOS di regole deboli:
+
+```python
+from forgedge import RuleDiscovery, RuleDiscoveryConfig, SelectionCriteria
+
+config = RuleDiscoveryConfig(
+    criteria=SelectionCriteria(early_elimination=False),
+)
+rd   = RuleDiscovery(ed.df, contract, cand, config=config)
+resp = rd.run()
+# resp.walk_forward è ora popolato anche se resp.verdict == "NON-EDGE"
+print(f"OOS PF: {resp.walk_forward.oos_summary.profit_factor:.2f}")
+```
+
 ---
 
 ## 6. Pipeline completa per produzione
@@ -639,9 +660,24 @@ ad.summary().to_csv("alpha_summary.csv", index=False)
 
 ### Salvare i candidati (lista completa pre-promozione)
 
-I candidati non sono serializzabili direttamente via `to_contract_dict()`, ma
-l'`event_formula` e l'`expression` salvate in ogni `EventCandidate` contengono
-tutto ciò che serve per riapplicarli:
+Il metodo raccomandato per archiviare candidati completi è `persist()`, che
+esegue un round-trip pickle completo (componenti, soglie, statistiche,
+validazione walk-forward incluse):
+
+```python
+import pathlib
+
+pathlib.Path("candidates").mkdir(exist_ok=True)
+for c in candidates:
+    c.persist(f"candidates/{c.event_id}.pkl")
+
+# Ricaricare in una sessione successiva
+import pickle
+cand = pickle.load(open("candidates/EV-BTC-1H-260610-000.pkl", "rb"))
+cand.apply(new_kpi)   # pronto all'uso immediato
+```
+
+Per archivi tabulari leggibili (meno completi, non invertibili):
 
 ```python
 candidates_data = [

@@ -128,7 +128,11 @@ La configurazione viene valutata tramite il composite score `pf_score_tpm` che
 bilancia Profit Factor, frequenza di trading e consistenza mensile.
 
 **Early elimination (Step 2.3):** configurazioni con < 20 trade, PF < 1.0, o
-`fill_rate < min_fill_rate` vengono scartate prima della validazione.
+`fill_rate < min_fill_rate` vengono scartate prima della validazione costosa
+(walk-forward + diagnostiche). Con `SelectionCriteria(early_elimination=False)`
+la pipeline gira interamente anche per queste configurazioni: il verdetto rimane
+`NON-EDGE`, ma walk-forward e diagnostiche sono popolati — utile per report
+uniformi o per analizzare il comportamento OOS di regole deboli.
 
 ---
 
@@ -431,6 +435,7 @@ with open(f"{resp.alpha_id}_rule_discovery.json", "w") as f:
 | `max_regime_dependency` | `0.30` | Score dipendenza regime massimo per EDGE |
 | `min_dsr` | `1.0` | Deflated Sharpe minimo per EDGE |
 | `max_ttest_p` | `0.05` | p-value massimo t-test expectancy |
+| `early_elimination` | `True` | Se `True`, regole che falliscono lo screen rapido (Step 2.3) vengono rifiutate prima di walk-forward e diagnostiche; se `False`, la pipeline gira per intero — il verdetto rimane `NON-EDGE` ma con tutti i diagnostici popolati |
 
 ### `RuleDiscoveryConfig`
 

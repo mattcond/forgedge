@@ -388,6 +388,28 @@ from forgedge.event_discovery.models import build_feature_series
 feature_series = build_feature_series(cand.components[0], oos_kpi)
 ```
 
+### Persisting to disk: `EventCandidate.persist(path)`
+
+`persist(path)` serialises the full candidate to disk as a pickle file,
+preserving the complete structure (components, thresholds, activation stats,
+walk-forward validation). To reload, use the standard `pickle` module:
+
+```python
+# Save
+cand.persist("contracts/ev_btc_rsi25.pkl")
+
+# Reload — returns a ready-to-use EventCandidate
+import pickle
+cand_loaded = pickle.load(open("contracts/ev_btc_rsi25.pkl", "rb"))
+cand_loaded.apply(new_df)   # works immediately
+```
+
+`persist()` is the recommended way to archive individual candidates across
+sessions or share them between processes. For multi-candidate archives, the
+JSON/CSV form of `to_dict()` is more readable but not invertible (it does
+not reconstruct the full `EventCandidate` object); `persist()` is the only
+method that guarantees a complete round-trip.
+
 ---
 
 ## Walk-forward OOS validation
