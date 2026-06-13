@@ -672,3 +672,39 @@ class TestConfig:
                            RuleDiscoveryConfig(use_contract_target=True))
         base = rd._seed_base_params([])
         assert base.target_h == int(c.derived_target.holding_period_h)
+
+    def test_early_elimination_toggle(self):
+        """A rule that fails the fast screen is short-circuited by default
+        (no diagnostics); with early_elimination=False the full pipeline runs."""
+        df = _predictive_kpi_table(n=8000)
+        ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))
+        cands = ed.run()
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(asset="SYN"))
+        ad.run()
+        promoted = ad.promoted_contracts()
+        by_id = {c.event_id: c for c in cands}
+        c = promoted[0]
+
+        # A 30% limit discount never fills (1% intrabar) → fast-screen NON-EDGE.
+        def make_cfg(early):
+            return RuleDiscoveryConfig(
+                grid=GridSpec(buy_drop_pct=[0.30], sell_pct=[0.05], target_h=[12]),
+                walk_forward=WalkForwardConfig(n_splits=2, min_train_months=3),
+                criteria=SelectionCriteria(early_elimination=early),
+            )
+
+        # Default: short-circuit → diagnostics skipped.
+        r_on = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id], make_cfg(True)).run()
+        assert r_on.verdict == "NON-EDGE"
+        assert r_on.walk_forward is None
+        assert r_on.regime_analysis is None
+        assert r_on.execution_envelope is None
+        assert r_on.rejection_reasons
+
+        # Disabled: full pipeline runs; still NON-EDGE but diagnostics populated.
+        r_off = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id], make_cfg(False)).run()
+        assert r_off.verdict == "NON-EDGE"
+        assert r_off.execution_envelope is not None
+        assert r_off.regime_analysis is not None
+        assert r_off.walk_forward is not None
+        assert r_off.rejection_reasons

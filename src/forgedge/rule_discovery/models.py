@@ -204,6 +204,15 @@ class SelectionCriteria:
         Minimum Deflated Sharpe Ratio for a full ``EDGE``.
     max_ttest_p : float
         Maximum p-value for the win-rate / expectancy significance tests.
+    early_elimination : bool
+        When ``True`` (default), a rule that fails the fast in-sample screen
+        (Step 2.3 — too few trades, losing in-sample, or unfillable) is rejected
+        as ``NON-EDGE`` immediately, *before* the expensive walk-forward and the
+        regime / envelope / MAE-MFE diagnostics, to save compute.  When
+        ``False`` the full pipeline always runs: the rule still gets a
+        ``NON-EDGE`` verdict carrying the same reasons, but with the walk-forward
+        and every diagnostic populated — useful for uniform reporting and to see
+        how a weak rule would have behaved out-of-sample.
     """
 
     min_profit_factor: float = 2.0
@@ -218,6 +227,7 @@ class SelectionCriteria:
     max_regime_dependency: float = 0.30
     min_dsr: float = 1.0
     max_ttest_p: float = 0.05
+    early_elimination: bool = True
 
 
 @dataclass
