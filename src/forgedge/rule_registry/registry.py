@@ -190,6 +190,7 @@ class RuleRegistry:
                 "win_rate": d.stats.get("win_rate"),
                 "total_trades": d.stats.get("total_trades"),
                 "overlap_max": d.overlap_max,
+                "gain_corr_max": d.gain_corr_max,
                 "is_duplicate": d.is_duplicate,
                 "duplicate_of": d.duplicate_of,
                 "cross_ticker_score": d.cross_ticker_score,
