@@ -507,3 +507,19 @@ class AlphaContract:
             "handoff_status": self.handoff_status,
             "rule_discovery_response": self.rule_discovery_response,
         }
+
+    def persist(self, path) -> None:
+        """Save this Alpha Contract to disk as a pickle file.
+
+        Mirrors ``EventCandidate.persist``: the contract is the Alpha Discovery
+        output artifact, pickled whole so Rule Discovery (or a later session)
+        can reload it without re-running discovery.
+
+        Reload with::
+
+            import pickle
+            contract = pickle.load(open(path, "rb"))
+        """
+        import pickle
+        import pathlib
+        pathlib.Path(path).write_bytes(pickle.dumps(self))
