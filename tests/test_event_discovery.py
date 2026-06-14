@@ -406,53 +406,50 @@ class TestEventDiscoveryE2E:
 class TestWalkForward:
     """Tests for train/test split and walk-forward OOS validation."""
 
-    def _make_long_table(self, n: int = 8760) -> pd.DataFrame:
-        """~12 months of 1H data, large enough for a meaningful split."""
-        return _make_kpi_table(n=n, seed=7)
+    @pytest.fixture(scope="class")
+    @classmethod
+    def long_df(cls):
+        """8 760-bar (≈12 months, 1H) table shared across all walk-forward
+        tests.  Each test builds its own EventDiscovery with its own config,
+        so sharing the immutable input DataFrame is safe."""
+        return _make_kpi_table(n=8760, seed=7)
 
-    def test_no_split_leaves_validation_none(self):
-        df = self._make_long_table()
+    def test_no_split_leaves_validation_none(self, long_df):
         cfg = DiscoveryConfig(gate_params=GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0))
-        ed = EventDiscovery(df, cfg)
+        ed = EventDiscovery(long_df, cfg)
         cands = ed.run()
         assert ed.oos_period is None
         assert all(c.validation is None for c in cands)
 
-    def test_split_without_wf_has_correct_periods(self):
-        df = self._make_long_table()
+    def test_split_without_wf_has_correct_periods(self, long_df):
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
             train_ratio=0.70,
         )
-        ed = EventDiscovery(df, cfg)
+        ed = EventDiscovery(long_df, cfg)
         ed.run()
         assert ed.is_period is not None
         assert ed.oos_period is not None
-        # IS end must precede OOS start
         assert ed.is_period[1] < ed.oos_period[0]
-        # IS length is approximately 70% of total
-        n_is = int(len(df) * 0.70)
         is_start, is_end = ed.is_period
         assert isinstance(is_start, pd.Timestamp)
 
-    def test_split_without_wf_validation_is_none(self):
-        df = self._make_long_table()
+    def test_split_without_wf_validation_is_none(self, long_df):
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
             train_ratio=0.70,
         )
-        ed = EventDiscovery(df, cfg)
+        ed = EventDiscovery(long_df, cfg)
         cands = ed.run()
         assert all(c.validation is None for c in cands)
 
-    def test_walk_forward_populates_validation(self):
-        df = self._make_long_table()
+    def test_walk_forward_populates_validation(self, long_df):
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
             train_ratio=0.70,
             walk_forward=WalkForwardConfig(n_splits=3, min_pass_rate=0.5),
         )
-        ed = EventDiscovery(df, cfg)
+        ed = EventDiscovery(long_df, cfg)
         cands = ed.run()
         assert len(cands) > 0
         assert all(c.validation is not None for c in cands)
@@ -463,14 +460,13 @@ class TestWalkForward:
         assert 0.0 <= v.pass_rate <= 1.0
         assert v.passed == (v.pass_rate >= 0.5)
 
-    def test_fold_results_structure(self):
-        df = self._make_long_table()
+    def test_fold_results_structure(self, long_df):
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
             train_ratio=0.70,
             walk_forward=WalkForwardConfig(n_splits=2, min_pass_rate=0.5),
         )
-        ed = EventDiscovery(df, cfg)
+        ed = EventDiscovery(long_df, cfg)
         cands = ed.run()
         for cand in cands:
             v = cand.validation
@@ -480,61 +476,55 @@ class TestWalkForward:
                 assert fr.n_rows > 0
                 assert fr.passed == fr.gate_result.passed
 
-    def test_validated_candidates_filters_correctly(self):
-        df = self._make_long_table()
+    def test_validated_candidates_filters_correctly(self, long_df):
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
             train_ratio=0.70,
             walk_forward=WalkForwardConfig(n_splits=3, min_pass_rate=0.5),
         )
-        ed = EventDiscovery(df, cfg)
+        ed = EventDiscovery(long_df, cfg)
         cands = ed.run()
         stable = ed.validated_candidates()
         assert all(c.validation.passed for c in stable)
         assert len(stable) <= len(cands)
 
-    def test_validated_candidates_raises_without_config(self):
-        df = self._make_long_table()
+    def test_validated_candidates_raises_without_config(self, long_df):
         cfg = DiscoveryConfig(gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8))
-        ed = EventDiscovery(df, cfg)
+        ed = EventDiscovery(long_df, cfg)
         ed.run()
         with pytest.raises(RuntimeError, match="Walk-forward validation was not configured"):
             ed.validated_candidates()
 
-    def test_summary_includes_oos_columns_when_wf_set(self):
-        df = self._make_long_table()
+    def test_summary_includes_oos_columns_when_wf_set(self, long_df):
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
             train_ratio=0.70,
             walk_forward=WalkForwardConfig(n_splits=2, min_pass_rate=0.5),
         )
-        ed = EventDiscovery(df, cfg)
+        ed = EventDiscovery(long_df, cfg)
         ed.run()
         s = ed.summary()
         for col in ("oos_pass_rate", "oos_n_passed", "oos_n_folds", "oos_stable"):
             assert col in s.columns, f"Missing column: {col}"
 
-    def test_summary_no_oos_columns_without_wf(self):
-        df = self._make_long_table()
+    def test_summary_no_oos_columns_without_wf(self, long_df):
         cfg = DiscoveryConfig(gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8))
-        ed = EventDiscovery(df, cfg)
+        ed = EventDiscovery(long_df, cfg)
         ed.run()
         s = ed.summary()
         assert "oos_pass_rate" not in s.columns
 
-    def test_custom_oos_gate_params(self):
-        df = self._make_long_table()
-        # Very strict custom OOS params — should produce fewer passing folds
+    def test_custom_oos_gate_params(self, long_df):
         strict_oos = GateParams(min_act=9999, min_months=99, max_conc=0.01, min_tpm=999)
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
             train_ratio=0.70,
             walk_forward=WalkForwardConfig(n_splits=2, min_pass_rate=0.5, oos_gate_params=strict_oos),
         )
-        ed = EventDiscovery(df, cfg)
+        ed = EventDiscovery(long_df, cfg)
         cands = ed.run()
         stable = ed.validated_candidates()
-        assert len(stable) == 0  # nothing survives impossible OOS criteria
+        assert len(stable) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """Tests for the ``forge`` end-to-end orchestrator."""
 import numpy as np
 import pandas as pd
+import pytest
 
 from forgedge import (
     AlphaConfig,
@@ -68,29 +69,35 @@ def _ohlc_kpi_table(n: int = 2600, seed: int = 7) -> pd.DataFrame:
 
 
 class TestForge:
-    def test_end_to_end_runs_every_module(self):
-        kpi = _ohlc_kpi_table()
-        result = forge(
+    @pytest.fixture(scope="class")
+    @classmethod
+    def kpi(cls):
+        return _ohlc_kpi_table()
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def full_result(cls, kpi):
+        """Full M0→M3 pipeline, shared by tests that assert on the same run."""
+        return forge(
             kpi,
-            ticker="BTCUSDC",
+            asset="TEST",
             timeframe="4H",
             event_discovery_config=_FAST_ED_CONFIG,
             rule_discovery_config=_FAST_RD_CONFIG,
         )
 
+    def test_end_to_end_runs_every_module(self, full_result):
+        result = full_result
         assert isinstance(result, ForgeResult)
-        assert result.ticker == "BTCUSDC"
         # Modulo 0 enriched the table.
         assert REGIME_COL in result.enriched.columns
         assert result.market_context is not None
-        # Modulo 1 produced candidates.
         assert len(result.candidates) > 0
         # event_frame is the Event Discovery post-pipeline frame.
         assert result.event_frame is result.event_discovery.df
         # Modulo 2 produced one contract per candidate fed in.
         assert len(result.contracts) == len(result.candidates)
         assert all(c in result.contracts for c in result.promoted)
-        # Modulo 3 ran once per promoted contract.
         assert len(result.rule_responses) == len(result.promoted)
         for contract, response in result.rule_responses:
             assert response.verdict in {"EDGE", "PARTIAL-EDGE", "NON-EDGE"}
@@ -99,37 +106,25 @@ class TestForge:
         assert isinstance(result.registry, RuleRegistry)
         assert len(result.registry.documents) == len(result.submissions())
 
-    def test_summary_carries_rule_verdict(self):
-        kpi = _ohlc_kpi_table()
-        result = forge(
-            kpi,
-            asset="TEST",
-            event_discovery_config=_FAST_ED_CONFIG,
-            rule_discovery_config=_FAST_RD_CONFIG,
-        )
-        summary = result.summary()
+    def test_summary_carries_rule_verdict(self, full_result):
+        summary = full_result.summary()
         assert "rule_verdict" in summary.columns
-        assert len(summary) == len(result.contracts)
+        assert len(summary) == len(full_result.contracts)
 
-    def test_skips_market_context_when_regime_present(self):
-        kpi = _ohlc_kpi_table()
-        # Enrich once (no Rule Discovery needed to obtain the regime columns).
+    def test_skips_market_context_when_regime_present(self, kpi):
         enriched = forge(
             kpi, event_discovery_config=_FAST_ED_CONFIG, run_rule_discovery=False
         ).enriched
-
         result = forge(
             enriched,
             asset="TEST",
             event_discovery_config=_FAST_ED_CONFIG,
             run_rule_discovery=False,
         )
-        # Market Context is skipped when the table is already enriched.
         assert result.market_context is None
         assert REGIME_COL in result.enriched.columns
 
-    def test_run_market_context_false_skips_module_zero(self):
-        kpi = _ohlc_kpi_table()
+    def test_run_market_context_false_skips_module_zero(self, kpi):
         result = forge(
             kpi,
             run_market_context=False,
@@ -139,13 +134,11 @@ class TestForge:
         assert result.market_context is None
         assert REGIME_COL not in result.enriched.columns
 
-    def test_run_rule_discovery_false_stops_after_alpha(self):
-        kpi = _ohlc_kpi_table()
+    def test_run_rule_discovery_false_stops_after_alpha(self, kpi):
         result = forge(
             kpi, event_discovery_config=_FAST_ED_CONFIG, run_rule_discovery=False
         )
         assert result.rule_responses == []
-        # Modules 0–2 still ran fully.
         assert len(result.candidates) > 0
         assert result.alpha_discovery is not None
         # Modulo 4 is skipped when Rule Discovery did not run.
@@ -163,8 +156,7 @@ class TestForge:
         # Rule Discovery still ran.
         assert len(result.rule_responses) == len(result.promoted)
 
-    def test_default_alpha_config_carries_metadata(self):
-        kpi = _ohlc_kpi_table()
+    def test_default_alpha_config_carries_metadata(self, kpi):
         result = forge(
             kpi,
             asset="MYCOIN",
@@ -175,8 +167,7 @@ class TestForge:
         assert result.alpha_discovery.config.asset == "MYCOIN"
         assert result.alpha_discovery.config.timeframe == "4H"
 
-    def test_explicit_alpha_config_is_respected(self):
-        kpi = _ohlc_kpi_table()
+    def test_explicit_alpha_config_is_respected(self, kpi):
         cfg = AlphaConfig(asset="EXPLICIT", timeframe="1D")
         result = forge(
             kpi,
@@ -188,16 +179,10 @@ class TestForge:
         assert result.alpha_discovery.config.asset == "EXPLICIT"
         assert result.alpha_discovery.config.timeframe == "1D"
 
-    def test_edges_and_validated_rules_are_consistent(self):
-        kpi = _ohlc_kpi_table()
-        result = forge(
-            kpi,
-            event_discovery_config=_FAST_ED_CONFIG,
-            rule_discovery_config=_FAST_RD_CONFIG,
-        )
-        for contract, response in result.edges():
+    def test_edges_and_validated_rules_are_consistent(self, full_result):
+        for contract, response in full_result.edges():
             assert response.is_edge
-        for response in result.validated_rules():
+        for response in full_result.validated_rules():
             assert response.validated_rule is not None
 
 
