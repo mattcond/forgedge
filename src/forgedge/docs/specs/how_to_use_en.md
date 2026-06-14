@@ -396,7 +396,102 @@ print(f"OOS PF: {resp.walk_forward.oos_summary.profit_factor:.2f}")
 
 ---
 
-## 6. Full production pipeline
+## 6. Module 4 — Rule Registry
+
+### Minimal configuration (production)
+
+The Rule Registry receives validated rules from all tickers in the session and
+produces the flat table and HTML report. The fastest path is `from_forge_results`,
+which builds submissions and frames automatically from each ticker's `ForgeResult`:
+
+```python
+from forgedge import RuleRegistry, RegistryConfig
+
+# Run forge() independently for each ticker
+results = {}
+for ticker, kpi in kpi_tables.items():
+    results[ticker] = forge(kpi, asset=ticker, timeframe="1H")
+
+# Module 4: one row per EDGE / PARTIAL-EDGE
+registry = RuleRegistry.from_forge_results(results).run()
+
+print(registry.summary().to_string(index=False))
+```
+
+### Configuration with custom parameters
+
+```python
+config = RegistryConfig(
+    overlap_threshold=0.70,        # Jaccard >= 0.70 → duplicate
+    cross_pf_threshold=2.0,        # minimum PF for cross-ticker PASS
+    generic_ratio_threshold=2/3,   # >= 2/3 of tickers PASS → GENERIC
+    export_format="excel",         # "csv" or "excel"
+    html_charts=True,              # inline SVG in the report
+)
+registry = RuleRegistry.from_forge_results(results, config=config).run()
+```
+
+### Reading the results
+
+```python
+# Full flat table (one row per document)
+df = registry.flat_table()
+print(df[["rule_id", "source_ticker", "pf", "is_duplicate",
+          "classification", "cross_ticker_score"]].to_string())
+
+# Non-duplicate and generic only
+df_clean = df[~df["is_duplicate"] & df["classification"].isin(["GENERIC", "PARTIAL"])]
+
+# Access the cross-ticker results for a single rule
+doc = registry.documents[0]
+for ticker, ct in doc.cross_ticker.items():
+    print(f"  {ticker}: PF={ct.pf:.2f}, {ct.verdict}")
+print(f"Classification: {doc.classification}")  # GENERIC / PARTIAL / SPECIFIC / ISOLATED
+
+# Correlation matrices (Jaccard and Spearman)
+m = registry.matrices
+print(m.jaccard.round(2))
+print(m.spearman.round(2))
+```
+
+### Exporting the flat table and HTML report
+
+```python
+# Flat table as CSV or Excel
+flat_path = registry.export("forge_flat_table.xlsx")
+
+# Self-contained HTML report (inline SVG, no CDN)
+html = registry.html_report(timeframe="1H")
+with open("forge_report.html", "w", encoding="utf-8") as f:
+    f.write(html)
+```
+
+### Manual construction with RuleSubmission
+
+When not using `forge()` as the orchestrator, submissions can be built explicitly:
+
+```python
+from forgedge import RuleDiscovery, RuleRegistry, RuleSubmission
+
+submissions = []
+for contract in promoted:
+    cand = by_id[contract.event_candidate_id]
+    resp = RuleDiscovery(ed.df, contract, cand).run()
+    if resp.is_edge:
+        submissions.append(RuleSubmission(
+            ticker="BTC",
+            response=resp,
+            candidate=cand,
+            grade=contract.alpha_score.grade,
+        ))
+
+frames = {"BTC": ed.df}
+registry = RuleRegistry(submissions, frames).run()
+```
+
+---
+
+## 7. Full production pipeline
 
 ### One-call orchestrator: `forge`
 
@@ -568,7 +663,7 @@ for contract, resp in rule_responses:
 
 ---
 
-## 7. Multi-asset workflow
+## 8. Multi-asset workflow
 
 Run an independent session per asset — sessions share no state. Each asset
 gets its own distributional thresholds, OU half-lives, and contracts.
@@ -605,7 +700,7 @@ print(cross)
 
 ---
 
-## 8. OOS replay: applying discovered events to new data
+## 9. OOS replay: applying discovered events to new data
 
 `EventCandidate.apply(df)` deterministically replays the event on any DataFrame
 with the same native columns, using the thresholds fixed at discovery time. This
@@ -628,7 +723,7 @@ it requires no access to the original session and re-optimises nothing.
 
 ---
 
-## 9. Persisting artefacts
+## 10. Persisting artefacts
 
 ### Saving promoted contracts
 
@@ -687,10 +782,9 @@ pd.DataFrame(candidates_data).to_csv("event_candidates.csv", index=False)
 
 ---
 
-## 10. Pre-production checklist
+## 11. Pre-production checklist
 
-Before promoting a `ValidatedRule` to the Rule Registry (not yet implemented),
-verify:
+Before promoting a `ValidatedRule` to the Rule Registry, verify:
 
 **Module 0**
 - [ ] `mc.window_resolution["source"] == "hurst_ou"` — adaptive EMAs derived from data
@@ -711,3 +805,9 @@ verify:
 - [ ] `resp.statistical_validation.temporal_stability != "FAIL"` — edge is not concentrated in time
 - [ ] `resp.regime_analysis.avoid_in` is a short list — edge works across multiple regimes
 - [ ] Check execution envelope: `env.conservative.profit_factor > 1.5` — edge holds in the conservative case
+
+**Module 4**
+- [ ] At least one rule with `classification in ("GENERIC", "PARTIAL")` — the edge is not specific to the discovery ticker alone
+- [ ] Check `df[df["is_duplicate"]]["duplicate_of"]` — rules flagged as duplicates must not be promoted to production
+- [ ] `doc.cross_ticker_score > 0` for GENERIC rules — generalisation is confirmed on at least one external ticker
+- [ ] Review the Jaccard matrix (`registry.matrices.jaccard`) — pairs with overlap ≥ 0.85 indicate structural redundancy between signals
