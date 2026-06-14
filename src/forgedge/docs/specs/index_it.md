@@ -155,6 +155,7 @@ precedente.
 
 | File | Contenuto |
 |---|---|
+| `concepts_it.md` | Guida concettuale: evento, alpha e regola — dal mercato al segnale |
 | `how_to_use_it.md` | Guida pratica alla pipeline end-to-end per produzione |
 | `modulo_0_it.md` | Market Context: regime, EMAProxy, configurazione |
 | `modulo_1_it.md` | Event Discovery: pipeline 5-step, EventCandidate, walk-forward |
