@@ -189,7 +189,7 @@ if resp.is_edge:
 | 1 — Event Discovery | ✅ Implemented |
 | 2 — Alpha Discovery | ✅ Implemented |
 | 3 — Rule Discovery | ✅ Implemented |
-| 4 — Rule Registry | ✅ Implemented |
+| 4 — Rule Registry | 🚧 WIP |
 
 ---
 
