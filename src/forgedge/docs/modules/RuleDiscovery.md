@@ -167,6 +167,37 @@ BASE_CONFIG = {
 > **Vincolo:** il grid esplora solo i parametri operativi — `buy_drop_pct`,
 > `sell_pct`, `target_h`. L'espressione rimane invariata.
 
+### 1.3 Ricostruzione del segnale evento
+
+Il backtest e il grid hanno bisogno della serie booleana di attivazione
+dell'evento allineata alle candele osservate (la KPI Table ricevuta). Un Event
+Candidate **è** una funzione di attivazione: Rule Discovery la *rivaluta* sulle
+candele che osserva tramite `EventCandidate.apply(frame)` — un replay
+deterministico dei parametri congelati (soglie, finestre, `diffnorm_std`,
+etichette di classe), **senza** rifittare nulla. È ricostruzione della feature,
+non ri-derivazione.
+
+La `EventCandidate.event_series` pre-calcolata è una **cache** di quella stessa
+funzione valutata sulle candele di training. Viene riusata come fast-path
+trasparente **solo** quando il suo indice è identico a quello del frame
+osservato — dove la cache coincide con `apply()` bit-for-bit:
+
+```python
+stored = candidate.event_series
+if stored is not None and stored.index.equals(frame.index):
+    signal = stored                  # fast-path: indice identico
+else:
+    signal = candidate.apply(frame)  # rivalutazione onesta + warning
+```
+
+> **Vincolo (no-recompute, stesso contratto di Alpha Discovery):** quando i set
+> di candele differiscono — diversa unit di timestamp, uno slice, o una finestra
+> OOS — la cache è inapplicabile. Un `reindex()` cieco mapperebbe ogni barra non
+> sovrapposta a `NaN → inattivo`, nel caso peggiore facendo collassare il segnale
+> a tutto-zero e backtestando una regola che non si attiva mai. Per questo
+> l'evento viene rivalutato sul frame osservato; le trasformazioni a finestra
+> riflettono la storia effettivamente disponibile in quella finestra.
+
 ---
 
 ## 4. Step 2 — Backtest e Scoring
