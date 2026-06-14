@@ -1,5 +1,6 @@
 """Tests for the Alpha Discovery module (FORGE Modulo 2)."""
 import math
+import pickle
 import warnings
 
 import numpy as np
@@ -640,6 +641,48 @@ class TestEventAppliedAsFunction:
             warnings.simplefilter("error")          # no warning on the fast path
             used = ad._event_series(cands[0])
         pd.testing.assert_series_equal(used, cands[0].event_series)
+
+
+# ---------------------------------------------------------------------------
+# Persistence — the Alpha Contract artifact round-trips through a pickle
+# ---------------------------------------------------------------------------
+
+class TestPersist:
+    @pytest.fixture(scope="class")
+    def contract(self):
+        df = _predictive_kpi_table()
+        ed, cands = _make_candidates(df)
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(asset="SYN"))
+        ad.run()
+        return ad._contracts[0]
+
+    def test_persist_writes_pickle(self, contract, tmp_path):
+        path = tmp_path / "alpha.pkl"
+        assert contract.persist(path) is None
+        assert path.exists() and path.stat().st_size > 0
+
+    def test_persist_roundtrip_preserves_contract(self, contract, tmp_path):
+        path = tmp_path / "alpha.pkl"
+        contract.persist(path)
+        loaded = pickle.loads(path.read_bytes())
+
+        assert loaded.alpha_id == contract.alpha_id
+        assert loaded.status == contract.status
+        assert loaded.promoted == contract.promoted
+        assert loaded.event_expression == contract.event_expression
+        assert loaded.direction == contract.direction
+        dt, ldt = contract.derived_target, loaded.derived_target
+        assert ldt.holding_period_h == dt.holding_period_h
+        assert ldt.direction == dt.direction
+        assert ldt.advantage_by_h == dt.advantage_by_h
+        assert loaded.alpha_score.grade == contract.alpha_score.grade
+        assert loaded.rejection_reasons == contract.rejection_reasons
+
+    def test_persist_accepts_str_path(self, contract, tmp_path):
+        path = str(tmp_path / "as_str.pkl")
+        contract.persist(path)
+        loaded = pickle.loads(open(path, "rb").read())
+        assert loaded.alpha_id == contract.alpha_id
 
 
 # ---------------------------------------------------------------------------
