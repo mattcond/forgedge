@@ -593,3 +593,16 @@ class RuleDiscoveryResponse:
             "rejection_reasons": self.rejection_reasons or None,
             "notes": self.notes,
         }
+
+    def persist(self, path) -> None:
+        """Save this Rule Discovery contract to disk as a pickle file.
+
+        Reload with::
+
+            import pickle
+            response = pickle.load(open(path, "rb"))
+            response.verdict
+        """
+        import pickle
+        import pathlib
+        pathlib.Path(path).write_bytes(pickle.dumps(self))

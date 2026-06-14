@@ -12,6 +12,7 @@ from forgedge import (
     EventDiscovery,
     RuleDiscovery,
     RuleDiscoveryConfig,
+    RuleDiscoveryResponse,
 )
 from forgedge.rule_discovery import (
     BacktestParams,
@@ -652,6 +653,23 @@ class TestEndToEnd:
         rd = RuleDiscovery(indexed, c, by_id[c.event_candidate_id])
         resp = rd.run()
         assert resp.verdict in ("EDGE", "PARTIAL-EDGE", "NON-EDGE")
+
+    def test_response_persist_roundtrip(self, pipeline, tmp_path):
+        """RuleDiscoveryResponse.persist pickles the contract; it reloads identically."""
+        import pickle
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        resp = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id]).run()
+
+        path = tmp_path / "rule_contract.pkl"
+        assert resp.persist(path) is None        # mirrors EventCandidate.persist
+        assert path.exists()
+
+        reloaded = pickle.loads(path.read_bytes())
+        assert isinstance(reloaded, RuleDiscoveryResponse)
+        assert reloaded.verdict == resp.verdict
+        assert reloaded.alpha_id == resp.alpha_id
+        assert reloaded.to_dict() == resp.to_dict()
 
 
 # ---------------------------------------------------------------------------
