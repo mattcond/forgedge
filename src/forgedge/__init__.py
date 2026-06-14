@@ -28,6 +28,13 @@ from .rule_discovery import (
     ValidatedRule,
     WalkForwardConfig,
 )
+from .rule_registry import (
+    CrossTickerResult,
+    RegistryConfig,
+    RuleDocument,
+    RuleRegistry,
+    RuleSubmission,
+)
 
 __all__ = [
     "forge",
@@ -52,4 +59,9 @@ __all__ = [
     "SelectionCriteria",
     "WalkForwardConfig",
     "ValidatedRule",
+    "RuleRegistry",
+    "RuleSubmission",
+    "RegistryConfig",
+    "RuleDocument",
+    "CrossTickerResult",
 ]
