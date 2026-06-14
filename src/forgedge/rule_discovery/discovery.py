@@ -46,6 +46,7 @@ Usage
 from __future__ import annotations
 
 import math
+import warnings
 from datetime import date
 from typing import List, Optional
 
@@ -109,6 +110,7 @@ class RuleDiscovery:
             )
 
         self._frame = self._prepare_frame(kpi_table)
+        self._mismatch_warned = False
         self.response: Optional[RuleDiscoveryResponse] = None
 
     # ------------------------------------------------------------------
@@ -259,15 +261,37 @@ class RuleDiscovery:
     def _inject_signal(self) -> None:
         """Reconstruct the event boolean series and add it as the signal column.
 
-        Uses the candidate's stored ``event_series`` when present (Event
-        Discovery's own activations, reindexed onto the frame), else replays it
-        deterministically via :meth:`EventCandidate.apply`.  No threshold is
-        re-fitted — this is feature *reconstruction*, exactly as the spec requires.
+        An Event Candidate *is* an activation function.  Rule Discovery evaluates
+        it on the candles it actually observes — the KPI frame — via the
+        candidate's deterministic replay, :meth:`EventCandidate.apply`.  No
+        threshold is re-fitted: this is feature *reconstruction*, exactly as the
+        spec requires.
+
+        The pre-computed ``EventCandidate.event_series`` is a **cache** of that
+        same function evaluated on the training candles.  It is reused as a
+        transparent fast path *only* when its index is identical to the observed
+        frame's, where the cached evaluation equals ``apply()`` bit-for-bit.  When
+        the candle sets differ the cache is silently inapplicable: reindexing it
+        onto the frame would force every non-overlapping bar to "inactive" — at
+        worst collapsing the signal to all-zeros and backtesting a rule that never
+        fires — so the function is re-evaluated on the observed frame instead.
+        This mirrors Alpha Discovery's ``_event_series`` no-recompute contract.
         """
         col = self.config.signal_col
-        if self.candidate.event_series is not None:
-            series = self.candidate.event_series.reindex(self._frame.index)
+        stored = self.candidate.event_series
+        if stored is not None and stored.index.equals(self._frame.index):
+            series = stored
         else:
+            if stored is not None and not self._mismatch_warned:
+                warnings.warn(
+                    "Rule Discovery received candles whose index differs from the "
+                    "event's stored activation series; the event is re-evaluated as "
+                    "an activation function on the observed candles "
+                    "(EventCandidate.apply). Windowed transforms reflect the history "
+                    "available in the observed window.",
+                    stacklevel=2,
+                )
+                self._mismatch_warned = True
             series = self.candidate.apply(self._frame)
         self._frame[col] = series.fillna(0).to_numpy()
 
