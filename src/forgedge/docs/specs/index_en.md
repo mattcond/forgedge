@@ -71,9 +71,9 @@ KPI Table (OHLCV + technical indicators)
     │
     ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  Module 4 — Rule Registry                 [not implemented]      │
-│  Deduplication, cross-asset backtest, report export.             │
-│  Output: Validated rules ready for the execution system          │
+│  Module 4 — Rule Registry                                        │
+│  Deduplication, cross-ticker backtest, report export.            │
+│  Output: Flat table + HTML report with genericity badges          │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -87,7 +87,7 @@ KPI Table (OHLCV + technical indicators)
 | 1 — Event Discovery | ✅ Implemented |
 | 2 — Alpha Discovery | ✅ Implemented |
 | 3 — Rule Discovery | ✅ Implemented |
-| 4 — Rule Registry | 🔲 Not implemented |
+| 4 — Rule Registry | ✅ Implemented |
 
 ---
 
@@ -159,5 +159,6 @@ confirmed on an OOS tail that has taken no part in any prior computation.
 | `modulo_1_en.md` | Event Discovery: 5-step pipeline, EventCandidate, walk-forward |
 | `modulo_2_en.md` | Alpha Discovery: derived target, OOS, AlphaContract |
 | `modulo_3_en.md` | Rule Discovery: backtest, EDGE verdict, walk-forward OOS, reports |
+| `modulo_4_en.md` | Rule Registry: deduplication, cross-ticker, genericity, export |
 
 Italian versions are in the corresponding `*_it.md` files.

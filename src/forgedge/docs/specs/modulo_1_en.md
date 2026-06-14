@@ -410,6 +410,35 @@ JSON/CSV form of `to_dict()` is more readable but not invertible (it does
 not reconstruct the full `EventCandidate` object); `persist()` is the only
 method that guarantees a complete round-trip.
 
+### OOS re-evaluation: `EventCandidate.update_event(df)`
+
+`update_event(df)` re-evaluates the candidate on a new DataFrame **in place**,
+using only the IS parameters fixed at discovery time (thresholds, transform
+windows) — without recalibrating them. It updates:
+
+- `event_series` — new boolean series on the passed DataFrame
+- `activation_stats` — recomputed from the new series
+- `consistency_gate` — metrics and `passed` recomputed with the original
+  `gate_params` (if stored; without `gate_params` the gate is marked `False`)
+
+```python
+# Evaluate a candidate discovered on historical data against more recent data
+new_kpi = pd.read_parquet("btc_1h_new.parquet")
+cand.update_event(new_kpi)
+
+print(f"Activations on the new period: {cand.activation_stats.n_activations}")
+print(f"Gate passed: {cand.consistency_gate.passed}")
+print(f"Active months: {cand.activation_stats.n_active_months}")
+
+# The signal is now updated on the new data
+new_signal = cand.event_series
+```
+
+`update_event()` is the alternative to `apply()` when you also want the
+activation stats and gate updated (not just the boolean series): after the
+call, `cand.event_series` and `cand.activation_stats` reflect the new period.
+Thresholds never change — they remain fixed from the IS discovery run.
+
 ---
 
 ## Walk-forward OOS validation

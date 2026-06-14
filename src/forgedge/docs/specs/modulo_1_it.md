@@ -423,6 +423,35 @@ JSON/CSV del `to_dict()` è più leggibile ma non è invertibile (non riproduce
 l'oggetto `EventCandidate` completo); `persist()` è l'unico metodo che
 garantisce il round-trip completo.
 
+### Rivalutazione OOS: `EventCandidate.update_event(df)`
+
+`update_event(df)` rivaluta il candidato su un nuovo DataFrame **in place**,
+usando esclusivamente i parametri IS fissati durante la scoperta (soglie,
+finestre di trasformazione) — senza ricalibrarli. Aggiorna:
+
+- `event_series` — nuova serie booleana sul DataFrame passato
+- `activation_stats` — ricalcolate dalla nuova serie
+- `consistency_gate` — metriche e `passed` ricalcolati con i `gate_params`
+  originali (se disponibili; senza `gate_params` il gate è marcato `False`)
+
+```python
+# Valutare un candidato scoperto su dati storici su dati più recenti
+new_kpi = pd.read_parquet("btc_1h_new.parquet")
+cand.update_event(new_kpi)
+
+print(f"Attivazioni sul nuovo periodo: {cand.activation_stats.n_activations}")
+print(f"Gate superato: {cand.consistency_gate.passed}")
+print(f"Mesi attivi: {cand.activation_stats.n_active_months}")
+
+# Il segnale è ora aggiornato sui nuovi dati
+new_signal = cand.event_series
+```
+
+`update_event()` è l'alternativa a `apply()` quando si vogliono aggiornare anche
+le statistiche e il gate (e non solo la serie booleana): dopo la chiamata,
+`cand.event_series` e `cand.activation_stats` riflettono il nuovo periodo.
+Le soglie non cambiano mai — sono sempre quelle fissate durante la scoperta IS.
+
 ---
 
 ## Walk-forward OOS validation
