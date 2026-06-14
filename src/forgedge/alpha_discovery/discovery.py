@@ -21,11 +21,13 @@ derived target out-of-sample, recording the OOS advantage.  All directed
 contracts receive a grade (A–D) and are handed to Rule Discovery; statistical
 measures inform the grade but do not gate promotion.
 
-The flow is strictly sequential and read-only: regimes come from Market
-Context, events come from Event Discovery — Alpha Discovery recomputes
-neither.  It reads each candidate's stored ``event_series``, reads the
-``regime`` column from the enriched table, and reads the underlying feature
-columns from Event Discovery's post-pipeline table.
+The flow is strictly sequential: regimes come from Market Context, events come
+from Event Discovery — Alpha Discovery re-derives neither.  It evaluates each
+candidate as an activation function on the candles it observes (a deterministic
+replay of the event's frozen parameters, reusing the cached ``event_series``
+verbatim when the candle set is identical), reads the ``regime`` column from the
+enriched table, and reads the underlying feature columns from Event Discovery's
+post-pipeline table.
 
 Usage
 -----
@@ -42,6 +44,7 @@ Usage
 from __future__ import annotations
 
 import math
+import warnings
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
@@ -82,8 +85,10 @@ class AlphaDiscovery:
         stored parameters).  Must carry a datetime column (default
         ``open_dt``) or a DatetimeIndex.
     event_candidates : list[EventCandidate]
-        Output of ``EventDiscovery.run()``.  Each candidate's stored
-        ``event_series`` is used as-is — events are never re-derived.
+        Output of ``EventDiscovery.run()``.  Each candidate is evaluated as an
+        activation function on the observed candles — events are re-evaluated,
+        never re-derived (the cached ``event_series`` is reused verbatim only
+        when the candle set is identical).  See :meth:`_event_series`.
     config : AlphaConfig, optional
         Horizon grid, IS/OOS split and gates.  Defaults derive the target
         over horizons 1–48 bars with a 70/30 temporal split.
@@ -100,6 +105,7 @@ class AlphaDiscovery:
 
         self._frame = self._prepare_frame(kpi_table)
         self._contracts: Optional[List[AlphaContract]] = None
+        self._mismatch_warned = False
 
         # Populated by run().
         self.market_structure: Optional[MarketStructure] = None
@@ -887,21 +893,45 @@ class AlphaDiscovery:
         return df.sort_index()
 
     def _event_series(self, cand: EventCandidate) -> pd.Series:
-        """Return the candidate's boolean activation series, aligned to the frame.
+        """Return the candidate's activation series on the **observed** candles.
 
-        Alpha Discovery does **not** recompute events — the activation series
-        produced by Event Discovery (``EventCandidate.event_series``, carrying
-        its DatetimeIndex) is used as-is, reindexed onto the KPI frame.  Bars
-        outside the candidate's discovery period align to NaN and are treated
-        as inactive downstream.
+        An Event Candidate *is* an activation function.  Alpha Discovery
+        evaluates it on the candles it actually observes (the KPI frame) via the
+        candidate's deterministic replay, :meth:`EventCandidate.apply`.  That
+        replay consumes the event's frozen parameters verbatim — thresholds,
+        window sizes, ``diffnorm_std``, class labels — and never re-derives any
+        of them, so the "no-recompute" contract is honoured: the event is
+        *re-evaluated*, not *re-fitted*.
 
-        ``EventCandidate.apply()`` is used only as a fallback for candidates
-        that were serialised without their series (``event_series is None``);
-        even then it is a deterministic replay of the stored thresholds and
-        windows, never a re-fit.
+        The pre-computed ``EventCandidate.event_series`` is a **cache** of that
+        same function evaluated on the *training* candles.  It is reused as a
+        transparent fast path only when its index is identical to the observed
+        frame's, where the cached evaluation equals ``apply()`` exactly.  When
+        the candle sets differ the cache is silently inapplicable — reindexing
+        it would force every non-overlapping bar to "inactive", measuring the
+        event against returns on bars where it was never evaluated — so the
+        function is evaluated on the observed frame instead.
+
+        Rolling transforms (``rolling_pctrank``, ``rolling_zscore``, ``delta``,
+        crossings) depend on the bars preceding each one; when the observed
+        candles differ from the training ones, activations near the start of the
+        observed window reflect the history actually available there.  This is
+        the honest value of a windowed feature given the observed data, not an
+        inconsistency.
         """
-        if cand.event_series is not None:
-            return cand.event_series.reindex(self._frame.index)
+        stored = cand.event_series
+        if stored is not None and stored.index.equals(self._frame.index):
+            return stored
+        if stored is not None and not self._mismatch_warned:
+            warnings.warn(
+                "Alpha Discovery received candles whose index differs from the "
+                "event's stored activation series; the event is evaluated as an "
+                "activation function on the observed candles "
+                "(EventCandidate.apply). Windowed transforms reflect the history "
+                "available in the observed window.",
+                stacklevel=2,
+            )
+            self._mismatch_warned = True
         return cand.apply(self._frame)
 
     def _feature_series(self, comp) -> pd.Series:

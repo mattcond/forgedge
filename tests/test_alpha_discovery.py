@@ -1,5 +1,6 @@
 """Tests for the Alpha Discovery module (FORGE Modulo 2)."""
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -15,6 +16,7 @@ from forgedge import (
 from forgedge.alpha_discovery import stats
 from forgedge.alpha_discovery.market_structure import analyse_market_structure
 from forgedge.alpha_discovery.target import binary_target, forward_returns
+from forgedge.event_discovery.models import GateParams
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +474,9 @@ class TestRegimeSensitivity:
 
 class TestNoRecompute:
     def test_events_come_from_stored_series_not_apply(self, monkeypatch):
-        """With event_series present, EventCandidate.apply must never run."""
+        """Fast path: when the observed candles are identical to the event's
+        (the sequential ``ed.df`` case), the cached ``event_series`` is reused
+        verbatim and ``EventCandidate.apply`` must never run."""
         df = _predictive_kpi_table()
         ed, cands = _make_candidates(df)
         assert all(c.event_series is not None for c in cands)
@@ -533,6 +537,109 @@ class TestNoRecompute:
             # so n_activations equals the stored IS activation count exactly.
             assert split + contract.derived_target.holding_period_h < n
             assert contract.event_stats.n_activations == int(stored.iloc[:split].sum())
+
+
+# ---------------------------------------------------------------------------
+# The event is consumed as an activation function on the observed candles
+# ---------------------------------------------------------------------------
+
+class TestEventAppliedAsFunction:
+    """Regression guard for the event/Alpha temporal-consistency fix.
+
+    When Event Discovery builds an event on one candle set and Alpha Discovery
+    observes a *different* one, Alpha must evaluate the event as an activation
+    function on the candles it observes — not reindex the cached activations of
+    a foreign candle set (which would silently force every non-overlapping bar
+    to "inactive").  The fast path (identical candles) still reuses the cache.
+    """
+
+    def _identity_candidate(self, cands):
+        """A single-component, identity-transform, level (non-crossing) event.
+
+        For such an event the activation function is a pure pointwise threshold,
+        so the expected activations can be computed by an oracle that does not
+        go through ``apply`` — the comparison is not tautological.
+        """
+        for c in cands:
+            comp = c.components[0]
+            if (len(c.components) == 1 and comp.transform == "identity"
+                    and comp.event_type != "crossing"):
+                return c
+        return None
+
+    @staticmethod
+    def _identity_oracle(frame, comp):
+        s = frame[comp.source_feature]
+        hit = (s < comp.threshold) if comp.direction == "below" else (s > comp.threshold)
+        return hit.astype(float).where(s.notna(), np.nan)
+
+    @pytest.fixture(scope="class")
+    def split_setup(self):
+        # Event on the first half (set A); Alpha will observe the full table (B).
+        full = _predictive_kpi_table(n=6000)
+        A = full.iloc[:3000].copy()
+        ed = EventDiscovery(A, DiscoveryConfig(
+            timestamp_col="open_dt",
+            gate_params=GateParams(min_act=30, min_months=2, max_conc=0.6, min_tpm=1.0),
+        ))
+        cands = ed.run()
+        cand = self._identity_candidate(cands)
+        assert cand is not None, "expected a single-component identity candidate"
+        return full, cand
+
+    def test_event_series_equals_function_on_observed_candles(self, split_setup):
+        full, cand = split_setup
+        ad = AlphaDiscovery(full.copy(), [cand], AlphaConfig())
+        used = ad._event_series(cand).reindex(ad._frame.index)
+        oracle = self._identity_oracle(ad._frame, cand.components[0])
+        pd.testing.assert_series_equal(
+            used.fillna(0.0), oracle.fillna(0.0), check_names=False
+        )
+
+    def test_event_fires_on_non_common_tail(self, split_setup):
+        full, cand = split_setup
+        ad = AlphaDiscovery(full.copy(), [cand], AlphaConfig())
+        used = ad._event_series(cand).reindex(ad._frame.index)
+        tail = ad._frame.index.difference(cand.event_series.index)
+        # Old reindex behaviour forced this to 0; the event genuinely fires here.
+        assert used.reindex(tail).fillna(0).sum() > 0
+
+    def test_overlap_still_matches_stored(self, split_setup):
+        full, cand = split_setup
+        ad = AlphaDiscovery(full.copy(), [cand], AlphaConfig())
+        used = ad._event_series(cand).reindex(ad._frame.index)
+        common = ad._frame.index.intersection(cand.event_series.index)
+        pd.testing.assert_series_equal(
+            used.reindex(common).fillna(0.0),
+            cand.event_series.reindex(common).fillna(0.0),
+            check_names=False,
+        )
+
+    def test_contract_counts_include_tail_activations(self, split_setup):
+        full, cand = split_setup
+        ad = AlphaDiscovery(full.copy(), [cand], AlphaConfig())
+        ad.run()
+        split = ad.split_idx
+        stored_is = int(
+            cand.event_series.reindex(ad._frame.index).fillna(0).iloc[:split].sum()
+        )
+        # The IS window now sees the tail activations the old code dropped.
+        assert ad._contracts[0].event_stats.n_activations > stored_is
+
+    def test_warns_on_candle_mismatch(self, split_setup):
+        full, cand = split_setup
+        ad = AlphaDiscovery(full.copy(), [cand], AlphaConfig())
+        with pytest.warns(UserWarning, match="activation function"):
+            ad._event_series(cand)
+
+    def test_fast_path_identical_candles_uses_cache_silently(self):
+        df = _predictive_kpi_table()
+        ed, cands = _make_candidates(df)
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig())
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")          # no warning on the fast path
+            used = ad._event_series(cands[0])
+        pd.testing.assert_series_equal(used, cands[0].event_series)
 
 
 # ---------------------------------------------------------------------------
