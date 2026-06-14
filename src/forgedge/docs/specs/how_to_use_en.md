@@ -495,18 +495,21 @@ registry = RuleRegistry(submissions, frames).run()
 
 ### One-call orchestrator: `forge`
 
-The four modules are wired together by the built-in `forge` orchestrator, so the
+The five modules are wired together by the built-in `forge` orchestrator, so the
 whole session is a single call. It accepts the KPI Table plus the configuration
-object of each module and returns a `ForgeResult` carrying every artefact:
+object of each module and returns a `ForgeResult` carrying every artefact —
+including the Rule Registry (Module 4) built from the run's tradeable rules:
 
 ```python
 from forgedge import forge
 
-result = forge(kpi, asset="BTC", timeframe="1H")
+result = forge(kpi, ticker="BTCUSDC", timeframe="1H")
 
 print(result.summary())                      # one row per candidate + rule_verdict
 for contract, response in result.edges():    # EDGE / PARTIAL-EDGE only
     print(contract.alpha_id, response.verdict)
+
+print(result.registry.summary())             # Module 4 — catalogued rules
 ```
 
 Per-module configuration is passed through dedicated keyword arguments:
@@ -540,17 +543,51 @@ result = forge(
 
 Useful switches:
 
+- `ticker="BTCUSDC"` — the label used for the Rule Registry pool and the Alpha Contract
+  metadata (falls back to `alpha_config.asset` or `asset`).
 - `run_market_context=False` — feed a table that already carries `regime` (Module 0 is
   also skipped automatically when the `regime` column is present).
 - `run_rule_discovery=False` — stop after Alpha Discovery to get the promoted hypotheses
-  (`result.promoted`) without backtesting them.
+  (`result.promoted`) without backtesting them (Module 4 is then skipped too).
+- `run_registry=False` — stop after Rule Discovery, without building the Module 4 registry.
 - `only_validated_events=True` — hand Alpha Discovery only the walk-forward-validated
   candidates (when Event Discovery ran with `walk_forward`).
 
 `ForgeResult` exposes the live module instances (`result.market_context`,
 `result.event_discovery`, `result.alpha_discovery`) for drill-down, plus
-`result.candidates`, `result.contracts`, `result.promoted` and
-`result.rule_responses`.
+`result.candidates`, `result.contracts`, `result.promoted`,
+`result.rule_responses`, `result.event_frame` (the post-pipeline frame) and
+`result.registry` (the Module 4 `RuleRegistry`).
+
+### Multi-ticker sessions: `forge_multi`
+
+The Rule Registry's cross-ticker backtest only has other tickers to replay
+against when the session covers several. `forge_multi` runs `forge` per ticker
+and pools every tradeable rule into one cross-ticker registry:
+
+```python
+from forgedge import forge_multi
+
+frames = {
+    "BTCUSDC": btc_kpi,
+    "ETHUSDC": eth_kpi,
+    "ADAUSDC": ada_kpi,
+}
+results, registry = forge_multi(frames, timeframe="1H")
+
+print(registry.summary())            # rule_id, source_ticker, cross-ticker score, class
+registry.export("rules.xlsx")        # flat table (Module 4 persistence artefact)
+html = registry.html_report()        # self-contained HTML
+
+# Per-ticker drill-down is still available
+for ticker, res in results.items():
+    print(ticker, len(res.edges()), "tradeable rules")
+```
+
+Pass the per-module config objects (`event_discovery_config`, `alpha_config`, …)
+as keyword arguments — they are forwarded to every per-ticker run. Do **not**
+pass `ticker` / `asset` (set automatically per ticker) or `run_registry` (the
+pooled registry supersedes the per-ticker ones).
 
 ### Building it by hand
 

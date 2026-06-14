@@ -221,7 +221,16 @@ class RuleRegistry:
         submissions: List[RuleSubmission] = []
         frames: Dict[str, pd.DataFrame] = {}
         for ticker, result in results_by_ticker.items():
-            frames[ticker] = result.enriched
+            # Prefer the Event Discovery post-pipeline frame (native columns +
+            # every derived feature + regime) so the cross-ticker backtest reads
+            # exactly the data the rule was validated on; fall back to the
+            # Market-Context-enriched table.
+            frames[ticker] = getattr(result, "event_frame", None)
+            if frames[ticker] is None:
+                frames[ticker] = result.enriched
+            if hasattr(result, "submissions"):
+                submissions.extend(result.submissions())
+                continue
             by_id = {c.event_id: c for c in result.candidates}
             for contract, response in result.rule_responses:
                 if not response.is_edge or response.validated_rule is None:

@@ -2,9 +2,18 @@
 import numpy as np
 import pandas as pd
 
-from forgedge import AlphaConfig, DiscoveryConfig, ForgeResult, forge
+from forgedge import (
+    AlphaConfig,
+    DiscoveryConfig,
+    ForgeResult,
+    RuleDiscoveryConfig,
+    RuleRegistry,
+    forge,
+    forge_multi,
+)
 from forgedge.event_discovery.models import GateParams
 from forgedge.market_context.models import REGIME_COL
+from forgedge.rule_discovery.models import GridSpec, WalkForwardConfig
 
 
 # A deliberately strict, single-component Event Discovery config: the table
@@ -13,7 +22,15 @@ from forgedge.market_context.models import REGIME_COL
 # end-to-end tests stay fast.
 _FAST_ED_CONFIG = DiscoveryConfig(
     max_and_components=1,
-    gate_params=GateParams(min_act=40, min_months=8, max_conc=0.6, min_tpm=1.0),
+    gate_params=GateParams(min_act=120, min_months=8, max_conc=0.6, min_tpm=2.0),
+)
+
+# Minimal Rule Discovery config — a single-cell grid and a light, non-reoptimised
+# walk-forward — so each Modulo 3 run is cheap.  The verdicts are not the point
+# of these orchestration tests; the wiring is.
+_FAST_RD_CONFIG = RuleDiscoveryConfig(
+    grid=GridSpec(buy_drop_pct=[0.0], buy_delay_bar=[0]),
+    walk_forward=WalkForwardConfig(n_splits=2, reoptimise=False),
 )
 
 
@@ -54,15 +71,22 @@ class TestForge:
     def test_end_to_end_runs_every_module(self):
         kpi = _ohlc_kpi_table()
         result = forge(
-            kpi, asset="TEST", timeframe="4H", event_discovery_config=_FAST_ED_CONFIG
+            kpi,
+            ticker="BTCUSDC",
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
         )
 
         assert isinstance(result, ForgeResult)
+        assert result.ticker == "BTCUSDC"
         # Modulo 0 enriched the table.
         assert REGIME_COL in result.enriched.columns
         assert result.market_context is not None
         # Modulo 1 produced candidates.
         assert len(result.candidates) > 0
+        # event_frame is the Event Discovery post-pipeline frame.
+        assert result.event_frame is result.event_discovery.df
         # Modulo 2 produced one contract per candidate fed in.
         assert len(result.contracts) == len(result.candidates)
         assert all(c in result.contracts for c in result.promoted)
@@ -71,10 +95,18 @@ class TestForge:
         for contract, response in result.rule_responses:
             assert response.verdict in {"EDGE", "PARTIAL-EDGE", "NON-EDGE"}
             assert contract.alpha_id == response.alpha_id
+        # Modulo 4 — Rule Registry built from this run's tradeable rules.
+        assert isinstance(result.registry, RuleRegistry)
+        assert len(result.registry.documents) == len(result.submissions())
 
     def test_summary_carries_rule_verdict(self):
         kpi = _ohlc_kpi_table()
-        result = forge(kpi, asset="TEST", event_discovery_config=_FAST_ED_CONFIG)
+        result = forge(
+            kpi,
+            asset="TEST",
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+        )
         summary = result.summary()
         assert "rule_verdict" in summary.columns
         assert len(summary) == len(result.contracts)
@@ -116,6 +148,20 @@ class TestForge:
         # Modules 0–2 still ran fully.
         assert len(result.candidates) > 0
         assert result.alpha_discovery is not None
+        # Modulo 4 is skipped when Rule Discovery did not run.
+        assert result.registry is None
+
+    def test_run_registry_false_skips_module_four(self):
+        kpi = _ohlc_kpi_table()
+        result = forge(
+            kpi,
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            run_registry=False,
+        )
+        assert result.registry is None
+        # Rule Discovery still ran.
+        assert len(result.rule_responses) == len(result.promoted)
 
     def test_default_alpha_config_carries_metadata(self):
         kpi = _ohlc_kpi_table()
@@ -144,8 +190,37 @@ class TestForge:
 
     def test_edges_and_validated_rules_are_consistent(self):
         kpi = _ohlc_kpi_table()
-        result = forge(kpi, event_discovery_config=_FAST_ED_CONFIG)
+        result = forge(
+            kpi,
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+        )
         for contract, response in result.edges():
             assert response.is_edge
         for response in result.validated_rules():
             assert response.validated_rule is not None
+
+
+class TestForgeMulti:
+    def test_pools_tickers_into_one_cross_ticker_registry(self):
+        frames = {
+            "BTCUSDC": _ohlc_kpi_table(seed=7),
+            "ETHUSDC": _ohlc_kpi_table(seed=11),
+        }
+        results, registry = forge_multi(
+            frames,
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+        )
+
+        assert set(results) == {"BTCUSDC", "ETHUSDC"}
+        # Per-ticker registries are skipped in favour of the pooled one.
+        for res in results.values():
+            assert res.registry is None
+            assert res.ticker in frames
+        # The pooled registry knows about every ticker's frame for cross-ticker.
+        assert isinstance(registry, RuleRegistry)
+        assert set(registry.frames) == {"BTCUSDC", "ETHUSDC"}
+        # Every ingested document traces back to a session ticker.
+        for doc in registry.documents:
+            assert doc.source_ticker in frames
