@@ -13,6 +13,7 @@ regime) onto the document.
 from __future__ import annotations
 
 import math
+import warnings
 from typing import List, Optional
 
 import pandas as pd
@@ -57,10 +58,29 @@ def build_document(
     candidate = submission.candidate
 
     # ── replay the validated rule on the source frame for the trade ledger ──
+    # An Event Candidate *is* an activation function; the registry evaluates it
+    # on the candles it actually observes via the candidate's deterministic
+    # replay (:meth:`EventCandidate.apply`).  The pre-computed ``event_series``
+    # is a *cache* of that same function on the training candles — reused as a
+    # fast path only when its index matches the observed frame's exactly, where
+    # the two are bit-for-bit identical.  When the candle sets differ a blind
+    # ``reindex`` would force every non-overlapping bar to "inactive" — at worst
+    # collapsing the signal to all-zeros and ledgering a rule that never fires —
+    # so the event is re-evaluated on the observed frame instead.  This mirrors
+    # the no-recompute contract of Alpha and Rule Discovery.
     frame = source_frame.copy()
-    if candidate.event_series is not None:
-        series = candidate.event_series.reindex(frame.index)
+    stored = candidate.event_series
+    if stored is not None and stored.index.equals(frame.index):
+        series = stored
     else:
+        if stored is not None:
+            warnings.warn(
+                "Rule Registry received candles whose index differs from the "
+                "event's stored activation series; the event is re-evaluated as "
+                "an activation function on the observed candles "
+                "(EventCandidate.apply).",
+                stacklevel=2,
+            )
         series = candidate.apply(frame)
     frame[_SIGNAL_COL] = series.fillna(0).to_numpy()
 

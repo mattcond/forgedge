@@ -342,3 +342,79 @@ class TestRuleRegistry:
         assert path.endswith(".csv")
         loaded = pd.read_csv(path)
         assert loaded.iloc[0]["rule_id"] == "RULE_ADA_01"
+
+
+# ---------------------------------------------------------------------------
+# Event-signal reconstruction (no blind reindex of a stale cache)
+# ---------------------------------------------------------------------------
+
+class TestSignalReconstruction:
+    """Ingestion must evaluate the event on the candles it observes, not blindly
+    reindex the candidate's cached ``event_series`` (which would collapse the
+    signal to all-zeros when the index differs)."""
+
+    def test_reevaluated_when_source_index_differs(self):
+        f = _profitable_frame(seed=1)
+        thr = float(np.quantile(f["feat"], 0.20))
+        cand = _make_candidate("EVT-ADA", thr)
+        # Cache the activations on the original timestamps…
+        base = f.copy()
+        base.index = pd.DatetimeIndex(pd.to_datetime(base["open_dt"]))
+        cand.event_series = cand.apply(base)
+        # …then hand the registry the SAME data shifted 10 years forward, so the
+        # prepared index no longer matches the cache. A blind reindex would map
+        # every bar to NaN→inactive and ledger a rule that never fires.
+        shifted = f.copy()
+        shifted["open_dt"] = pd.to_datetime(shifted["open_dt"]) + pd.Timedelta(days=3650)
+        params = BacktestParams(buy_type="limit", buy_drop_pct=0.005,
+                                buy_delay_bar=6, sell_pct=0.03, target_h=12)
+        resp = _make_response(shifted, cand, params, alpha_id="A-ADA", asset="ADAUSDC")
+        sub = RuleSubmission(ticker="ADAUSDC", response=resp, candidate=cand)
+
+        with pytest.warns(UserWarning, match="differs from"):
+            reg = RuleRegistry([sub], {"ADAUSDC": shifted}).run()
+
+        # The recomputed ledger (activation arrays) must not collapse to zero —
+        # a blind reindex would have produced an empty ledger.
+        d = reg.documents[0]
+        assert len(d.gains) > 0
+        assert len(d.activation_dates) == len(d.gains)
+
+    def test_stale_cache_matches_clean_recompute(self):
+        # A stale (mismatched) cache must yield exactly the same ledger as a
+        # candidate that carries no cache at all — i.e. the cache is ignored.
+        f = _profitable_frame(seed=3)
+        thr = float(np.quantile(f["feat"], 0.20))
+
+        clean = _submission("ADAUSDC", f, thr, event_id="EVT-clean", alpha_id="A-clean")
+        stale = _submission("ADAUSDC", f, thr, event_id="EVT-stale", alpha_id="A-stale")
+        # An all-ones cache on a positional index that won't match the prepared
+        # DatetimeIndex; if trusted it would fire on every bar.
+        stale.candidate.event_series = pd.Series(
+            np.ones(len(f)), index=pd.RangeIndex(len(f))
+        )
+
+        reg = RuleRegistry([clean, stale], {"ADAUSDC": f}).run()
+        d_clean, d_stale = reg.documents
+        assert len(d_stale.gains) > 0
+        assert d_stale.activation_dates == d_clean.activation_dates
+        assert d_stale.gains == d_clean.gains
+
+    def test_matching_cache_used_as_fast_path(self):
+        # When the cache index matches the observed frame exactly it is trusted
+        # verbatim (no warning, no recompute) — proven by a deliberately empty
+        # cache that yields an empty ledger.  The frame already carries the
+        # DatetimeIndex so the registry keeps it as-is.
+        f = _profitable_frame(seed=2)
+        f.index = pd.DatetimeIndex(pd.to_datetime(f["open_dt"]))
+        thr = float(np.quantile(f["feat"], 0.20))
+        sub = _submission("ADAUSDC", f, thr)
+        sub.candidate.event_series = pd.Series(0.0, index=f.index)  # matches prepared index
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning would fail the test
+            reg = RuleRegistry([sub], {"ADAUSDC": f}).run()
+
+        # The empty cache is trusted verbatim → the ledger is empty (no recompute).
+        assert len(reg.documents[0].gains) == 0
