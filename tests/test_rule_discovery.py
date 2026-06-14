@@ -603,6 +603,30 @@ class TestEndToEnd:
         expected = cand.event_series.reindex(rd._frame.index).fillna(0).to_numpy()
         assert np.array_equal(injected, expected)
 
+    def test_signal_reevaluated_when_index_differs(self, pipeline):
+        # When the observed candles carry a timestamp index disjoint from the
+        # candidate's stored activation series, the event must be re-evaluated as
+        # an activation function (EventCandidate.apply), not reindexed: a blind
+        # reindex would map every bar to NaN→inactive and backtest a rule that
+        # never fires.  Features are unchanged here — only the timestamps move —
+        # so re-evaluation recovers the genuine activations.
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        cand = by_id[c.event_candidate_id]
+        shifted = ed.df.copy()
+        shifted.index = shifted.index + pd.Timedelta(days=3650)
+        assert not cand.event_series.index.equals(shifted.index)
+
+        with pytest.warns(UserWarning, match="differs from the"):
+            rd = RuleDiscovery(shifted, c, cand)
+            rd._inject_signal()
+        injected = rd._frame[rd.config.signal_col].to_numpy()
+
+        # The old blind-reindex path would have collapsed this to all-zeros.
+        assert injected.sum() > 0
+        expected = cand.apply(rd._frame).fillna(0).to_numpy()
+        assert np.array_equal(injected, expected)
+
     def test_mismatched_candidate_raises(self, pipeline):
         ed, _, promoted, by_id = pipeline
         c = promoted[0]
