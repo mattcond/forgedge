@@ -369,6 +369,23 @@ Properties populated by `run()`:
 
 Only contracts with `status == "HYPOTHESIS"` (determined direction).
 
+### `contract.persist(path)`
+
+Saves the `AlphaContract` to disk as a pickle file. The contract can be reloaded
+in a later session and passed directly to `RuleDiscovery` without re-running
+Alpha Discovery.
+
+```python
+import pickle, pathlib
+
+pathlib.Path("contracts").mkdir(exist_ok=True)
+for c in promoted:
+    c.persist(f"contracts/{c.alpha_id}.pkl")
+
+# Reload in a later session
+contract = pickle.load(open("contracts/ALPHA-BTC-1H-000.pkl", "rb"))
+```
+
 ### `ad.summary() → pd.DataFrame`
 
 Flat summary sorted by `composite_score` descending:

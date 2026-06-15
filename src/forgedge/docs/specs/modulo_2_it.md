@@ -367,6 +367,23 @@ Proprietà popolate da `run()`:
 
 Solo contratti con `status == "HYPOTHESIS"` (direction determinata).
 
+### `contract.persist(path)`
+
+Salva l'`AlphaContract` su disco come file pickle. Il contratto può essere
+ricaricato in una sessione successiva e passato direttamente a `RuleDiscovery`
+senza rieseguire Alpha Discovery.
+
+```python
+import pickle, pathlib
+
+pathlib.Path("contracts").mkdir(exist_ok=True)
+for c in promoted:
+    c.persist(f"contracts/{c.alpha_id}.pkl")
+
+# Ricaricare in una sessione successiva
+contract = pickle.load(open("contracts/ALPHA-BTC-1H-000.pkl", "rb"))
+```
+
 ### `ad.summary() → pd.DataFrame`
 
 Riepilogo tabellare ordinato per `composite_score` decrescente:

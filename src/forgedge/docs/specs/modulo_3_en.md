@@ -383,6 +383,25 @@ with open(f"{resp.alpha_id}_rule_discovery.json", "w") as f:
     json.dump(resp.to_dict(), f, indent=2)
 ```
 
+### `resp.persist(path)`
+
+Saves the full `RuleDiscoveryResponse` to disk as a pickle file. Useful for
+archiving the complete rule — verdict, metrics, trade log, walk-forward results —
+without re-running the backtest.
+
+```python
+import pickle, pathlib
+
+pathlib.Path("rules").mkdir(exist_ok=True)
+for contract, resp in rule_responses:
+    if resp.is_edge:
+        resp.persist(f"rules/{resp.alpha_id}.pkl")
+
+# Reload in a later session
+resp = pickle.load(open("rules/ALPHA-BTC-1H-000.pkl", "rb"))
+print(resp.verdict, resp.in_sample_summary.profit_factor)
+```
+
 ---
 
 ## Full configuration reference

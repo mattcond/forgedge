@@ -197,6 +197,39 @@ for c in candidates:
           f"months={gate.n_active_months}, passed={gate.passed}")
 ```
 
+### Manual event injection: `CustomEvent`
+
+When you want to test a user-defined hypothesis without running automatic
+discovery, bypass Module 1 entirely using `CustomEvent` and the
+`manual_events` argument of `forge()`:
+
+```python
+from forgedge import forge, CustomEvent
+
+events = [
+    CustomEvent("rsi_14 < 25 and spread_ema < -0.02", name="rsi_extreme_spread"),
+    CustomEvent("volume > volume_ema_20 * 2", name="volume_spike"),
+]
+
+# manual_events bypasses Module 1; ConsistencyGate still runs
+# (failure emits a warning but does not drop the event)
+result = forge(
+    kpi,
+    ticker="BTCUSDC",
+    timeframe="1H",
+    manual_events=events,
+)
+
+for contract, resp in result.rule_responses:
+    print(contract.alpha_id, resp.verdict)
+```
+
+Key notes:
+- `manual_events` and `event_discovery_config` are mutually exclusive — passing both raises `ValueError`.
+- AND composition is not performed in manual injection mode.
+- Each resulting candidate has `event_id = "CUSTOM-{name}"`.
+- For standalone use (without `forge()`), use `CustomEvent.apply(df)` or `CustomEvent.to_event_candidate(df)`.
+
 ---
 
 ## 4. Module 2 — Alpha Discovery

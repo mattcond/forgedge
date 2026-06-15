@@ -200,6 +200,43 @@ for candidate in ed.run():
 
 ---
 
+### Step 4b — Diversity Gate (opt-in)
+
+**Nome:** Diversity Gate (opt-in)
+
+**Scopo:** dopo il ConsistencyGate e prima della composizione AND, gli eventi singoli
+near-duplicate vengono rimossi tramite similarità Jaccard sulla sovrapposizione delle
+date di attivazione. Due eventi con Jaccard ≥ `diversity_threshold` sono considerati
+near-duplicate; il più debole (meno attivazioni IS) viene scartato.
+
+**Perché è importante:** senza il Diversity Gate, l'AND Composer può produrre un gran
+numero di eventi composti strutturalmente ridondanti (es. `RSI < 31 AND RSI < 30` dove
+le due componenti hanno >85% di date di attivazione sovrapposte). Deduplicare il pool
+di eventi singoli prima della composizione AND riduce sia lo spazio di ricerca sia il
+rischio di candidati ridondanti.
+
+**Default:** disabilitato (`diversity_gate_enabled=False` in `DiscoveryConfig`).
+Solo opt-in — nessun breaking change.
+
+**Soglia default:** `diversity_threshold=0.85`. Nota empirica: a p99 della distribuzione
+Jaccard inter-evento (su 12 mesi di dati 1H), Jaccard=0.47 — valori sopra 0.70 sono
+genuine near-duplicate.
+
+**Attivazione:** impostare `diversity_gate_enabled=True` in `DiscoveryConfig`.
+
+```python
+from forgedge import EventDiscovery, DiscoveryConfig
+
+config = DiscoveryConfig(
+    diversity_gate_enabled=True,    # deduplicazione Jaccard opt-in
+    diversity_threshold=0.85,       # rimuovi near-duplicate con Jaccard ≥ 0.85
+)
+ed = EventDiscovery(enriched, config=config)
+candidates = ed.run()
+```
+
+---
+
 ### Step 5 — AND Composition (`ANDComposer`)
 
 Il composer combina coppie (e opzionalmente triple) di eventi che passano il gate
@@ -451,6 +488,77 @@ new_signal = cand.event_series
 le statistiche e il gate (e non solo la serie booleana): dopo la chiamata,
 `cand.event_series` e `cand.activation_stats` riflettono il nuovo periodo.
 Le soglie non cambiano mai — sono sempre quelle fissate durante la scoperta IS.
+
+---
+
+### `CustomEvent` — iniezione manuale di eventi
+
+`CustomEvent` permette all'utente di definire una formula-ipotesi e iniettarla
+direttamente in Alpha Discovery (Modulo 2) e Rule Discovery (Modulo 3), bypassando
+completamente il pipeline automatico di Event Discovery. La formula è valutata con
+`pd.DataFrame.eval()` e può riferirsi a qualsiasi colonna del DataFrame — compresi
+indicatori proprietari che il FeatureGenerator automatico non produce mai.
+
+Import: `from forgedge import CustomEvent`
+
+**Costruttore:**
+
+| Parametro | Tipo | Default | Descrizione |
+|---|---|---|---|
+| `formula` | str | — | Espressione booleana per `pd.DataFrame.eval()`. Esempi: `"rsi_14 > 70"`, `"close < bb_lower and volume > 1e6"`. |
+| `name` | str | `""` | Etichetta leggibile usata nei report. Default: il testo della formula. |
+
+**Metodi:**
+- `apply(df)` → `pd.Series[bool]`: valuta la formula su `df`. I risultati NaN sono trattati come inattivi (False).
+- `to_event_candidate(df, gate_params=None)` → `EventCandidate`: costruisce un `EventCandidate` completo dalla formula. Il ConsistencyGate e le statistiche di attivazione sono calcolati su `df`; non ci sono soglie distribuzionali (la formula è definita dall'utente).
+
+**Comportamento importante:**
+- Quando usato via `forge(manual_events=[...])`, ogni CustomEvent attraversa comunque il ConsistencyGate. Un fallimento emette un `logger.warning` ma non scarta l'evento — l'ipotesi dell'utente è sempre inoltrata.
+- La composizione AND non viene eseguita in modalità iniezione manuale.
+- Il candidato risultante ha `event_id = "CUSTOM-{name}"`.
+
+**Esempio standalone:**
+```python
+from forgedge import CustomEvent, AlphaDiscovery, AlphaConfig
+
+# Definire una ipotesi custom
+ev = CustomEvent("rsi_14 > 70 and volume > 1e6", name="rsi_overbought_volume")
+
+# Applicare a qualsiasi frame
+signal = ev.apply(df)                            # pd.Series bool
+
+# Costruire un EventCandidate completo per M2/M3
+cand = ev.to_event_candidate(df)
+print(cand.event_id)                             # "CUSTOM-rsi_overbought_volume"
+print(cand.activation_stats.n_activations)
+
+# Alpha Discovery direttamente
+ad = AlphaDiscovery(df, [cand], AlphaConfig(asset="BTC", timeframe="1H"))
+contracts = ad.run()
+```
+
+**Esempio via `forge()` con iniezione manuale:**
+```python
+from forgedge import forge, CustomEvent
+
+events = [
+    CustomEvent("close_adj_v2 < 100", name="close_below_100"),
+    CustomEvent("rsi_14 < 25 and spread_ema < -0.02", name="rsi_extreme_spread"),
+]
+
+# manual_events bypassa il Modulo 1; Moduli 2 e 3 girano normalmente
+result = forge(
+    kpi,
+    ticker="BTCUSDC",
+    timeframe="1H",
+    manual_events=events,
+)
+for contract, resp in result.rule_responses:
+    print(contract.alpha_id, resp.verdict)
+```
+
+Nota: `manual_events` e `event_discovery_config` sono mutualmente esclusivi — passarli
+entrambi genera `ValueError`.
 
 ---
 

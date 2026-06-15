@@ -141,6 +141,8 @@ Configurazione principale del Modulo 1. Controlla gate, composizione degli event
 | `max_and_components` | int | `2` | Numero massimo di singoli eventi da combinare in un AND. Valori > 3 sono tecnicamente accettati ma sconsigliati (overfitting strutturale). |
 | `train_ratio` | float | `1.0` | Frazione di barre IS (0 < train_ratio ≤ 1.0). Default 1.0 = tutto IS (nessun split). |
 | `walk_forward` | WalkForwardConfig \| None | `None` | Configurazione walk-forward OOS. Attivo solo se anche `train_ratio < 1.0`. |
+| `diversity_gate_enabled` | bool | `False` | Se True, applica una deduplicazione Jaccard degli eventi singoli dopo il ConsistencyGate e prima della composizione AND. Opt-in — nessun breaking change. |
+| `diversity_threshold` | float | `0.85` | Similarità Jaccard massima tollerata tra due eventi conservati. Usato solo con `diversity_gate_enabled=True`. A p99 della distribuzione Jaccard inter-evento (12 mesi di dati 1H), Jaccard=0.47 — valori sopra 0.70 sono genuine near-duplicate. |
 
 ```python
 from forgedge import EventDiscovery, DiscoveryConfig
@@ -154,6 +156,8 @@ ed = EventDiscovery(
         gate_params=GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0),
         walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         scale_free_overrides={"rsi_14": True},  # forza scale-free su RSI
+        diversity_gate_enabled=True,            # deduplicazione Jaccard opt-in
+        diversity_threshold=0.85,
     ),
 )
 candidates = ed.run()
