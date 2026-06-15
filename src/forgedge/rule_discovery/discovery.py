@@ -57,7 +57,7 @@ from ..alpha_discovery.models import AlphaContract
 from ..event_discovery.discovery import _infer_timestamp_unit
 from ..event_discovery.models import EventCandidate
 from .analysis import excursion_stats, execution_envelope
-from .backtest import run_backtest
+from .backtest import _as_datetime64, _months_m, run_backtest
 from .grid import grid_dataframe, run_grid, select_best
 from .models import (
     BacktestParams,
@@ -330,7 +330,7 @@ class RuleDiscovery:
             regime_map = pd.Series(
                 self._frame[regime_col].to_numpy(), index=self._frame.index
             )
-            fill_dt = pd.to_datetime(trades["fill_dt"])
+            fill_dt = pd.Series(_as_datetime64(trades["fill_dt"]))
             regimes = fill_dt.map(regime_map).fillna("UNDEFINED").to_numpy()
             net = trades["net_pct_gain"].to_numpy()
             for label in pd.unique(regimes):
@@ -368,7 +368,7 @@ class RuleDiscovery:
         """1 − normalised entropy of the monthly trade counts (spec 5.3)."""
         if trades.empty:
             return float("nan")
-        months = pd.to_datetime(trades["fill_dt"]).dt.to_period("M")
+        months = _months_m(trades["fill_dt"])
         counts = months.value_counts().to_numpy(dtype=float)
         if counts.size <= 1:
             return 1.0
@@ -380,13 +380,16 @@ class RuleDiscovery:
     def _zero_months(self, trades: pd.DataFrame) -> int:
         if trades.empty:
             return 0
-        dt = pd.to_datetime(self._frame[self.config.timestamp_col]) \
-            if self.config.timestamp_col in self._frame.columns \
-            else pd.Series(self._frame.index)
+        ts = (
+            self._frame[self.config.timestamp_col]
+            if self.config.timestamp_col in self._frame.columns
+            else self._frame.index
+        )
+        dt = pd.DatetimeIndex(_as_datetime64(ts))
         start = dt.min().to_period("M")
         end = dt.max().to_period("M")
         n_months = max((end.year - start.year) * 12 + (end.month - start.month) + 1, 1)
-        active = pd.to_datetime(trades["fill_dt"]).dt.to_period("M").nunique()
+        active = _months_m(trades["fill_dt"]).nunique()
         return max(n_months - active, 0)
 
     # ------------------------------------------------------------------

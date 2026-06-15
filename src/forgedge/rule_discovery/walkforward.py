@@ -24,7 +24,7 @@ from typing import List, Optional
 import pandas as pd
 
 from .analysis import excursion_stats
-from .backtest import optimistic_hit_col, run_backtest
+from .backtest import _as_datetime64, optimistic_hit_col, run_backtest
 from .grid import run_grid, select_best
 from .models import (
     BacktestParams,
@@ -40,7 +40,7 @@ from .validation import validate
 
 
 def _month_bounds(candle: pd.DataFrame, timestamp_col: str):
-    dt = pd.to_datetime(candle[timestamp_col])
+    dt = pd.DatetimeIndex(_as_datetime64(candle[timestamp_col]))
     start = dt.min().to_period("M").to_timestamp()
     # Exclusive upper bound: first day of the month after the last candle.
     end = (dt.max().to_period("M") + 1).to_timestamp()
@@ -231,7 +231,7 @@ def _summarise_concat(frames, total_signals, months, scoring):
 
 
 def _bars_per_year(candle: pd.DataFrame, timestamp_col: str) -> float:
-    dt = pd.to_datetime(candle[timestamp_col])
+    dt = pd.Series(_as_datetime64(candle[timestamp_col]))
     if len(dt) > 1:
         delta = dt.diff().dt.total_seconds().median()
         if delta and delta > 0:
