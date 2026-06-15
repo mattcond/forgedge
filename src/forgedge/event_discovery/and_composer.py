@@ -521,8 +521,7 @@ def _make_composed_event(
     """Construct a RawEvent representing the AND composition of two or three events.
 
     The new event's ``EventComponent`` uses ``transform="and_composition"``
-    and stores the constituent components in a ``_components`` attribute
-    (a dynamic attribute, not part of the dataclass definition) so that
+    and stores the constituent components in the ``components`` field so that
     ``EventDiscovery._to_candidate`` can recover the full component list.
 
     The ``source_feature``, ``transformed_col``, and ``expression`` fields
@@ -574,8 +573,8 @@ def _make_composed_event(
         expression=expr,
         event_formula=formula_expr,
         sql_expression=sql_expr,
+        components=components,
     )
-    comp._components = components  # type: ignore[attr-defined]
 
     ev = RawEvent(series=and_series, component=comp)
     ev.gate_result = gate_result

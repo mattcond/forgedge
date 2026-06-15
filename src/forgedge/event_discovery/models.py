@@ -303,6 +303,13 @@ class EventComponent:
         rel = duckdb.from_df(ed.df.reset_index())
         rel.query("df", f"SELECT *, ({comp.sql_expression})::INT AS event_active FROM df")
     """
+    components: list["EventComponent"] = field(default_factory=list)
+    """Constituent sub-components for AND-composed events (``transform == "and_composition"``).
+
+    Empty for all other event types.  Storing this as a declared dataclass
+    field (rather than a dynamic attribute) ensures the list survives
+    serialisation (pickle, deepcopy, JSON round-trips).
+    """
 
 
 @dataclass
