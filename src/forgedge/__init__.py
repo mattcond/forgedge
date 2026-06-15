@@ -10,7 +10,7 @@ from .alpha_discovery import (
     OOSValidation,
     PromotionThresholds,
 )
-from .event_discovery import DiscoveryConfig, EventDiscovery
+from .event_discovery import CustomEvent, DiscoveryConfig, EventDiscovery
 from .forge import ForgeResult, forge, forge_multi
 from .market_context import (
     EMAProxyClassifier,
@@ -42,6 +42,7 @@ __all__ = [
     "ForgeResult",
     "EventDiscovery",
     "DiscoveryConfig",
+    "CustomEvent",
     "MarketContext",
     "MarketContextConfig",
     "EMAProxyConfig",

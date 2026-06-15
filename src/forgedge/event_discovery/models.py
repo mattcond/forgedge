@@ -658,9 +658,144 @@ class EventCandidate:
         )
 
 
+@dataclass
+class CustomEvent:
+    """User-defined event specified by a pandas-eval formula.
+
+    Lets a user inject a hand-built event hypothesis straight into Alpha
+    Discovery (M2) and Rule Discovery (M3) without running the automatic
+    Event Discovery pipeline (M1).  The formula is evaluated with
+    ``pd.DataFrame.eval`` so it can reference *any* column present in the
+    DataFrame — including proprietary indicators that the FeatureGenerator
+    would never produce.
+
+    Parameters
+    ----------
+    formula : str
+        Boolean expression compatible with ``pd.DataFrame.eval()``.
+        Examples: ``"close_adj_v2 < 100"``, ``"rsi_14 > 70 and volume > 1e6"``.
+    name : str, optional
+        Human-readable label used in reports.  Defaults to the formula text.
+
+    Examples
+    --------
+    >>> ev = CustomEvent("close_adj_v2 < 100", name="close_below_100")
+    >>> series = ev.apply(df)            # boolean Series aligned to df.index
+    >>> cand = ev.to_event_candidate(df)  # EventCandidate for the M2/M3 flow
+    """
+
+    formula: str
+    name: str = ""
+
+    def __post_init__(self):
+        if not self.name:
+            self.name = self.formula
+
+    def apply(self, df: pd.DataFrame) -> pd.Series:
+        """Evaluate the formula on ``df`` and return a boolean activation Series.
+
+        NaN results (e.g. comparisons against missing values) are treated as
+        inactive (``False``), matching the gate's treatment of NaN bars.
+
+        Raises
+        ------
+        ValueError
+            If the formula references unknown columns or is otherwise invalid.
+        """
+        return _eval_custom_formula(self.formula, df).astype(bool)
+
+    def to_event_candidate(
+        self,
+        df: pd.DataFrame,
+        gate_params: Optional[GateParams] = None,
+    ) -> "EventCandidate":
+        """Build an :class:`EventCandidate` that replays this formula on any frame.
+
+        The returned candidate carries a single ``custom_formula`` component
+        whose ``transform_params["formula"]`` holds the original expression, so
+        ``EventCandidate.apply`` re-evaluates it deterministically on new data.
+        The ``consistency_gate`` and ``activation_stats`` are placeholders here;
+        :func:`forge` populates them after running the Consistency Gate.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Frame the formula is evaluated on to seed the cached
+            ``event_series`` (aligned to ``df.index``).
+        gate_params : GateParams, optional
+            Stored on the candidate so ``update_event`` can re-evaluate the
+            gate on new horizons without the original config.
+        """
+        bool_series = self.apply(df)
+        series = bool_series.astype(float)
+        n_act = int(bool_series.sum())
+
+        component = EventComponent(
+            source_feature=self.name,
+            transform="custom_formula",
+            transform_params={"formula": self.formula},
+            transformed_col=self.name,
+            threshold=float("nan"),
+            threshold_type="custom",
+            direction="above",
+            event_type="threshold",
+            expression=self.formula,
+            sql_expression=self.formula,
+            event_formula=self.formula,
+        )
+        placeholder_gate = GateResult(
+            passed=False,
+            n_activations=n_act,
+            n_active_months=0,
+            max_monthly_share=float("nan"),
+            mean_tpm=float("nan"),
+            fail_reason="gate not yet evaluated",
+        )
+        placeholder_stats = ActivationStats(
+            n_activations=n_act,
+            n_active_months=0,
+            zero_months=0,
+            max_monthly_share=float("nan"),
+            mean_tpm=float("nan"),
+        )
+        return EventCandidate(
+            event_id=f"CUSTOM-{self.name}",
+            status="CANDIDATE",
+            components=[component],
+            expression=self.formula,
+            activation_stats=placeholder_stats,
+            consistency_gate=placeholder_gate,
+            event_series=series,
+            gate_params=gate_params,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Replay helpers
 # ---------------------------------------------------------------------------
+
+def _eval_custom_formula(formula: str, df: pd.DataFrame) -> pd.Series:
+    """Evaluate a ``CustomEvent`` formula on ``df`` into a float 0/1 Series.
+
+    NaN results are coerced to 0 (inactive).  A constant expression that
+    ``df.eval`` collapses to a scalar is broadcast across ``df.index``.
+
+    Raises
+    ------
+    ValueError
+        If the formula cannot be evaluated (e.g. unknown column).
+    """
+    try:
+        result = df.eval(formula)
+    except Exception as exc:
+        raise ValueError(
+            f"CustomEvent formula '{formula}' failed to evaluate: {exc}"
+        ) from exc
+    if not isinstance(result, pd.Series):
+        # Constant expression → broadcast scalar across the frame.
+        result = pd.Series(result, index=df.index)
+    return result.fillna(False).astype(float)
+
 
 def build_feature_series(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
     """Reconstruct the *continuous underlying feature* of a component on ``df``.
@@ -697,6 +832,11 @@ def build_feature_series(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
         was created without its stored in-sample standard deviation.
     """
     sf = comp.source_feature
+
+    if comp.transform == "custom_formula":
+        # User-defined formula: the "continuous feature" is the 0/1 activation
+        # itself (Alpha Discovery measures a point-biserial IC against it).
+        return _eval_custom_formula(comp.transform_params["formula"], df)
 
     if comp.transform in ("binary_native", "categorical_onehot"):
         # No continuous feature underneath — return the raw column.
@@ -753,6 +893,10 @@ def _apply_component(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
         Float 0/1/NaN series aligned to ``df.index``.
     """
     sf = comp.source_feature
+
+    # ── 0. Custom user formula — evaluated verbatim, no transform/threshold ─
+    if comp.transform == "custom_formula":
+        return _eval_custom_formula(comp.transform_params["formula"], df)
 
     # ── 1. Feature series ────────────────────────────────────────────────
     if comp.transform in ("binary_native",):

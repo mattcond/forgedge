@@ -53,6 +53,7 @@ on several tickers and pool their rules into one cross-ticker registry.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -61,13 +62,20 @@ import pandas as pd
 from .alpha_discovery.discovery import AlphaDiscovery
 from .alpha_discovery.models import AlphaConfig, AlphaContract
 from .event_discovery.discovery import DiscoveryConfig, EventDiscovery
-from .event_discovery.models import EventCandidate
+from .event_discovery.models import (
+    ActivationStats,
+    CustomEvent,
+    EventCandidate,
+    GateParams,
+)
 from .market_context.context import MarketContext
 from .market_context.models import REGIME_COL, MarketContextConfig
 from .rule_discovery.discovery import RuleDiscovery
 from .rule_discovery.models import RuleDiscoveryConfig, RuleDiscoveryResponse
 from .rule_registry.models import RegistryConfig, RuleSubmission
 from .rule_registry.registry import RuleRegistry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -196,6 +204,7 @@ def forge(
     alpha_config: Optional[AlphaConfig] = None,
     rule_discovery_config: Optional[RuleDiscoveryConfig] = None,
     registry_config: Optional[RegistryConfig] = None,
+    manual_events: Optional[List[CustomEvent]] = None,
     run_market_context: bool = True,
     run_rule_discovery: bool = True,
     run_registry: bool = True,
@@ -242,6 +251,13 @@ def forge(
     registry_config : RegistryConfig, optional
         Modulo 4 configuration.  Defaults to the calibrated dedup / cross-ticker
         thresholds.
+    manual_events : list[CustomEvent], optional
+        Skip automatic Event Discovery (Modulo 1) and inject these user-defined
+        formula events straight into Alpha/Rule Discovery.  Mutually exclusive
+        with ``event_discovery_config`` — passing both raises ``ValueError``.
+        Each event still crosses the Consistency Gate, but a failure only emits
+        a ``logger.warning`` and does not drop the event.  AND composition is
+        not performed in this mode.
     run_market_context : bool, default True
         Run Modulo 0.  Set ``False`` to feed a table that already carries the
         ``regime`` columns (or to skip regime analysis entirely).
@@ -263,6 +279,13 @@ def forge(
     ForgeResult
         All pipeline artefacts (see the class docstring).
     """
+    # ── Mode validation: manual injection XOR automatic discovery ─────────
+    if manual_events is not None and event_discovery_config is not None:
+        raise ValueError(
+            "manual_events and event_discovery_config are mutually exclusive. "
+            "Pass one or the other, not both."
+        )
+
     # ── Modulo 2 config drives the resolved ticker / metadata ─────────────
     cfg = alpha_config
     if cfg is None:
@@ -280,9 +303,15 @@ def forge(
     else:
         enriched = kpi_table
 
-    # ── Modulo 1 — Event Discovery ────────────────────────────────────────
-    ed = EventDiscovery(enriched, config=event_discovery_config)
-    candidates = ed.run()
+    # ── Modulo 1 — Event Discovery (or manual injection) ──────────────────
+    ed: Optional[EventDiscovery] = None
+    if manual_events is not None:
+        candidates = _build_candidates_from_manual_events(manual_events, enriched)
+        alpha_frame = enriched
+    else:
+        ed = EventDiscovery(enriched, config=event_discovery_config)
+        candidates = ed.run()
+        alpha_frame = ed.df
 
     alpha_candidates = candidates
     if only_validated_events:
@@ -295,7 +324,7 @@ def forge(
             alpha_candidates = validated
 
     # ── Modulo 2 — Alpha Discovery ────────────────────────────────────────
-    ad = AlphaDiscovery(ed.df, alpha_candidates, cfg)
+    ad = AlphaDiscovery(alpha_frame, alpha_candidates, cfg)
     contracts = ad.run()
     promoted = ad.promoted_contracts()
 
@@ -306,7 +335,7 @@ def forge(
         cand = by_id.get(contract.event_candidate_id)
         if cand is None:
             continue
-        rd = RuleDiscovery(ed.df, contract, cand, config=rule_discovery_config)
+        rd = RuleDiscovery(alpha_frame, contract, cand, config=rule_discovery_config)
         response = rd.run()
         rule_responses.append((contract, response))
 
@@ -317,7 +346,7 @@ def forge(
         promoted=promoted,
         rule_responses=rule_responses,
         ticker=resolved_ticker,
-        event_frame=ed.df,
+        event_frame=alpha_frame,
         market_context=mc,
         event_discovery=ed,
         alpha_discovery=ad,
@@ -327,11 +356,87 @@ def forge(
     if run_rule_discovery and run_registry:
         result.registry = RuleRegistry(
             result.submissions(),
-            {resolved_ticker: ed.df},
+            {resolved_ticker: alpha_frame},
             config=registry_config,
         ).run()
 
     return result
+
+
+def _timestamps_from_frame(
+    frame: pd.DataFrame, timestamp_col: str = "open_dt"
+) -> pd.Series:
+    """Extract a datetime Series (RangeIndex) from a frame for month indexing.
+
+    Accepts a ``DatetimeIndex`` or a datetime/parseable ``timestamp_col``.
+    """
+    if isinstance(frame.index, pd.DatetimeIndex):
+        return pd.Series(frame.index, dtype="datetime64[ns]")
+    if timestamp_col in frame.columns:
+        return pd.to_datetime(frame[timestamp_col]).reset_index(drop=True)
+    raise ValueError(
+        "Cannot evaluate the Consistency Gate for manual_events: the frame has "
+        f"no DatetimeIndex and no '{timestamp_col}' column."
+    )
+
+
+def _build_candidates_from_manual_events(
+    manual_events: List[CustomEvent],
+    frame: pd.DataFrame,
+) -> List[EventCandidate]:
+    """Turn user ``CustomEvent`` formulas into gate-annotated EventCandidates.
+
+    Each event is evaluated on ``frame``, crosses the Consistency Gate for
+    diagnostics, and is returned regardless of the gate verdict (a failure is
+    logged as a warning).  ``activation_stats`` are computed honestly from the
+    activation series, independent of whether the gate passed.
+    """
+    from .event_discovery.consistency_gate import (
+        ConsistencyGate,
+        _build_month_index,
+        _count_by_month,
+    )
+
+    gate_params = GateParams()
+    gate = ConsistencyGate(gate_params)
+    timestamps = _timestamps_from_frame(frame)
+    month_index, n_total_months = _build_month_index(timestamps)
+
+    candidates: List[EventCandidate] = []
+    for ev in manual_events:
+        cand = ev.to_event_candidate(frame, gate_params=gate_params)
+        series = cand.event_series
+
+        # Carry the same DatetimeIndex that M1 candidates expose, so Alpha/Rule
+        # Discovery recognise the cached series and skip the apply() re-eval.
+        if not isinstance(series.index, pd.DatetimeIndex):
+            series = series.copy()
+            series.index = pd.DatetimeIndex(timestamps.values, name="open_dt")
+            cand.event_series = series
+
+        gate_result = gate.evaluate_series(series, month_index, n_total_months)
+        cand.consistency_gate = gate_result
+
+        active = series.fillna(0).values.astype(bool)
+        counts = _count_by_month(active, month_index, n_total_months)
+        n_act = int(active.sum())
+        n_active_months = int((counts > 0).sum())
+        cand.activation_stats = ActivationStats(
+            n_activations=n_act,
+            n_active_months=n_active_months,
+            zero_months=max(0, n_total_months - n_active_months),
+            max_monthly_share=(float(counts.max()) / n_act) if n_act else float("nan"),
+            mean_tpm=(n_act / n_total_months) if n_total_months else float("nan"),
+        )
+
+        if not gate_result.passed:
+            logger.warning(
+                "CustomEvent '%s' failed ConsistencyGate (%s) — proceeding anyway.",
+                ev.name,
+                gate_result.fail_reason,
+            )
+        candidates.append(cand)
+    return candidates
 
 
 def forge_multi(

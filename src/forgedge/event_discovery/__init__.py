@@ -5,6 +5,7 @@ from .models import (
     ActivationStats,
     ColumnClassification,
     ColumnType,
+    CustomEvent,
     EventCandidate,
     EventComponent,
     FoldResult,
@@ -20,6 +21,7 @@ __all__ = [
     "DiscoveryConfig",
     "WalkForwardConfig",
     "GateParams",
+    "CustomEvent",
     "EventCandidate",
     "EventComponent",
     "ActivationStats",
@@ -29,4 +31,5 @@ __all__ = [
     "ColumnClassification",
     "ColumnType",
     "RawEvent",
+    "apply_diversity_gate",
 ]

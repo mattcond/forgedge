@@ -983,3 +983,83 @@ class TestDiversityGate:
         # After deduplication the single-event pool is smaller or equal;
         # the AND pool may differ, so total candidates can only decrease or stay equal.
         assert len(filtered) <= len(base)
+
+
+# ---------------------------------------------------------------------------
+# Custom Event Injection (issue #77)
+# ---------------------------------------------------------------------------
+
+from forgedge.event_discovery.models import CustomEvent
+
+
+class TestCustomEvent:
+    """Unit tests for CustomEvent — user-defined formula events."""
+
+    def _frame(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "open_dt": pd.date_range("2024-01-01", periods=6, freq="1h"),
+                "close_adj_v2": [120.0, 95.0, 100.0, 80.0, 110.0, 90.0],
+                "volume": [1, 2, 3, 4, 5, 6],
+            }
+        )
+
+    def test_formula_evaluated_correctly(self):
+        """apply() produces the expected boolean Series."""
+        df = self._frame()
+        ev = CustomEvent("close_adj_v2 < 100", name="below_100")
+        series = ev.apply(df)
+        assert series.dtype == bool
+        assert series.tolist() == [False, True, False, True, False, True]
+
+    def test_invalid_formula_raises_value_error(self):
+        """A formula referencing an unknown column raises a readable ValueError."""
+        df = self._frame()
+        ev = CustomEvent("nonexistent_col < 100")
+        with pytest.raises(ValueError, match="failed to evaluate"):
+            ev.apply(df)
+
+    def test_name_defaults_to_formula(self):
+        ev = CustomEvent("close_adj_v2 < 100")
+        assert ev.name == "close_adj_v2 < 100"
+
+    def test_to_event_candidate_apply_roundtrip(self):
+        """EventCandidate.apply() re-evaluates the custom formula on new data."""
+        df = self._frame()
+        ev = CustomEvent("close_adj_v2 < 100", name="below_100")
+        cand = ev.to_event_candidate(df)
+
+        # The cached series matches the direct evaluation.
+        assert cand.event_series.tolist() == [0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
+
+        # apply() on a fresh frame with different values recomputes correctly.
+        df2 = df.copy()
+        df2["close_adj_v2"] = [50.0, 200.0, 50.0, 200.0, 50.0, 200.0]
+        replayed = cand.apply(df2)
+        assert replayed.tolist() == [1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+
+    def test_candidate_carries_formula_in_expressions(self):
+        """The custom formula surfaces in expression / sql / event_formula."""
+        df = self._frame()
+        ev = CustomEvent("close_adj_v2 < 100", name="below_100")
+        cand = ev.to_event_candidate(df)
+        assert cand.expression == "close_adj_v2 < 100"
+        assert cand.sql_expression == "close_adj_v2 < 100"
+        assert cand.event_formula == "close_adj_v2 < 100"
+        assert cand.event_id == "CUSTOM-below_100"
+
+    def test_compound_formula(self):
+        """A multi-condition formula evaluates with pandas-eval semantics."""
+        df = self._frame()
+        ev = CustomEvent("close_adj_v2 < 100 and volume > 3")
+        series = ev.apply(df)
+        # close<100 → [F,T,F,T,F,T]; volume>3 → [F,F,F,T,T,T]; AND → [F,F,F,T,F,T]
+        assert series.tolist() == [False, False, False, True, False, True]
+
+    def test_nan_treated_as_inactive(self):
+        """NaN comparison results are coerced to inactive (False)."""
+        df = self._frame()
+        df.loc[2, "close_adj_v2"] = np.nan
+        ev = CustomEvent("close_adj_v2 < 100")
+        series = ev.apply(df)
+        assert series.iloc[2] == False  # noqa: E712 — NaN < 100 → inactive
