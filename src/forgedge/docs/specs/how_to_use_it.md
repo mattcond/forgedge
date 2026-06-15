@@ -199,6 +199,37 @@ for c in candidates:
           f"months={gate.n_active_months}, passed={gate.passed}")
 ```
 
+### Iniezione manuale di eventi: `CustomEvent`
+
+Quando si vuole testare un'ipotesi definita dall'utente senza eseguire la scoperta automatica, si può bypassare il Modulo 1 tramite `CustomEvent` e l'argomento `manual_events` di `forge()`:
+
+```python
+from forgedge import forge, CustomEvent
+
+events = [
+    CustomEvent("rsi_14 < 25 and spread_ema < -0.02", name="rsi_extreme_spread"),
+    CustomEvent("volume > volume_ema_20 * 2", name="volume_spike"),
+]
+
+# manual_events bypassa il Modulo 1; il ConsistencyGate è ancora applicato
+# (un fallimento emette un warning ma non scarta l'evento)
+result = forge(
+    kpi,
+    ticker="BTCUSDC",
+    timeframe="1H",
+    manual_events=events,
+)
+
+for contract, resp in result.rule_responses:
+    print(contract.alpha_id, resp.verdict)
+```
+
+Note importanti:
+- `manual_events` e `event_discovery_config` sono mutualmente esclusivi (passarli entrambi genera `ValueError`).
+- La composizione AND non viene eseguita in modalità iniezione manuale.
+- Il candidato risultante ha `event_id = "CUSTOM-{name}"`.
+- Per un uso standalone (senza `forge()`), usare `CustomEvent.apply(df)` o `CustomEvent.to_event_candidate(df)`.
+
 ---
 
 ## 4. Modulo 2 — Alpha Discovery
@@ -508,11 +539,12 @@ artefatti:
 ```python
 from forgedge import forge
 
-result = forge(kpi, asset="BTC", timeframe="1H")
+result = forge(kpi, ticker="BTCUSDC", timeframe="1H")
 
 print(result.summary())                         # una riga per candidato + rule_verdict
 for contract, response in result.edges():       # solo EDGE / PARTIAL-EDGE
     print(contract.alpha_id, response.verdict)
+print(result.registry.summary())                # Modulo 4 — regole catalogate
 ```
 
 La configurazione per modulo si passa come argomento keyword dedicato:
@@ -520,7 +552,7 @@ La configurazione per modulo si passa come argomento keyword dedicato:
 ```python
 from forgedge import (
     forge, MarketContextConfig, EMAProxyConfig,
-    DiscoveryConfig, AlphaConfig,
+    DiscoveryConfig, AlphaConfig, RegistryConfig,
 )
 from forgedge.event_discovery.models import WalkForwardConfig, GateParams
 from forgedge.alpha_discovery.models import PromotionThresholds
@@ -541,23 +573,27 @@ result = forge(
         train_ratio=0.70,
         thresholds=PromotionThresholds(min_lift=0.08, min_cohens_d=0.15),
     ),
+    registry_config=RegistryConfig(),
 )
 ```
 
 Switch utili:
 
+- `ticker="BTCUSDC"` — etichetta usata per il pool del Rule Registry e i metadati degli AlphaContract (fallback su `alpha_config.asset` o `asset`).
 - `run_market_context=False` — alimenta una tabella che porta già `regime`
   (Modulo 0 viene saltato anche automaticamente quando la colonna `regime` è
   presente).
 - `run_rule_discovery=False` — fermati dopo Alpha Discovery per ottenere le
-  ipotesi promosse (`result.promoted`) senza backtestare.
+  ipotesi promosse (`result.promoted`) senza backtestare; il Modulo 4 viene saltato automaticamente.
+- `run_registry=False` — ferma dopo Rule Discovery, senza costruire il registry del Modulo 4.
 - `only_validated_events=True` — passa ad Alpha Discovery solo i candidati
   walk-forward-validati (quando Event Discovery ha usato `walk_forward`).
 
 `ForgeResult` espone le istanze vive dei moduli (`result.market_context`,
 `result.event_discovery`, `result.alpha_discovery`) per drill-down, più
-`result.candidates`, `result.contracts`, `result.promoted` e
-`result.rule_responses`.
+`result.candidates`, `result.contracts`, `result.promoted`,
+`result.rule_responses`, `result.event_frame` (il frame post-pipeline) e
+`result.registry` (il `RuleRegistry` del Modulo 4).
 
 ### Costruirla passo per passo
 
@@ -667,6 +703,31 @@ for contract, resp in rule_responses:
         print(f"  PF={resp.in_sample_summary.profit_factor:.2f}"
               f"  OOS={resp.walk_forward.oos_summary.profit_factor:.2f}")
 ```
+
+### Sessioni multi-ticker: `forge_multi`
+
+Il backtest cross-ticker del Rule Registry ha altri ticker su cui riprodurre i segnali solo quando la sessione copre più ticker. `forge_multi` esegue `forge` per ogni ticker e raccoglie tutte le regole tradabili in un unico registry cross-ticker:
+
+```python
+from forgedge import forge_multi
+
+frames = {
+    "BTCUSDC": btc_kpi,
+    "ETHUSDC": eth_kpi,
+    "ADAUSDC": ada_kpi,
+}
+results, registry = forge_multi(frames, timeframe="1H")
+
+print(registry.summary())            # rule_id, source_ticker, cross-ticker score, class
+registry.export("rules.xlsx")        # tabella piatta (artefatto di persistenza del Modulo 4)
+html = registry.html_report()        # report HTML autocontenuto
+
+# Drill-down per ticker ancora disponibile
+for ticker, res in results.items():
+    print(ticker, len(res.edges()), "regole tradabili")
+```
+
+Passare gli oggetti di configurazione per modulo (`event_discovery_config`, `alpha_config`, …) come keyword argument — vengono inoltrati a ogni run per-ticker. Non passare `ticker` / `asset` (impostati automaticamente per ticker) né `run_registry` (il registry pooled sostituisce quelli per-ticker).
 
 ---
 

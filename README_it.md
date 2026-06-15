@@ -94,23 +94,21 @@ from forgedge import forge
 kpi = pd.read_parquet("kpi_table.parquet")
 
 # Pipeline completa: da KPI Table a regole validate in una singola chiamata
-result = forge(kpi, asset="BTC", timeframe="1H")
+result = forge(kpi, ticker="BTCUSDC", timeframe="1H")
 
 print(result.summary())                         # una riga per candidato + rule_verdict
 for contract, response in result.edges():       # solo EDGE / PARTIAL-EDGE
     print(contract.alpha_id, response.verdict)
+print(result.registry.summary())                # Modulo 4 — regole catalogate
 ```
 
-Sessioni multi-asset con Rule Registry:
+Sessioni multi-ticker con `forge_multi`:
 
 ```python
-from forgedge import forge, RuleRegistry
+from forgedge import forge_multi
 
-results = {}
-for ticker, kpi in kpi_tables.items():
-    results[ticker] = forge(kpi, asset=ticker, timeframe="1H")
-
-registry = RuleRegistry.from_forge_results(results).run()
+frames = {"BTCUSDC": btc_kpi, "ETHUSDC": eth_kpi, "ADAUSDC": ada_kpi}
+results, registry = forge_multi(frames, timeframe="1H")
 
 # GENERIC: la regola si generalizza su ≥ 2/3 dei ticker testati
 df = registry.flat_table()

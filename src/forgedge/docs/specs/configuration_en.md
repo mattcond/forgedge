@@ -155,6 +155,8 @@ IS/OOS split, and walk-forward.
 | `max_and_components` | int | `2` | Maximum number of single events to combine in one AND composition. Values > 3 are accepted but strongly discouraged (structural overfitting risk). |
 | `train_ratio` | float | `1.0` | IS fraction (0 < train_ratio ≤ 1.0). Default 1.0 = all IS, no split. |
 | `walk_forward` | WalkForwardConfig \| None | `None` | Walk-forward OOS configuration. Active only when `train_ratio < 1.0`. |
+| `diversity_gate_enabled` | bool | `False` | When True, applies Jaccard-based deduplication of single events after the ConsistencyGate and before AND composition. Opt-in — no breaking change. |
+| `diversity_threshold` | float | `0.85` | Maximum tolerated Jaccard similarity between any two kept events. Only used when `diversity_gate_enabled=True`. At p99 of the inter-event Jaccard distribution (12 months of 1H data), Jaccard=0.47 — values above 0.70 are genuine near-duplicates. |
 
 ```python
 from forgedge import EventDiscovery, DiscoveryConfig
@@ -168,6 +170,8 @@ ed = EventDiscovery(
         gate_params=GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0),
         walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         scale_free_overrides={"rsi_14": True},  # force scale-free on RSI
+        diversity_gate_enabled=True,            # opt-in Jaccard deduplication
+        diversity_threshold=0.85,
     ),
 )
 candidates = ed.run()

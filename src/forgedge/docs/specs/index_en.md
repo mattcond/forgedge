@@ -113,11 +113,30 @@ from forgedge import forge
 kpi = pd.read_parquet("kpi_table.parquet")
 
 # Full pipeline: from KPI Table to validated rules in a single call
-result = forge(kpi, asset="BTC", timeframe="1H")
+result = forge(kpi, ticker="BTCUSDC", timeframe="1H")
 
 print(result.summary())                         # one row per candidate + rule_verdict
 for contract, response in result.edges():       # EDGE / PARTIAL-EDGE only
     print(contract.alpha_id, response.verdict)
+print(result.registry.summary())                # Module 4 — catalogued rules
+```
+
+Multi-ticker sessions with `forge_multi`:
+
+```python
+from forgedge import forge_multi
+
+frames = {"BTCUSDC": btc_kpi, "ETHUSDC": eth_kpi, "ADAUSDC": ada_kpi}
+results, registry = forge_multi(frames, timeframe="1H")
+
+# GENERIC: rule generalises to ≥ 2/3 of tested tickers
+df = registry.flat_table()
+print(df[["rule_id", "classification", "pf", "cross_ticker_score"]])
+
+# Self-contained HTML report (inline SVG, no CDN)
+html = registry.html_report(timeframe="1H")
+with open("report.html", "w") as f:
+    f.write(html)
 ```
 
 The orchestrator accepts each module's configuration as an optional keyword
