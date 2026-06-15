@@ -187,6 +187,76 @@ class TestForge:
             assert response.validated_rule is not None
 
 
+class TestForgeGradeFilter:
+    """rule_discovery_grades restricts which alphas reach Rule Discovery."""
+
+    def test_filter_limits_rule_discovery_to_selected_grades(self):
+        kpi = _ohlc_kpi_table()
+        # Baseline: every promoted contract is backtested.
+        baseline = forge(
+            kpi,
+            asset="TEST",
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            progress=False,
+        )
+        assert len(baseline.rule_responses) == len(baseline.promoted)
+
+        grades = {c.alpha_score.grade for c in baseline.promoted}
+        keep = sorted(grades)[:1]  # keep just one of the present grades
+        expected = [c for c in baseline.promoted if c.alpha_score.grade in keep]
+
+        filtered = forge(
+            kpi,
+            asset="TEST",
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            rule_discovery_grades=keep,
+            progress=False,
+        )
+        # Only the selected-grade contracts were backtested…
+        assert len(filtered.rule_responses) == len(expected)
+        backtested = {c.alpha_id for c, _ in filtered.rule_responses}
+        assert backtested == {c.alpha_id for c in expected}
+        # …yet the full promoted/contracts lists are preserved for audit.
+        assert len(filtered.promoted) == len(baseline.promoted)
+        # Nothing of an excluded grade slipped through to a response.
+        for contract, _ in filtered.rule_responses:
+            assert contract.alpha_score.grade in keep
+
+    def test_filter_is_case_insensitive(self):
+        kpi = _ohlc_kpi_table()
+        result = forge(
+            kpi,
+            asset="TEST",
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            rule_discovery_grades=["a", "b", "c", "d"],
+            progress=False,
+        )
+        # Every grade accepted (any case) ⇒ same as no filter.
+        assert len(result.rule_responses) == len(result.promoted)
+
+    def test_empty_grade_set_skips_all_rule_discovery(self):
+        kpi = _ohlc_kpi_table()
+        result = forge(
+            kpi,
+            asset="TEST",
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            rule_discovery_grades=[],
+            progress=False,
+        )
+        assert result.rule_responses == []
+        # Registry still ran, just with nothing tradeable to catalogue.
+        assert isinstance(result.registry, RuleRegistry)
+        assert result.registry.documents == []
+
+
 class TestForgeMulti:
     def test_pools_tickers_into_one_cross_ticker_registry(self):
         frames = {

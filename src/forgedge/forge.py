@@ -293,6 +293,7 @@ def forge(
     run_rule_discovery: bool = True,
     run_registry: bool = True,
     only_validated_events: bool = False,
+    rule_discovery_grades: Optional[Iterable[str]] = None,
     progress: bool = True,
 ) -> ForgeResult:
     """Run the full FORGE rule-extraction pipeline end to end.
@@ -358,6 +359,15 @@ def forge(
         When Event Discovery ran with walk-forward validation, hand Alpha
         Discovery only the candidates with ``validation.passed == True``.  Has
         no effect when walk-forward was not configured.
+    rule_discovery_grades : iterable of str, optional
+        Restrict the (expensive) Rule Discovery backtest to the promoted Alpha
+        Contracts whose letter grade (``A`` / ``B`` / ``C`` / ``D``) is in this
+        set — e.g. ``("A", "B")`` skips the weaker grade-C/D alphas that rarely
+        survive validation, cutting pipeline time.  Comparison is
+        case-insensitive.  When omitted every promoted contract is backtested
+        (the previous behaviour).  Contracts filtered out here still appear in
+        ``contracts`` / ``promoted`` for audit; they simply get no rule
+        response and never reach the Rule Registry.
     progress : bool, default True
         Print per-stage status and a Rule Discovery progress bar to ``stderr``.
         Independently of this flag every milestone is emitted at ``INFO`` on the
@@ -437,14 +447,21 @@ def forge(
     # ── Modulo 3 — Rule Discovery ─────────────────────────────────────────
     by_id = {c.event_id: c for c in candidates}
     rule_responses: List[Tuple[AlphaContract, RuleDiscoveryResponse]] = []
-    if run_rule_discovery and promoted:
-        report.stage(f"M3 Rule Discovery — backtesting {len(promoted)} contract(s)…")
+    to_backtest = _filter_by_grade(promoted, rule_discovery_grades)
+    if run_rule_discovery and rule_discovery_grades is not None:
+        skipped = len(promoted) - len(to_backtest)
+        report.stage(
+            f"M3 Rule Discovery — grade filter {_grades_label(rule_discovery_grades)} "
+            f"kept {len(to_backtest)}/{len(promoted)} contract(s) ({skipped} skipped)"
+        )
+    if run_rule_discovery and to_backtest:
+        report.stage(f"M3 Rule Discovery — backtesting {len(to_backtest)} contract(s)…")
     elif not run_rule_discovery:
         report.stage("M3 Rule Discovery — skipped")
     for contract in report.track(
-        promoted if run_rule_discovery else [],
+        to_backtest if run_rule_discovery else [],
         desc="M3 Rule Discovery",
-        total=len(promoted) if run_rule_discovery else 0,
+        total=len(to_backtest) if run_rule_discovery else 0,
     ):
         cand = by_id.get(contract.event_candidate_id)
         if cand is None:
@@ -480,6 +497,34 @@ def forge(
 
     report.stage("done")
     return result
+
+
+def _contract_grade(contract: AlphaContract) -> Optional[str]:
+    """Return the upper-case letter grade of a contract, or ``None`` if ungraded."""
+    score = getattr(contract, "alpha_score", None)
+    if score is None or score.grade is None:
+        return None
+    return str(score.grade).strip().upper()
+
+
+def _grades_label(grades: Iterable[str]) -> str:
+    """Render a grade set as a stable, readable label for status messages."""
+    return "{" + ", ".join(sorted({g.strip().upper() for g in grades})) + "}"
+
+
+def _filter_by_grade(
+    contracts: List[AlphaContract], grades: Optional[Iterable[str]]
+) -> List[AlphaContract]:
+    """Keep only the contracts whose grade is in ``grades`` (case-insensitive).
+
+    ``grades=None`` is the pass-through default (every contract is kept).  An
+    ungraded contract is dropped whenever a filter is active, since it cannot be
+    shown to meet the requested bar.
+    """
+    if grades is None:
+        return contracts
+    allowed = {g.strip().upper() for g in grades}
+    return [c for c in contracts if _contract_grade(c) in allowed]
 
 
 def _timestamps_from_frame(
