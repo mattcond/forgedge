@@ -462,14 +462,17 @@ class FeatureGenerator:
         close_col = close_cols[0] if close_cols else None
 
         for key in set(bb_lower) & set(bb_upper):
-            if close_col is None:
-                break
             base, param = key
             lower_col = bb_lower[key]
             upper_col = bb_upper[key]
             new_col = f"bb_pct_b_{base}_{param:02d}"
             if new_col not in extended.columns:
-                series = _safe_position(df[close_col], df[lower_col], df[upper_col])
+                base_cols = [col for col, pf in parsed.items()
+                             if pf.family == "price" and pf.base == base]
+                base_col = base_cols[0] if base_cols else (base if base in df.columns else None)
+                if base_col is None:
+                    continue
+                series = _safe_position(df[base_col], df[lower_col], df[upper_col])
                 extended[new_col] = series
                 meta[new_col] = DerivedFeature(
                     col=new_col,
@@ -477,7 +480,7 @@ class FeatureGenerator:
                     is_scale_free=True,
                     arity=3,
                     operation="position",
-                    source_cols=[close_col, lower_col, upper_col],
+                    source_cols=[base_col, lower_col, upper_col],
                 )
 
         # Rolling range: group by (base, param)
