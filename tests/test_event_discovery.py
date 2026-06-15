@@ -855,3 +855,131 @@ class TestBugRegressions:
         # Must not raise — result can pass or fail, but no exception
         result = gate.filter([raw], timestamps)
         assert isinstance(result, list)
+
+
+# ---------------------------------------------------------------------------
+# Diversity Gate
+# ---------------------------------------------------------------------------
+
+from forgedge.event_discovery.diversity_gate import apply_diversity_gate
+from forgedge.event_discovery.models import GateResult
+
+
+def _make_raw_event(series: pd.Series, n_activations: int) -> RawEvent:
+    """Build a minimal RawEvent with a populated gate_result."""
+    gate = GateResult(
+        passed=True,
+        n_activations=n_activations,
+        n_active_months=1,
+        max_monthly_share=0.5,
+        mean_tpm=1.0,
+    )
+    from forgedge.event_discovery.models import EventComponent
+    comp = EventComponent(
+        source_feature="x",
+        transform="identity",
+        transform_params={},
+        transformed_col="x",
+        threshold=0.5,
+        threshold_type="distributional_p50",
+        direction="below",
+        event_type="threshold",
+        expression="x < 0.5",
+    )
+    ev = RawEvent(series=series, component=comp)
+    ev.gate_result = gate
+    return ev
+
+
+class TestDiversityGate:
+    """Unit tests for apply_diversity_gate()."""
+
+    def _bool_series(self, indices: list[int], length: int = 100) -> pd.Series:
+        """Build a 0/1 Series with 1s at the given indices."""
+        s = pd.Series(0.0, index=range(length))
+        for i in indices:
+            s.iloc[i] = 1.0
+        return s
+
+    def test_identical_events_deduplicated(self):
+        """Two events with identical series (J=1.0) → one is discarded."""
+        s = self._bool_series(list(range(10)))
+        ev1 = _make_raw_event(s.copy(), n_activations=10)
+        ev2 = _make_raw_event(s.copy(), n_activations=10)
+        result = apply_diversity_gate([ev1, ev2], threshold=0.85)
+        assert len(result) == 1
+
+    def test_diverse_events_preserved(self):
+        """Two events with J < threshold → both kept."""
+        s1 = self._bool_series(list(range(10)))        # indices 0-9
+        s2 = self._bool_series(list(range(50, 60)))    # indices 50-59, no overlap
+        ev1 = _make_raw_event(s1, n_activations=10)
+        ev2 = _make_raw_event(s2, n_activations=10)
+        result = apply_diversity_gate([ev1, ev2], threshold=0.85)
+        assert len(result) == 2
+
+    def test_priority_keeps_more_frequent_event(self):
+        """With near-identical events, the one with more activations is kept."""
+        # ev_big has 20 activations; ev_small has 10, all within ev_big's set.
+        big_indices = list(range(20))
+        small_indices = list(range(10))  # subset → J = 10/20 = 0.5
+        # Make them identical (J=1.0) to guarantee deduplication
+        s_big = self._bool_series(big_indices)
+        s_small = self._bool_series(big_indices)   # identical series
+        ev_big   = _make_raw_event(s_big,   n_activations=20)
+        ev_small = _make_raw_event(s_small, n_activations=10)
+        result = apply_diversity_gate([ev_big, ev_small], threshold=0.85)
+        assert len(result) == 1
+        assert result[0].gate_result.n_activations == 20
+
+    def test_disabled_via_discovery_config_is_noop(self):
+        """diversity_gate_enabled=False → same candidates as baseline."""
+        df = _make_kpi_table(n=4380)
+        gate_p = GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0)
+        base = EventDiscovery(df, DiscoveryConfig(gate_params=gate_p)).run()
+        with_gate = EventDiscovery(
+            df,
+            DiscoveryConfig(gate_params=gate_p, diversity_gate_enabled=False),
+        ).run()
+        assert len(base) == len(with_gate)
+
+    def test_threshold_boundary_exact_duplicate_removed(self):
+        """J == 1.0 >= threshold=0.85 → duplicate is discarded."""
+        s = self._bool_series(list(range(20)))
+        ev1 = _make_raw_event(s.copy(), n_activations=20)
+        ev2 = _make_raw_event(s.copy(), n_activations=20)
+        result = apply_diversity_gate([ev1, ev2], threshold=0.85)
+        assert len(result) == 1
+
+    def test_threshold_1_0_keeps_near_duplicates(self):
+        """threshold=1.0 → only exact duplicates removed; overlapping events kept."""
+        s1 = self._bool_series(list(range(10)))
+        s2 = self._bool_series(list(range(5, 15)))  # J = 5/15 = 0.33
+        # Force high overlap: 9 shared out of 11 → J = 9/11 ≈ 0.818 < 1.0
+        s1 = self._bool_series(list(range(10)))
+        s2 = self._bool_series(list(range(1, 11)))  # J = 9/11 ≈ 0.818
+        ev1 = _make_raw_event(s1, n_activations=10)
+        ev2 = _make_raw_event(s2, n_activations=10)
+        result = apply_diversity_gate([ev1, ev2], threshold=1.0)
+        assert len(result) == 2
+
+    def test_empty_list_returns_empty(self):
+        result = apply_diversity_gate([], threshold=0.85)
+        assert result == []
+
+    def test_diversity_gate_reduces_pool_in_pipeline(self):
+        """diversity_gate_enabled=True yields ≤ candidates than baseline."""
+        df = _make_kpi_table(n=4380)
+        gate_p = GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0)
+        base = EventDiscovery(df, DiscoveryConfig(gate_params=gate_p)).run()
+        filtered = EventDiscovery(
+            df,
+            DiscoveryConfig(
+                gate_params=gate_p,
+                diversity_gate_enabled=True,
+                diversity_threshold=0.85,
+            ),
+        ).run()
+        # After deduplication the single-event pool is smaller or equal;
+        # the AND pool may differ, so total candidates can only decrease or stay equal.
+        assert len(filtered) <= len(base)
