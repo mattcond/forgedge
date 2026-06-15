@@ -585,6 +585,10 @@ Useful switches:
 - `run_registry=False` — stop after Rule Discovery, without building the Module 4 registry.
 - `only_validated_events=True` — hand Alpha Discovery only the walk-forward-validated
   candidates (when Event Discovery ran with `walk_forward`).
+- `progress=True` — print per-stage status and a Rule Discovery progress bar to `stderr`
+  (useful for long runs). Independently of the flag, every milestone is logged at `INFO`
+  on the `forgedge.forge` logger, so `logging.basicConfig(level=logging.INFO)` surfaces the
+  same information. The bar uses `tqdm` when installed, else a dependency-free fallback.
 
 `ForgeResult` exposes the live module instances (`result.market_context`,
 `result.event_discovery`, `result.alpha_discovery`) for drill-down, plus
