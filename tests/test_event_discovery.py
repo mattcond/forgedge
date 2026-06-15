@@ -706,3 +706,34 @@ class TestBugRegressions:
         timestamps = pd.Series(pd.to_datetime([pd.NaT, pd.NaT, pd.NaT]))
         result = _monthly_counts(active, timestamps)
         assert len(result) == 0
+
+
+    # ── Bug #6: EventComponent._components dynamic attr lost after deepcopy ──
+
+    def test_and_composition_components_survive_deepcopy(self):
+        """EventComponent.components must be a declared field, not a dynamic
+        attribute, so it survives deepcopy (and any serialisation round-trip).
+
+        Regression for issue #52: previously comp._components was set as a
+        dynamic attr which is dropped by dataclasses serialisation helpers.
+        """
+        import copy
+
+        df = _make_kpi_table(n=4380, seed=42)
+        cfg = DiscoveryConfig(max_and_components=2, gate_params=GateParams(
+            min_act=20, min_months=2, max_conc=0.9, min_tpm=0.5
+        ))
+        ed = EventDiscovery(df, config=cfg)
+        candidates = ed.run()
+
+        and_candidates = [c for c in candidates if len(c.components) == 2]
+        assert and_candidates, "need at least one AND-composed candidate for this test"
+
+        original = and_candidates[0]
+        restored = copy.deepcopy(original)
+
+        assert len(restored.components) == 2
+        for orig_comp, rest_comp in zip(original.components, restored.components):
+            assert orig_comp.source_feature == rest_comp.source_feature
+            assert orig_comp.transform == rest_comp.transform
+            assert orig_comp.threshold == rest_comp.threshold

@@ -449,7 +449,7 @@ class EventDiscovery:
         """Promote a passing RawEvent to an EventCandidate.
 
         Extracts the component list (handling the AND-composition case where
-        components are stored as a ``_components`` dynamic attribute), computes
+        components are stored in the ``components`` field), computes
         the zero-months statistic, aggregates all stats into an
         ``ActivationStats`` object, and constructs the final ``EventCandidate``.
 
@@ -472,7 +472,7 @@ class EventDiscovery:
         # Retrieve actual components list
         comp = ev.component
         if comp.transform == "and_composition":
-            components: list[EventComponent] = getattr(comp, "_components", [comp])
+            components: list[EventComponent] = comp.components if comp.components else [comp]
         else:
             components = [comp]
 
