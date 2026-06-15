@@ -264,3 +264,43 @@ class TestForgeManualEvents:
         assert len(result.candidates) == 1
         assert not result.candidates[0].consistency_gate.passed
         assert any("failed ConsistencyGate" in rec.message for rec in caplog.records)
+
+
+class TestForgeProgress:
+    """Status logging and the optional stderr progress output."""
+
+    _MANUAL = [CustomEvent("feat < 0.4", name="feat_low")]
+
+    def test_logs_stage_milestones_at_info(self, caplog):
+        import logging
+
+        kpi = _ohlc_kpi_table()
+        with caplog.at_level(logging.INFO, logger="forgedge.forge"):
+            forge(kpi, manual_events=self._MANUAL, rule_discovery_config=_FAST_RD_CONFIG)
+        msgs = [r.getMessage() for r in caplog.records]
+        for needle in ("M0 Market Context", "M2 Alpha Discovery", "M3 Rule Discovery", "done"):
+            assert any(needle in m for m in msgs), needle
+
+    def test_progress_false_is_silent_on_stderr(self, capsys):
+        kpi = _ohlc_kpi_table()
+        forge(
+            kpi,
+            manual_events=self._MANUAL,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            progress=False,
+        )
+        assert "[forge" not in capsys.readouterr().err
+
+    def test_progress_true_prints_stages_to_stderr(self, capsys):
+        kpi = _ohlc_kpi_table()
+        forge(
+            kpi,
+            ticker="BTCUSDC",
+            manual_events=self._MANUAL,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            progress=True,
+        )
+        err = capsys.readouterr().err
+        assert "forge:BTCUSDC" in err
+        assert "M3 Rule Discovery" in err
+        assert "done" in err

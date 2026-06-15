@@ -54,8 +54,10 @@ on several tickers and pool their rules into one cross-ticker registry.
 from __future__ import annotations
 
 import logging
+import sys
+import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 import pandas as pd
 
@@ -76,6 +78,88 @@ from .rule_registry.models import RegistryConfig, RuleSubmission
 from .rule_registry.registry import RuleRegistry
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Progress reporting
+# ---------------------------------------------------------------------------
+
+class _Reporter:
+    """Routes pipeline progress to ``logging`` and, on demand, to a live bar.
+
+    Every stage milestone is always emitted at ``INFO`` on the package logger
+    (silent unless the host application configures logging).  When ``enabled``
+    is set, the same milestones are also printed to ``stderr`` with a running
+    elapsed-time stamp, and long loops are wrapped in a progress bar — ``tqdm``
+    when it is installed, otherwise a dependency-free textual fallback.
+    """
+
+    def __init__(self, enabled: bool, label: str = ""):
+        self.enabled = enabled
+        self.label = label
+        self._t0 = time.perf_counter()
+
+    @property
+    def _prefix(self) -> str:
+        return f"forge:{self.label}" if self.label else "forge"
+
+    def stage(self, msg: str) -> None:
+        """Announce a pipeline milestone."""
+        logger.info("[%s] %s", self._prefix, msg)
+        if self.enabled:
+            elapsed = time.perf_counter() - self._t0
+            print(f"[{self._prefix} +{elapsed:6.1f}s] {msg}", file=sys.stderr, flush=True)
+
+    def track(
+        self, iterable: Iterable, desc: str, total: Optional[int] = None
+    ) -> Iterable:
+        """Wrap ``iterable`` in a progress bar when reporting is enabled."""
+        if not self.enabled or not total:
+            return iterable
+        tqdm = _get_tqdm()
+        if tqdm is not None:
+            return tqdm(iterable, desc=f"[{self._prefix}] {desc}", total=total, leave=False)
+        return _TextBar(iterable, desc=f"[{self._prefix}] {desc}", total=total)
+
+
+def _get_tqdm():
+    """Return ``tqdm.auto.tqdm`` if installed, else ``None`` (optional dep)."""
+    try:
+        from tqdm.auto import tqdm  # type: ignore
+
+        return tqdm
+    except Exception:  # pragma: no cover - tqdm is an optional convenience
+        return None
+
+
+class _TextBar:
+    """Minimal dependency-free progress bar printed in place on ``stderr``."""
+
+    def __init__(self, iterable: Iterable, desc: str, total: int, width: int = 28):
+        self._iterable = iterable
+        self._desc = desc
+        self._total = total
+        self._width = width
+        self._t0 = time.perf_counter()
+
+    def __iter__(self) -> Iterator:
+        for i, item in enumerate(self._iterable, start=1):
+            yield item
+            self._draw(i)
+        # Newline so the finished bar is not overwritten by later output.
+        print("", file=sys.stderr, flush=True)
+
+    def _draw(self, done: int) -> None:
+        frac = done / self._total
+        filled = int(self._width * frac)
+        bar = "█" * filled + "·" * (self._width - filled)
+        elapsed = time.perf_counter() - self._t0
+        print(
+            f"\r{self._desc} |{bar}| {done}/{self._total} ({frac:4.0%}) {elapsed:5.1f}s",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 @dataclass
@@ -209,6 +293,7 @@ def forge(
     run_rule_discovery: bool = True,
     run_registry: bool = True,
     only_validated_events: bool = False,
+    progress: bool = False,
 ) -> ForgeResult:
     """Run the full FORGE rule-extraction pipeline end to end.
 
@@ -273,6 +358,13 @@ def forge(
         When Event Discovery ran with walk-forward validation, hand Alpha
         Discovery only the candidates with ``validation.passed == True``.  Has
         no effect when walk-forward was not configured.
+    progress : bool, default False
+        Print per-stage status and a Rule Discovery progress bar to ``stderr``
+        (handy for long runs).  Independently of this flag every milestone is
+        emitted at ``INFO`` on the ``forgedge.forge`` logger, so configuring
+        logging surfaces the same information without the ``stderr`` output.
+        The progress bar uses ``tqdm`` when installed, else a built-in textual
+        fallback.
 
     Returns
     -------
@@ -294,24 +386,32 @@ def forge(
     else:
         resolved_ticker = ticker or cfg.asset
 
+    report = _Reporter(progress, label=resolved_ticker)
+    report.stage(f"start — {len(kpi_table)} bars")
+
     # ── Modulo 0 — Market Context ─────────────────────────────────────────
     mc: Optional[MarketContext] = None
     already_enriched = REGIME_COL in kpi_table.columns
     if run_market_context and not already_enriched:
+        report.stage("M0 Market Context — classifying regimes…")
         mc = MarketContext(kpi_table, config=market_context_config)
         enriched = mc.run()
     else:
+        report.stage("M0 Market Context — skipped (regime already present)")
         enriched = kpi_table
 
     # ── Modulo 1 — Event Discovery (or manual injection) ──────────────────
     ed: Optional[EventDiscovery] = None
     if manual_events is not None:
+        report.stage(f"M1 Event Discovery — injecting {len(manual_events)} manual event(s)…")
         candidates = _build_candidates_from_manual_events(manual_events, enriched)
         alpha_frame = enriched
     else:
+        report.stage("M1 Event Discovery — mining event candidates…")
         ed = EventDiscovery(enriched, config=event_discovery_config)
         candidates = ed.run()
         alpha_frame = ed.df
+    report.stage(f"M1 Event Discovery — {len(candidates)} candidate(s)")
 
     alpha_candidates = candidates
     if only_validated_events:
@@ -322,16 +422,29 @@ def forge(
         # candidates so the pipeline does not silently drop everything.
         if any(c.validation is not None for c in candidates):
             alpha_candidates = validated
+            report.stage(
+                f"M1 Event Discovery — {len(validated)} walk-forward-validated candidate(s) kept"
+            )
 
     # ── Modulo 2 — Alpha Discovery ────────────────────────────────────────
+    report.stage(f"M2 Alpha Discovery — evaluating {len(alpha_candidates)} candidate(s)…")
     ad = AlphaDiscovery(alpha_frame, alpha_candidates, cfg)
     contracts = ad.run()
     promoted = ad.promoted_contracts()
+    report.stage(f"M2 Alpha Discovery — {len(promoted)}/{len(contracts)} promoted")
 
     # ── Modulo 3 — Rule Discovery ─────────────────────────────────────────
     by_id = {c.event_id: c for c in candidates}
     rule_responses: List[Tuple[AlphaContract, RuleDiscoveryResponse]] = []
-    for contract in promoted if run_rule_discovery else []:
+    if run_rule_discovery and promoted:
+        report.stage(f"M3 Rule Discovery — backtesting {len(promoted)} contract(s)…")
+    elif not run_rule_discovery:
+        report.stage("M3 Rule Discovery — skipped")
+    for contract in report.track(
+        promoted if run_rule_discovery else [],
+        desc="M3 Rule Discovery",
+        total=len(promoted) if run_rule_discovery else 0,
+    ):
         cand = by_id.get(contract.event_candidate_id)
         if cand is None:
             continue
@@ -351,15 +464,20 @@ def forge(
         event_discovery=ed,
         alpha_discovery=ad,
     )
+    if run_rule_discovery:
+        report.stage(f"M3 Rule Discovery — {len(result.edges())} tradeable rule(s)")
 
     # ── Modulo 4 — Rule Registry ──────────────────────────────────────────
     if run_rule_discovery and run_registry:
+        report.stage("M4 Rule Registry — cataloguing rules…")
         result.registry = RuleRegistry(
             result.submissions(),
             {resolved_ticker: alpha_frame},
             config=registry_config,
         ).run()
+        report.stage(f"M4 Rule Registry — {len(result.registry.documents)} document(s)")
 
+    report.stage("done")
     return result
 
 
@@ -443,6 +561,7 @@ def forge_multi(
     frames_by_ticker: Dict[str, pd.DataFrame],
     *,
     registry_config: Optional[RegistryConfig] = None,
+    progress: bool = False,
     **forge_kwargs,
 ) -> Tuple[Dict[str, ForgeResult], RuleRegistry]:
     """Run :func:`forge` per ticker and pool the rules into one cross-ticker registry.
@@ -458,6 +577,9 @@ def forge_multi(
         ``ticker -> raw KPI table`` for every ticker of the session.
     registry_config : RegistryConfig, optional
         Modulo 4 configuration for the pooled registry.
+    progress : bool, default False
+        Print per-ticker status to ``stderr`` and forward the flag to every
+        per-ticker :func:`forge` call.  Milestones are also logged at ``INFO``.
     **forge_kwargs
         Forwarded to every per-ticker :func:`forge` call (e.g. ``timeframe``,
         the per-module config objects).  Do **not** pass ``ticker`` / ``asset``
@@ -476,9 +598,22 @@ def forge_multi(
     forge_kwargs.pop("ticker", None)
     forge_kwargs.pop("asset", None)
 
-    results: Dict[str, ForgeResult] = {}
-    for tk, kpi in frames_by_ticker.items():
-        results[tk] = forge(kpi, ticker=tk, run_registry=False, **forge_kwargs)
+    report = _Reporter(progress, label="multi")
+    tickers = list(frames_by_ticker)
+    report.stage(f"start — {len(tickers)} ticker(s): {', '.join(tickers)}")
 
+    results: Dict[str, ForgeResult] = {}
+    for i, tk in enumerate(tickers, start=1):
+        report.stage(f"[{i}/{len(tickers)}] {tk}")
+        results[tk] = forge(
+            frames_by_ticker[tk],
+            ticker=tk,
+            run_registry=False,
+            progress=progress,
+            **forge_kwargs,
+        )
+
+    report.stage("pooling rules into cross-ticker registry…")
     registry = RuleRegistry.from_forge_results(results, config=registry_config).run()
+    report.stage(f"done — {len(registry.documents)} pooled rule(s)")
     return results, registry
