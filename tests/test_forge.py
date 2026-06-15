@@ -5,6 +5,7 @@ import pytest
 
 from forgedge import (
     AlphaConfig,
+    CustomEvent,
     DiscoveryConfig,
     ForgeResult,
     RuleDiscoveryConfig,
@@ -209,3 +210,57 @@ class TestForgeMulti:
         # Every ingested document traces back to a session ticker.
         for doc in registry.documents:
             assert doc.source_ticker in frames
+
+
+class TestForgeManualEvents:
+    """Custom Event Injection — forge(manual_events=...) (issue #77)."""
+
+    def test_mutual_exclusion_raises(self):
+        """Passing both manual_events and event_discovery_config → ValueError."""
+        kpi = _ohlc_kpi_table()
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            forge(
+                kpi,
+                manual_events=[CustomEvent("close < 100")],
+                event_discovery_config=_FAST_ED_CONFIG,
+            )
+
+    def test_manual_event_end_to_end(self):
+        """forge(manual_events=[...]) skips M1 and runs M2/M3 on the injected event."""
+        kpi = _ohlc_kpi_table()
+        result = forge(
+            kpi,
+            asset="TEST",
+            timeframe="4H",
+            manual_events=[CustomEvent("feat < 0.5", name="feat_low")],
+            rule_discovery_config=_FAST_RD_CONFIG,
+        )
+        assert isinstance(result, ForgeResult)
+        # M1 was skipped — no EventDiscovery instance.
+        assert result.event_discovery is None
+        # The injected event became the sole candidate, carrying the formula.
+        assert len(result.candidates) == 1
+        cand = result.candidates[0]
+        assert cand.event_id == "CUSTOM-feat_low"
+        assert cand.expression == "feat < 0.5"
+        # M2 evaluated it (one contract per candidate).
+        assert len(result.contracts) == 1
+        assert result.alpha_discovery is not None
+
+    def test_gate_failure_does_not_block(self, caplog):
+        """An event that fails the Consistency Gate still reaches M2, with a warning."""
+        import logging
+
+        kpi = _ohlc_kpi_table()
+        # An almost-never-true formula fails the gate's volume criterion.
+        with caplog.at_level(logging.WARNING, logger="forgedge.forge"):
+            result = forge(
+                kpi,
+                asset="TEST",
+                timeframe="4H",
+                manual_events=[CustomEvent("feat < 0.0001", name="rare")],
+                rule_discovery_config=_FAST_RD_CONFIG,
+            )
+        assert len(result.candidates) == 1
+        assert not result.candidates[0].consistency_gate.passed
+        assert any("failed ConsistencyGate" in rec.message for rec in caplog.records)
