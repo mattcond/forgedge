@@ -789,3 +789,69 @@ class TestBugRegressions:
             assert orig_comp.source_feature == rest_comp.source_feature
             assert orig_comp.transform == rest_comp.transform
             assert orig_comp.threshold == rest_comp.threshold
+
+    # ── Bug #7: _build_month_index KeyError on NaT timestamps ───────────────
+
+    def test_build_month_index_skips_nat_timestamps(self):
+        """_build_month_index must not raise KeyError when timestamps contain NaT.
+
+        Regression for issue #53: pandas Period.unique() excludes NaT, so the
+        dict lookup crashed when iterating NaT periods.  NaT rows are now
+        assigned sentinel -1 and skipped in _count_by_month.
+        """
+        dates = pd.date_range("2024-01-01", periods=6, freq="1ME")
+        timestamps = pd.Series([dates[0], pd.NaT, dates[1], pd.NaT, dates[2], dates[3]])
+
+        month_index, n_months = _build_month_index(timestamps)
+
+        assert n_months == 4
+        assert len(month_index) == len(timestamps)
+        # NaT rows (indices 1 and 3) must be -1
+        assert month_index[1] == -1
+        assert month_index[3] == -1
+        # Valid rows must have non-negative indices
+        assert all(month_index[i] >= 0 for i in [0, 2, 4, 5])
+
+    def test_count_by_month_ignores_sentinel_indices(self):
+        """_count_by_month must skip month_index == -1 without IndexError."""
+        # 6 rows: 3 valid months, 2 NaT (sentinel -1)
+        month_index = np.array([0, -1, 1, -1, 2, 2], dtype=np.int32)
+        active = np.array([True, True, True, True, True, False], dtype=bool)
+
+        counts = _count_by_month(active, month_index, n_months=3)
+
+        assert counts.tolist() == [1, 1, 1]  # NaT rows ignored
+
+    def test_consistency_gate_filter_survives_nat_timestamps(self):
+        """ConsistencyGate.filter must not crash when the timestamp series
+        contains NaT values (issue #53)."""
+        n = 200
+        dates = pd.date_range("2024-01-01", periods=n, freq="1h")
+        timestamps = pd.Series(dates, dtype="datetime64[ns]")
+        # Inject NaT at a few positions
+        timestamps.iloc[0] = pd.NaT
+        timestamps.iloc[50] = pd.NaT
+
+        rng = np.random.default_rng(42)
+        event_series = pd.Series(
+            (rng.random(n) > 0.8).astype(float), index=dates
+        )
+
+        from forgedge.event_discovery.models import EventComponent, RawEvent
+        comp = EventComponent(
+            source_feature="close",
+            transform="identity",
+            transform_params={},
+            transformed_col="close",
+            threshold=0.5,
+            threshold_type="distributional_p50",
+            direction="above",
+            event_type="threshold",
+            expression="close > 0.5",
+        )
+        raw = RawEvent(series=event_series, component=comp)
+
+        gate = ConsistencyGate()
+        # Must not raise — result can pass or fail, but no exception
+        result = gate.filter([raw], timestamps)
+        assert isinstance(result, list)

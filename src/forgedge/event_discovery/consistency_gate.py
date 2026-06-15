@@ -247,6 +247,9 @@ def _build_month_index(timestamps: pd.Series) -> tuple[np.ndarray, int]:
     across calls for the same dataset, making it safe to pre-compute once
     and reuse for all events.
 
+    NaT timestamps are assigned the sentinel value ``-1`` so they are
+    silently skipped by ``_count_by_month`` without raising a KeyError.
+
     Parameters
     ----------
     timestamps : pd.Series
@@ -256,14 +259,19 @@ def _build_month_index(timestamps: pd.Series) -> tuple[np.ndarray, int]:
     -------
     month_index : np.ndarray
         Integer array of shape (n_rows,) where each value is the zero-based
-        index of the calendar month for that row.
+        index of the calendar month for that row, or ``-1`` for NaT rows.
     n_total_months : int
         Total number of distinct calendar months in the dataset.
     """
     periods = timestamps.dt.to_period("M")
-    unique_months = periods.sort_values().unique()
+    valid_mask = ~periods.isna()
+    valid_periods = periods[valid_mask]
+    if valid_periods.empty:
+        return np.full(len(periods), -1, dtype=np.int32), 0
+    unique_months = valid_periods.sort_values().unique()
     month_to_idx = {m: i for i, m in enumerate(unique_months)}
-    month_index = np.array([month_to_idx[p] for p in periods], dtype=np.int32)
+    month_index = np.full(len(periods), -1, dtype=np.int32)
+    month_index[valid_mask.values] = [month_to_idx[p] for p in valid_periods]
     return month_index, len(unique_months)
 
 
@@ -295,7 +303,9 @@ def _count_by_month(
         Integer array of shape (n_months,) with per-month activation counts.
     """
     counts = np.zeros(n_months, dtype=np.int32)
-    np.add.at(counts, month_index, active.astype(np.int32))
+    valid = month_index >= 0
+    if valid.any():
+        np.add.at(counts, month_index[valid], active[valid].astype(np.int32))
     return counts
 
 
