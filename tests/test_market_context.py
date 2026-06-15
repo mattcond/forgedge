@@ -471,6 +471,17 @@ class TestRegimeTable:
 # ---------------------------------------------------------------------------
 
 class TestAutoWindow:
+    @pytest.fixture(scope="class")
+    @classmethod
+    def ou_kpi_default(cls):
+        """3 000-bar OU price table shared by tests that use default theta=0.05.
+        Each test creates its own MarketContext, so sharing the input is safe."""
+        prices = _ou_prices(3000, theta=0.05)
+        return pd.DataFrame(
+            {"open_dt": pd.date_range("2024-01-01", periods=3000, freq="1h"),
+             "close": prices}
+        )
+
     def _ou_kpi(self, n=3000, theta=0.05):
         prices = _ou_prices(n, theta=theta)
         return pd.DataFrame(
@@ -486,13 +497,12 @@ class TestAutoWindow:
         params.update(ema)
         return MarketContextConfig(ema_proxy=EMAProxyConfig(**params))
 
-    def test_windows_derived_from_data(self):
-        mc = MarketContext(self._ou_kpi(), self._bar_cfg())
+    def test_windows_derived_from_data(self, ou_kpi_default):
+        mc = MarketContext(ou_kpi_default, self._bar_cfg())
         mc.run()
         res = mc.window_resolution
         assert res["source"] == "hurst_ou"
         assert res["half_life_bars"] > 0
-        # The classifier in use must reflect the derived spans.
         cfg = mc.classifier.get_config()
         assert cfg["short_period"] == res["short_period"]
         assert cfg["long_period"] == res["long_period"]
@@ -514,17 +524,17 @@ class TestAutoWindow:
         assert res["source"] == "fallback"
         assert (res["short_period"], res["long_period"]) == (9, 25)
 
-    def test_auto_window_disabled_uses_configured(self):
+    def test_auto_window_disabled_uses_configured(self, ou_kpi_default):
         cfg = self._bar_cfg(auto_window=False, short_period=5, long_period=20)
-        mc = MarketContext(self._ou_kpi(), cfg)
+        mc = MarketContext(ou_kpi_default, cfg)
         mc.run()
         res = mc.window_resolution
         assert res["source"] == "configured"
         assert (res["short_period"], res["long_period"]) == (5, 20)
         assert mc.classifier.get_config()["long_period"] == 20
 
-    def test_get_config_reports_window_resolution(self):
-        mc = MarketContext(self._ou_kpi(), self._bar_cfg())
+    def test_get_config_reports_window_resolution(self, ou_kpi_default):
+        mc = MarketContext(ou_kpi_default, self._bar_cfg())
         mc.run()
         assert mc.get_config()["window_resolution"]["source"] == "hurst_ou"
 
@@ -555,6 +565,16 @@ class TestAutoWindow:
 # ---------------------------------------------------------------------------
 
 class TestWindowUnit:
+    @pytest.fixture(scope="class")
+    @classmethod
+    def ou_kpi_default(cls):
+        """3 000-bar OU price table (1H) shared by tests that use default params."""
+        prices = _ou_prices(3000, theta=0.05)
+        return pd.DataFrame(
+            {"open_dt": pd.date_range("2024-01-01", periods=3000, freq="1h"),
+             "close": prices}
+        )
+
     def _ou_kpi(self, n=3000, freq="1h", theta=0.05):
         prices = _ou_prices(n, theta=theta)
         return pd.DataFrame(
@@ -567,23 +587,23 @@ class TestWindowUnit:
         assert cfg.window_unit == "day"
         assert cfg.window_estimation == 168  # 168 days by default
 
-    def test_bar_mode_uses_bar_window(self):
+    def test_bar_mode_uses_bar_window(self, ou_kpi_default):
         # window_estimation = 168 interpreted as 168 *bars* in bar mode.
         cfg = MarketContextConfig(
             ema_proxy=EMAProxyConfig(window_unit="bar", window_estimation=168)
         )
-        mc = MarketContext(self._ou_kpi(), cfg)
+        mc = MarketContext(ou_kpi_default, cfg)
         mc.run()
         assert mc.window_resolution["unit"] == "bar"
         assert mc.window_resolution["estimation_window_bars"] == 168
 
-    def test_day_mode_same_W_means_days_on_1h(self):
+    def test_day_mode_same_W_means_days_on_1h(self, ou_kpi_default):
         # The SAME single value (168) is reinterpreted as 168 *days* on 1h,
         # i.e. 168 * 24 = 4032 bars — even though the timeframe is hourly.
         cfg = MarketContextConfig(
             ema_proxy=EMAProxyConfig(window_unit="day", window_estimation=168)
         )
-        mc = MarketContext(self._ou_kpi(), cfg)
+        mc = MarketContext(ou_kpi_default, cfg)
         mc.run()
         res = mc.window_resolution
         assert res["unit"] == "day"
@@ -601,7 +621,7 @@ class TestWindowUnit:
         assert abs(res["bar_hours"] - 4.0) < 1e-6
         assert res["estimation_window_bars"] == 1008  # 168d * 24 / 4h
 
-    def test_day_mode_small_W_converges_on_1h(self):
+    def test_day_mode_small_W_converges_on_1h(self, ou_kpi_default):
         # 7-day window, 1-day stride on 1h → 168-bar window, 24-bar stride:
         # both W and stride follow the "day" unit.
         cfg = MarketContextConfig(
@@ -609,7 +629,7 @@ class TestWindowUnit:
                 window_unit="day", window_estimation=7, window_stride=1
             )
         )
-        mc = MarketContext(self._ou_kpi(), cfg)
+        mc = MarketContext(ou_kpi_default, cfg)
         mc.run()
         res = mc.window_resolution
         assert res["estimation_window_bars"] == 168  # 7d * 24 / 1h
@@ -632,10 +652,10 @@ class TestWindowUnit:
         mc.run()
         assert mc.window_resolution["estimation_window_bars"] == 168
 
-    def test_invalid_window_unit_raises(self):
+    def test_invalid_window_unit_raises(self, ou_kpi_default):
         cfg = MarketContextConfig(ema_proxy=EMAProxyConfig(window_unit="hour"))
         with pytest.raises(ValueError):
-            MarketContext(self._ou_kpi(), cfg).run()
+            MarketContext(ou_kpi_default, cfg).run()
 
 
 # ---------------------------------------------------------------------------
