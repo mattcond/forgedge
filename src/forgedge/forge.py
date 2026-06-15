@@ -293,7 +293,7 @@ def forge(
     run_rule_discovery: bool = True,
     run_registry: bool = True,
     only_validated_events: bool = False,
-    progress: bool = False,
+    progress: bool = True,
 ) -> ForgeResult:
     """Run the full FORGE rule-extraction pipeline end to end.
 
@@ -358,11 +358,12 @@ def forge(
         When Event Discovery ran with walk-forward validation, hand Alpha
         Discovery only the candidates with ``validation.passed == True``.  Has
         no effect when walk-forward was not configured.
-    progress : bool, default False
-        Print per-stage status and a Rule Discovery progress bar to ``stderr``
-        (handy for long runs).  Independently of this flag every milestone is
-        emitted at ``INFO`` on the ``forgedge.forge`` logger, so configuring
-        logging surfaces the same information without the ``stderr`` output.
+    progress : bool, default True
+        Print per-stage status and a Rule Discovery progress bar to ``stderr``.
+        Independently of this flag every milestone is emitted at ``INFO`` on the
+        ``forgedge.forge`` logger, so configuring logging surfaces the same
+        information without the ``stderr`` output.  Set ``False`` to silence all
+        ``stderr`` output (e.g. in batch / CI contexts).
         The progress bar uses ``tqdm`` when installed, else a built-in textual
         fallback.
 
@@ -561,7 +562,7 @@ def forge_multi(
     frames_by_ticker: Dict[str, pd.DataFrame],
     *,
     registry_config: Optional[RegistryConfig] = None,
-    progress: bool = False,
+    progress: bool = True,
     **forge_kwargs,
 ) -> Tuple[Dict[str, ForgeResult], RuleRegistry]:
     """Run :func:`forge` per ticker and pool the rules into one cross-ticker registry.
@@ -577,9 +578,10 @@ def forge_multi(
         ``ticker -> raw KPI table`` for every ticker of the session.
     registry_config : RegistryConfig, optional
         Modulo 4 configuration for the pooled registry.
-    progress : bool, default False
+    progress : bool, default True
         Print per-ticker status to ``stderr`` and forward the flag to every
         per-ticker :func:`forge` call.  Milestones are also logged at ``INFO``.
+        Set ``False`` to silence all ``stderr`` output.
     **forge_kwargs
         Forwarded to every per-ticker :func:`forge` call (e.g. ``timeframe``,
         the per-module config objects).  Do **not** pass ``ticker`` / ``asset``
