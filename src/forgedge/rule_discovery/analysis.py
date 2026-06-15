@@ -95,7 +95,17 @@ def excursion_stats(
     # Per-trade take-profit target as a (positive) fraction of the entry price.
     target = np.abs(trades["sell_price"].to_numpy(dtype=float) / np.where(bp > 0, bp, np.nan) - 1.0)
     # Excursion is expressed in P&L terms, so MAE ≤ MFE for both directions.
-    is_short = "direction" in trades.columns and (trades["direction"] == "short").any()
+    if "direction" in trades.columns:
+        directions = trades["direction"].dropna().unique()
+        if len(directions) > 1:
+            raise ValueError(
+                f"excursion_stats received a mixed-direction trades frame "
+                f"({directions.tolist()}); each call must contain a single "
+                "direction (long or short)."
+            )
+        is_short = len(directions) == 1 and directions[0] == "short"
+    else:
+        is_short = False
 
     mae = np.full(fill.size, np.nan)
     mfe = np.full(fill.size, np.nan)

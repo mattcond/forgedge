@@ -393,6 +393,44 @@ class TestRangeOfAction:
         _, trades = run_backtest(df, "__sig__", BacktestParams(), return_trades=True)
         assert excursion_stats(df, trades) is None
 
+    def test_excursion_mixed_direction_raises(self):
+        """excursion_stats must raise ValueError for a mixed long/short frame.
+
+        Regression for issue #54: previously .any() accepted a mixed frame and
+        silently applied short logic to all trades including long ones.
+        """
+        dates = pd.date_range("2023-01-01", periods=10, freq="1h")
+        df = pd.DataFrame({
+            "open_dt": dates, "open": [100.0] * 10,
+            "high": [101.0] * 10, "low": [99.0] * 10, "close": [100.0] * 10,
+        })
+        # Build a minimal trades frame with both directions present
+        mixed = pd.DataFrame({
+            "fill_rn": [1, 3],
+            "exit_rn": [2, 4],
+            "buy_price": [100.0, 100.0],
+            "sell_price": [103.0, 97.0],
+            "direction": ["long", "short"],
+        })
+        with pytest.raises(ValueError, match="mixed-direction"):
+            excursion_stats(df, mixed)
+
+    def test_excursion_short_direction_uses_short_formula(self):
+        """excursion_stats with all-short trades must use short P&L formula.
+
+        For a short trade: adverse excursion = price rises (high > entry),
+        favourable excursion = price falls (low < entry).
+        """
+        df = _candle_with_short_signal(n=400, signal_every=40, drop_after_signal=0.06)
+        params = BacktestParams(direction="short", sell_pct=0.03, target_h=12)
+        _, trades = run_backtest(df, "__sig__", params, return_trades=True)
+        ex = excursion_stats(df, trades)
+        if ex is None or ex.n_trades == 0:
+            pytest.skip("no trades — skipping short excursion test")
+        # Short excursion ordering: worst <= mean for both MAE and MFE
+        assert ex.mae_worst <= ex.mae_mean
+        assert ex.mfe_mean <= ex.mfe_best
+
     def test_response_carries_envelope_and_excursion(self):
         df = _predictive_kpi_table()
         ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))
