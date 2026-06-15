@@ -162,6 +162,58 @@ class TestFeatureGenerator:
         arity3_cols = [k for k, v in meta.items() if v.arity == 3]
         assert any("bb_pct_b" in c for c in arity3_cols), f"No bb_pct_b in {arity3_cols}"
 
+    def test_bb_pct_b_uses_matching_base_not_close(self):
+        """bb_pct_b_{base} must use the {base} column as numerator, not close.
+
+        Regression for issue #51: previously close_col was selected once outside
+        the loop, so bb_pct_b_high_20 used close as numerator instead of high.
+        """
+        import numpy as np
+        import pandas as pd
+
+        rng = np.random.default_rng(0)
+        n = 100
+        close = 100 + np.cumsum(rng.normal(0, 1, n))
+        high = close + np.abs(rng.normal(0, 0.5, n))
+        sma20 = pd.Series(close).rolling(20, min_periods=1).mean().values
+        std20 = pd.Series(close).rolling(20, min_periods=1).std().fillna(0).values
+
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2024-01-01", periods=n, freq="1h"),
+            "close": close,
+            "high": high,
+            "close_bb_lower_20": sma20 - 2 * std20,
+            "close_bb_upper_20": sma20 + 2 * std20,
+            "high_bb_lower_20": sma20 - 2 * std20 + 0.5,
+            "high_bb_upper_20": sma20 + 2 * std20 + 0.5,
+        })
+
+        cls = TypeClassifier().fit(df)
+        ext_df, meta = FeatureGenerator().generate(df, cls)
+
+        assert "bb_pct_b_close_20" in ext_df.columns
+        assert "bb_pct_b_high_20" in ext_df.columns
+
+        # source_cols must record the correct base column (primary assertion)
+        assert meta["bb_pct_b_high_20"].source_cols[0] == "high"
+        assert meta["bb_pct_b_close_20"].source_cols[0] == "close"
+
+        # Verify that bb_pct_b_high_20 uses high as numerator and not close.
+        # Pick a bar where high != close (all bars after index 0) and check
+        # that the computed value matches (high - lower) / (upper - lower)
+        # rather than (close - lower) / (upper - lower).
+        i = 10  # arbitrary mid-series bar with stable rolling window
+        lower = df["high_bb_lower_20"].iloc[i]
+        upper = df["high_bb_upper_20"].iloc[i]
+        width = upper - lower
+        val_high = ext_df["bb_pct_b_high_20"].iloc[i]
+        assert abs(val_high - (df["high"].iloc[i] - lower) / width) < 1e-10, (
+            "bb_pct_b_high_20 should use 'high' as numerator"
+        )
+        assert abs(val_high - (df["close"].iloc[i] - lower) / width) > 1e-6, (
+            "bb_pct_b_high_20 must NOT use 'close' as numerator"
+        )
+
     def test_parse_feature_ema(self):
         pf = parse_feature("close_ema_09")
         assert pf is not None
