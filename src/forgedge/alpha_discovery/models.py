@@ -27,18 +27,36 @@ class DerivedTarget:
 
     Alpha Discovery receives no economic parameters: for every Event
     Candidate it scans a grid of candidate horizons and derives the target
-    from the data —
+    from the data — the **excess log-return** ``Δ_h = μ_cond_h − μ_base_h``
+    (conditional mean minus the unconditional baseline, in log space) is the
+    quantity that carries the signal, so direction and horizon are read from
+    *it*, not from the raw conditional return that mixes the asset's drift in:
 
-    * ``holding_period_h`` — the horizon that maximises ``|mean_advantage| / √h``
-      (Sharpe-like deflation that favours persistent edges over noise-amplified
-      short-horizon t-stats);
-    * ``mean_advantage``   — the signed mean forward return realised when the
-      event is active, at that horizon;
+    * ``holding_period_h`` — the horizon that maximises ``|z_h|``, where
+      ``z_h = Δ_h / σ_null,h`` is the excess log-return standardised by a
+      **circular-rotation null** that preserves the event's activation
+      clustering.  A naive t-statistic ``Δ_h / (σ_cond / √n)`` treats the
+      overlapping forward-return windows as independent, so its denominator
+      shrinks with the horizon and ``|T_h|`` is inflated on long horizons —
+      pinning ``h*`` to the long edge of the grid for clustered events even
+      with no real edge.  The rotation null re-derives the scale from the
+      data's own autocorrelation, removing that bias;
+    * ``mean_advantage``   — the signed excess log-return ``Δ_h*`` at ``h*``
+      (long convention: positive ⇒ long edge, negative ⇒ short edge);
     * ``sell_pct``         — ``q``-quantile of the Maximum Favorable Excursion
       (MFE) at ``h*`` across active IS bars: the candidate take-profit baseline
       handed to Rule Discovery;
-    * ``direction``        — the sign of the mean advantage (``long`` when
-      positive, ``short`` when negative).
+    * ``direction``        — the sign of the excess log-return ``Δ_h*``
+      (``long`` when positive, ``short`` when negative).  It emerges from the
+      data and is never imposed a priori: the same rule (e.g. ``RSI > 80``)
+      yields *short* in a bull run and *long* in a flat market, because only
+      the excess over the prevailing drift is read.
+
+    Statistical significance (rotation-null p-values + Benjamini-Hochberg →
+    ``h_sig``) is recorded as **non-blocking diagnostics**: with few activations
+    the FDR gate can be empty even on a real edge, so ``h*`` is still chosen on
+    ``|z_h|`` over the whole grid and the target is flagged
+    ``statistically_weak`` instead of being discarded.
 
     These are **candidates**, not validated parameters: they are written into
     the Alpha Contract as the baseline that Rule Discovery refines and
@@ -51,17 +69,28 @@ class DerivedTarget:
     sell_pct : float
         ``q``-quantile of the MFE at ``h*`` across active IS bars.
     direction : str
-        ``"long"`` | ``"short"`` | ``"undetermined"`` (no finite advantage).
+        ``"long"`` | ``"short"`` | ``"undetermined"`` (no finite excess
+        log-return, or ``|z_h*|`` below ``min_direction_t``).
     mean_advantage : float
-        Signed mean forward return of active bars at ``holding_period_h``.
+        Signed excess log-return ``Δ_h*`` at ``holding_period_h``.
     advantage_by_h : dict[int, float]
-        Mean active-bar forward return (signed, long convention) for every
-        horizon scanned — the full profile, for transparency.
+        Excess log-return ``Δ_h`` (signed, long convention) for every horizon
+        scanned — the full profile, for transparency.
     t_stat_by_h : dict[int, float]
-        Active-vs-inactive t-stat (signed, long convention) per horizon.
+        Rotation-standardised excess statistic ``z_h`` (signed, long
+        convention) per horizon — autocorrelation-robust, unlike a naive t-stat.
     score_by_h : dict[int, float]
-        ``|mean_advantage| / √h`` selection score per horizon — the criterion
-        used to choose ``h*``.
+        ``|z_h|`` selection score per horizon — the criterion used to choose
+        ``h*``.
+    p_value_by_h : dict[int, float]
+        Circular-rotation-null p-value of ``|Δ_h|`` per horizon (two-sided);
+        ``nan`` where it could not be computed. Diagnostic only.
+    h_sig : tuple[int, ...]
+        Horizons surviving the Benjamini-Hochberg control of ``p_value_by_h``
+        at ``fdr_q``. Diagnostic only — never gates ``h*``.
+    statistically_weak : bool
+        ``True`` when ``h*`` is **not** in ``h_sig`` (no horizon cleared the FDR
+        gate): the derived direction stands but the evidence is thin.
     """
 
     holding_period_h: int
@@ -71,6 +100,9 @@ class DerivedTarget:
     advantage_by_h: Dict[int, float] = field(default_factory=dict)
     t_stat_by_h: Dict[int, float] = field(default_factory=dict)
     score_by_h: Dict[int, float] = field(default_factory=dict)
+    p_value_by_h: Dict[int, float] = field(default_factory=dict)
+    h_sig: Tuple[int, ...] = ()
+    statistically_weak: bool = False
 
 
 @dataclass
@@ -149,6 +181,16 @@ class PromotionThresholds:
     min_oos_activations : int
         Minimum activations in the OOS window for the confirmation test to be
         considered at all — below this the candidate cannot be promoted.
+    min_direction_t : float
+        Minimum ``|z_h*|`` (rotation-standardised excess statistic at the
+        selected horizon) for a direction to be assigned.  Below this floor the
+        edge is not distinguishable from the rotation null and ``direction`` is
+        set to ``"undetermined"``.  Default ``0.0`` keeps the derivation
+        non-blocking — a direction is always assigned when ``Δ_h*`` is finite
+        and non-zero, and thin evidence is surfaced via
+        ``DerivedTarget.statistically_weak`` rather than discarded.  Raise it
+        (e.g. ``1.0`` ≈ one null standard deviation) to refuse a direction on
+        excess returns indistinguishable from the null.
     """
 
     ic_min_abs: float = 0.02
@@ -161,6 +203,7 @@ class PromotionThresholds:
     fdr_q: float = 0.10
     oos_max_p: float = 0.10
     min_oos_activations: int = 10
+    min_direction_t: float = 0.0
 
 
 @dataclass
@@ -177,7 +220,8 @@ class AlphaConfig:
     horizon_grid : tuple of int
         Candidate holding horizons, in bars, scanned by the target
         derivation (Step 1).  For every Event Candidate the horizon that
-        maximises ``|mean_advantage| / √h`` is selected as ``h*``.
+        maximises ``|T_h|`` (the excess log-return t-statistic) is selected as
+        ``h*``.
     mfe_quantile : float
         Quantile of the Maximum Favorable Excursion distribution (over active
         IS bars at ``h*``) used to set ``sell_pct``.  Default ``0.5``

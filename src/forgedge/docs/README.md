@@ -251,8 +251,10 @@ il Consistency Gate, con statistiche di attivazione temporale
 ### Modulo 2 — Alpha Discovery
 
 Deriva dai dati il target economico di ciascun Event Candidate (orizzonte
-h* = argmax |vantaggio medio|/√h, sell_pct = quantile della Maximum
-Favorable Excursion a h*, direzione = segno del vantaggio), lo replica
+h* = argmax |z_h|, l'excess log-return Δ_h = μ_cond − μ_base standardizzato da un
+null a rotazione circolare (autocorrelation-robust);
+sell_pct = quantile della Maximum Favorable Excursion a h*; direzione = segno
+dell'excess Δ_h*, che esclude il drift), lo replica
 out-of-sample e ne misura il potere predittivo. Ogni candidato con
 direzione determinata diventa un Alpha Contract con voto A–D — le misure
 statistiche alimentano il voto, non scartano: Rule Discovery è l'unico
@@ -535,9 +537,9 @@ alpha_id:              "ALPHA-ADAUSDC-1H-250101-003"
 event_candidate_id:    "EVT-close_rsi_25-ID×PR-P105-W096-P010"
 event_expression:      "close_rsi_25 < 30.5 AND pr_close_rsi_25_96 < 0.10"
 derived_target:                # derivato dai dati, per evento
-  holding_period_h:    24      # h* = argmax(|vantaggio medio| / √h)
+  holding_period_h:    3       # h* = argmax|z_h| (excess standardizzato, null a rotazione)
   sell_pct:            0.042   # quantile MFE a h*, barre attive IS
-  direction:           "long"  # segno del vantaggio
+  direction:           "long"  # segno dell'excess log-return Δ_h*
   base_rate:           0.235
 oos_validation:
   p_value:             0.0011
