@@ -14,7 +14,7 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 
-from .backtest import run_backtest
+from .backtest import _PreparedCandles, run_backtest
 from .models import (
     BacktestParams,
     GridResult,
@@ -64,14 +64,20 @@ def run_grid(
     timerange_from: Optional[str] = None,
     timerange_to: Optional[str] = None,
     timestamp_col: str = "open_dt",
+    _prepared: Optional[_PreparedCandles] = None,
 ) -> List[GridResult]:
     """Backtest every combination of the resolved grid.
 
     Returns the results sorted by ``pf_score_tpm`` (descending) so the best
-    operating point is first.
+    operating point is first.  The per-bar candle arrays are extracted once and
+    shared across every combination (and, when ``_prepared`` is supplied by the
+    caller, across the whole walk-forward).
     """
     spec = build_grid(spec, base)
     scoring = scoring or ScoringParams()
+    prep = _prepared if _prepared is not None else _PreparedCandles(
+        candle, signal_col, timestamp_col
+    )
 
     axes = {
         "buy_drop_pct": spec.buy_drop_pct,
@@ -86,7 +92,7 @@ def run_grid(
         summary = run_backtest(
             candle, signal_col, params,
             timerange_from=timerange_from, timerange_to=timerange_to,
-            scoring=scoring, timestamp_col=timestamp_col,
+            scoring=scoring, timestamp_col=timestamp_col, _prepared=prep,
         )
         results.append(GridResult(params=params, summary=summary))
 
