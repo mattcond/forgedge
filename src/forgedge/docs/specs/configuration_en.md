@@ -198,6 +198,8 @@ promotion (except in extreme cases) — they inform the grade.
 | `fdr_q` | float | `0.10` | Target FDR level (q). |
 | `oos_max_p` | float | `0.10` | Maximum OOS confirmation p-value. |
 | `min_oos_activations` | int | `10` | Minimum OOS activations to treat OOS confirmation as reliable. |
+| `min_direction_t` | float | `0.5` | Minimum `\|z_h*\|` (rotation-standardised excess) to assign a direction; below it → `undetermined`. |
+| `require_significant_direction` | bool | `True` | When True, a direction is assigned only if `h*` clears Benjamini-Hochberg (not `statistically_weak`); otherwise → `undetermined`. False = legacy non-blocking behaviour. |
 
 ```python
 from forgedge import AlphaConfig, PromotionThresholds

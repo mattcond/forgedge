@@ -185,6 +185,7 @@ class AlphaDiscovery:
                 active[:split], valid_is, L0, cnt_t, sum_t, horizons,
                 close.iloc[:split].to_numpy(), cfg.mfe_quantile, cfg.mfe_floor,
                 fdr_q=cfg.thresholds.fdr_q, min_direction_t=cfg.thresholds.min_direction_t,
+                require_significant=cfg.thresholds.require_significant_direction,
             )
             h_star = derived.holding_period_h
             j_star = horizons.index(h_star)
@@ -280,6 +281,7 @@ class AlphaDiscovery:
         mfe_floor: float = 0.005,
         fdr_q: float = 0.10,
         min_direction_t: float = 0.0,
+        require_significant: bool = True,
     ) -> DerivedTarget:
         """Scan the horizon grid and derive ``(h*, sell_pct*, direction*)``.
 
@@ -299,16 +301,19 @@ class AlphaDiscovery:
         event's own activation pattern (rotated against the returns) removes
         that bias.
 
-        Significance is recorded as a **non-blocking diagnostic**: the rotation
-        null yields ``p_value_by_h``, Benjamini-Hochberg at ``fdr_q`` yields
-        ``h_sig``.  With few activations the FDR gate can be empty even on a real
-        edge, so ``h*`` is always chosen on ``|z_h|`` over the whole grid; an
-        empty gate only sets ``statistically_weak``.
+        The rotation null yields ``p_value_by_h``; Benjamini-Hochberg at
+        ``fdr_q`` yields ``h_sig`` and the ``statistically_weak`` flag (``h*``
+        outside ``h_sig``).  ``h*`` is always chosen on ``|z_h|`` over the whole
+        grid, but the **direction** is gated: when ``require_significant`` is
+        set (default) and no horizon clears BH, the excess is indistinguishable
+        from the null everywhere, so ``direction`` is ``"undetermined"`` rather
+        than a coin-flip read off ``argmax|z_h|``.
 
         ``sell_pct`` is the ``mfe_quantile``-quantile of the Maximum Favorable
         Excursion at ``h*`` across active IS bars.  ``direction`` is
-        ``"undetermined"`` when no horizon yields a finite ``Δ_h`` or when
-        ``|z_h*| < min_direction_t``.
+        ``"undetermined"`` when no horizon yields a finite ``Δ_h``, when
+        ``|z_h*| < min_direction_t``, or (with ``require_significant``) when the
+        target is ``statistically_weak``.
         """
         m_f = active_is.astype(float)
         cnt_a = m_f @ valid_is                 # active bars valid at each horizon
@@ -356,6 +361,10 @@ class AlphaDiscovery:
         undetermined = (
             not np.isfinite(adv) or adv == 0.0
             or not np.isfinite(z_star) or abs(z_star) < min_direction_t
+            # No BH-significant horizon: the excess is indistinguishable from the
+            # rotation null everywhere, so argmax|z| would assign a direction off
+            # a coin-flip (often the drift-driven long edge of the grid).
+            or (require_significant and statistically_weak)
         )
         if undetermined:
             return DerivedTarget(

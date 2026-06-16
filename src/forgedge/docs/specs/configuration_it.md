@@ -183,6 +183,8 @@ Soglie statistiche IS che contribuiscono al grade A–D. Non bloccano la promozi
 | `fdr_q` | float | `0.10` | Livello FDR (q) target. |
 | `oos_max_p` | float | `0.10` | P-value massimo per la conferma OOS. |
 | `min_oos_activations` | int | `10` | Attivazioni OOS minime per considerare la conferma OOS attendibile. |
+| `min_direction_t` | float | `0.5` | `\|z_h*\|` minimo (excess standardizzato dalla rotazione) per assegnare una direzione; sotto → `undetermined`. |
+| `require_significant_direction` | bool | `True` | Se True, la direzione è assegnata solo se `h*` supera Benjamini-Hochberg (non `statistically_weak`); altrimenti → `undetermined`. False = comportamento legacy non-bloccante. |
 
 ```python
 from forgedge import AlphaConfig, PromotionThresholds
