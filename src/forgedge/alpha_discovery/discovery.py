@@ -223,7 +223,7 @@ class AlphaDiscovery:
         for idx, ((cand, derived, ic_res, ev_stats, regime_res, oos_res), fdr_ok) in (
             enumerate(zip(measured, fdr_mask))
         ):
-            score = self._score(ic_res, ev_stats, regime_res)
+            score = self._score(ic_res, ev_stats, regime_res, derived, oos_res)
             contract = self._build_contract(
                 idx, cand, derived, ic_res, ev_stats, regime_res, oos_res,
                 score, bool(fdr_ok),
@@ -834,25 +834,59 @@ class AlphaDiscovery:
     # ------------------------------------------------------------------
 
     def _score(
-        self, ic: ICResult, ev: EventStats, regime: RegimeAnalysis
+        self,
+        ic: ICResult,
+        ev: EventStats,
+        regime: RegimeAnalysis,
+        derived: DerivedTarget,
+        oos: Optional[OOSValidation],
     ) -> AlphaScore:
-        """Composite alpha score and grade (doc Section 6.1/6.2)."""
-        w_ic, w_lift, w_d, w_breadth = self.config.score_weights
+        """Composite alpha score and grade (doc Section 6.1/6.2).
+
+        The composite is a weighted average of the signal-quality terms, then
+        adjusted for statistical robustness:
+
+        * ``cohens_d`` is normalised **signed** in ``[-1, 1]`` — a negative
+          Cohen's d (the conditioned group does *worse* than the background)
+          now *penalises* the score instead of being silently clipped to zero;
+        * ``|z*|`` — the rotation-null standardised excess at ``h*`` (the
+          edge-to-noise ratio) — enters as its own term;
+        * a ``statistically_weak`` target (selected horizon outside the
+          BH-significant set) has its composite multiplied by
+          ``statistically_weak_penalty``, so a horizon picked by the very
+          selection bias the FDR control guards against cannot rank highly;
+        * a passing out-of-sample confirmation adds ``oos_bonus``.
+
+        The result is clamped to ``[0, 1]``.
+        """
+        cfg = self.config
+        w_ic, w_lift, w_d, w_z, w_breadth = cfg.score_weights
 
         ic_norm = _clamp01(abs(ic.ic) / 0.10) if np.isfinite(ic.ic) else 0.0
         lift_norm = _clamp01(ev.lift / 0.30) if np.isfinite(ev.lift) else 0.0
-        d_norm = _clamp01(ev.cohens_d / 0.80) if np.isfinite(ev.cohens_d) else 0.0
+        # Signed: an adverse effect (cohens_d < 0) drags the score down.
+        d_norm = (
+            float(np.clip(ev.cohens_d / 0.80, -1.0, 1.0))
+            if np.isfinite(ev.cohens_d) else 0.0
+        )
+        z_star = derived.t_stat_by_h.get(derived.holding_period_h, float("nan"))
+        z_norm = _clamp01(abs(z_star) / 3.0) if np.isfinite(z_star) else 0.0
         breadth = regime.regime_breadth
 
+        terms = [(w_ic, ic_norm), (w_lift, lift_norm), (w_d, d_norm), (w_z, z_norm)]
         if np.isfinite(breadth):
-            terms = [(w_ic, ic_norm), (w_lift, lift_norm), (w_d, d_norm),
-                     (w_breadth, breadth)]
-        else:
-            # No regime information — drop the breadth term and renormalise.
-            terms = [(w_ic, ic_norm), (w_lift, lift_norm), (w_d, d_norm)]
+            terms.append((w_breadth, breadth))
+        # else: no regime information — drop the breadth term and renormalise.
 
         total_w = sum(w for w, _ in terms)
         composite = sum(w * v for w, v in terms) / total_w if total_w else 0.0
+
+        # Robustness adjustments: weak-horizon penalty, OOS-confirmation bonus.
+        if derived.statistically_weak:
+            composite *= cfg.statistically_weak_penalty
+        if oos is not None and oos.passed:
+            composite += cfg.oos_bonus
+        composite = _clamp01(composite)
 
         return AlphaScore(
             ic_magnitude=float(abs(ic.ic)) if np.isfinite(ic.ic) else float("nan"),

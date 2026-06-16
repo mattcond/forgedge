@@ -241,7 +241,9 @@ IS/OOS split, and traceability metadata.
 | `min_regime_obs` | int | `10` | Minimum observations per regime to compute reliable per-regime metrics. |
 | `rolling_ic_window` | int \| None | `None` | Rolling IC window size. When None, computed automatically (≈ n/20). |
 | `bars_per_day` | float \| None | `None` | Bars per day for Deflated Sharpe computation. When None, derived from the timestamp. |
-| `score_weights` | tuple[float,...] | `(0.25, 0.30, 0.25, 0.20)` | Composite score weights (IC, lift, Cohen's d, regime breadth). |
+| `score_weights` | tuple[float,...] | `(0.20, 0.25, 0.15, 0.25, 0.15)` | Composite score weights (IC, lift, Cohen's d, z, regime breadth). A legacy 4-tuple (IC, lift, Cohen's d, breadth) is also accepted. |
+| `statistically_weak_penalty` | float | `0.6` | Composite-score multiplier when the target is `statistically_weak`. `1.0` disables it. |
+| `oos_bonus` | float | `0.05` | Additive composite-score bonus when the OOS confirmation passes. `0.0` disables it. |
 | `discovery_date` | str \| None | `None` | Discovery date (ISO, e.g. `"2026-01-15"`). When None, uses today's date. |
 
 ```python

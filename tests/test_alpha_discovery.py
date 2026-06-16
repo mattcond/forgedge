@@ -16,6 +16,13 @@ from forgedge import (
 )
 from forgedge.alpha_discovery import stats
 from forgedge.alpha_discovery.market_structure import analyse_market_structure
+from forgedge.alpha_discovery.models import (
+    DerivedTarget,
+    EventStats,
+    ICResult,
+    OOSValidation,
+    RegimeAnalysis,
+)
 from forgedge.alpha_discovery.target import (
     binary_target,
     forward_log_returns,
@@ -915,6 +922,94 @@ class TestExcessLogReturnDirection:
         )
         assert a.p_value_by_h == b.p_value_by_h
         assert a.t_stat_by_h == b.t_stat_by_h
+
+
+# ---------------------------------------------------------------------------
+# Composite score / grade — significance must shape the grade (issue #91)
+# ---------------------------------------------------------------------------
+
+def _score_inputs(ic=0.05, lift=0.15, cohens_d=0.40, z=1.5, breadth=float("nan"),
+                  weak=False, h=3):
+    """Minimal (ICResult, EventStats, RegimeAnalysis, DerivedTarget, OOS) tuple
+    for a direct ``_score`` call.  ``breadth=nan`` drops the regime term."""
+    ic_res = ICResult("feat", ic, 0.01, 400, True, ic, 0.8, True)
+    ev = EventStats(100, 0.40, 0.25, lift, 0.01, cohens_d, 2.0, 0.02)
+    regime = RegimeAnalysis([], "unknown", [], [], breadth)
+    derived = DerivedTarget(
+        h, 0.02, "long", 0.005, {h: 0.005}, {h: z}, {h: abs(z)}, {h: 0.04},
+        (h,) if not weak else (), weak,
+    )
+    return ic_res, ev, regime, derived
+
+
+def _oos(passed):
+    return OOSValidation(100, 30, 0.01, 2.0, 0.02, 0.40, 0.25, 0.15, passed)
+
+
+class TestScoreGrading:
+    @pytest.fixture(scope="class")
+    def ad(self):
+        df = _predictive_kpi_table(n=400)
+        return AlphaDiscovery(df, [], AlphaConfig())
+
+    def test_negative_cohens_d_penalises_not_neutral(self, ad):
+        """A negative Cohen's d (conditioned group worse than background) must
+        drag the score *below* the d=0 case — not be clipped to neutral."""
+        pos = ad._score(*_score_inputs(cohens_d=+0.5), None)
+        zero = ad._score(*_score_inputs(cohens_d=0.0), None)
+        neg = ad._score(*_score_inputs(cohens_d=-0.5), None)
+        assert pos.composite_score > zero.composite_score > neg.composite_score
+
+    def test_z_star_rewards_high_edge_to_noise(self, ad):
+        """A higher |z*| (rotation-null edge-to-noise) lifts the score."""
+        lo = ad._score(*_score_inputs(z=0.3), None)
+        hi = ad._score(*_score_inputs(z=3.0), None)
+        assert hi.composite_score > lo.composite_score
+
+    def test_statistically_weak_applies_penalty(self, ad):
+        """A statistically_weak target has its composite multiplied by the
+        configured penalty (0.6 by default)."""
+        strong = ad._score(*_score_inputs(weak=False), None)
+        weak = ad._score(*_score_inputs(weak=True), None)
+        assert weak.composite_score < strong.composite_score
+        assert weak.composite_score == pytest.approx(
+            strong.composite_score * 0.6, abs=1e-3
+        )
+
+    def test_oos_pass_adds_bonus(self, ad):
+        """A passing OOS confirmation adds the configured bonus."""
+        without = ad._score(*_score_inputs(), None)
+        with_oos = ad._score(*_score_inputs(), _oos(passed=True))
+        assert with_oos.composite_score == pytest.approx(
+            without.composite_score + 0.05, abs=1e-3
+        )
+
+    def test_weak_adverse_signal_grades_below_strong_clean(self, ad):
+        """The issue's headline: a weak signal with cohens_d < 0 must grade
+        strictly below a confirmed signal with cohens_d > 0."""
+        adverse = ad._score(
+            *_score_inputs(cohens_d=-0.3, z=0.6, weak=True), _oos(passed=False)
+        )
+        clean = ad._score(
+            *_score_inputs(cohens_d=+0.6, z=2.5, weak=False), _oos(passed=True)
+        )
+        assert clean.composite_score > adverse.composite_score
+        order = {"D": 0, "C": 1, "B": 2, "A": 3}
+        assert order[clean.grade] >= order[adverse.grade]
+
+    def test_composite_stays_in_unit_interval(self, ad):
+        """Even with a strongly negative Cohen's d the stored composite is
+        clamped to [0, 1]."""
+        s = ad._score(*_score_inputs(ic=0.0, lift=0.0, cohens_d=-1.0, z=0.0), None)
+        assert 0.0 <= s.composite_score <= 1.0
+
+    def test_legacy_four_tuple_weights_still_work(self):
+        """A legacy 4-tuple ``score_weights`` is upgraded and scores normally."""
+        df = _predictive_kpi_table(n=400)
+        ad = AlphaDiscovery(df, [], AlphaConfig(score_weights=(0.25, 0.30, 0.25, 0.20)))
+        assert len(ad.config.score_weights) == 5
+        s = ad._score(*_score_inputs(), None)
+        assert 0.0 <= s.composite_score <= 1.0
 
 
 # ---------------------------------------------------------------------------
