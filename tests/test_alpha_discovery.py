@@ -805,21 +805,79 @@ class TestExcessLogReturnDirection:
         """An event independent of returns on a drifting series carries (almost)
         no excess: its |Δ_h*| is an order of magnitude below the reversal
         event's, so the drift never manufactures a strong spurious edge."""
+        # require_significant=False so the raw excess at h* is exposed for the
+        # comparison (the significance gate is exercised separately below).
         close, rng = _drift_series(seed=3)
         active = rng.random(len(close)) < 0.05   # fires independently of returns
         valid, L0, cnt_t, sum_t, _ = _log_sufficient_stats(close, self.horizons)
         noise_dt = AlphaDiscovery._derive_target(
             active, valid, L0, cnt_t, sum_t, self.horizons,
-            close.to_numpy(), 0.5, 0.005,
+            close.to_numpy(), 0.5, 0.005, require_significant=False,
         )
 
         close_r, active_r = _trending_reversal_table()
         v, l0, ct, st, _ = _log_sufficient_stats(close_r, self.horizons)
         real_dt = AlphaDiscovery._derive_target(
             active_r, v, l0, ct, st, self.horizons,
-            close_r.to_numpy(), 0.5, 0.005,
+            close_r.to_numpy(), 0.5, 0.005, require_significant=False,
         )
         assert abs(noise_dt.mean_advantage) < 0.2 * abs(real_dt.mean_advantage)
+
+    def _weak_event(self):
+        """A bursty no-edge event on a drifting series for which no horizon
+        clears Benjamini-Hochberg (statistically_weak) — found deterministically
+        under a fixed seed."""
+        close, rng = _drift_series(seed=5)
+        valid, L0, cnt_t, sum_t, _ = _log_sufficient_stats(close, self.horizons)
+        for _ in range(30):
+            active = _clustered_mask(rng, len(close))
+            if active.sum() < 30:
+                continue
+            dt = AlphaDiscovery._derive_target(
+                active, valid, L0, cnt_t, sum_t, self.horizons,
+                close.to_numpy(), 0.5, 0.005, require_significant=False,
+            )
+            if dt.statistically_weak:
+                return close, active, valid, L0, cnt_t, sum_t
+        raise AssertionError("no statistically_weak clustered event found")
+
+    def test_statistically_weak_yields_undetermined(self):
+        """Default gate (require_significant_direction): when no horizon clears
+        BH, the direction is 'undetermined' instead of a coin-flip read off
+        argmax|z| — the RSI>80 (DOGE) behaviour the user expects."""
+        close, active, valid, L0, cnt_t, sum_t = self._weak_event()
+        dt = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons,
+            close.to_numpy(), 0.5, 0.005,   # require_significant defaults True
+        )
+        assert dt.statistically_weak
+        assert dt.h_sig == ()
+        assert dt.direction == "undetermined"
+        assert math.isnan(dt.mean_advantage)
+
+    def test_require_significant_false_restores_legacy_direction(self):
+        """The toggle re-enables the non-blocking behaviour: the same weak event
+        is assigned a direction (subject only to min_direction_t)."""
+        close, active, valid, L0, cnt_t, sum_t = self._weak_event()
+        legacy = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons,
+            close.to_numpy(), 0.5, 0.005,
+            require_significant=False, min_direction_t=0.0,
+        )
+        assert legacy.statistically_weak          # still flagged as weak…
+        assert legacy.direction in ("long", "short")   # …but a direction stands
+
+    def test_significant_event_keeps_direction(self):
+        """A genuine edge (BH-significant horizon) is unaffected by the gate."""
+        close, active = _trending_reversal_table()
+        valid, L0, cnt_t, sum_t, _ = _log_sufficient_stats(close, self.horizons)
+        dt = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons,
+            close.to_numpy(), 0.5, 0.005,
+        )
+        assert not dt.statistically_weak
+        assert dt.holding_period_h in dt.h_sig
+        assert dt.direction == "short"
 
     def test_clustered_noise_not_falsely_significant(self):
         """Regression for issue #88's clustered-event pathology: a bursty event

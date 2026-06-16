@@ -337,21 +337,33 @@ sell_pct = max(quantile(MFE[attive], mfe_quantile), mfe_floor)
   il rendimento medio a scadenza. Candidato take-profit che Rule Discovery
   raffina con la meccanica reale degli ordini.
 
-#### Significatività — diagnostica NON bloccante
+#### Significatività e gate di direzione
 
 Ogni **rotazione circolare** della maschera evento è un campione sotto l'ipotesi
 nulla "il timing dell'evento è scorrelato dai rendimenti": preserva esattamente
 il *clustering* delle attivazioni (e quindi la sovrapposizione delle finestre
 forward) ma le scolla dai rendimenti. Da tutte le rotazioni si leggono `σ_null,h`
 (per `z_h`) e la p-value a due code `p_h = (1 + #{|Δ^rot| ≥ |Δ_h|}) / (1 + #shift)`.
-**Benjamini-Hochberg** (`fdr_q`) sui k orizzonti produce `h_sig`. Questi **non**
-sono un hard gate: con poche attivazioni il gate FDR può risultare vuoto anche con
-edge reale, quindi `h*` viene comunque scelto su `|z_h|` su tutta la griglia e il
-target è marcato `statistically_weak` (anziché scartato). `direction` resta
-`undetermined` solo quando nessun orizzonte produce un `Δ` finito **oppure** quando
-`|z_h*| < min_direction_t` (floor, default 0 = sempre assegnata). Coerentemente con
-come il modulo tratta `lift`/`cohens_d`, la significatività informa il voto A–D ma
-non blocca la promozione.
+**Benjamini-Hochberg** (`fdr_q`) sui k orizzonti produce `h_sig`; se `h*` non è in
+`h_sig` il target è marcato `statistically_weak`.
+
+La **selezione di `h*`** resta sempre `argmax|z_h|` su tutta la griglia, ma la
+**direzione è gated** (`require_significant_direction`, default `True`): quando
+**nessun** orizzonte supera BH (`h_sig` vuoto, `statistically_weak=True`),
+l'excess non è distinguibile dal null a *nessun* orizzonte, quindi `argmax|z_h|`
+assegnerebbe una direzione a testa-o-croce — tipicamente il long del bordo lungo
+guidato dal drift. In quel caso `direction = "undetermined"` → contratto REJECTED.
+
+> **Esempio (DOGEUSDC 1H).** `RSI>80` ha profilo `z` che cambia segno (corto
+> short, lungo long per drift), nessun orizzonte BH-significativo (`h_sig=()`):
+> con il gate → `undetermined`. `RSI<20` ha `h_sig=(1,3)`, `h*=1` → `long`.
+
+`direction` è quindi `undetermined` quando: nessun orizzonte produce un `Δ`
+finito; **oppure** `|z_h*| < min_direction_t` (floor, default 0.5); **oppure**
+(con `require_significant_direction`) il target è `statistically_weak`. Le altre
+misure (`lift`, `cohens_d`, IC, OOS) restano diagnostiche non bloccanti che
+pesano sul voto A–D. Per il comportamento legacy non-bloccante sulla direzione,
+impostare `require_significant_direction=False`.
 
 > Nota implementativa: tutte le `n−1` rotazioni sono valutate in un colpo via
 > cross-correlazione circolare (FFT) — test **esatto**, deterministico, costo

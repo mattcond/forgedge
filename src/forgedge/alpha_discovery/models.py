@@ -185,12 +185,18 @@ class PromotionThresholds:
         Minimum ``|z_h*|`` (rotation-standardised excess statistic at the
         selected horizon) for a direction to be assigned.  Below this floor the
         edge is not distinguishable from the rotation null and ``direction`` is
-        set to ``"undetermined"``.  Default ``0.0`` keeps the derivation
-        non-blocking — a direction is always assigned when ``Δ_h*`` is finite
-        and non-zero, and thin evidence is surfaced via
-        ``DerivedTarget.statistically_weak`` rather than discarded.  Raise it
-        (e.g. ``1.0`` ≈ one null standard deviation) to refuse a direction on
-        excess returns indistinguishable from the null.
+        set to ``"undetermined"``.  Default ``0.5``.
+    require_significant_direction : bool
+        When ``True`` (default), a direction is assigned only if the selected
+        horizon clears the Benjamini-Hochberg control — i.e. ``h*`` is in
+        ``DerivedTarget.h_sig`` (equivalently ``statistically_weak`` is
+        ``False``).  When **no** horizon is BH-significant the excess is not
+        statistically distinguishable from the rotation null at any horizon, so
+        ``argmax|z_h|`` would assign a direction off a coin-flip (often the
+        drift-driven long edge of the grid); this gate returns
+        ``"undetermined"`` instead.  Set to ``False`` for the legacy
+        non-blocking behaviour (always assign a direction subject only to
+        ``min_direction_t``, flagging thin evidence via ``statistically_weak``).
     """
 
     ic_min_abs: float = 0.02
@@ -204,6 +210,7 @@ class PromotionThresholds:
     oos_max_p: float = 0.10
     min_oos_activations: int = 10
     min_direction_t: float = 0.5
+    require_significant_direction: bool = True
 
 
 @dataclass
