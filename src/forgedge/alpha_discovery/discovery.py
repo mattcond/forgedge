@@ -304,10 +304,14 @@ class AlphaDiscovery:
         # h* = argmax(|mean_advantage| / √h) — deflates only variance ∝ √h,
         # preserving the signal-to-noise ratio across the horizon grid without
         # the t-stat denominator inflation that penalises long horizons.
+        # Advantage = mean_a − mean_b (excess return over background), NOT mean_a
+        # alone — using mean_a would conflate a trending asset's base return with
+        # the event's directional edge and flip the direction on trending markets.
         h_arr = np.array(horizons, dtype=float)
-        score = np.where(usable, np.abs(mean_a) / np.sqrt(h_arr), np.nan)
+        advantage = mean_a - mean_b
+        score = np.where(usable, np.abs(advantage) / np.sqrt(h_arr), np.nan)
 
-        advantage_by_h = {h: float(mean_a[j]) for j, h in enumerate(horizons)}
+        advantage_by_h = {h: float(advantage[j]) for j, h in enumerate(horizons)}
         t_stat_by_h = {h: float(t[j]) for j, h in enumerate(horizons)}
         score_by_h = {h: float(score[j]) for j, h in enumerate(horizons)}
 
@@ -316,7 +320,7 @@ class AlphaDiscovery:
         else:
             j_star = 0
 
-        adv = mean_a[j_star]
+        adv = advantage[j_star]
         if not np.isfinite(adv) or adv == 0.0:
             return DerivedTarget(
                 holding_period_h=horizons[j_star],
