@@ -16,7 +16,11 @@ from forgedge import (
 )
 from forgedge.alpha_discovery import stats
 from forgedge.alpha_discovery.market_structure import analyse_market_structure
-from forgedge.alpha_discovery.target import binary_target, forward_returns
+from forgedge.alpha_discovery.target import (
+    binary_target,
+    forward_log_returns,
+    forward_returns,
+)
 from forgedge.event_discovery.models import GateParams
 
 
@@ -683,6 +687,234 @@ class TestPersist:
         contract.persist(path)
         loaded = pickle.loads(open(path, "rb").read())
         assert loaded.alpha_id == contract.alpha_id
+
+
+# ---------------------------------------------------------------------------
+# Direction from excess log-return — the drift must not dictate direction
+# (issue #88)
+# ---------------------------------------------------------------------------
+
+def _log_sufficient_stats(close: pd.Series, horizons):
+    """Mirror ``AlphaDiscovery.run`` log-space prep for a unit test on
+    ``_derive_target`` — the whole series is treated as in-sample."""
+    L = forward_log_returns(close, horizons).to_numpy()
+    F = forward_returns(close, horizons).to_numpy()
+    valid = np.isfinite(L) & np.isfinite(F)
+    L0 = np.where(valid, L, 0.0)
+    cnt_t = valid.sum(axis=0).astype(float)
+    sum_t = L0.sum(axis=0)
+    return valid, L0, cnt_t, sum_t, F
+
+
+def _naive_excess_t(active, valid, L0, cnt_t, sum_t):
+    """The pre-fix naive excess t-stat ``Δ_h / (σ_cond/√n)`` — assumes the
+    overlapping forward windows are independent, so it inflates on long
+    horizons for clustered events.  Used only to demonstrate the rotation
+    null deflates that inflation."""
+    af = active.astype(float)
+    cnt_a = af @ valid
+    sum_a = af @ L0
+    sumsq_a = af @ (L0 * L0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mu_c = np.where(cnt_a > 0, sum_a / np.maximum(cnt_a, 1), np.nan)
+        mu_b = sum_t / np.maximum(cnt_t, 1)
+        var = (sumsq_a - cnt_a * mu_c ** 2) / np.maximum(cnt_a - 1, 1)
+        se = np.sqrt(var / np.maximum(cnt_a, 1))
+        return (mu_c - mu_b) / se
+
+
+def _trending_reversal_table(n=4000, seed=11, drift=0.004, shock=0.012):
+    """Strong upward drift with an event that predicts a *short-term reversal*.
+
+    ``feat > 0.8`` marks the event; the bar after an active bar gets the drift
+    minus ``shock`` (a one-step underperformance).  The excess log-return is
+    therefore negative at every horizon (drift cancels in the excess), but the
+    *raw* conditional return is dominated by the drift on long horizons — the
+    exact configuration that made the old ``|mean|/√h`` criterion derive a
+    spurious *long*.
+    """
+    rng = np.random.default_rng(seed)
+    feat = rng.uniform(0.0, 1.0, n)
+    active = feat > 0.8
+    noise = rng.normal(0.0, 0.002, n)
+    r = np.full(n, drift) + noise
+    r[1:][active[:-1]] -= shock          # reversal on the bar after the event
+    r[0] = 0.0
+    close = pd.Series(100.0 * np.exp(np.cumsum(r)))
+    return close, active
+
+
+def _drift_series(n=4000, seed=5, drift=0.004, vol=0.01):
+    rng = np.random.default_rng(seed)
+    r = np.full(n, drift) + rng.normal(0.0, vol, n)
+    return pd.Series(100.0 * np.exp(np.cumsum(r))), rng
+
+
+def _clustered_mask(rng, n, rate=0.05, burst=30):
+    """Activations in bursts of consecutive bars — maximal forward-window
+    overlap, independent of the returns."""
+    m = np.zeros(n, bool)
+    i = 0
+    while i < n:
+        if rng.random() < rate / burst:
+            m[i:i + burst] = True
+            i += burst
+        else:
+            i += 1
+    return m
+
+
+class TestExcessLogReturnDirection:
+    horizons = [1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48]
+
+    def test_direction_is_excess_not_drift(self):
+        """The reversal event must derive *short* from the negative excess,
+        even though the asset's drift makes the raw conditional return positive
+        on the horizon the old criterion would have selected."""
+        close, active = _trending_reversal_table()
+        valid, L0, cnt_t, sum_t, F = _log_sufficient_stats(close, self.horizons)
+
+        dt = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons,
+            close.to_numpy(), 0.5, 0.005,
+        )
+
+        # Excess log-return is negative -> short, by construction.
+        assert dt.direction == "short"
+        assert dt.mean_advantage < 0
+        assert all(v <= 1e-9 for v in dt.advantage_by_h.values())
+
+        # The bug it fixes: the *raw* (simple) conditional return is dominated
+        # by the drift at long horizons, so |mean|/√h would have chosen a long
+        # horizon with a positive mean -> a spurious "long".
+        af = active.astype(float)
+        raw_mean = (af @ np.where(valid, F, 0.0)) / np.maximum(af @ valid, 1)
+        h_arr = np.array(self.horizons, dtype=float)
+        old_score = np.abs(raw_mean) / np.sqrt(h_arr)
+        j_old = int(np.nanargmax(old_score))
+        assert raw_mean[j_old] > 0          # old criterion -> spurious long
+
+    def test_pure_drift_excess_is_negligible_vs_real_edge(self):
+        """An event independent of returns on a drifting series carries (almost)
+        no excess: its |Δ_h*| is an order of magnitude below the reversal
+        event's, so the drift never manufactures a strong spurious edge."""
+        close, rng = _drift_series(seed=3)
+        active = rng.random(len(close)) < 0.05   # fires independently of returns
+        valid, L0, cnt_t, sum_t, _ = _log_sufficient_stats(close, self.horizons)
+        noise_dt = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons,
+            close.to_numpy(), 0.5, 0.005,
+        )
+
+        close_r, active_r = _trending_reversal_table()
+        v, l0, ct, st, _ = _log_sufficient_stats(close_r, self.horizons)
+        real_dt = AlphaDiscovery._derive_target(
+            active_r, v, l0, ct, st, self.horizons,
+            close_r.to_numpy(), 0.5, 0.005,
+        )
+        assert abs(noise_dt.mean_advantage) < 0.2 * abs(real_dt.mean_advantage)
+
+    def test_clustered_noise_not_falsely_significant(self):
+        """Regression for issue #88's clustered-event pathology: a bursty event
+        with no real edge would, under a naive t-stat, be pinned to the long
+        grid edge and flagged significant.  The rotation null — which keeps the
+        event's clustering — deflates that inflation, so it is (almost always)
+        marked statistically_weak."""
+        close, rng = _drift_series(seed=5)
+        n = len(close)
+        valid, L0, cnt_t, sum_t, _ = _log_sufficient_stats(close, self.horizons)
+
+        not_weak = 0
+        naive_significant = 0
+        deflation = []
+        runs = 0
+        for _ in range(60):
+            active = _clustered_mask(rng, n)
+            if active.sum() < 30:
+                continue
+            runs += 1
+            dt = AlphaDiscovery._derive_target(
+                active, valid, L0, cnt_t, sum_t, self.horizons,
+                close.to_numpy(), 0.5, 0.005,
+            )
+            if not dt.statistically_weak:
+                not_weak += 1
+            nt = _naive_excess_t(active, valid, L0, cnt_t, sum_t)
+            if abs(nt[int(np.nanargmax(np.abs(nt)))]) > 2.5:
+                naive_significant += 1
+            # rotation z at the longest horizon is heavily deflated vs naive t
+            deflation.append(abs(dt.t_stat_by_h[48]) / (abs(nt[-1]) + 1e-9))
+
+        assert runs >= 30
+        # The naive statistic is spuriously significant on most clustered events…
+        assert naive_significant / runs > 0.5
+        # …while the rotation null keeps the spurious-significant rate low.
+        assert not_weak / runs < 0.30
+        # And it deflates the inflated long-horizon statistic by a large factor.
+        assert np.median(deflation) < 0.5
+
+    def test_direction_floor_forces_undetermined(self):
+        """A ``min_direction_t`` floor above |z_h*| refuses to assign a
+        direction — the contract path for an edge too weak to call."""
+        close, active = _trending_reversal_table()
+        valid, L0, cnt_t, sum_t, _ = _log_sufficient_stats(close, self.horizons)
+        base = dict(close_is=close.to_numpy())
+        derived = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons, **base
+        )
+        floor = abs(derived.t_stat_by_h[derived.holding_period_h]) + 1.0
+        gated = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons,
+            min_direction_t=floor, **base
+        )
+        assert derived.direction == "short"          # without the floor
+        assert gated.direction == "undetermined"     # with it
+        assert math.isnan(gated.mean_advantage)
+        # The diagnostic profile is still populated for transparency.
+        assert set(gated.advantage_by_h) == set(self.horizons)
+
+    def test_real_excess_clears_gate_and_is_significant(self):
+        """The reversal event has a real edge: its selected horizon is in
+        ``h_sig`` (FDR passes) and the rotation p-value at ``h*`` is small."""
+        close, active = _trending_reversal_table()
+        valid, L0, cnt_t, sum_t, _ = _log_sufficient_stats(close, self.horizons)
+        dt = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons,
+            close.to_numpy(), 0.5, 0.005,
+        )
+        assert not dt.statistically_weak
+        assert dt.holding_period_h in dt.h_sig
+        assert dt.p_value_by_h[dt.holding_period_h] < 0.10
+
+    def test_h_star_maximises_abs_z_over_h_sig(self):
+        """``h*`` is the argmax of |z_h| restricted to the significant set."""
+        close, active = _trending_reversal_table()
+        valid, L0, cnt_t, sum_t, _ = _log_sufficient_stats(close, self.horizons)
+        dt = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons,
+            close.to_numpy(), 0.5, 0.005,
+        )
+        # score_by_h holds |z_h|; h* maximises it over the significant horizons.
+        best = max(dt.h_sig, key=lambda h: dt.score_by_h[h])
+        assert dt.holding_period_h == best
+        assert dt.score_by_h[dt.holding_period_h] == pytest.approx(
+            abs(dt.t_stat_by_h[dt.holding_period_h])
+        )
+
+    def test_rotation_null_is_deterministic(self):
+        """The rotation null evaluates every circular shift exactly (FFT), so it
+        is reproducible without a seed."""
+        close, active = _trending_reversal_table()
+        valid, L0, cnt_t, sum_t, _ = _log_sufficient_stats(close, self.horizons)
+        kw = dict(close_is=close.to_numpy())
+        a = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons, **kw
+        )
+        b = AlphaDiscovery._derive_target(
+            active, valid, L0, cnt_t, sum_t, self.horizons, **kw
+        )
+        assert a.p_value_by_h == b.p_value_by_h
+        assert a.t_stat_by_h == b.t_stat_by_h
 
 
 # ---------------------------------------------------------------------------

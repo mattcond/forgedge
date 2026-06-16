@@ -125,14 +125,17 @@ event_expression:   "close_rsi_25 < 30.5 AND pr_close_rsi_25_96 < 0.10"
 # Alpha Discovery non riceve parametri economici: il target è derivato
 # in-sample per ciascun evento e replicato out-of-sample (vedi Step 1).
 derived_target:
-  holding_period_h: 24         # h* = argmax(|vantaggio medio| / √h) sulla griglia
+  holding_period_h: 3          # h* = argmax|z_h| (excess standardizzato, null a rotazione)
   sell_pct:         0.0420     # quantile MFE (mfe_quantile) a h*, barre attive IS
-  direction:        "long"     # segno del vantaggio medio
-  mean_advantage:   +0.0218    # vantaggio medio firmato (convenzione long)
+  direction:        "long"     # segno dell'excess log-return Δ_h*
+  mean_advantage:   +0.0050    # Δ_h* firmato (excess log-return, convenzione long)
   base_rate:        0.235      # win rate senza filtro a (h*, sell_pct*)
-  advantage_by_h:   {1: 0.004, 6: 0.011, 12: 0.017, 24: 0.0218, 48: 0.019}
-  t_stat_by_h:      {1: 1.8,   6: 3.1,   12: 4.6,   24: 5.34,   48: 4.2}
-  score_by_h:       {1: 0.004, 6: 0.0045, 12: 0.0049, 24: 0.00445, 48: 0.0027}
+  advantage_by_h:   {1: 0.0041, 3: 0.0050, 6: 0.0033, 12: 0.0011, 24: 0.0002}  # Δ_h
+  t_stat_by_h:      {1: 2.1,    3: 2.6,    6: 1.7,    12: 0.6,    24: 0.1}      # z_h (rotazione)
+  score_by_h:       {1: 2.1,    3: 2.6,    6: 1.7,    12: 0.6,    24: 0.1}      # |z_h|
+  p_value_by_h:     {1: 0.041,  3: 0.022,  6: 0.094,  12: 0.51,   24: 0.93}    # rotazione
+  h_sig:            [1, 3]      # orizzonti che superano Benjamini-Hochberg (diagnostica)
+  statistically_weak: false    # h* ∈ h_sig → evidenza non marginale
 
 # ── REPLAY OUT-OF-SAMPLE DEL TARGET DERIVATO ─────────────────────────
 oos_validation:
@@ -282,41 +285,83 @@ OUT-OF-SAMPLE (ultimi 30%): mai toccato dalla derivazione — replay del
                             target derivato (diagnostica per il voto A–D)
 ```
 
-### 1.2 Derivazione per evento — vantaggio deflazionato per √h
+### 1.2 Derivazione per evento — excess log-return
+
+La direzione **non è nella regola**: è nell'*excess return* rispetto al
+contesto. Il forward return dopo un evento è `drift dell'asset` +
+`reazione specifica del segnale`; su un asset in forte trend il drift domina e
+un criterio sul rendimento condizionato assoluto (`|mean|/√h`) seleziona sempre
+gli orizzonti lunghi, dove il segno è positivo per puro drift — derivando una
+direzione spuria (entrambi gli eventi `long` anche quando uno è textbook short).
+Per separare l'edge dal drift si lavora sull'**excess log-return**.
 
 Per ogni Event Candidate, su una griglia di orizzonti candidati
 (`horizon_grid`, default 1–48 barre):
 
 ```python
-# fwd_ret[h] = close.shift(-h) / close - 1   (convenzione long, firmato)
+# Forward return in LOG space: r_h(t) = log(close[t+h] / close[t])
 for h in horizon_grid:
-    mean_adv[h] = fwd_ret[h][attive].mean()       # vantaggio medio firmato, IS
-    score[h]    = abs(mean_adv[h]) / sqrt(h)      # deflazione della varianza
+    μ_base[h] = r_h.mean()                  # incondizionato, su TUTTE le barre valide
+    μ_cond[h] = r_h[attive].mean()          # condizionato, sulle barre dell'evento
+    Δ[h]      = μ_cond[h] - μ_base[h]        # EXCESS log-return (il drift si cancella)
 
-h_star         = argmax_h score[h]
-mean_advantage = mean_adv[h_star]
-direction      = "long" if mean_advantage > 0 else "short"
+    σ_null[h] = std( Δ[h] sotto rotazione circolare della maschera evento )
+    z[h]      = Δ[h] / σ_null[h]            # excess standardizzato, robusto all'autocorr.
+
+h_star         = argmax_h |z[h]|   (ristretto a h_sig se non vuoto)
+direction      = "long" if Δ[h_star] > 0 else "short"
+mean_advantage = Δ[h_star]
 
 # sell_pct: quantile della Maximum Favorable Excursion a h* (barre attive IS)
-# MFE_i = max escursione favorevole nelle h* barre successive alla barra i
 sell_pct = max(quantile(MFE[attive], mfe_quantile), mfe_floor)
 ```
 
-- **`h*`** massimizza il vantaggio medio deflazionato per `√h`. La deflazione
-  compensa solo la crescita della varianza con l'orizzonte (∝ √h): a
-  differenza dell'argmax sul |t-stat| — il cui denominatore si gonfia con h e
-  penalizza sistematicamente gli orizzonti lunghi — questo criterio lascia
-  emergere gli edge persistenti (es. un rimbalzo oversold che si realizza in
-  24 barre).
+- **Log e non winsorizing.** I forward return crypto hanno outlier estremi
+  (single bar fino a +70× → skew elevato). Il winsorizing distorce la baseline
+  in modo asimmetrico e produce direzioni sbagliate; il log comprime gli outlier
+  (`log(71) ≈ 4.26`) senza tagliarli, rivelando il segnale reale.
+- **`h*`** massimizza `|z_h|`, l'excess standardizzato da un **null a rotazione
+  circolare**. Una t-statistic naïve `Δ_h/(σ_cond/√n)` tratta le finestre forward
+  *sovrapposte* come indipendenti: il denominatore si restringe con l'orizzonte,
+  perciò per un evento **clusterizzato** (attivazioni a raffica — il caso comune)
+  `|T_h|` si gonfia sugli orizzonti lunghi e `h*` si incolla al bordo lungo della
+  griglia anche **senza edge reale**. Standardizzando con un null che riusa la
+  *stessa* maschera evento ruotata contro i rendimenti, la scala è ricavata
+  dall'autocorrelazione dei dati e quel bias sparisce.
+- **`direction`** è il segno dell'excess `Δ_h*`, **mai imposto a priori**: la
+  stessa regola (`RSI>80`) dà *short* in un bull run e *long* in un mercato
+  flat, perché si legge solo l'eccesso sul drift prevalente.
 - **`sell_pct`** è il quantile (`mfe_quantile`, default 0.5 = mediana, con
   floor `mfe_floor`, default 0.5%) della **Maximum Favorable Excursion** a h*
   sulle barre attive IS: la migliore escursione *raggiungibile* dal trade, non
-  il rendimento medio a scadenza. È il candidato take-profit realistico che
-  Rule Discovery raffinerà con la meccanica reale degli ordini.
-- **`direction`** è il segno del vantaggio: un evento che anticipa ribassi
-  diventa uno short candidate, senza configurazione manuale.
+  il rendimento medio a scadenza. Candidato take-profit che Rule Discovery
+  raffina con la meccanica reale degli ordini.
 
-Il profilo completo (`advantage_by_h`, `t_stat_by_h`, `score_by_h`) viene
+#### Significatività — diagnostica NON bloccante
+
+Ogni **rotazione circolare** della maschera evento è un campione sotto l'ipotesi
+nulla "il timing dell'evento è scorrelato dai rendimenti": preserva esattamente
+il *clustering* delle attivazioni (e quindi la sovrapposizione delle finestre
+forward) ma le scolla dai rendimenti. Da tutte le rotazioni si leggono `σ_null,h`
+(per `z_h`) e la p-value a due code `p_h = (1 + #{|Δ^rot| ≥ |Δ_h|}) / (1 + #shift)`.
+**Benjamini-Hochberg** (`fdr_q`) sui k orizzonti produce `h_sig`. Questi **non**
+sono un hard gate: con poche attivazioni il gate FDR può risultare vuoto anche con
+edge reale, quindi `h*` viene comunque scelto su `|z_h|` su tutta la griglia e il
+target è marcato `statistically_weak` (anziché scartato). `direction` resta
+`undetermined` solo quando nessun orizzonte produce un `Δ` finito **oppure** quando
+`|z_h*| < min_direction_t` (floor, default 0 = sempre assegnata). Coerentemente con
+come il modulo tratta `lift`/`cohens_d`, la significatività informa il voto A–D ma
+non blocca la promozione.
+
+> Nota implementativa: tutte le `n−1` rotazioni sono valutate in un colpo via
+> cross-correlazione circolare (FFT) — test **esatto**, deterministico, costo
+> `O(n log n · k)`, nessun Monte Carlo né seed. Risolve il limite del bootstrap
+> uniforme (che, ignorando l'autocorrelazione, su eventi clusterizzati senza edge
+> reale produceva ~80% di falsi significativi incollati a h=48; con la rotazione
+> scendono a ~5–25%).
+
+Il profilo completo (`advantage_by_h` = Δ_h, `t_stat_by_h` = z_h,
+`score_by_h` = |z_h|, `p_value_by_h`, `h_sig`, `statistically_weak`) viene
 scritto nel contratto per trasparenza.
 
 ### 1.3 Target binario e base rate al target derivato
@@ -417,8 +462,8 @@ for lag in [1, 2, 3, 6, 12, 24]:
 | 24h | −0.0819 | Anticorrelazione — inversione a 24h |
 
 La struttura ACF è la **lettura interpretativa** dell'orizzonte derivato allo
-Step 1: un `h* = 24` derivato per massima separazione è coerente con
-un'inversione che si manifesta a 24h. Se la derivazione restituisse `h*`
+Step 1: un `h*` derivato per massimo `|z_h|` dell'excess return è coerente con
+l'orizzonte a cui si manifesta l'inversione. Se la derivazione restituisse `h*`
 incompatibili con la struttura ACF (es. h* lunghi su un mercato che inverte a
 6h), il contrasto è un segnale d'allarme da annotare nel contratto.
 
@@ -833,10 +878,11 @@ consistency_gate: PASS
 
 ```
 Griglia orizzonti: 1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48
-score(h) = |vantaggio_medio(h)| / √h  massimo a h = 24  →  h* = 24
-mean_advantage(24) = +2.18%  →  direction = long
-sell_pct = mediana MFE(24h) barre attive IS = 0.042   (quantile configurabile)
-base_rate a (24, 0.042, long) = 23.5%   (in-sample)
+Δ_h = μ_cond_h − μ_base_h  (excess log-return);  z_h = Δ_h / σ_null,h  (null a rotazione)
+score(h) = |z_h|  massimo a h = 3  →  h* = 3
+Δ_3 = +0.50%  →  direction = long   (segno dell'excess, drift escluso)
+sell_pct = mediana MFE(3h) barre attive IS = 0.042   (quantile configurabile)
+base_rate a (3, 0.042, long) = 23.5%   (in-sample)
 ```
 
 ### Step 2 — Struttura di mercato

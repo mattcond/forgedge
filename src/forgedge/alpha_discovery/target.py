@@ -5,8 +5,12 @@ sell percentage and the direction are *derived* per Event Candidate.  This
 module provides the two look-ahead-safe building blocks of that derivation:
 
 * :func:`forward_returns` — the point-to-point return over each candidate
-  horizon, ``close[t+h] / close[t] - 1`` (signed, long convention).  The
-  horizon scan, the IC, Cohen's d and the t-tests all read from here;
+  horizon, ``close[t+h] / close[t] - 1`` (signed, long convention).  The IC,
+  the MFE-based ``sell_pct`` and the binary-target measures read from here;
+* :func:`forward_log_returns` — the log-space counterpart
+  ``log(close[t+h] / close[t])``, used by the direction/horizon derivation so
+  the conditional **excess** return is robust to the extreme outliers of
+  crypto forward returns;
 * :func:`binary_target`  — once ``(h*, sell_pct*, direction*)`` have been
   derived, the binary economic target: did the favourable extreme within the
   next ``h`` bars reach ``sell_pct``?  For a long this is the forward
@@ -49,6 +53,46 @@ def forward_returns(close: pd.Series, horizons: Sequence[int]) -> pd.DataFrame:
         if h <= 0:
             raise ValueError(f"horizons must be positive, got {h}.")
         out[h] = c.shift(-h) / c - 1.0
+    return pd.DataFrame(out, index=close.index)
+
+
+def forward_log_returns(close: pd.Series, horizons: Sequence[int]) -> pd.DataFrame:
+    """Point-to-point forward **log**-return per candidate horizon.
+
+    The direction/horizon derivation (Step 1) operates in log space:
+    ``r_h(t) = log(close[t+h] / close[t])``.  Crypto forward returns carry
+    extreme right-skewed outliers (single bars of +70× are not unheard of on
+    illiquid pairs); on a *simple* return the unconditional baseline is then
+    dominated by a handful of jumps and the excess return ``μ_cond − μ_base``
+    collapses to noise.  The log transform compresses those outliers
+    (``log(71) ≈ 4.26``) without winsorising — winsorising would clip the
+    baseline asymmetrically and bias the direction — so the conditional edge
+    of a signal can be separated from the asset's drift.
+
+    Parameters
+    ----------
+    close : pd.Series
+        Close-price series, chronologically ordered, aligned to the KPI table.
+    horizons : sequence of int
+        Candidate holding horizons, in bars (each must be positive).
+
+    Returns
+    -------
+    pd.DataFrame
+        One column per horizon (``int`` column labels):
+        ``log(close[t+h] / close[t])``, NaN in the last ``h`` bars where the
+        horizon runs off the end and wherever a non-positive close makes the
+        log undefined.  Signed with the **long** convention — direction is
+        derived downstream from the sign of the *excess* log-return.
+    """
+    c = close.astype(float)
+    safe = c.where(c > 0)
+    out = {}
+    for h in horizons:
+        h = int(h)
+        if h <= 0:
+            raise ValueError(f"horizons must be positive, got {h}.")
+        out[h] = np.log(safe.shift(-h) / safe)
     return pd.DataFrame(out, index=close.index)
 
 

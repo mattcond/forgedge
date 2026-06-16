@@ -9,11 +9,16 @@ Alpha Discovery takes no economic parameters as input.  For every candidate it
 scans ``AlphaConfig.horizon_grid`` on the in-sample window (the first
 ``train_ratio`` of the table) and derives:
 
-* ``holding_period_h`` — the horizon with the maximum ``|mean_advantage| / √h``
-  score (Sharpe-like deflation of the horizon grid);
+* ``holding_period_h`` — the horizon with the maximum ``|z_h|``, the **excess
+  log-return** ``Δ_h = μ_cond_h − μ_base_h`` standardised by a circular-rotation
+  null (autocorrelation-robust, so clustered events don't pin ``h*`` to the
+  grid edge);
 * ``sell_pct``         — the ``q``-quantile of the Maximum Favorable Excursion
   (MFE) at ``h*`` across active IS bars;
-* ``direction``        — the sign of that mean advantage.
+* ``direction``        — the sign of the excess log-return ``Δ_h*``.  Working
+  in log-space excess (conditional minus unconditional) strips the asset's
+  drift, so a rule reads *short* in a bull run and *long* in a flat market
+  from the data alone — never imposed a priori.
 
 Every in-sample measure (IC, win rate, lift, Cohen's d, regime sensitivity)
 is computed at the derived target.  The held-out temporal tail replays the
@@ -67,7 +72,7 @@ from .models import (
     RegimeAnalysis,
     RegimeStat,
 )
-from .target import forward_returns
+from .target import forward_log_returns, forward_returns
 
 
 class AlphaDiscovery:
@@ -134,16 +139,24 @@ class AlphaDiscovery:
         self.split_idx = split
 
         fwd = forward_returns(close, horizons)
-        F = fwd.to_numpy()  # n × k, long convention
+        F = fwd.to_numpy()  # n × k, simple, long convention (IC, MFE, binary)
 
-        # In-sample sufficient statistics for the vectorised horizon scan.
+        # Direction/horizon derivation runs in log-space: the excess log-return
+        # Δ_h = μ_cond_h − μ_base_h is what carries the signal, robust to the
+        # extreme outliers of crypto forward returns.
+        logfwd = forward_log_returns(close, horizons)
+        L = logfwd.to_numpy()  # n × k, log, long convention
+
+        # In-sample arrays for the vectorised horizon scan, in log-space.
+        # ``valid_is`` is the validity mask shared by every measure (a bar is
+        # valid at horizon h when both the simple and log forward return are
+        # finite — they share the same off-the-end / non-positive close gaps).
         F_is = F[:split]
-        valid_is = np.isfinite(F_is)
-        F0 = np.where(valid_is, F_is, 0.0)
-        F0sq = F0 * F0
+        L_is = L[:split]
+        valid_is = np.isfinite(F_is) & np.isfinite(L_is)
+        L0 = np.where(valid_is, L_is, 0.0)
         cnt_t = valid_is.sum(axis=0).astype(float)
-        sum_t = F0.sum(axis=0)
-        sumsq_t = F0sq.sum(axis=0)
+        sum_t = L0.sum(axis=0)
 
         # Step 2 — interpretive context, on the in-sample window only.
         med_h = horizons[len(horizons) // 2]
@@ -169,8 +182,9 @@ class AlphaDiscovery:
             comp0 = cand.components[0]
 
             derived = self._derive_target(
-                active[:split], valid_is, F0, F0sq, cnt_t, sum_t, sumsq_t, horizons,
+                active[:split], valid_is, L0, cnt_t, sum_t, horizons,
                 close.iloc[:split].to_numpy(), cfg.mfe_quantile, cfg.mfe_floor,
+                fdr_q=cfg.thresholds.fdr_q, min_direction_t=cfg.thresholds.min_direction_t,
             )
             h_star = derived.holding_period_h
             j_star = horizons.index(h_star)
@@ -196,7 +210,7 @@ class AlphaDiscovery:
                 regime_is, comp0.source_feature, h_star,
             )
             oos_res = self._validate_oos(
-                active, F[:, j_star], target_binary, derived, split, n
+                active, L[:, j_star], target_binary, derived, split, n
             )
             measured.append((cand, derived, ic_res, ev_stats, regime_res, oos_res))
 
@@ -257,83 +271,107 @@ class AlphaDiscovery:
     def _derive_target(
         active_is: np.ndarray,
         valid_is: np.ndarray,
-        F0: np.ndarray,
-        F0sq: np.ndarray,
+        L0: np.ndarray,
         cnt_t: np.ndarray,
         sum_t: np.ndarray,
-        sumsq_t: np.ndarray,
         horizons: List[int],
         close_is: Optional[np.ndarray] = None,
         mfe_quantile: float = 0.5,
         mfe_floor: float = 0.005,
+        fdr_q: float = 0.10,
+        min_direction_t: float = 0.0,
     ) -> DerivedTarget:
         """Scan the horizon grid and derive ``(h*, sell_pct*, direction*)``.
 
-        For every horizon the mean active-bar advantage and the pooled
-        two-sample t-stat are computed from in-sample sufficient statistics
-        (vectorised across the grid).  ``h*`` maximises ``|mean_advantage| / √h``
-        — a Sharpe-like criterion that deflates horizon variance without the
-        t-stat denominator inflation that systematically penalises long horizons.
+        The signal lives in the **excess log-return**
+        ``Δ_h = μ_cond_h − μ_base_h`` — the mean active-bar log-return minus the
+        *unconditional* baseline over all valid bars.  Subtracting the baseline
+        strips the asset's drift, so the direction reflects the event's own edge
+        rather than the prevailing trend (``sign(Δ_h)`` — never imposed).
+
+        ``h*`` maximises ``|z_h|``, the excess standardised by a **circular-
+        rotation null** (see :meth:`_rotation_null`).  A naive
+        ``T_h = Δ_h / (σ_cond / √n)`` treats the overlapping forward-return
+        windows as independent: its denominator shrinks with the horizon, so for
+        a *clustered* event (activations in runs — the common case) ``|T_h|`` is
+        inflated on long horizons and ``h*`` pins to the long edge of the grid
+        even with no real edge.  Standardising by a null that re-uses the
+        event's own activation pattern (rotated against the returns) removes
+        that bias.
+
+        Significance is recorded as a **non-blocking diagnostic**: the rotation
+        null yields ``p_value_by_h``, Benjamini-Hochberg at ``fdr_q`` yields
+        ``h_sig``.  With few activations the FDR gate can be empty even on a real
+        edge, so ``h*`` is always chosen on ``|z_h|`` over the whole grid; an
+        empty gate only sets ``statistically_weak``.
+
         ``sell_pct`` is the ``mfe_quantile``-quantile of the Maximum Favorable
-        Excursion at ``h*`` across active IS bars; direction follows the sign of
-        the mean advantage.
+        Excursion at ``h*`` across active IS bars.  ``direction`` is
+        ``"undetermined"`` when no horizon yields a finite ``Δ_h`` or when
+        ``|z_h*| < min_direction_t``.
         """
         m_f = active_is.astype(float)
-        cnt_a = m_f @ valid_is
-        sum_a = m_f @ F0
-        sumsq_a = m_f @ F0sq
-
-        cnt_b = cnt_t - cnt_a
-        sum_b = sum_t - sum_a
-        sumsq_b = sumsq_t - sumsq_a
+        cnt_a = m_f @ valid_is                 # active bars valid at each horizon
+        sum_a = m_f @ L0                       # Σ log-return over active bars
 
         with np.errstate(divide="ignore", invalid="ignore"):
-            mean_a = np.where(cnt_a > 0, sum_a / np.maximum(cnt_a, 1), np.nan)
-            mean_b = np.where(cnt_b > 0, sum_b / np.maximum(cnt_b, 1), np.nan)
-            var_a = (sumsq_a - cnt_a * mean_a ** 2) / np.maximum(cnt_a - 1, 1)
-            var_b = (sumsq_b - cnt_b * mean_b ** 2) / np.maximum(cnt_b - 1, 1)
+            mu_cond = np.where(cnt_a > 0, sum_a / np.maximum(cnt_a, 1), np.nan)
+            mu_base = np.where(cnt_t > 0, sum_t / np.maximum(cnt_t, 1), np.nan)
+            delta = mu_cond - mu_base          # Δ_h — excess log-return (signed)
 
-            dof = cnt_a + cnt_b - 2
-            sp2 = ((cnt_a - 1) * var_a + (cnt_b - 1) * var_b) / np.maximum(dof, 1)
-            denom = np.sqrt(sp2 * (1.0 / np.maximum(cnt_a, 1) + 1.0 / np.maximum(cnt_b, 1)))
-            t = (mean_a - mean_b) / denom
+        # Circular-rotation null: z_h = Δ_h / σ_null,h and the two-sided p-value.
+        z, p_rot = AlphaDiscovery._rotation_null(
+            active_is, valid_is, L0, mu_base, delta,
+        )
+        usable = (cnt_a >= 2) & np.isfinite(delta) & np.isfinite(z)
+        z = np.where(usable, z, np.nan)
+        p_rot = np.where(usable, p_rot, np.nan)
+        score = np.abs(z)                       # h* = argmax |z_h|
 
-        usable = (cnt_a >= 2) & (cnt_b >= 2) & (dof > 0) & np.isfinite(mean_a)
-        t = np.where(usable, t, np.nan)
+        sig_mask = stats.benjamini_hochberg(p_rot, fdr_q)
+        h_sig = tuple(int(horizons[j]) for j in range(len(horizons)) if sig_mask[j])
 
-        # h* = argmax(|mean_advantage| / √h) — deflates only variance ∝ √h,
-        # preserving the signal-to-noise ratio across the horizon grid without
-        # the t-stat denominator inflation that penalises long horizons.
-        # Advantage = mean_a − mean_b (excess return over background), NOT mean_a
-        # alone — using mean_a would conflate a trending asset's base return with
-        # the event's directional edge and flip the direction on trending markets.
-        h_arr = np.array(horizons, dtype=float)
-        advantage = mean_a - mean_b
-        score = np.where(usable, np.abs(advantage) / np.sqrt(h_arr), np.nan)
-
-        advantage_by_h = {h: float(advantage[j]) for j, h in enumerate(horizons)}
-        t_stat_by_h = {h: float(t[j]) for j, h in enumerate(horizons)}
+        advantage_by_h = {h: float(delta[j]) for j, h in enumerate(horizons)}
+        t_stat_by_h = {h: float(z[j]) for j, h in enumerate(horizons)}
         score_by_h = {h: float(score[j]) for j, h in enumerate(horizons)}
+        p_value_by_h = {h: float(p_rot[j]) for j, h in enumerate(horizons)}
 
-        if np.isfinite(score).any():
+        # h* on |z_h| over H_sig when non-empty, else over the whole grid (the
+        # empty-gate case is surfaced via statistically_weak, not discarded).
+        sel = score.copy()
+        if sig_mask.any():
+            sel = np.where(sig_mask, sel, np.nan)
+        if np.isfinite(sel).any():
+            j_star = int(np.nanargmax(np.where(np.isfinite(sel), sel, np.nan)))
+        elif np.isfinite(score).any():
             j_star = int(np.nanargmax(np.where(np.isfinite(score), score, np.nan)))
         else:
             j_star = 0
 
-        adv = advantage[j_star]
-        if not np.isfinite(adv) or adv == 0.0:
+        h_star = horizons[j_star]
+        statistically_weak = h_star not in h_sig
+
+        adv = delta[j_star]
+        z_star = z[j_star]
+        undetermined = (
+            not np.isfinite(adv) or adv == 0.0
+            or not np.isfinite(z_star) or abs(z_star) < min_direction_t
+        )
+        if undetermined:
             return DerivedTarget(
-                holding_period_h=horizons[j_star],
+                holding_period_h=h_star,
                 sell_pct=float("nan"),
                 direction="undetermined",
                 mean_advantage=float("nan"),
                 advantage_by_h=advantage_by_h,
                 t_stat_by_h=t_stat_by_h,
                 score_by_h=score_by_h,
+                p_value_by_h=p_value_by_h,
+                h_sig=h_sig,
+                statistically_weak=statistically_weak,
             )
 
         direction = "long" if adv > 0 else "short"
-        h_star = horizons[j_star]
         sell_pct = (
             AlphaDiscovery._compute_mfe_quantile(
                 close_is, active_is, h_star, direction, mfe_quantile, mfe_floor,
@@ -350,7 +388,68 @@ class AlphaDiscovery:
             advantage_by_h=advantage_by_h,
             t_stat_by_h=t_stat_by_h,
             score_by_h=score_by_h,
+            p_value_by_h=p_value_by_h,
+            h_sig=h_sig,
+            statistically_weak=statistically_weak,
         )
+
+    @staticmethod
+    def _rotation_null(
+        active_is: np.ndarray,
+        valid_is: np.ndarray,
+        L0: np.ndarray,
+        mu_base: np.ndarray,
+        delta: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Circular-rotation null for the excess log-return, per horizon.
+
+        Every non-trivial circular shift ``k`` of the event mask is a draw under
+        the null "the event timing is unrelated to the returns": the rotated
+        mask keeps the event's exact activation *clustering* (so overlapping
+        forward windows are reproduced) while decoupling it from the returns.
+        For each horizon the rotated excess is ``Δ_h^{(k)} = mean(L0 over the
+        shifted active∩valid bars) − μ_base``; from the distribution over all
+        shifts we read
+
+        * ``σ_null,h`` — its standard deviation, the honest scale for ``z_h =
+          Δ_h / σ_null,h`` (autocorrelation-robust: it widens on long horizons
+          for clustered events exactly where a naive ``σ / √n`` would not);
+        * ``p_h`` — ``(1 + #{|Δ^{(k)}| ≥ |Δ_h|}) / (1 + #shifts)``, a valid
+          two-sided permutation p-value.
+
+        All ``n−1`` shifts are evaluated at once via the circular cross-
+        correlation (FFT), so the exact test costs ``O(n log n · k)`` — no Monte
+        Carlo, no seed.  Returns ``(z, p)`` with ``nan`` where a horizon has no
+        usable null.
+        """
+        n, k = L0.shape
+        z = np.full(k, np.nan)
+        p = np.full(k, np.nan)
+        if n < 4:
+            return z, p
+
+        af = active_is.astype(float)
+        vf = valid_is.astype(float)
+        # All circular shifts via FFT: corr[k, j] = Σ_u af[u] · X[(u+k) mod n, j].
+        fa_conj = np.conj(np.fft.rfft(af))
+        num = np.fft.irfft(fa_conj[:, None] * np.fft.rfft(L0, axis=0), n=n, axis=0)
+        den = np.fft.irfft(fa_conj[:, None] * np.fft.rfft(vf, axis=0), n=n, axis=0)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mu_shift = np.where(den > 0.5, num / np.maximum(den, 1e-9), np.nan)
+        boot_delta = mu_shift - mu_base[None, :]      # (n, k); row 0 = observed
+        null = boot_delta[1:]                          # drop the identity shift
+
+        n_valid = np.sum(np.isfinite(null), axis=0).astype(float)
+        with np.errstate(invalid="ignore"), warnings.catch_warnings():
+            # An all-NaN column (a horizon with no usable rotation) makes nanstd
+            # warn about empty d.o.f.; it correctly yields nan, which we handle.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            sd = np.nanstd(null, axis=0)
+            z = np.where((sd > 0) & np.isfinite(delta), delta / sd, np.nan)
+            ge = np.nansum(np.abs(null) >= np.abs(delta)[None, :], axis=0)
+            p = np.where(n_valid > 0, (1.0 + ge) / (1.0 + n_valid), np.nan)
+        return z, p
 
     @staticmethod
     def _compute_mfe_quantile(
@@ -680,7 +779,10 @@ class AlphaDiscovery:
 
         The OOS window played no part in the derivation or in any in-sample
         measure; the derived ``(h*, sell_pct*, direction*)`` must confirm the
-        oriented advantage here for the candidate to be promotable.
+        oriented advantage here for the candidate to be promotable.  ``fwd_h``
+        is the forward **log**-return at ``h*`` (matching the log-space
+        derivation); the active-vs-inactive t-test nets out the common drift,
+        so the confirmation reads the event's edge, not the trend.
         """
         n_oos = n - split
         if n_oos <= 0:

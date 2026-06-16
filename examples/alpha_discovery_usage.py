@@ -13,10 +13,12 @@ entrambi gli output — la tabella post-pipeline ``ed.df`` (regime + feature
 derivate) e i candidati con le loro ``event_series`` — e non ricalcola nulla.
 
 Alpha Discovery non riceve alcun target economico in input: per ogni evento
-**deriva dai dati** l'orizzonte h* (argmax di |vantaggio_medio| / √h sulla
-griglia di orizzonti), il sell_pct candidato (quantile della Maximum
-Favorable Excursion a h* sulle barre attive IS) e la direzione (segno del
-vantaggio). Il target derivato viene replicato out-of-sample sulla coda
+**deriva dai dati** l'orizzonte h* (argmax di |z_h|, l'excess log-return
+Δ_h = μ_cond − μ_base standardizzato da un null a rotazione circolare,
+autocorrelation-robust, sulla griglia di orizzonti), il
+sell_pct candidato (quantile della Maximum Favorable Excursion a h* sulle barre
+attive IS) e la direzione (segno dell'excess Δ_h*, che esclude il drift). Il
+target derivato viene replicato out-of-sample sulla coda
 temporale mai usata nella derivazione; IC, lift, Cohen's d e conferma OOS
 alimentano il voto A–D del contratto. Tutti i contratti con direzione
 determinata passano al Modulo 3 (Rule Discovery), unico giudice economico.
