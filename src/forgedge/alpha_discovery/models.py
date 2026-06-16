@@ -203,7 +203,7 @@ class PromotionThresholds:
     fdr_q: float = 0.10
     oos_max_p: float = 0.10
     min_oos_activations: int = 10
-    min_direction_t: float = 0.0
+    min_direction_t: float = 0.5
 
 
 @dataclass
