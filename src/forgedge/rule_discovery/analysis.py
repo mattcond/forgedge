@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .backtest import optimistic_hit_col, run_backtest
+from .backtest import _PreparedCandles, optimistic_hit_col, run_backtest
 from .models import (
     BacktestParams,
     ExcursionStats,
@@ -46,15 +46,16 @@ def execution_envelope(
     cheap to run once on the selected configuration.
     """
     scoring = scoring or ScoringParams()
+    prep = _PreparedCandles(candle, signal_col, timestamp_col)
     conservative = run_backtest(
         candle, signal_col, params.merged(target_hit_col="close"),
         timerange_from=timerange_from, timerange_to=timerange_to,
-        scoring=scoring, timestamp_col=timestamp_col,
+        scoring=scoring, timestamp_col=timestamp_col, _prepared=prep,
     )
     optimistic = run_backtest(
         candle, signal_col, params.merged(target_hit_col=optimistic_hit_col(params.direction)),
         timerange_from=timerange_from, timerange_to=timerange_to,
-        scoring=scoring, timestamp_col=timestamp_col,
+        scoring=scoring, timestamp_col=timestamp_col, _prepared=prep,
     )
     return ExecutionEnvelope(conservative=conservative, optimistic=optimistic)
 
