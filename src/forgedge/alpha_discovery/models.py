@@ -271,8 +271,20 @@ class AlphaConfig:
         Bars per calendar day, used only to size the default rolling-IC window.
         When ``None`` it is inferred from the timestamp spacing.
     score_weights : tuple of float
-        Weights for ``(ic, lift, cohens_d, regime_breadth)`` in the composite
-        alpha score (Step 6.1).
+        Weights for ``(ic, lift, cohens_d, z, regime_breadth)`` in the composite
+        alpha score (Step 6.1) — ``z`` is ``|z_h*|``, the rotation-null
+        standardised excess (the edge-to-noise ratio).  A legacy 4-tuple
+        ``(ic, lift, cohens_d, breadth)`` is still accepted and upgraded with a
+        default ``z`` weight.
+    statistically_weak_penalty : float
+        Multiplier applied to the composite when
+        ``DerivedTarget.statistically_weak`` is ``True`` (the selected horizon
+        did not clear the Benjamini-Hochberg gate).  Default ``0.6``; ``1.0``
+        disables the penalty.
+    oos_bonus : float
+        Additive bonus applied to the composite when the out-of-sample
+        confirmation passes (``OOSValidation.passed``), to separate confirmed
+        edges from unconfirmed ones.  Default ``0.05``; ``0.0`` disables it.
     discovery_date : str or None
         ISO date stamped onto every contract.  ``None`` → today's date.
     """
@@ -294,7 +306,9 @@ class AlphaConfig:
     min_regime_obs: int = 10
     rolling_ic_window: Optional[int] = None
     bars_per_day: Optional[float] = None
-    score_weights: Tuple[float, float, float, float] = (0.25, 0.30, 0.25, 0.20)
+    score_weights: Tuple[float, ...] = (0.20, 0.25, 0.15, 0.25, 0.15)
+    statistically_weak_penalty: float = 0.6
+    oos_bonus: float = 0.05
     discovery_date: Optional[str] = None
 
     def __post_init__(self):
@@ -307,6 +321,17 @@ class AlphaConfig:
             raise ValueError(f"mfe_quantile must be in (0, 1], got {self.mfe_quantile}.")
         if self.mfe_floor < 0:
             raise ValueError(f"mfe_floor must be >= 0, got {self.mfe_floor}.")
+        # Back-compat: a legacy 4-tuple (ic, lift, cohens_d, breadth) is upgraded
+        # to the 5-tuple (ic, lift, cohens_d, z, breadth) with a default z weight.
+        w = tuple(float(x) for x in self.score_weights)
+        if len(w) == 4:
+            w = (w[0], w[1], w[2], 0.25, w[3])
+        elif len(w) != 5:
+            raise ValueError(
+                "score_weights must have 5 elements (ic, lift, cohens_d, z, "
+                f"breadth) or a legacy 4 (ic, lift, cohens_d, breadth); got {len(w)}."
+            )
+        self.score_weights = w
 
 
 # ---------------------------------------------------------------------------

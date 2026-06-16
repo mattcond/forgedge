@@ -424,7 +424,9 @@ regime_dependency, regime_breadth, composite_score, grade, rejection_reasons
 | `min_regime_obs` | `10` | Minimum IS observations to evaluate a regime |
 | `rolling_ic_window` | `None` | Rolling IC window (None → 60 days in bars) |
 | `bars_per_day` | `None` | Bars per day (None → inferred from spacing) |
-| `score_weights` | `(0.25, 0.30, 0.25, 0.20)` | Weights: (IC, lift, cohens_d, breadth) |
+| `score_weights` | `(0.20, 0.25, 0.15, 0.25, 0.15)` | Weights: (IC, lift, cohens_d, z, breadth). A legacy 4-tuple (IC, lift, cohens_d, breadth) is also accepted. |
+| `statistically_weak_penalty` | `0.6` | Composite multiplier when `statistically_weak=True`. |
+| `oos_bonus` | `0.05` | Additive composite bonus when the OOS confirmation passes. |
 | `discovery_date` | `None` | ISO date for contracts (None → today) |
 
 ### `PromotionThresholds`

@@ -727,22 +727,44 @@ priorizarli. Il Composite Alpha Score combina le misure dei passi precedenti.
 ### 6.1 Formula
 
 ```python
-def alpha_score(ic_abs, lift, cohens_d, regime_breadth):
+def alpha_score(ic_abs, lift, cohens_d, z_star, regime_breadth,
+                statistically_weak, oos_passed):
     """
     ic_abs:         |IC| della feature sottostante
     lift:           WR_evento - base_rate  (es. 0.18 = +18pp)
-    cohens_d:       effect size dell'evento binario
+    cohens_d:       effect size dell'evento binario (FIRMATO)
+    z_star:         z_h* — excess standardizzato dal null a rotazione (edge/noise)
     regime_breadth: frazione dei regimi con IC significativo [0, 1]
     """
     # Normalizzazione su valori tipici crypto 1H
-    ic_norm      = min(ic_abs / 0.10, 1.0)
-    lift_norm    = min(lift   / 0.30, 1.0)
-    d_norm       = min(cohens_d / 0.80, 1.0)
-    breadth_norm = regime_breadth
+    ic_norm   = min(ic_abs / 0.10, 1.0)
+    lift_norm = min(lift   / 0.30, 1.0)
+    d_norm    = clip(cohens_d / 0.80, -1.0, 1.0)   # FIRMATO: d<0 penalizza
+    z_norm    = min(abs(z_star) / 3.0, 1.0)        # qualità del segnale (edge/noise)
+    breadth_norm = regime_breadth                  # cade se non c'è regime
 
-    weights = [0.25, 0.30, 0.25, 0.20]
-    return sum(w*v for w,v in zip(weights, [ic_norm, lift_norm, d_norm, breadth_norm]))
+    weights = [0.20, 0.25, 0.15, 0.25, 0.15]       # (ic, lift, d, z, breadth)
+    score = weighted_average(weights, [ic_norm, lift_norm, d_norm, z_norm, breadth_norm])
+
+    # Aggiustamenti di robustezza statistica
+    if statistically_weak:        # h* fuori dal set BH-significativo H_sig
+        score *= statistically_weak_penalty   # default 0.6
+    if oos_passed:                # conferma out-of-sample superata
+        score += oos_bonus        # default 0.05
+    return clip(score, 0.0, 1.0)
 ```
+
+Tre correzioni rispetto alla versione precedente (issue #91):
+
+- **`cohens_d` firmato**: un effect size negativo (gruppo condizionato *peggiore*
+  del background) ora **penalizza** lo score invece di essere azzerato a neutro.
+- **`|z*|` come componente**: la z all'orizzonte scelto (excess standardizzato dal
+  null a rotazione) è la misura più diretta della qualità del segnale e pesa nello score.
+- **Penalità `statistically_weak`**: se `h*` non è nel set BH-significativo, lo
+  score è moltiplicato per `statistically_weak_penalty` — un orizzonte scelto per
+  il bias di selezione che il controllo FDR dovrebbe contenere non può graduare alto.
+- **Bonus OOS**: una conferma out-of-sample superata aggiunge `oos_bonus`, separando
+  gli edge confermati da quelli non confermati.
 
 ### 6.2 Griglia di prioritizzazione
 
@@ -762,9 +784,13 @@ Discovery, che li ordina per priorità e li giudica economicamente.
 ic_abs = 0.032   → ic_norm = 0.32
 lift   = 0.180   → lift_norm = 0.60
 cohens_d = 0.394 → d_norm = 0.49
+z_star = 2.10    → z_norm = 0.70
 regime_breadth = 0.75 (3/4 regimi significativi)
 
-Score = 0.25×0.32 + 0.30×0.60 + 0.25×0.49 + 0.20×0.75 = 0.68 → Grade B
+base = 0.20×0.32 + 0.25×0.60 + 0.15×0.49 + 0.25×0.70 + 0.15×0.75 = 0.575
+statistically_weak = False  → nessuna penalità
+oos_passed = True           → +0.05
+Score = 0.575 + 0.05 = 0.625 → Grade B
 ```
 
 ---

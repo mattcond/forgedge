@@ -225,7 +225,9 @@ Configurazione principale del Modulo 2. Controlla la grid degli orizzonti, la de
 | `min_regime_obs` | int | `10` | Osservazioni minime per regime per calcolare metriche per-regime attendibili. |
 | `rolling_ic_window` | int \| None | `None` | Ampiezza della finestra per il rolling IC. Se None, calcolata automaticamente (≈ n/20). |
 | `bars_per_day` | float \| None | `None` | Barre per giorno per il calcolo del Deflated Sharpe. Se None, derivato dal timestamp. |
-| `score_weights` | tuple[float,...] | `(0.25, 0.30, 0.25, 0.20)` | Pesi del composite score (IC, lift, Cohen's d, regime breadth). |
+| `score_weights` | tuple[float,...] | `(0.20, 0.25, 0.15, 0.25, 0.15)` | Pesi del composite score (IC, lift, Cohen's d, z, regime breadth). Accetta anche la 4-tupla legacy (IC, lift, Cohen's d, breadth). |
+| `statistically_weak_penalty` | float | `0.6` | Moltiplicatore del composite score quando il target è `statistically_weak`. `1.0` disabilita. |
+| `oos_bonus` | float | `0.05` | Bonus additivo al composite score quando la conferma OOS passa. `0.0` disabilita. |
 | `discovery_date` | str \| None | `None` | Data di scoperta (ISO, es. `"2026-01-15"`). Se None, usa la data corrente. |
 
 ```python
