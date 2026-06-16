@@ -24,7 +24,7 @@ from typing import List, Optional
 import pandas as pd
 
 from .analysis import excursion_stats
-from .backtest import _as_datetime64, optimistic_hit_col, run_backtest
+from .backtest import _as_datetime64, _PreparedCandles, optimistic_hit_col, run_backtest
 from .grid import run_grid, select_best
 from .models import (
     BacktestParams,
@@ -122,6 +122,10 @@ def walk_forward(
     if not bounds:
         return None
 
+    # Extract the per-bar candle arrays once for the whole walk-forward — every
+    # train grid screening and test-window backtest below reuses them.
+    prep = _PreparedCandles(candle, signal_col, timestamp_col)
+
     splits: List[WalkForwardSplit] = []
     close_trades: List[pd.DataFrame] = []
     high_trades: List[pd.DataFrame] = []
@@ -135,27 +139,31 @@ def walk_forward(
             grid_res = run_grid(
                 candle, signal_col, base, spec, scoring=scoring,
                 timerange_from=tr_from_s, timerange_to=tr_to_s,
-                timestamp_col=timestamp_col,
+                timestamp_col=timestamp_col, _prepared=prep,
             )
             best = select_best(grid_res, criteria)
             params = best.params if best else base
             train_summary = best.summary if best else run_backtest(
-                candle, signal_col, base, tr_from_s, tr_to_s, scoring, timestamp_col
+                candle, signal_col, base, tr_from_s, tr_to_s, scoring, timestamp_col,
+                _prepared=prep,
             )
         else:
             params = base
             train_summary = run_backtest(
-                candle, signal_col, params, tr_from_s, tr_to_s, scoring, timestamp_col
+                candle, signal_col, params, tr_from_s, tr_to_s, scoring, timestamp_col,
+                _prepared=prep,
             )
 
         # ── evaluate once on the untouched test window (both conventions) ──
         test_summary, test_tr = run_backtest(
             candle, signal_col, params.merged(target_hit_col="close"),
             te_from_s, te_to_s, scoring, timestamp_col, return_trades=True,
+            _prepared=prep,
         )
         _, test_tr_high = run_backtest(
             candle, signal_col, params.merged(target_hit_col=optimistic_hit_col(params.direction)),
             te_from_s, te_to_s, scoring, timestamp_col, return_trades=True,
+            _prepared=prep,
         )
         close_trades.append(test_tr)
         high_trades.append(test_tr_high)

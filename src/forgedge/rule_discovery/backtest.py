@@ -70,6 +70,54 @@ def _months_m(values) -> pd.PeriodIndex:
 
 
 # ---------------------------------------------------------------------------
+# Prepared candles (extract per-bar arrays once)
+# ---------------------------------------------------------------------------
+# ``run_backtest`` is invoked ~210 times per ``RuleDiscovery.run`` over the same
+# candle table.  Parsing the timestamps and materialising every price column
+# (``to_numpy``) is fixed work that does not depend on the operational
+# parameters, yet it was repeated on every call.  ``_PreparedCandles`` extracts
+# those arrays once; the grid and walk-forward screening build it a single time
+# and thread it through.  Columns whose name varies with the parameters
+# (``target_col`` / ``target_hit_col`` / ``buy_price_anchor``) are resolved
+# lazily and memoised — across a whole run these collapse to ``close``/``high``/
+# ``low``.
+
+class _PreparedCandles:
+    """Immutable per-bar numpy arrays extracted once from a candle table."""
+
+    __slots__ = ("n", "dt", "low", "high", "open", "close", "signal", "_frame", "_cache")
+
+    def __init__(self, candle: pd.DataFrame, signal_col: str, timestamp_col: str):
+        if timestamp_col not in candle.columns:
+            raise KeyError(f"timestamp column {timestamp_col!r} not found on candle table")
+        self.n = len(candle)
+        self.dt = _as_datetime64(candle[timestamp_col])
+        self.low = candle["low"].to_numpy(dtype=float)
+        self.high = candle["high"].to_numpy(dtype=float)
+        self.open = candle["open"].to_numpy(dtype=float)
+        self.close = candle["close"].to_numpy(dtype=float)
+        self.signal = candle[signal_col].fillna(0).to_numpy()
+        self._frame = candle
+        self._cache = {
+            "low": self.low, "high": self.high,
+            "open": self.open, "close": self.close,
+        }
+
+    def has_column(self, name: str) -> bool:
+        return name in self._cache or name in self._frame.columns
+
+    def column(self, name: str) -> np.ndarray:
+        """Return a numeric column by name, materialising and memoising on first use."""
+        arr = self._cache.get(name)
+        if arr is None:
+            if name not in self._frame.columns:
+                raise KeyError(f"column {name!r} not found on candle table")
+            arr = self._frame[name].to_numpy(dtype=float)
+            self._cache[name] = arr
+        return arr
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -82,6 +130,7 @@ def run_backtest(
     scoring: Optional[ScoringParams] = None,
     timestamp_col: str = "open_dt",
     return_trades: bool = False,
+    _prepared: Optional["_PreparedCandles"] = None,
 ):
     """Backtest a reconstructed entry signal over a (sub)range of candles.
 
@@ -120,29 +169,27 @@ def run_backtest(
     scoring = scoring or ScoringParams()
     is_short = params.direction == "short"
 
-    c = candle
-    n = len(c)
-    if timestamp_col not in c.columns:
-        raise KeyError(f"timestamp column {timestamp_col!r} not found on candle table")
-
-    dt = _as_datetime64(c[timestamp_col])
-    low = c["low"].to_numpy(dtype=float)
-    high = c["high"].to_numpy(dtype=float)
-    open_ = c["open"].to_numpy(dtype=float)
-    close = c["close"].to_numpy(dtype=float)
-    target_arr = c[params.target_col].to_numpy(dtype=float)
-    hit_arr = c[params.target_hit_col].to_numpy(dtype=float)
-    signal = c[signal_col].fillna(0).to_numpy()
-
-    if params.buy_type == "limit" and params.buy_price_anchor not in c.columns:
-        raise KeyError(
-            f"buy_price_anchor {params.buy_price_anchor!r} not found on candle table"
-        )
-    anchor = (
-        c[params.buy_price_anchor].to_numpy(dtype=float)
-        if params.buy_type == "limit"
-        else close
+    prep = _prepared if _prepared is not None else _PreparedCandles(
+        candle, signal_col, timestamp_col
     )
+    n = prep.n
+    dt = prep.dt
+    low = prep.low
+    high = prep.high
+    open_ = prep.open
+    close = prep.close
+    target_arr = prep.column(params.target_col)
+    hit_arr = prep.column(params.target_hit_col)
+    signal = prep.signal
+
+    if params.buy_type == "limit":
+        if not prep.has_column(params.buy_price_anchor):
+            raise KeyError(
+                f"buy_price_anchor {params.buy_price_anchor!r} not found on candle table"
+            )
+        anchor = prep.column(params.buy_price_anchor)
+    else:
+        anchor = close
 
     # ── entry bars (HIT) restricted to the entry window ──────────────────
     ts_from = pd.Timestamp(timerange_from) if timerange_from else None
@@ -195,12 +242,23 @@ def run_backtest(
         fill_rn, target_rn, sell_price, hit_arr, target_arr, valid, is_short, params
     )
 
-    # ── per-trade frame ──────────────────────────────────────────────────
+    # ── per-trade results (numpy) ────────────────────────────────────────
     fee_rt = params.fee * 2.0
     bp = buy_price[valid]
     ep = exit_price[valid]
     # Long gains when price rises, short when it falls.
     net = ((bp - ep) if is_short else (ep - bp)) / bp - fee_rt
+    fill_dt = dt[fill_rn[valid]]
+    hit = target_hit[valid]
+
+    # The summary is computed straight from the numpy arrays; the per-trade
+    # DataFrame — needed only when ``return_trades`` (the winning config's
+    # ledger, the walk-forward OOS trades) — is materialised on demand.  This
+    # keeps the ~200 grid/walk-forward screening calls free of DataFrame
+    # construction.
+    summary = _summarise_arrays(net, fill_dt, hit, total_signals, months, scoring)
+    if not return_trades:
+        return summary
 
     trades = pd.DataFrame(
         {
@@ -208,19 +266,17 @@ def run_backtest(
             "fill_rn": fill_rn[valid],
             "target_rn": target_rn[valid],
             "exit_rn": exit_rn[valid],
-            "fill_dt": dt[fill_rn[valid]],
+            "fill_dt": fill_dt,
             "exit_dt": dt[exit_rn[valid]],
             "direction": params.direction,
             "buy_price": bp,
             "sell_price": sell_price[valid],
             "exit_price": ep,
             "net_pct_gain": net,
-            "target_hit": target_hit[valid],
+            "target_hit": hit,
         }
     )
-
-    summary = _summarise(trades, total_signals, months, scoring)
-    return (summary, trades) if return_trades else summary
+    return summary, trades
 
 
 # ---------------------------------------------------------------------------
@@ -322,10 +378,32 @@ def _summarise(
     months: pd.PeriodIndex,
     scoring: ScoringParams,
 ) -> BacktestSummary:
-    """Aggregate per-trade results into a :class:`BacktestSummary`."""
+    """Aggregate a per-trade DataFrame into a :class:`BacktestSummary`.
+
+    Thin adapter over :func:`_summarise_arrays`; kept for callers that already
+    hold a materialised trades frame (e.g. the walk-forward OOS concatenation).
+    """
+    return _summarise_arrays(
+        trades["net_pct_gain"].to_numpy(),
+        trades["fill_dt"].to_numpy(),
+        trades["target_hit"].to_numpy(),
+        total_signals,
+        months,
+        scoring,
+    )
+
+
+def _summarise_arrays(
+    net: np.ndarray,
+    fill_dt: np.ndarray,
+    target_hit: np.ndarray,
+    total_signals: int,
+    months: pd.PeriodIndex,
+    scoring: ScoringParams,
+) -> BacktestSummary:
+    """Aggregate per-trade numpy arrays into a :class:`BacktestSummary`."""
     n_months = max(len(months), 1)
-    n = len(trades)
-    net = trades["net_pct_gain"].to_numpy()
+    n = int(net.size)
 
     wins = net[net > 0]
     losses = net[net < 0]
@@ -344,7 +422,7 @@ def _summarise(
     std = float(net.std(ddof=1)) if n > 1 else 0.0
 
     # ── monthly distribution (on the fill bar) ───────────────────────────
-    fill_months = _months_m(trades["fill_dt"])
+    fill_months = _months_m(fill_dt)
     monthly_counts = fill_months.value_counts().reindex(months, fill_value=0)
     active_months = int((monthly_counts > 0).sum())
     zero_months = n_months - active_months
@@ -384,7 +462,7 @@ def _summarise(
         profit_factor=round(profit_factor, 4),
         best_trade=round(float(net.max()), 6) if n else float("nan"),
         worst_trade=round(float(net.min()), 6) if n else float("nan"),
-        target_hit_rate_pct=round(float(trades["target_hit"].mean()) * 100, 2) if n else 0.0,
+        target_hit_rate_pct=round(float(target_hit.mean()) * 100, 2) if n else 0.0,
         n_months=n_months,
         active_months=active_months,
         zero_months=zero_months,
