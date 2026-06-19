@@ -795,77 +795,66 @@ for c in promoted:
 `apply()` uses the expression and thresholds stored in the `EventCandidate` —
 it requires no access to the original session and re-optimises nothing.
 
-### Re-evaluating Alpha Discovery with persisted events
+### Monitoring a discovered edge on new data
 
-When persisted events are reloaded and passed to `AlphaDiscovery` on a larger
-historical frame, all rolling transforms (`pctrank`, `zscore`) are recomputed on
-that frame from scratch. If the observed frame contains pre-training history, the
-rolling baselines shift: thresholds calibrated on the training distribution may
-rarely or never fire, and `AlphaDiscovery` returns `direction="undetermined"` for
-every event ("no derivable target; no finite advantage on the grid").
+When new market data becomes available after a discovery session, the correct
+tool to verify the edge still holds is **Rule Discovery**, not Alpha Discovery.
 
-**The rule:** pass only `train_df + new_bars_df`, not a full historical dataset.
+Alpha Discovery re-derives direction and optimal horizon from whatever data you
+pass it. Running it on a dataset that predates the training window mixes
+activations from incompatible market regimes — for example, a vol-spike event
+discovered as LONG in 2024–2026 may have also fired frequently during a 2022
+crash, where the same condition was followed by strongly *negative* returns. The
+mean advantage from those two opposing populations averages toward zero, and
+Alpha Discovery returns `direction="undetermined"` ("no derivable target") — not
+because the edge is gone, but because the question posed is wrong.
+
+Rule Discovery does not re-derive anything. It takes the `AlphaContract` with
+its fixed `direction`, `holding_period_h`, and `sell_pct`, and measures whether
+the trading rule still produces positive expected value on the new bars:
 
 ```python
-import pickle
 import pandas as pd
-from forgedge import AlphaDiscovery, AlphaConfig
+from forgedge import RuleDiscovery
 
-events = [pickle.load(open(f"events/{e}.pkl", "rb")) for e in event_ids]
+# Append only the genuinely new bars — do not extend into pre-training history
+new_bars = full_df[full_df["open_dt"] > train_df["open_dt"].max()]
+eval_df  = pd.concat([train_df, new_bars]).drop_duplicates("open_dt")
 
-# ✗ WRONG — pre-training history shifts the rolling baselines
-ad = AlphaDiscovery(full_historical_df, events, AlphaConfig(train_ratio=1))
-
-# ✓ CORRECT — training period + new bars only
-eval_df = pd.concat([train_df, new_bars_df]).drop_duplicates("open_dt")
-ad = AlphaDiscovery(eval_df, events, AlphaConfig(train_ratio=1))
-contracts = ad.run()
+for contract, cand in discovered_rules:
+    resp = RuleDiscovery(eval_df, contract, cand).run()
+    print(f"{contract.alpha_id}: {resp.verdict}")
+    print(f"  PF={resp.in_sample_summary.profit_factor:.2f}"
+          f"  WR={resp.in_sample_summary.win_rate_pct:.0%}"
+          f"  OOS-consistency={resp.walk_forward.consistency:.0%}")
 ```
 
-The concat approach preserves the exact rolling context of the training period.
-Every `pctrank` and `zscore` value on the training bars is identical to what was
-observed during discovery; new bars extend the rolling window from the same tail.
+**What to expect on new data**
 
-Rolling-transform events (those with `pctrank` or `zscore` components) are most
-sensitive to this. An expression such as `pr_close_vol_05_48 > 0.854` means "5-day
-vol is in the 85th percentile of the past 48 bars." On the training data the
-percentile is computed against the training-period distribution. On a full historical
-frame that begins in an earlier, different-regime period, the same absolute vol value
-can rank at the 50th percentile — the threshold never fires. As a result,
-`cand.apply()` returns all-False, every horizon has `cnt_a = 0`, and there is no
-finite mean advantage to report.
+A small drop in profit factor (5–15%) is normal as the IS period expands. The
+`walk_forward.consistency` metric is more informative for monitoring: a drop of
+25 percentage points or more signals a weakening edge. A verdict change from
+PARTIAL-EDGE to NON-EDGE warrants investigating whether the market regime has
+shifted.
 
-**Diagnosing "no derivable target" after reload**
+**Why AlphaDiscovery on full historical data produces "no derivable target"**
 
-If `AlphaDiscovery` returns "no derivable target" after reloading persisted events,
-count activations on the observed frame and compare against the stored training count:
+Running `AlphaDiscovery(full_df, events, AlphaConfig(train_ratio=1))` on data
+that predates the training period asks the wrong question: "does this event have
+a measurable edge across *all* of recorded history?" The answer is
+regime-dependent. Activations in the discovery window (e.g. 2024–2026) and
+activations in an earlier crash cycle (e.g. 2022) belong to two populations with
+opposite forward-return characteristics. Their combined mean advantage can cancel
+to near zero at every horizon, causing `_derive_target` to return
+`direction="undetermined"` even when activation counts are well above the minimum
+threshold.
 
-```python
-import pickle
-import numpy as np
-from forgedge.alpha_discovery.discovery import AlphaDiscovery
-from forgedge.alpha_discovery.models import AlphaConfig
-from forgedge.alpha_discovery.target import forward_returns
-
-for event_id in event_ids:
-    cand = pickle.load(open(f"events/{event_id}.pkl", "rb"))
-    ad   = AlphaDiscovery(eval_df, [cand], AlphaConfig(train_ratio=1))
-    ff   = ad._frame
-    active   = cand.apply(ff).fillna(0).astype(bool)
-    n_new    = int(active.sum())
-    n_stored = int(cand.event_series.fillna(0).astype(bool).sum()) if cand.event_series is not None else None
-    fwd      = forward_returns(ff["close"].astype(float), [1])
-    cnt_a_h1 = float(active.astype(float).to_numpy() @ np.isfinite(fwd.to_numpy())[:, 0])
-    print(f"{event_id}: stored={n_stored}, on_frame={n_new}, cnt_a[h=1]={cnt_a_h1:.0f}")
-```
-
-If `on_frame` is less than 10% of `stored`, the rolling baselines have shifted due to
-pre-training history in `eval_df`. Rebuild `eval_df` as
-`pd.concat([train_df, new_bars_df])`.
-
-`AlphaDiscovery._event_series()` emits a `UserWarning` automatically when the observed
-activation count is less than 2 and less than 10% of the stored training count, with
-the event expression and the recommended fix included in the message.
+`AlphaDiscovery._event_series()` emits a `UserWarning` in the specific case
+where the activation count on the observed frame drops to near zero (fewer than 2
+activations and less than 10% of the stored training count). The more common
+"no derivable target" outcome, however, arises at a higher level — from the
+cancellation of opposing signals across incompatible market regimes — and is
+resolved by switching to Rule Discovery rather than re-running Alpha Discovery.
 
 ---
 
