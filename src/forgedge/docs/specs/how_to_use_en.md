@@ -795,6 +795,78 @@ for c in promoted:
 `apply()` uses the expression and thresholds stored in the `EventCandidate` —
 it requires no access to the original session and re-optimises nothing.
 
+### Re-evaluating Alpha Discovery with persisted events
+
+When persisted events are reloaded and passed to `AlphaDiscovery` on a larger
+historical frame, all rolling transforms (`pctrank`, `zscore`) are recomputed on
+that frame from scratch. If the observed frame contains pre-training history, the
+rolling baselines shift: thresholds calibrated on the training distribution may
+rarely or never fire, and `AlphaDiscovery` returns `direction="undetermined"` for
+every event ("no derivable target; no finite advantage on the grid").
+
+**The rule:** pass only `train_df + new_bars_df`, not a full historical dataset.
+
+```python
+import pickle
+import pandas as pd
+from forgedge import AlphaDiscovery, AlphaConfig
+
+events = [pickle.load(open(f"events/{e}.pkl", "rb")) for e in event_ids]
+
+# ✗ WRONG — pre-training history shifts the rolling baselines
+ad = AlphaDiscovery(full_historical_df, events, AlphaConfig(train_ratio=1))
+
+# ✓ CORRECT — training period + new bars only
+eval_df = pd.concat([train_df, new_bars_df]).drop_duplicates("open_dt")
+ad = AlphaDiscovery(eval_df, events, AlphaConfig(train_ratio=1))
+contracts = ad.run()
+```
+
+The concat approach preserves the exact rolling context of the training period.
+Every `pctrank` and `zscore` value on the training bars is identical to what was
+observed during discovery; new bars extend the rolling window from the same tail.
+
+Rolling-transform events (those with `pctrank` or `zscore` components) are most
+sensitive to this. An expression such as `pr_close_vol_05_48 > 0.854` means "5-day
+vol is in the 85th percentile of the past 48 bars." On the training data the
+percentile is computed against the training-period distribution. On a full historical
+frame that begins in an earlier, different-regime period, the same absolute vol value
+can rank at the 50th percentile — the threshold never fires. As a result,
+`cand.apply()` returns all-False, every horizon has `cnt_a = 0`, and there is no
+finite mean advantage to report.
+
+**Diagnosing "no derivable target" after reload**
+
+If `AlphaDiscovery` returns "no derivable target" after reloading persisted events,
+count activations on the observed frame and compare against the stored training count:
+
+```python
+import pickle
+import numpy as np
+from forgedge.alpha_discovery.discovery import AlphaDiscovery
+from forgedge.alpha_discovery.models import AlphaConfig
+from forgedge.alpha_discovery.target import forward_returns
+
+for event_id in event_ids:
+    cand = pickle.load(open(f"events/{event_id}.pkl", "rb"))
+    ad   = AlphaDiscovery(eval_df, [cand], AlphaConfig(train_ratio=1))
+    ff   = ad._frame
+    active   = cand.apply(ff).fillna(0).astype(bool)
+    n_new    = int(active.sum())
+    n_stored = int(cand.event_series.fillna(0).astype(bool).sum()) if cand.event_series is not None else None
+    fwd      = forward_returns(ff["close"].astype(float), [1])
+    cnt_a_h1 = float(active.astype(float).to_numpy() @ np.isfinite(fwd.to_numpy())[:, 0])
+    print(f"{event_id}: stored={n_stored}, on_frame={n_new}, cnt_a[h=1]={cnt_a_h1:.0f}")
+```
+
+If `on_frame` is less than 10% of `stored`, the rolling baselines have shifted due to
+pre-training history in `eval_df`. Rebuild `eval_df` as
+`pd.concat([train_df, new_bars_df])`.
+
+`AlphaDiscovery._event_series()` emits a `UserWarning` automatically when the observed
+activation count is less than 2 and less than 10% of the stored training count, with
+the event expression and the recommended fix included in the message.
+
 ---
 
 ## 10. Persisting artefacts

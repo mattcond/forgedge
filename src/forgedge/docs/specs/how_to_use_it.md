@@ -791,6 +791,82 @@ for c in promoted:
 `apply()` usa l'espressione e le soglie salvate nel `EventCandidate` — non
 richiede accesso alla sessione originale e non ri-ottimizza nulla.
 
+### Ri-valutare Alpha Discovery con eventi persistiti
+
+Quando gli eventi persistiti vengono ricaricati e passati ad `AlphaDiscovery` su un
+frame storico più ampio, tutti i transform rolling (`pctrank`, `zscore`) vengono
+ricalcolati su quel frame da zero. Se il frame osservato contiene storia pre-training,
+le baseline rolling si spostano: le soglie calibrate sulla distribuzione di training
+possono scattare raramente o mai, e `AlphaDiscovery` restituisce
+`direction="undetermined"` per ogni evento ("no derivable target; no finite advantage
+on the grid").
+
+**La regola:** passa solo `train_df + new_bars_df`, non un dataset storico completo.
+
+```python
+import pickle
+import pandas as pd
+from forgedge import AlphaDiscovery, AlphaConfig
+
+events = [pickle.load(open(f"events/{e}.pkl", "rb")) for e in event_ids]
+
+# ✗ SBAGLIATO — la storia pre-training sposta le baseline rolling
+ad = AlphaDiscovery(full_historical_df, events, AlphaConfig(train_ratio=1))
+
+# ✓ CORRETTO — solo il periodo di training + barre nuove
+eval_df = pd.concat([train_df, new_bars_df]).drop_duplicates("open_dt")
+ad = AlphaDiscovery(eval_df, events, AlphaConfig(train_ratio=1))
+contracts = ad.run()
+```
+
+L'approccio con concat preserva il contesto rolling esatto del periodo di training.
+Ogni valore di `pctrank` e `zscore` sulle barre di training è identico a quello
+osservato durante la scoperta; le barre nuove estendono la finestra rolling dalla
+stessa coda.
+
+Gli eventi con transform rolling (componenti `pctrank` o `zscore`) sono i più
+sensibili. Un'espressione come `pr_close_vol_05_48 > 0.854` significa "la volatilità
+5-day è all'85° percentile delle ultime 48 barre." Sul dataset di training il
+percentile è calcolato sulla distribuzione del periodo di training. Su un frame
+storico completo che inizia in un periodo precedente con regime diverso, lo stesso
+valore assoluto di vol può posizionarsi al 50° percentile — la soglia non scatta mai.
+Di conseguenza, `cand.apply()` restituisce tutto False, ogni orizzonte ha `cnt_a = 0`,
+e non c'è nessun vantaggio medio finito da riportare.
+
+**Diagnosticare "no derivable target" dopo il ricaricamento**
+
+Se `AlphaDiscovery` restituisce "no derivable target" dopo aver ricaricato eventi
+persistiti, conta le attivazioni sul frame osservato e confrontale con il conteggio
+memorizzato nel training:
+
+```python
+import pickle
+import numpy as np
+from forgedge.alpha_discovery.discovery import AlphaDiscovery
+from forgedge.alpha_discovery.models import AlphaConfig
+from forgedge.alpha_discovery.target import forward_returns
+
+for event_id in event_ids:
+    cand = pickle.load(open(f"events/{event_id}.pkl", "rb"))
+    ad   = AlphaDiscovery(eval_df, [cand], AlphaConfig(train_ratio=1))
+    ff   = ad._frame
+    active   = cand.apply(ff).fillna(0).astype(bool)
+    n_new    = int(active.sum())
+    n_stored = int(cand.event_series.fillna(0).astype(bool).sum()) if cand.event_series is not None else None
+    fwd      = forward_returns(ff["close"].astype(float), [1])
+    cnt_a_h1 = float(active.astype(float).to_numpy() @ np.isfinite(fwd.to_numpy())[:, 0])
+    print(f"{event_id}: stored={n_stored}, on_frame={n_new}, cnt_a[h=1]={cnt_a_h1:.0f}")
+```
+
+Se `on_frame` è meno del 10% di `stored`, le baseline rolling si sono spostate per
+effetto della storia pre-training in `eval_df`. Ricostruisci `eval_df` come
+`pd.concat([train_df, new_bars_df])`.
+
+`AlphaDiscovery._event_series()` emette automaticamente un `UserWarning` quando il
+conteggio di attivazioni sul frame osservato è inferiore a 2 e a meno del 10% del
+conteggio memorizzato nel training, includendo l'espressione dell'evento e la
+correzione raccomandata nel messaggio.
+
 ---
 
 ## 10. Persistenza degli artefatti
