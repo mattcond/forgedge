@@ -194,10 +194,15 @@ class SelectionCriteria:
     partial_min_profit_factor : float
         Lower PF bound for a ``PARTIAL-EDGE`` (between this and
         ``min_profit_factor``).
-    max_zero_months_edge : int
-        Maximum months with zero trades tolerated for a full ``EDGE``.
-    max_zero_months_partial : int
-        Maximum months with zero trades tolerated for a ``PARTIAL-EDGE``.
+    min_active_month_rate : float
+        Minimum fraction of IS months that must contain at least one trade
+        for a full ``EDGE`` verdict.  Computed as
+        ``active_months / n_months >= min_active_month_rate``.  A rate-based
+        threshold is timeframe-agnostic: on 1H data (tpm ≫ 1) the rate is
+        naturally near 1.0 without any special calibration; on 1D data
+        (tpm ~ 1.5–4) a Poisson process with dispersion up to
+        ``max_dispersion`` (ConsistencyGate) yields an active rate in the
+        0.75–0.95 range, which the default 0.80 accommodates correctly.
     max_regime_dependency : float
         Maximum regime-dependency score for a full ``EDGE``.
     min_dsr : float
@@ -222,8 +227,7 @@ class SelectionCriteria:
     min_pf_score_tpm: float = 0.30
     min_fill_rate: float = 0.40
     partial_min_profit_factor: float = 1.5
-    max_zero_months_edge: int = 1
-    max_zero_months_partial: int = 4
+    min_active_month_rate: float = 0.80
     max_regime_dependency: float = 0.30
     min_dsr: float = 1.0
     max_ttest_p: float = 0.05

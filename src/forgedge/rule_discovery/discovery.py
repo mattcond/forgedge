@@ -431,8 +431,12 @@ class RuleDiscovery:
             edge_block.append(f"PF {s.profit_factor:.2f} < {cr.min_profit_factor}")
         if not (np.isfinite(s.win_rate_pct) and s.win_rate_pct >= cr.min_win_rate):
             edge_block.append(f"WR {s.win_rate_pct} < {cr.min_win_rate}")
-        if s.zero_months > cr.max_zero_months_edge:
-            edge_block.append(f"zero_months {s.zero_months} > {cr.max_zero_months_edge}")
+        active_rate = (s.n_months - s.zero_months) / s.n_months if s.n_months > 0 else 0.0
+        if active_rate < cr.min_active_month_rate:
+            edge_block.append(
+                f"active_months {s.n_months - s.zero_months}/{s.n_months}"
+                f" = {active_rate:.0%} < {cr.min_active_month_rate:.0%}"
+            )
         if stat_val is not None and np.isfinite(stat_val.deflated_sharpe) \
                 and stat_val.deflated_sharpe < cr.min_dsr:
             edge_block.append(f"DSR {stat_val.deflated_sharpe:.2f} < {cr.min_dsr}")
