@@ -24,7 +24,7 @@ from forgedge.rule_discovery.models import GridSpec, WalkForwardConfig
 # end-to-end tests stay fast.
 _FAST_ED_CONFIG = DiscoveryConfig(
     max_and_components=1,
-    gate_params=GateParams(min_act=120, min_months=8, max_conc=0.6, min_tpm=2.0),
+    gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
 )
 
 # Minimal Rule Discovery config — a single-cell grid and a light, non-reoptimised

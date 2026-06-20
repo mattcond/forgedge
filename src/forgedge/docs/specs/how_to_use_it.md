@@ -274,11 +274,9 @@ config = AlphaConfig(
         ic_max_p=0.05,
         min_lift=0.08,
         min_cohens_d=0.15,
-        min_activations=30,
         use_fdr=True,
         fdr_q=0.10,
         oos_max_p=0.10,
-        min_oos_activations=10,
     ),
     fee_per_side=0.001,             # registrato nel contratto per Rule Discovery
 )
@@ -670,11 +668,9 @@ def run_forge_pipeline(
         thresholds=PromotionThresholds(
             min_lift=0.08,
             min_cohens_d=0.15,
-            min_activations=30,
             use_fdr=True,
             fdr_q=0.10,
             oos_max_p=0.10,
-            min_oos_activations=10,
         ),
     )
     ad = AlphaDiscovery(ed.df, candidates, alpha_config)
@@ -790,6 +786,67 @@ for c in promoted:
 
 `apply()` usa l'espressione e le soglie salvate nel `EventCandidate` — non
 richiede accesso alla sessione originale e non ri-ottimizza nulla.
+
+### Monitorare un edge scoperto su nuovi dati
+
+Quando nuovi dati di mercato si rendono disponibili dopo una sessione di scoperta,
+il modulo corretto per verificare che l'edge regga è **Rule Discovery**, non Alpha
+Discovery.
+
+Alpha Discovery ri-deriva direzione e orizzonte ottimale da qualunque dato gli si
+passi. Eseguirlo su un dataset che si estende prima del periodo di training mescola
+attivazioni da regimi di mercato incompatibili — ad esempio, un evento vol-spike
+scoperto come LONG nel 2024–2026 potrebbe aver scattato frequentemente durante il
+crash del 2022, dove la stessa condizione era seguita da rendimenti fortemente
+*negativi*. La media dei vantaggi tra quelle due popolazioni opposte tende a zero,
+e Alpha Discovery restituisce `direction="undetermined"` ("no derivable target") —
+non perché l'edge sia scomparso, ma perché la domanda posta è sbagliata.
+
+Rule Discovery non ri-deriva nulla. Utilizza l'`AlphaContract` con `direction`,
+`holding_period_h` e `sell_pct` fissi e misura se la regola di trading produce ancora
+valore atteso positivo sulle nuove barre:
+
+```python
+import pandas as pd
+from forgedge import RuleDiscovery
+
+# Aggiunge solo le barre genuinamente nuove — non estendere verso la storia pre-training
+new_bars = full_df[full_df["open_dt"] > train_df["open_dt"].max()]
+eval_df  = pd.concat([train_df, new_bars]).drop_duplicates("open_dt")
+
+for contract, cand in discovered_rules:
+    resp = RuleDiscovery(eval_df, contract, cand).run()
+    print(f"{contract.alpha_id}: {resp.verdict}")
+    print(f"  PF={resp.in_sample_summary.profit_factor:.2f}"
+          f"  WR={resp.in_sample_summary.win_rate_pct:.0%}"
+          f"  OOS-consistency={resp.walk_forward.consistency:.0%}")
+```
+
+**Cosa aspettarsi sui nuovi dati**
+
+Un calo moderato del profit factor (5–15%) è normale con l'espansione del periodo IS.
+La metrica `walk_forward.consistency` è più informativa per il monitoraggio: un calo
+di 25 punti percentuali o più segnala un edge che si sta indebolendo. Un cambio di
+verdetto da PARTIAL-EDGE a NON-EDGE è un segnale per verificare se il regime di
+mercato è mutato.
+
+**Perché AlphaDiscovery su dati storici completi produce "no derivable target"**
+
+Eseguire `AlphaDiscovery(full_df, events, AlphaConfig(train_ratio=1))` su dati che
+precedono il periodo di training pone la domanda sbagliata: "questo evento ha un edge
+misurabile su *tutta* la storia disponibile?". La risposta dipende dal regime. Le
+attivazioni nella finestra di scoperta (es. 2024–2026) e quelle in un ciclo di crash
+precedente (es. 2022) appartengono a due popolazioni con caratteristiche di forward
+return opposte. La media dei vantaggi combinata può cancellarsi a ogni orizzonte,
+portando `_derive_target` a restituire `direction="undetermined"` anche quando il
+numero di attivazioni è ben al di sopra della soglia minima.
+
+`AlphaDiscovery._event_series()` emette un `UserWarning` nel caso specifico in cui
+il conteggio di attivazioni sul frame osservato scende quasi a zero (meno di 2
+attivazioni e meno del 10% del conteggio di training). Il più comune errore
+"no derivable target", tuttavia, emerge a un livello superiore — dalla cancellazione
+di segnali opposti tra regimi di mercato incompatibili — e si risolve usando Rule
+Discovery invece di rieseguire Alpha Discovery.
 
 ---
 

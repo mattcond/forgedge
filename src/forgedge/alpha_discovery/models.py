@@ -130,8 +130,7 @@ class OOSValidation:
         direction)``.
     passed : bool
         ``True`` when the OOS advantage keeps the derived sign and the t-test
-        clears ``PromotionThresholds.oos_max_p`` with at least
-        ``min_oos_activations`` activations.
+        clears ``PromotionThresholds.oos_max_p``.
     """
 
     n_bars: int
@@ -143,6 +142,9 @@ class OOSValidation:
     base_rate: float
     lift: float
     passed: bool
+    min_detectable_effect: float = float("nan")
+    """Minimum Cohen's d detectable at ``oos_max_p`` given the OOS sample size.
+    Compared to IS ``cohens_d`` to diagnose underpowered OOS windows."""
 
 
 @dataclass
@@ -165,8 +167,6 @@ class PromotionThresholds:
         Minimum Cohen's d effect size (Step 4.3).
     max_p_value : float
         Maximum t-test p-value when FDR control is disabled.
-    min_activations : int
-        Minimum number of event activations for a stable estimate.
     use_fdr : bool
         When ``True`` (default), promotion uses Benjamini-Hochberg across all
         evaluated candidates instead of the raw ``max_p_value`` threshold.
@@ -174,13 +174,11 @@ class PromotionThresholds:
         Target false-discovery rate for Benjamini-Hochberg (Section 13).
     oos_max_p : float
         Maximum one-sided p-value for the out-of-sample confirmation of the
-        derived target.  Selecting the horizon by maximum in-sample
-        separation is an optimisation; OOS confirmation is what keeps it
-        honest, so promotion additionally requires the held-out tail to
-        confirm the advantage at this level.
-    min_oos_activations : int
-        Minimum activations in the OOS window for the confirmation test to be
-        considered at all — below this the candidate cannot be promoted.
+        derived target.  When the p-value clears this threshold with a positive
+        mean advantage, ``oos_validation.passed`` is ``True``.  No minimum
+        activation count is imposed — the p-value already encodes sample size.
+        A non-parametrizable floor of 10 activations triggers a diagnostic
+        warning about low statistical reliability (see ``AlphaDiscovery``).
     min_direction_t : float
         Minimum ``|z_h*|`` (rotation-standardised excess statistic at the
         selected horizon) for a direction to be assigned.  Below this floor the
@@ -204,11 +202,9 @@ class PromotionThresholds:
     min_lift: float = 0.08
     min_cohens_d: float = 0.15
     max_p_value: float = 0.05
-    min_activations: int = 30
     use_fdr: bool = True
     fdr_q: float = 0.10
     oos_max_p: float = 0.10
-    min_oos_activations: int = 10
     min_direction_t: float = 0.5
     require_significant_direction: bool = True
 

@@ -75,6 +75,12 @@ from .models import (
 from .target import forward_log_returns, forward_returns
 
 
+# Non-parametrizable floor: below this count the t-test is numerically
+# unreliable regardless of the p-value.  Not a hard gate — triggers a
+# diagnostic warning only.
+_MIN_STATS_CASES: int = 10
+
+
 class AlphaDiscovery:
     """FORGE Alpha Discovery module (Modulo 2).
 
@@ -820,10 +826,14 @@ class AlphaDiscovery:
         mean_adv = float(act_ret.mean()) if act_ret.size else nan
         t, p = stats.ttest_ind(act_ret, inact_ret, alternative="greater")
 
+        # p-value alone determines passed — sample size is already encoded in p.
         passed = (
-            n_act >= th.min_oos_activations
-            and np.isfinite(mean_adv) and mean_adv > 0
+            np.isfinite(mean_adv) and mean_adv > 0
             and math.isfinite(p) and p < th.oos_max_p
+        )
+
+        mde = stats.min_detectable_effect(
+            int(act_ret.size), int(inact_ret.size), th.oos_max_p
         )
 
         return OOSValidation(
@@ -836,6 +846,7 @@ class AlphaDiscovery:
             base_rate=base,
             lift=lift,
             passed=bool(passed),
+            min_detectable_effect=mde,
         )
 
     # ------------------------------------------------------------------
@@ -953,9 +964,10 @@ class AlphaDiscovery:
             diagnostics.append(
                 f"[diagnostic] cohens_d {ev.cohens_d:.4f} < {th.min_cohens_d}"
             )
-        if ev.n_activations < th.min_activations:
+        if ev.n_activations < _MIN_STATS_CASES:
             diagnostics.append(
-                f"[diagnostic] n_activations {ev.n_activations} < {th.min_activations}"
+                f"[diagnostic] IS sample too small for reliable statistics "
+                f"(n_activations={ev.n_activations} < {_MIN_STATS_CASES})"
             )
 
         if th.use_fdr:
@@ -969,11 +981,24 @@ class AlphaDiscovery:
                     f"[diagnostic] p_value {ev.p_value:.6f} >= {th.max_p_value}"
                 )
 
-        if oos is not None and not oos.passed:
-            diagnostics.append(
-                f"[diagnostic] OOS weak (p={oos.p_value:.4f} vs {th.oos_max_p}, "
-                f"mean_adv={oos.mean_advantage:.5f}, n_act={oos.n_activations})"
-            )
+        if oos is not None:
+            if oos.n_activations < _MIN_STATS_CASES:
+                diagnostics.append(
+                    f"[diagnostic] OOS sample too small for reliable statistics "
+                    f"(n_oos_activations={oos.n_activations} < {_MIN_STATS_CASES})"
+                )
+            if (math.isfinite(oos.min_detectable_effect)
+                    and np.isfinite(ev.cohens_d)
+                    and oos.min_detectable_effect > abs(ev.cohens_d)):
+                diagnostics.append(
+                    f"[diagnostic] OOS underpowered: MDE={oos.min_detectable_effect:.2f} "
+                    f"> IS Cohen's d={ev.cohens_d:.2f}; OOS cannot confirm IS effect size"
+                )
+            if not oos.passed:
+                diagnostics.append(
+                    f"[diagnostic] OOS weak (p={oos.p_value:.4f} vs {th.oos_max_p}, "
+                    f"mean_adv={oos.mean_advantage:.5f}, n_act={oos.n_activations})"
+                )
 
         # All directed contracts are promoted — Rule Discovery is the economic judge.
         promoted = derived.direction in ("long", "short")
@@ -1067,6 +1092,28 @@ class AlphaDiscovery:
         observed window reflect the history actually available there.  This is
         the honest value of a windowed feature given the observed data, not an
         inconsistency.
+
+        When the observed frame differs from the training frame, this method
+        also checks whether the re-evaluated activation count is dramatically
+        lower than the stored count and emits a second diagnostic warning.  A
+        near-zero count on the observed frame (< 10 % of training activations
+        and fewer than 2 activations) means the event's rolling-transform
+        thresholds are rarely met in the new data context — the most common
+        cause is that the observed frame contains a long pre-training history
+        whose higher volatility inflates the rolling-window baselines
+        (pctrank, z-score) so that the thresholds calibrated on the training
+        window are no longer crossed.
+
+        Correct workflow for evaluating persisted events on additional bars
+        ----------------------------------------------------------------
+        Pass only the **original training data concatenated with the new bars**,
+        not a broader historical dataset.  This preserves the same rolling
+        baselines for the training-period bars and appends the new period at the
+        end::
+
+            # Build evaluation frame: training + new bars only
+            eval_df = pd.concat([train_df, new_bars_df]).drop_duplicates('open_dt')
+            ad = AlphaDiscovery(eval_df, candidates, AlphaConfig(train_ratio=1))
         """
         stored = cand.event_series
         if stored is not None and stored.index.equals(self._frame.index):
@@ -1081,7 +1128,26 @@ class AlphaDiscovery:
                 stacklevel=2,
             )
             self._mismatch_warned = True
-        return cand.apply(self._frame)
+        replayed = cand.apply(self._frame)
+        if stored is not None:
+            stored_count = int(stored.fillna(0).astype(bool).sum())
+            new_count = int(replayed.fillna(0).astype(bool).sum())
+            if stored_count > 0 and new_count < 2 and new_count < stored_count * 0.10:
+                warnings.warn(
+                    f"Event '{cand.event_id}' fired {stored_count} times on the "
+                    f"training frame but only {new_count} time(s) on the observed "
+                    f"frame.  The rolling-transform baselines (pctrank, z-score) "
+                    f"are likely shifted by pre-training history in the observed "
+                    f"data, making the training-calibrated thresholds very hard to "
+                    f"cross.  This will cause AlphaDiscovery to return "
+                    f"direction='undetermined' (no derivable target).  "
+                    f"To preserve the training context, pass "
+                    f"pd.concat([train_df, new_bars_df]) instead of the full "
+                    f"historical dataset.  "
+                    f"Event expression: {cand.expression}",
+                    stacklevel=2,
+                )
+        return replayed
 
     def _feature_series(self, comp) -> pd.Series:
         """Return the component's underlying continuous feature.

@@ -282,33 +282,34 @@ class TestTransformLayer:
 
 class TestConsistencyGate:
     def _make_gate(self):
-        return ConsistencyGate(GateParams(min_act=30, min_months=4, max_conc=0.40, min_tpm=1.0))
+        return ConsistencyGate(GateParams(min_tpm=1.0, max_dispersion=2.5))
 
     def _timestamps(self, n: int = 720) -> pd.Series:
         return pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
 
     def test_sparse_event_fails_volume(self):
-        ts = self._timestamps()
+        # Use a 12-month series with only 2 activations → mean_tpm = 2/12 < min_tpm=1.0
+        ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
         month_idx, n_m = _build_month_index(ts)
-        event = pd.Series([1.0] * 10 + [0.0] * 710)
+        event = pd.Series([1.0] * 2 + [0.0] * 8758)
         active = event.fillna(0).values.astype(bool)
         counts = _count_by_month(active, month_idx, n_m)
         result = self._make_gate().evaluate(active, counts, n_m)
         assert not result.passed
-        assert "volume" in result.fail_reason
+        assert "rate" in result.fail_reason
 
     def test_concentrated_event_fails_concentration(self):
-        ts = self._timestamps()
+        # 12-month series, 50 activations all in first month → high dispersion
+        ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
         month_idx, n_m = _build_month_index(ts)
-        # All activations in first month
-        event = pd.Series([1.0] * 50 + [0.0] * 670)
-        active = event.fillna(0).values.astype(bool)
+        # All 50 activations in first month (first 744 hours), none after
+        active = np.array([True] * 50 + [False] * (8760 - 50), dtype=bool)
         counts = _count_by_month(active, month_idx, n_m)
-        result = ConsistencyGate(GateParams(min_act=30, min_months=1, max_conc=0.40, min_tpm=1.0)).evaluate(
+        result = ConsistencyGate(GateParams(min_tpm=1.0, max_dispersion=2.5)).evaluate(
             active, counts, n_m
         )
         assert not result.passed
-        assert "concentration" in result.fail_reason
+        assert "dispersion" in result.fail_reason
 
     def test_uniform_event_passes(self):
         ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
@@ -317,7 +318,7 @@ class TestConsistencyGate:
         event = pd.Series((rng.random(8760) < 0.10).astype(float))
         active = event.values.astype(bool)
         counts = _count_by_month(active, month_idx, n_m)
-        result = ConsistencyGate(GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0)).evaluate(
+        result = ConsistencyGate(GateParams(min_tpm=2.0, max_dispersion=2.5)).evaluate(
             active, counts, n_m
         )
         assert result.passed
@@ -334,7 +335,7 @@ class TestEventDiscoveryE2E:
         ed = EventDiscovery(
             df,
             config=DiscoveryConfig(
-                gate_params=GateParams(min_act=20, min_months=2, max_conc=0.60, min_tpm=1.0),
+                gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0),
                 max_and_components=2,
             ),
         )
@@ -346,7 +347,7 @@ class TestEventDiscoveryE2E:
         ed = EventDiscovery(
             df,
             config=DiscoveryConfig(
-                gate_params=GateParams(min_act=20, min_months=2, max_conc=0.60, min_tpm=1.0)
+                gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0)
             ),
         )
         candidates = ed.run()
@@ -366,7 +367,7 @@ class TestEventDiscoveryE2E:
         ed = EventDiscovery(
             df,
             config=DiscoveryConfig(
-                gate_params=GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0)
+                gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0)
             ),
         )
         candidates = ed.run()
@@ -383,7 +384,7 @@ class TestEventDiscoveryE2E:
             df,
             config=DiscoveryConfig(
                 # Impossible gate: nothing will pass
-                gate_params=GateParams(min_act=99999, min_months=8, max_conc=0.01, min_tpm=100.0)
+                gate_params=GateParams(min_tpm=100.0, max_dispersion=0.001)
             ),
         )
         ed.run()
@@ -406,7 +407,7 @@ class TestEventDiscoveryE2E:
             df,
             config=DiscoveryConfig(
                 timestamp_col="open_dt",
-                gate_params=GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0),
+                gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0),
             ),
         )
         candidates = ed.run()
@@ -420,7 +421,7 @@ class TestEventDiscoveryE2E:
         df_shuffled = df_sorted.sample(frac=1, random_state=0).reset_index(drop=True)
 
         cfg = DiscoveryConfig(
-            gate_params=GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0)
+            gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0)
         )
         candidates_sorted = EventDiscovery(df_sorted, config=cfg).run()
         candidates_shuffled = EventDiscovery(df_shuffled, config=cfg).run()
@@ -440,7 +441,7 @@ class TestEventDiscoveryE2E:
 
         cfg = DiscoveryConfig(
             timestamp_col="open_dt",
-            gate_params=GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0),
+            gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0),
         )
         candidates_sorted = EventDiscovery(df_sorted, config=cfg).run()
         candidates_shuffled = EventDiscovery(df_shuffled, config=cfg).run()
@@ -467,7 +468,7 @@ class TestWalkForward:
         return _make_kpi_table(n=8760, seed=7)
 
     def test_no_split_leaves_validation_none(self, long_df):
-        cfg = DiscoveryConfig(gate_params=GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0))
+        cfg = DiscoveryConfig(gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0))
         ed = EventDiscovery(long_df, cfg)
         cands = ed.run()
         assert ed.oos_period is None
@@ -475,7 +476,7 @@ class TestWalkForward:
 
     def test_split_without_wf_has_correct_periods(self, long_df):
         cfg = DiscoveryConfig(
-            gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
+            gate_params=GateParams(min_tpm=0.8, max_dispersion=10.0),
             train_ratio=0.70,
         )
         ed = EventDiscovery(long_df, cfg)
@@ -488,7 +489,7 @@ class TestWalkForward:
 
     def test_split_without_wf_validation_is_none(self, long_df):
         cfg = DiscoveryConfig(
-            gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
+            gate_params=GateParams(min_tpm=0.8, max_dispersion=10.0),
             train_ratio=0.70,
         )
         ed = EventDiscovery(long_df, cfg)
@@ -497,7 +498,7 @@ class TestWalkForward:
 
     def test_walk_forward_populates_validation(self, long_df):
         cfg = DiscoveryConfig(
-            gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
+            gate_params=GateParams(min_tpm=0.8, max_dispersion=10.0),
             train_ratio=0.70,
             walk_forward=WalkForwardConfig(n_splits=3, min_pass_rate=0.5),
         )
@@ -514,7 +515,7 @@ class TestWalkForward:
 
     def test_fold_results_structure(self, long_df):
         cfg = DiscoveryConfig(
-            gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
+            gate_params=GateParams(min_tpm=0.8, max_dispersion=10.0),
             train_ratio=0.70,
             walk_forward=WalkForwardConfig(n_splits=2, min_pass_rate=0.5),
         )
@@ -530,7 +531,7 @@ class TestWalkForward:
 
     def test_validated_candidates_filters_correctly(self, long_df):
         cfg = DiscoveryConfig(
-            gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
+            gate_params=GateParams(min_tpm=0.8, max_dispersion=10.0),
             train_ratio=0.70,
             walk_forward=WalkForwardConfig(n_splits=3, min_pass_rate=0.5),
         )
@@ -541,7 +542,7 @@ class TestWalkForward:
         assert len(stable) <= len(cands)
 
     def test_validated_candidates_raises_without_config(self, long_df):
-        cfg = DiscoveryConfig(gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8))
+        cfg = DiscoveryConfig(gate_params=GateParams(min_tpm=0.8, max_dispersion=10.0))
         ed = EventDiscovery(long_df, cfg)
         ed.run()
         with pytest.raises(RuntimeError, match="Walk-forward validation was not configured"):
@@ -549,7 +550,7 @@ class TestWalkForward:
 
     def test_summary_includes_oos_columns_when_wf_set(self, long_df):
         cfg = DiscoveryConfig(
-            gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
+            gate_params=GateParams(min_tpm=0.8, max_dispersion=10.0),
             train_ratio=0.70,
             walk_forward=WalkForwardConfig(n_splits=2, min_pass_rate=0.5),
         )
@@ -560,16 +561,16 @@ class TestWalkForward:
             assert col in s.columns, f"Missing column: {col}"
 
     def test_summary_no_oos_columns_without_wf(self, long_df):
-        cfg = DiscoveryConfig(gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8))
+        cfg = DiscoveryConfig(gate_params=GateParams(min_tpm=0.8, max_dispersion=10.0))
         ed = EventDiscovery(long_df, cfg)
         ed.run()
         s = ed.summary()
         assert "oos_pass_rate" not in s.columns
 
     def test_custom_oos_gate_params(self, long_df):
-        strict_oos = GateParams(min_act=9999, min_months=99, max_conc=0.01, min_tpm=999)
+        strict_oos = GateParams(min_tpm=999.0, max_dispersion=0.001)
         cfg = DiscoveryConfig(
-            gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
+            gate_params=GateParams(min_tpm=0.8, max_dispersion=10.0),
             train_ratio=0.70,
             walk_forward=WalkForwardConfig(n_splits=2, min_pass_rate=0.5, oos_gate_params=strict_oos),
         )
@@ -643,7 +644,7 @@ class TestBugRegressions:
         ed = EventDiscovery(
             df,
             config=DiscoveryConfig(
-                gate_params=GateParams(min_act=10, min_months=1, max_conc=1.0, min_tpm=0.1)
+                gate_params=GateParams(min_tpm=0.1, max_dispersion=100.0)
             ),
         )
         ed.run()
@@ -665,7 +666,7 @@ class TestBugRegressions:
         ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
         month_idx, n_months = _build_month_index(ts)
 
-        gate = ConsistencyGate(GateParams(min_act=50, min_months=6, max_conc=0.40, min_tpm=2.0))
+        gate = ConsistencyGate(GateParams(min_tpm=2.0, max_dispersion=2.5))
 
         # Build two highly correlated events so their AND fires often enough
         base = rng.random(n) < 0.30
@@ -773,7 +774,7 @@ class TestBugRegressions:
 
         df = _make_kpi_table(n=4380, seed=42)
         cfg = DiscoveryConfig(max_and_components=2, gate_params=GateParams(
-            min_act=20, min_months=2, max_conc=0.9, min_tpm=0.5
+            min_tpm=0.5, max_dispersion=15.0
         ))
         ed = EventDiscovery(df, config=cfg)
         candidates = ed.run()
@@ -935,7 +936,7 @@ class TestDiversityGate:
     def test_disabled_via_discovery_config_is_noop(self):
         """diversity_gate_enabled=False → same candidates as baseline."""
         df = _make_kpi_table(n=4380)
-        gate_p = GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0)
+        gate_p = GateParams(min_tpm=1.0, max_dispersion=10.0)
         base = EventDiscovery(df, DiscoveryConfig(gate_params=gate_p)).run()
         with_gate = EventDiscovery(
             df,
@@ -970,7 +971,7 @@ class TestDiversityGate:
     def test_diversity_gate_reduces_pool_in_pipeline(self):
         """diversity_gate_enabled=True yields ≤ candidates than baseline."""
         df = _make_kpi_table(n=4380)
-        gate_p = GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0)
+        gate_p = GateParams(min_tpm=1.0, max_dispersion=10.0)
         base = EventDiscovery(df, DiscoveryConfig(gate_params=gate_p)).run()
         filtered = EventDiscovery(
             df,

@@ -3,11 +3,9 @@
 Filters events based solely on the temporal distribution of their activations.
 No forward return is observed here.
 
-Four criteria:
-  1. Volume     — minimum total activations (MIN_ACT)
-  2. Coverage   — minimum active months (MIN_MONTHS)
-  3. Concentration — no single month dominates (MAX_CONC)
-  4. Frequency  — minimum activations per month (MIN_TPM)
+Two criteria:
+  1. Rate        — minimum activations per month (MIN_TPM)
+  2. Dispersion  — Index of Dispersion ≤ MAX_DISPERSION
 """
 from __future__ import annotations
 
@@ -20,7 +18,7 @@ from .models import GateParams, GateResult, RawEvent
 
 
 class ConsistencyGate:
-    """Applies the four-criterion temporal consistency filter to event series.
+    """Applies the two-criterion temporal consistency filter to event series.
 
     The gate operates exclusively on the *when* of activations, never on
     *what follows* them.  This is essential to avoid look-ahead bias: the
@@ -30,9 +28,8 @@ class ConsistencyGate:
     Parameters
     ----------
     params : GateParams or None
-        Configuration for all four thresholds.  Defaults to
-        ``GateParams()`` (min_act=50, min_months=8, max_conc=0.40,
-        min_tpm=2.0).
+        Configuration for both thresholds.  Defaults to
+        ``GateParams()`` (min_tpm=2.0, max_dispersion=2.5).
     """
 
     def __init__(self, params: Optional[GateParams] = None):
@@ -44,20 +41,15 @@ class ConsistencyGate:
         period_counts: np.ndarray,
         n_total_months: int,
     ) -> GateResult:
-        """Evaluate the four gate criteria given pre-computed counts.
+        """Evaluate the two gate criteria given pre-computed counts.
 
-        Criteria are checked in order from cheapest to most informative:
+        Criteria are checked in order:
 
-        1. **Volume** (``n_activations >= min_act``): rejects sparse events
-           that lack statistical power.
-        2. **Coverage** (``n_active_months >= min_months``): rejects bursts
-           of activity confined to a short period.
-        3. **Concentration** (``max_month_count / n_activations <= max_conc``):
-           rejects events where one month dominates — even if multiple months
-           are nominally active, the distribution may still be skewed.
-        4. **Frequency** (``n_activations / n_total_months >= min_tpm``):
-           rejects events whose average activation rate is too low relative
-           to the full date range (complements coverage by checking density).
+        1. **Rate** (``n_activations / n_total_months >= min_tpm``): rejects
+           events whose average activation rate is too low.
+        2. **Dispersion** (``Var(monthly_counts) / Mean(monthly_counts) <=
+           max_dispersion``): rejects over-dispersed events — bursty signals
+           concentrated in a few months or periodic signals with regular gaps.
 
         Failing any criterion terminates evaluation immediately and returns
         a ``GateResult`` with ``passed=False`` and a ``fail_reason`` string.
@@ -82,41 +74,23 @@ class ConsistencyGate:
         p = self.params
         n_act = int(active.sum())
 
-        if n_act < p.min_act:
-            return GateResult(
-                passed=False,
-                n_activations=n_act,
-                n_active_months=0,
-                max_monthly_share=float("nan"),
-                mean_tpm=float("nan"),
-                fail_reason=f"volume: {n_act} < {p.min_act}",
-            )
+        # Diagnostic fields — computed unconditionally for GateResult
+        n_active_months = int((period_counts > 0).sum()) if len(period_counts) > 0 else 0
+        max_month_count = int(period_counts.max()) if len(period_counts) > 0 and n_act > 0 else 0
+        max_conc = max_month_count / n_act if n_act > 0 else float("nan")
+        mean_tpm = n_act / n_total_months if n_total_months > 0 else 0.0
 
-        n_active_months = int((period_counts > 0).sum())
-        max_month_count = int(period_counts.max())
-        max_conc = max_month_count / n_act
-        mean_tpm = n_act / n_total_months
+        # Index of Dispersion: Var(monthly_counts) / Mean(monthly_counts)
+        # When n_total_months <= 1 there is no temporal spread to measure;
+        # set id_score = 0.0 so the dispersion criterion trivially passes.
+        if n_total_months > 1 and n_act > 0:
+            mu = float(period_counts.mean())
+            var = float(period_counts.var(ddof=1))
+            id_score = float(var / mu) if mu > 0 else float("inf")
+        else:
+            id_score = 0.0
 
-        if n_active_months < p.min_months:
-            return GateResult(
-                passed=False,
-                n_activations=n_act,
-                n_active_months=n_active_months,
-                max_monthly_share=max_conc,
-                mean_tpm=mean_tpm,
-                fail_reason=f"coverage: {n_active_months} active months < {p.min_months}",
-            )
-
-        if max_conc > p.max_conc:
-            return GateResult(
-                passed=False,
-                n_activations=n_act,
-                n_active_months=n_active_months,
-                max_monthly_share=max_conc,
-                mean_tpm=mean_tpm,
-                fail_reason=f"concentration: {max_conc:.2f} > {p.max_conc}",
-            )
-
+        # Criterion 1: activation rate
         if mean_tpm < p.min_tpm:
             return GateResult(
                 passed=False,
@@ -124,7 +98,20 @@ class ConsistencyGate:
                 n_active_months=n_active_months,
                 max_monthly_share=max_conc,
                 mean_tpm=mean_tpm,
-                fail_reason=f"frequency: {mean_tpm:.2f} tpm < {p.min_tpm}",
+                index_of_dispersion=id_score,
+                fail_reason=f"rate: {mean_tpm:.2f} tpm < {p.min_tpm}",
+            )
+
+        # Criterion 2: temporal dispersion
+        if id_score > p.max_dispersion:
+            return GateResult(
+                passed=False,
+                n_activations=n_act,
+                n_active_months=n_active_months,
+                max_monthly_share=max_conc,
+                mean_tpm=mean_tpm,
+                index_of_dispersion=id_score,
+                fail_reason=f"dispersion: ID={id_score:.2f} > {p.max_dispersion}",
             )
 
         return GateResult(
@@ -133,6 +120,7 @@ class ConsistencyGate:
             n_active_months=n_active_months,
             max_monthly_share=max_conc,
             mean_tpm=mean_tpm,
+            index_of_dispersion=id_score,
         )
 
     def evaluate_series(

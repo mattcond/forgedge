@@ -273,11 +273,9 @@ config = AlphaConfig(
         ic_max_p=0.05,
         min_lift=0.08,
         min_cohens_d=0.15,
-        min_activations=30,
         use_fdr=True,
         fdr_q=0.10,
         oos_max_p=0.10,
-        min_oos_activations=10,
     ),
     fee_per_side=0.001,             # recorded in the contract for Rule Discovery
 )
@@ -701,11 +699,9 @@ def run_forge_pipeline(
         thresholds=PromotionThresholds(
             min_lift=0.08,
             min_cohens_d=0.15,
-            min_activations=30,
             use_fdr=True,
             fdr_q=0.10,
             oos_max_p=0.10,
-            min_oos_activations=10,
         ),
     )
     ad = AlphaDiscovery(ed.df, candidates, alpha_config)
@@ -794,6 +790,67 @@ for c in promoted:
 
 `apply()` uses the expression and thresholds stored in the `EventCandidate` —
 it requires no access to the original session and re-optimises nothing.
+
+### Monitoring a discovered edge on new data
+
+When new market data becomes available after a discovery session, the correct
+tool to verify the edge still holds is **Rule Discovery**, not Alpha Discovery.
+
+Alpha Discovery re-derives direction and optimal horizon from whatever data you
+pass it. Running it on a dataset that predates the training window mixes
+activations from incompatible market regimes — for example, a vol-spike event
+discovered as LONG in 2024–2026 may have also fired frequently during a 2022
+crash, where the same condition was followed by strongly *negative* returns. The
+mean advantage from those two opposing populations averages toward zero, and
+Alpha Discovery returns `direction="undetermined"` ("no derivable target") — not
+because the edge is gone, but because the question posed is wrong.
+
+Rule Discovery does not re-derive anything. It takes the `AlphaContract` with
+its fixed `direction`, `holding_period_h`, and `sell_pct`, and measures whether
+the trading rule still produces positive expected value on the new bars:
+
+```python
+import pandas as pd
+from forgedge import RuleDiscovery
+
+# Append only the genuinely new bars — do not extend into pre-training history
+new_bars = full_df[full_df["open_dt"] > train_df["open_dt"].max()]
+eval_df  = pd.concat([train_df, new_bars]).drop_duplicates("open_dt")
+
+for contract, cand in discovered_rules:
+    resp = RuleDiscovery(eval_df, contract, cand).run()
+    print(f"{contract.alpha_id}: {resp.verdict}")
+    print(f"  PF={resp.in_sample_summary.profit_factor:.2f}"
+          f"  WR={resp.in_sample_summary.win_rate_pct:.0%}"
+          f"  OOS-consistency={resp.walk_forward.consistency:.0%}")
+```
+
+**What to expect on new data**
+
+A small drop in profit factor (5–15%) is normal as the IS period expands. The
+`walk_forward.consistency` metric is more informative for monitoring: a drop of
+25 percentage points or more signals a weakening edge. A verdict change from
+PARTIAL-EDGE to NON-EDGE warrants investigating whether the market regime has
+shifted.
+
+**Why AlphaDiscovery on full historical data produces "no derivable target"**
+
+Running `AlphaDiscovery(full_df, events, AlphaConfig(train_ratio=1))` on data
+that predates the training period asks the wrong question: "does this event have
+a measurable edge across *all* of recorded history?" The answer is
+regime-dependent. Activations in the discovery window (e.g. 2024–2026) and
+activations in an earlier crash cycle (e.g. 2022) belong to two populations with
+opposite forward-return characteristics. Their combined mean advantage can cancel
+to near zero at every horizon, causing `_derive_target` to return
+`direction="undetermined"` even when activation counts are well above the minimum
+threshold.
+
+`AlphaDiscovery._event_series()` emits a `UserWarning` in the specific case
+where the activation count on the observed frame drops to near zero (fewer than 2
+activations and less than 10% of the stored training count). The more common
+"no derivable target" outcome, however, arises at a higher level — from the
+cancellation of opposing signals across incompatible market regimes — and is
+resolved by switching to Rule Discovery rather than re-running Alpha Discovery.
 
 ---
 
