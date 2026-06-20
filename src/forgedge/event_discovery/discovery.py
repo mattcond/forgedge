@@ -43,9 +43,8 @@ class DiscoveryConfig:
     Attributes
     ----------
     gate_params : GateParams
-        Thresholds for the Consistency Gate (Step 4).  Defaults to the
-        conservative production settings (min_act=50, min_months=8,
-        max_conc=0.40, min_tpm=2.0).
+        Thresholds for the Consistency Gate (Step 4).  Defaults to
+        ``GateParams()`` (min_tpm=2.0, max_dispersion=2.5).
     max_categorical_classes : int
         Categorical columns with more distinct values than this limit are
         classified but excluded from the event generation pipeline.
@@ -321,7 +320,7 @@ class EventDiscovery:
         _base_cols = [
             "event_id", "status", "expression",
             "n_activations", "n_active_months", "zero_months",
-            "max_monthly_share", "mean_tpm", "gate_passed",
+            "max_monthly_share", "mean_tpm", "index_of_dispersion", "gate_passed",
         ]
         _oos_cols = ["oos_pass_rate", "oos_n_passed", "oos_n_folds", "oos_stable"]
         rows = [c.to_dict() for c in self._candidates]
@@ -507,6 +506,7 @@ class EventDiscovery:
             zero_months=zero_months,
             max_monthly_share=g.max_monthly_share if g else float("nan"),
             mean_tpm=g.mean_tpm if g else float("nan"),
+            index_of_dispersion=g.index_of_dispersion if g else float("nan"),
         )
 
         # Attach DatetimeIndex so callers can call .resample() directly
@@ -579,10 +579,8 @@ class EventDiscovery:
             fold_series = full_series.iloc[len(is_context):].reset_index(drop=True)
             fold_ts = oos_ts.iloc[start:end].reset_index(drop=True)
 
-            # Scale gate params proportionally to fold size
-            oos_params = wf.oos_gate_params or _scale_gate_params(
-                cfg.gate_params, n_oos_bars=end - start, n_is_bars=self._split_idx
-            )
+            # Both gate parameters are rate/ratio invariant — no scaling needed
+            oos_params = wf.oos_gate_params or cfg.gate_params
             month_index, n_months = _build_month_index(fold_ts)
             gate_result = ConsistencyGate(oos_params).evaluate_series(
                 fold_series, month_index, n_months
@@ -708,31 +706,6 @@ def _make_event_id(components: list[EventComponent], idx: int) -> str:
 
 
 def _scale_gate_params(is_params: GateParams, n_oos_bars: int, n_is_bars: int) -> GateParams:
-    """Scale IS gate thresholds proportionally to an OOS window length.
-
-    ``min_act`` and ``min_months`` shrink with the ratio ``n_oos / n_is``,
-    floored at sensible minimums.  ``max_conc`` and ``min_tpm`` are kept
-    unchanged — concentration and per-month frequency are rates, not counts,
-    so they remain meaningful at any window size.
-
-    Parameters
-    ----------
-    is_params : GateParams
-        Thresholds calibrated on the full IS period.
-    n_oos_bars : int
-        Number of bars in the OOS fold being evaluated.
-    n_is_bars : int
-        Number of bars in the IS period.
-
-    Returns
-    -------
-    GateParams
-        Scaled thresholds for use in ``ConsistencyGate`` on the OOS fold.
-    """
-    ratio = n_oos_bars / max(n_is_bars, 1)
-    return GateParams(
-        min_act=max(5, int(is_params.min_act * ratio)),
-        min_months=max(1, int(is_params.min_months * ratio)),
-        max_conc=is_params.max_conc,
-        min_tpm=is_params.min_tpm,
-    )
+    """Both gate parameters (min_tpm, max_dispersion) are rate/ratio invariant.
+    Return IS params unchanged — no scaling needed for OOS windows."""
+    return is_params

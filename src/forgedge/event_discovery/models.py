@@ -80,27 +80,27 @@ class ColumnClassification:
 class GateParams:
     """Thresholds that govern the Consistency Gate (Step 4).
 
+    Both parameters are rate/ratio invariant, making the same
+    ``GateParams`` instance valid for both in-sample discovery and
+    out-of-sample walk-forward validation without any scaling.
+
     Attributes
     ----------
-    min_act : int
-        Minimum total number of bar-level activations across the full dataset.
-        Events with fewer activations are discarded immediately (volume check).
-    min_months : int
-        Minimum number of calendar months in which the event must fire at least
-        once.  Ensures the event is not limited to a short burst.
-    max_conc : float
-        Maximum allowed share of total activations concentrated in a single
-        month (0–1).  Prevents events that fire densely in one period only.
     min_tpm : float
-        Minimum average activations per month (total_activations / n_months).
-        Guards against events that pass volume/coverage but are too sparse on
-        a per-month basis.
+        Minimum average activations per month
+        (total_activations / n_calendar_months).  Events below this rate
+        lack statistical power and are discarded.
+    max_dispersion : float
+        Maximum allowed Index of Dispersion:
+        ``Var(monthly_counts) / Mean(monthly_counts)``.
+        For a pure Poisson process, ID = 1.  Values above the threshold
+        indicate over-dispersed activations — bursty (concentrated in a
+        few months) or periodic (clustered with regular gaps).
+        Default 2.5 passes realistic financial signals while rejecting
+        periodic bursts and single-month concentration.
     """
-
-    min_act: int = 50
-    min_months: int = 8
-    max_conc: float = 0.40
     min_tpm: float = 2.0
+    max_dispersion: float = 2.5
 
 
 @dataclass
@@ -110,7 +110,7 @@ class GateResult:
     Attributes
     ----------
     passed : bool
-        True if all four gate criteria were satisfied.
+        True if all two gate criteria were satisfied.
     n_activations : int
         Total number of True bars in the event series.
     n_active_months : int
@@ -120,6 +120,9 @@ class GateResult:
         (max_month_count / n_activations).
     mean_tpm : float
         Average activations per calendar month (n_activations / n_total_months).
+    index_of_dispersion : float
+        Index of Dispersion (Var/Mean of monthly counts).  NaN when
+        insufficient months for sample variance (n_total_months <= 1).
     fail_reason : str or None
         Human-readable explanation of the first criterion that caused failure,
         or None when the gate passed.
@@ -130,6 +133,9 @@ class GateResult:
     n_active_months: int
     max_monthly_share: float
     mean_tpm: float
+    index_of_dispersion: float = float("nan")
+    """Index of Dispersion (Var/Mean of monthly counts).  NaN when
+    insufficient months for sample variance (n_total_months <= 1)."""
     fail_reason: Optional[str] = None
 
 
@@ -156,10 +162,9 @@ class WalkForwardConfig:
         of 5 (or 2 out of 3) windows must pass.
     oos_gate_params : GateParams or None
         Gate thresholds to use for OOS evaluation.  When ``None`` (default),
-        thresholds are scaled automatically from the IS ``gate_params``
-        proportional to the OOS window length relative to IS length —
-        ``min_act`` and ``min_months`` shrink, ``max_conc`` and ``min_tpm``
-        are unchanged.
+        the IS ``gate_params`` are used unchanged — both ``min_tpm`` and
+        ``max_dispersion`` are rate/ratio invariant and remain valid for
+        any window length.
     """
 
     n_splits: int = 3
@@ -332,6 +337,9 @@ class ActivationStats:
         Fraction of activations concentrated in the busiest month.
     mean_tpm : float
         Average activations per calendar month.
+    index_of_dispersion : float
+        Index of Dispersion (Var/Mean of monthly counts).  NaN when
+        insufficient months for sample variance (n_total_months <= 1).
     """
 
     n_activations: int
@@ -339,6 +347,7 @@ class ActivationStats:
     zero_months: int
     max_monthly_share: float
     mean_tpm: float
+    index_of_dispersion: float = float("nan")
 
 
 @dataclass
@@ -549,6 +558,7 @@ class EventCandidate:
             "zero_months": self.activation_stats.zero_months,
             "max_monthly_share": self.activation_stats.max_monthly_share,
             "mean_tpm": self.activation_stats.mean_tpm,
+            "index_of_dispersion": self.activation_stats.index_of_dispersion,
             "gate_passed": self.consistency_gate.passed,
         }
         if self.validation is not None:
@@ -638,6 +648,7 @@ class EventCandidate:
                 n_active_months=gate.n_active_months,
                 max_monthly_share=gate.max_monthly_share,
                 mean_tpm=gate.mean_tpm,
+                index_of_dispersion=gate.index_of_dispersion,
                 fail_reason="gate_params not stored on this candidate",
             )
 
@@ -655,6 +666,7 @@ class EventCandidate:
             zero_months=zero_months,
             max_monthly_share=g.max_monthly_share,
             mean_tpm=g.mean_tpm,
+            index_of_dispersion=g.index_of_dispersion,
         )
 
 
@@ -757,6 +769,7 @@ class CustomEvent:
             zero_months=0,
             max_monthly_share=float("nan"),
             mean_tpm=float("nan"),
+            index_of_dispersion=float("nan"),
         )
         return EventCandidate(
             event_id=f"CUSTOM-{self.name}",

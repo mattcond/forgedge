@@ -154,7 +154,10 @@ class ANDComposer:
         if not passing_events:
             return []
 
+        p = self.gate.params
         month_index, n_total_months = _build_month_index(timestamps)
+        n_months_dof = max(n_total_months - 1, 1)
+        min_act_floor = max(int(p.min_tpm * n_total_months), 1)
 
         pool = _build_composition_pool(passing_events)
         if len(pool) < 2:
@@ -166,7 +169,6 @@ class ANDComposer:
         )  # (n_pool, n_rows)
 
         composed: list[RawEvent] = []
-        p = self.gate.params
 
         valid_mask = _validity_mask(pool)
         ii_all, jj_all = np.where(np.triu(valid_mask, k=1))
@@ -191,26 +193,25 @@ class ANDComposer:
 
             # Collect volume-passing seeds for triple enumeration
             if max_components >= 3:
-                vol_seed = n_act >= p.min_act
+                vol_seed = n_act >= min_act_floor
                 vol_passing_ii.extend(ii[vol_seed].tolist())
                 vol_passing_jj.extend(jj[vol_seed].tolist())
 
             # Pass 2: full gate only where volume passes — skip matmul otherwise
-            sub_idx = np.where(n_act >= p.min_act)[0]
+            sub_idx = np.where(n_act >= min_act_floor)[0]
             if len(sub_idx) == 0:
                 continue
 
             counts_sub = and_chunk[sub_idx].astype(np.float64) @ one_hot  # (S, n_months)
             n_act_sub = n_act[sub_idx].astype(np.float64)
-            n_active_sub = (counts_sub > 0).sum(axis=1)
-            max_conc_sub = counts_sub.max(axis=1) / n_act_sub
+            n_active_sub = (counts_sub > 0).sum(axis=1)  # diagnostic only
+            max_conc_sub = counts_sub.max(axis=1) / n_act_sub  # diagnostic only
             mean_tpm_sub = n_act_sub / n_total_months
-
-            gate_pass = (
-                (n_active_sub >= p.min_months)
-                & (max_conc_sub <= p.max_conc)
-                & (mean_tpm_sub >= p.min_tpm)
-            )
+            # Index of Dispersion for each pair
+            sum_sq_dev = ((counts_sub - mean_tpm_sub[:, None]) ** 2).sum(axis=1)
+            var_sub = sum_sq_dev / n_months_dof
+            id_sub = np.where(mean_tpm_sub > 0, var_sub / mean_tpm_sub, np.inf)
+            gate_pass = (mean_tpm_sub >= p.min_tpm) & (id_sub <= p.max_dispersion)
 
             passing = np.where(gate_pass)[0]
             remaining = _MAX_COMPOSED - len(composed)
@@ -225,6 +226,7 @@ class ANDComposer:
                     n_active_months=int(n_active_sub[k]),
                     max_monthly_share=float(max_conc_sub[k]),
                     mean_tpm=float(mean_tpm_sub[k]),
+                    index_of_dispersion=float(id_sub[k]),
                 )
                 and_series = pd.Series(
                     and_chunk[orig].astype(float), index=pool[ii[orig]].series.index
@@ -259,22 +261,20 @@ class ANDComposer:
                     and_ijk = and_ij[None, :] & bool_matrix[k_chunk]  # (K, n_rows)
                     n_act_t = and_ijk.sum(axis=1).astype(np.int32)
 
-                    sub_t = np.where(n_act_t >= p.min_act)[0]
+                    sub_t = np.where(n_act_t >= min_act_floor)[0]
                     if len(sub_t) == 0:
                         continue
 
                     # Pass 2: full gate on volume-passing subset
                     counts_t = and_ijk[sub_t].astype(np.float64) @ one_hot
                     n_act_s = n_act_t[sub_t].astype(np.float64)
-                    n_active_s = (counts_t > 0).sum(axis=1)
-                    max_conc_s = counts_t.max(axis=1) / n_act_s
+                    n_active_s = (counts_t > 0).sum(axis=1)  # diagnostic only
+                    max_conc_s = counts_t.max(axis=1) / n_act_s  # diagnostic only
                     mean_tpm_s = n_act_s / n_total_months
-
-                    gate_t = (
-                        (n_active_s >= p.min_months)
-                        & (max_conc_s <= p.max_conc)
-                        & (mean_tpm_s >= p.min_tpm)
-                    )
+                    sum_sq_dev_t = ((counts_t - mean_tpm_s[:, None]) ** 2).sum(axis=1)
+                    var_t = sum_sq_dev_t / n_months_dof
+                    id_t = np.where(mean_tpm_s > 0, var_t / mean_tpm_s, np.inf)
+                    gate_t = (mean_tpm_s >= p.min_tpm) & (id_t <= p.max_dispersion)
 
                     passing_t = np.where(gate_t)[0]
                     remaining = _MAX_COMPOSED - len(composed)
@@ -289,6 +289,7 @@ class ANDComposer:
                             n_active_months=int(n_active_s[m]),
                             max_monthly_share=float(max_conc_s[m]),
                             mean_tpm=float(mean_tpm_s[m]),
+                            index_of_dispersion=float(id_t[m]),
                         )
                         and_series = pd.Series(
                             and_ijk[orig_m].astype(float),
