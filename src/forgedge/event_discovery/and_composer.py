@@ -25,18 +25,19 @@ Pairs: all valid pairs are chunked through a numpy/BLAS batch loop.
 Within each chunk an *early volume pre-filter* computes
 ``n_act = and_chunk.sum(axis=1)`` on the cheap uint8 representation and
 skips the expensive float32 matmul entirely for chunks where no pair
-exceeds ``min_act``.  For sparse financial signals (~3 % activation rate)
-this saves ~85 % of the matmul work.  When volume-passing pairs exist the
-matmul is performed only on the sub-chunk ``and_chunk[vol_mask]``.
+exceeds ``min_act_floor`` (derived as ``max(int(min_tpm * n_total_months), 1)``).
+For sparse financial signals (~3 % activation rate) this saves ~85 % of
+the matmul work.  When volume-passing pairs exist the matmul is performed
+only on the sub-chunk ``and_chunk[vol_mask]``.
 
 Triples: enumeration uses *pair-seeded pruning*.  Since
 ``and(i,j,k) ⊆ and(i,j)`` pointwise, any triple whose seed pair already
 fails the volume criterion is provably impossible to pass the gate.  Only
-pairs where ``n_act(and(i,j)) >= min_act`` are used as seeds.  For each
-seed pair the inner loop over all valid third events is vectorized with the
-same early-volume + sub-chunk matmul pattern.  This reduces the effective
-search space from ``O(n³)`` to ``O(n_vol_pairs × n_pool)`` and makes
-uncapped triple evaluation practical.
+pairs where ``n_act(and(i,j)) >= min_act_floor`` are used as seeds.  For
+each seed pair the inner loop over all valid third events is vectorized with
+the same early-volume + sub-chunk matmul pattern.  This reduces the
+effective search space from ``O(n³)`` to ``O(n_vol_pairs × n_pool)`` and
+makes uncapped triple evaluation practical.
 """
 from __future__ import annotations
 
@@ -110,7 +111,7 @@ class ANDComposer:
 
            * **Pass 1** (cheap): ``and_chunk = bool_matrix[ii] & bool_matrix[jj]``
              (uint8 AND), then ``n_act = and_chunk.sum(axis=1)`` to identify
-             volume-passing pairs.  If no pair exceeds ``min_act``, the
+             volume-passing pairs.  If no pair exceeds ``min_act_floor``, the
              entire chunk skips the matmul.
 
            * **Pass 2** (when needed): the matmul
@@ -119,7 +120,7 @@ class ANDComposer:
              cheap when volume-passing pairs are rare (sparse signals).
 
            While processing pair chunks, any pair where
-           ``n_act >= min_act`` is also recorded as a *volume-passing seed*
+           ``n_act >= min_act_floor`` is also recorded as a *volume-passing seed*
            for triple enumeration.
 
         5. **Pair-seeded triple gate** (max_components >= 3): For each
@@ -129,7 +130,7 @@ class ANDComposer:
 
            * ``and_ijk = and_ij[None,:] & bool_matrix[valid_k_chunk]``
            * Volume pre-filter on ``n_act_t``; skip matmul if nothing passes.
-           * Full gate on sub-chunk where ``n_act_t >= min_act``.
+           * Full gate on sub-chunk where ``n_act_t >= min_act_floor``.
 
            This reduces the search space from ``O(n³)`` to
            ``O(n_vol_pairs × n_pool)`` with no pool cap.

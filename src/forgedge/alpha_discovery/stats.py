@@ -264,6 +264,46 @@ def cohens_d(a: Sequence[float], b: Sequence[float]) -> float:
     return float((aa.mean() - bb.mean()) / pooled)
 
 
+def t_ppf_onesided(alpha: float, df: float) -> float:
+    """One-sided t critical value: smallest t > 0 such that P(T > t | df) = alpha.
+
+    Uses bisection on ``student_t_sf_twosided``.  Accurate to ~1e-10 over the
+    ranges Alpha Discovery cares about (alpha in [0.01, 0.50], df in [1, 10000]).
+    """
+    if df <= 0 or not (0.0 < alpha < 1.0):
+        return float("nan")
+    target = 2.0 * alpha  # P(|T| > t) = 2*alpha  ↔  P(T > t) = alpha for t>0
+    lo, hi = 0.0, 100.0
+    for _ in range(80):
+        mid = (lo + hi) / 2.0
+        if student_t_sf_twosided(mid, df) > target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
+
+def min_detectable_effect(n_a: int, n_b: int, alpha: float) -> float:
+    """Minimum detectable Cohen's d for a one-sided pooled-variance t-test.
+
+    Given ``n_a`` active and ``n_b`` inactive observations and significance
+    level ``alpha``, returns the smallest Cohen's d that would produce
+    ``p <= alpha`` in a ``ttest_ind(..., alternative='greater')`` call.
+
+    Formula: ``d_min = t_crit * sqrt(1/n_a + 1/n_b)`` where ``t_crit`` is
+    the one-sided critical value with ``df = n_a + n_b - 2`` degrees of freedom.
+
+    Returns ``inf`` when either sample is smaller than 2 (t-test undefined).
+    """
+    if n_a < 2 or n_b < 2:
+        return float("inf")
+    df = float(n_a + n_b - 2)
+    t_crit = t_ppf_onesided(alpha, df)
+    if not math.isfinite(t_crit):
+        return float("inf")
+    return t_crit * math.sqrt(1.0 / n_a + 1.0 / n_b)
+
+
 def benjamini_hochberg(p_values: Sequence[float], q: float) -> np.ndarray:
     """Benjamini-Hochberg step-up procedure controlling the FDR at level ``q``.
 

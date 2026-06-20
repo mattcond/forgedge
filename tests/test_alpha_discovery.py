@@ -592,7 +592,7 @@ class TestEventAppliedAsFunction:
         A = full.iloc[:3000].copy()
         ed = EventDiscovery(A, DiscoveryConfig(
             timestamp_col="open_dt",
-            gate_params=GateParams(min_act=30, min_months=2, max_conc=0.6, min_tpm=1.0),
+            gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0),
         ))
         cands = ed.run()
         cand = self._identity_candidate(cands)
