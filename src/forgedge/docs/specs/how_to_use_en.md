@@ -273,11 +273,9 @@ config = AlphaConfig(
         ic_max_p=0.05,
         min_lift=0.08,
         min_cohens_d=0.15,
-        min_activations=30,
         use_fdr=True,
         fdr_q=0.10,
         oos_max_p=0.10,
-        min_oos_activations=10,
     ),
     fee_per_side=0.001,             # recorded in the contract for Rule Discovery
 )
@@ -701,11 +699,9 @@ def run_forge_pipeline(
         thresholds=PromotionThresholds(
             min_lift=0.08,
             min_cohens_d=0.15,
-            min_activations=30,
             use_fdr=True,
             fdr_q=0.10,
             oos_max_p=0.10,
-            min_oos_activations=10,
         ),
     )
     ad = AlphaDiscovery(ed.df, candidates, alpha_config)
