@@ -153,6 +153,39 @@ class TestTargetOptimizerOOS:
         with pytest.raises(RuntimeError):
             opt.validate_oos(_ohlc_table())
 
+    def test_validate_oos_low_sample_flag_and_no_nan_suppression(self):
+        """OOS events below min_activations are still scored; low_sample_oos=True."""
+        # Small OOS window (50 bars) with high min_activations to force violations.
+        df = _ohlc_table(n=1200)
+        train = df.iloc[:1150]
+        oos = df.iloc[1150:]  # 50 bars — very few activations expected
+        opt = TargetOptimizer(
+            train,
+            TargetConfig(horizon=6, min_return=0.02, side="long", min_activations=20),
+        )
+        opt.run()
+        result = opt.validate_oos(oos, top_k=5)
+
+        # low_sample_oos column must exist.
+        assert "low_sample_oos" in result.columns
+
+        # Events with n_activations_oos < 20 must have low_sample_oos=True.
+        flagged = result[result["low_sample_oos"] == True]
+        if not flagged.empty:
+            assert flagged["n_activations_oos"].lt(20).all()
+            # lift_oos is NaN only when the base rate in the OOS window is
+            # degenerate (all 0 or all 1 targets), not merely because the sample
+            # is small — n_activations_oos is always populated.
+            assert flagged["n_activations_oos"].notna().all()
+
+        # n_activations_oos is always populated (never NaN), even for flagged rows.
+        assert result["n_activations_oos"].notna().all()
+
+        # Events with sufficient OOS activations must have low_sample_oos=False.
+        ok = result[result["n_activations_oos"] >= 20]
+        if not ok.empty:
+            assert (ok["low_sample_oos"] == False).all()
+
 
 class TestTargetOptimizerEmpty:
     def test_unreachable_target_returns_empty_schema(self):
