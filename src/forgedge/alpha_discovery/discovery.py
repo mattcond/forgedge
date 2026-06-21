@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from dataclasses import replace
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
@@ -68,6 +69,7 @@ from .models import (
     EventStats,
     ICResult,
     MarketStructure,
+    TargetConfig,
     OOSValidation,
     RegimeAnalysis,
     RegimeStat,
@@ -137,6 +139,10 @@ class AlphaDiscovery:
         """
         cfg = self.config
         horizons = list(cfg.horizon_grid)
+        # Fixed-target mode: make sure the user's horizon is in the forward-return
+        # grid so every downstream measure can be read at it.
+        if cfg.fixed_target is not None and cfg.fixed_target.horizon not in horizons:
+            horizons = sorted(set(horizons) | {cfg.fixed_target.horizon})
 
         close = self._frame[cfg.close_col].astype(float)
         n = len(close)
@@ -187,12 +193,19 @@ class AlphaDiscovery:
             active = event.fillna(0).astype(bool).to_numpy()
             comp0 = cand.components[0]
 
-            derived = self._derive_target(
-                active[:split], valid_is, L0, cnt_t, sum_t, horizons,
-                close.iloc[:split].to_numpy(), cfg.mfe_quantile, cfg.mfe_floor,
-                fdr_q=cfg.thresholds.fdr_q, min_direction_t=cfg.thresholds.min_direction_t,
-                require_significant=cfg.thresholds.require_significant_direction,
-            )
+            if cfg.fixed_target is not None:
+                derived = self._fixed_target(
+                    cfg.fixed_target, active[:split], valid_is, L0, cnt_t, sum_t,
+                    horizons, close.iloc[:split].to_numpy(), cfg,
+                )
+            else:
+                derived = self._derive_target(
+                    active[:split], valid_is, L0, cnt_t, sum_t, horizons,
+                    close.iloc[:split].to_numpy(), cfg.mfe_quantile, cfg.mfe_floor,
+                    fdr_q=cfg.thresholds.fdr_q,
+                    min_direction_t=cfg.thresholds.min_direction_t,
+                    require_significant=cfg.thresholds.require_significant_direction,
+                )
             h_star = derived.holding_period_h
             j_star = horizons.index(h_star)
 
@@ -406,6 +419,54 @@ class AlphaDiscovery:
             p_value_by_h=p_value_by_h,
             h_sig=h_sig,
             statistically_weak=statistically_weak,
+        )
+
+    @staticmethod
+    def _fixed_target(
+        ft: TargetConfig,
+        active_is: np.ndarray,
+        valid_is: np.ndarray,
+        L0: np.ndarray,
+        cnt_t: np.ndarray,
+        sum_t: np.ndarray,
+        horizons: List[int],
+        close_is: np.ndarray,
+        cfg: AlphaConfig,
+    ) -> DerivedTarget:
+        """Build a ``DerivedTarget`` from a **user-specified** target, skipping
+        the per-event derivation (issue #99).
+
+        ``(holding_period_h, sell_pct, direction)`` come straight from ``ft``;
+        ``mean_advantage`` is ``nan`` (not a derived quantity).  When
+        ``cfg.fixed_target_diagnostic`` is set, the standard derivation is run in
+        **read-only** mode to fill the per-horizon profile and the
+        ``data_derived_*`` convergence fields, and ``statistically_weak`` is set
+        from whether the *user's* horizon clears Benjamini-Hochberg.  The
+        direction is never overwritten, so a fixed-target contract is never
+        ``"undetermined"``.
+        """
+        base = dict(
+            holding_period_h=ft.horizon,
+            sell_pct=ft.min_return,
+            direction=ft.side,
+            mean_advantage=float("nan"),
+            fixed_target=True,
+        )
+        if not cfg.fixed_target_diagnostic:
+            return DerivedTarget(**base)
+
+        diag = AlphaDiscovery._derive_target(
+            active_is, valid_is, L0, cnt_t, sum_t, horizons, close_is,
+            cfg.mfe_quantile, cfg.mfe_floor, fdr_q=cfg.thresholds.fdr_q,
+            min_direction_t=cfg.thresholds.min_direction_t,
+            require_significant=cfg.thresholds.require_significant_direction,
+        )
+        return replace(
+            diag,
+            **base,
+            statistically_weak=ft.horizon not in diag.h_sig,
+            data_derived_horizon_h=diag.holding_period_h,
+            data_derived_sell_pct=diag.sell_pct,
         )
 
     @staticmethod

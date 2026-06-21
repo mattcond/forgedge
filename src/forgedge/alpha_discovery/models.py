@@ -91,6 +91,20 @@ class DerivedTarget:
     statistically_weak : bool
         ``True`` when ``h*`` is **not** in ``h_sig`` (no horizon cleared the FDR
         gate): the derived direction stands but the evidence is thin.
+    fixed_target : bool
+        ``True`` when the target was **user-specified** via
+        ``AlphaConfig.fixed_target`` rather than derived from the data.  In that
+        case ``holding_period_h``, ``sell_pct`` and ``direction`` come from the
+        user; ``mean_advantage`` is ``nan`` and the per-horizon profile (when
+        present) is the read-only data derivation kept for diagnostics.
+    data_derived_horizon_h : int or None
+        Fixed-target diagnostic: the horizon the data derivation *would* have
+        selected (``None`` when the read-only derivation was skipped).  Lets a
+        consumer check convergence — ``data_derived_horizon_h ≈ holding_period_h``
+        means the data independently confirms the user's horizon.
+    data_derived_sell_pct : float or None
+        Fixed-target diagnostic: the ``sell_pct`` the data derivation would have
+        produced at its own ``h*`` (``None``/``nan`` when unavailable).
     """
 
     holding_period_h: int
@@ -103,6 +117,9 @@ class DerivedTarget:
     p_value_by_h: Dict[int, float] = field(default_factory=dict)
     h_sig: Tuple[int, ...] = ()
     statistically_weak: bool = False
+    fixed_target: bool = False
+    data_derived_horizon_h: Optional[int] = None
+    data_derived_sell_pct: Optional[float] = None
 
 
 @dataclass
@@ -210,6 +227,46 @@ class PromotionThresholds:
 
 
 @dataclass
+class TargetConfig:
+    """A user-specified economic target for Alpha Discovery's fixed-target mode.
+
+    In the TargetOptimizer workflow the holding horizon, take-profit threshold
+    and side are chosen up front instead of being derived from the data.  Passed
+    via :attr:`AlphaConfig.fixed_target`, it makes Alpha Discovery skip the
+    per-event target *derivation* and measure every candidate against this
+    target directly — every downstream measure (IC, win rate, lift, Cohen's d,
+    regime sensitivity, OOS) runs unchanged.
+
+    Attributes
+    ----------
+    horizon : int
+        Holding period in bars (``> 0``).  Added to the forward-return grid if
+        not already in ``AlphaConfig.horizon_grid``.
+    min_return : float
+        Take-profit threshold as a **fraction** (e.g. ``0.02`` = 2%), used as
+        the derived target's ``sell_pct`` (``> 0``).
+    side : str
+        ``"long"`` or ``"short"`` — the trade direction, never overwritten by
+        the data.
+    """
+
+    horizon: int
+    min_return: float
+    side: str
+
+    def __post_init__(self):
+        self.horizon = int(self.horizon)
+        if self.horizon <= 0:
+            raise ValueError(f"horizon must be a positive integer, got {self.horizon}.")
+        self.min_return = float(self.min_return)
+        if self.min_return <= 0:
+            raise ValueError(f"min_return must be > 0 (fraction), got {self.min_return}.")
+        self.side = str(self.side).lower().strip()
+        if self.side not in ("long", "short"):
+            raise ValueError(f"side must be 'long' or 'short', got {self.side!r}.")
+
+
+@dataclass
 class AlphaConfig:
     """Top-level configuration for the Alpha Discovery pipeline.
 
@@ -290,6 +347,17 @@ class AlphaConfig:
         edges from unconfirmed ones.  Default ``0.05``; ``0.0`` disables it.
     discovery_date : str or None
         ISO date stamped onto every contract.  ``None`` → today's date.
+    fixed_target : TargetConfig or None
+        When set, Alpha Discovery **skips target derivation** and measures every
+        candidate against the user-specified ``(horizon, min_return, side)``.
+        The horizon is added to the forward-return grid if absent.  ``None``
+        (default) = derive the target from the data per event.
+    fixed_target_diagnostic : bool
+        Fixed-target mode only.  When ``True`` (default), Alpha Discovery still
+        runs the target derivation in **read-only** mode to populate the
+        per-horizon diagnostics and the ``data_derived_*`` convergence fields on
+        the contract (the user's target is still what's measured).  ``False``
+        skips it for a pure, slightly faster bypass (diagnostics left empty).
     """
 
     horizon_grid: Tuple[int, ...] = (1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48)
@@ -313,6 +381,8 @@ class AlphaConfig:
     statistically_weak_penalty: float = 0.6
     oos_bonus: float = 0.05
     discovery_date: Optional[str] = None
+    fixed_target: Optional[TargetConfig] = None
+    fixed_target_diagnostic: bool = True
 
     def __post_init__(self):
         if not self.horizon_grid or any(int(h) <= 0 for h in self.horizon_grid):

@@ -247,6 +247,18 @@ IS/OOS split, and traceability metadata.
 | `statistically_weak_penalty` | float | `0.6` | Composite-score multiplier when the target is `statistically_weak`. `1.0` disables it. |
 | `oos_bonus` | float | `0.05` | Additive composite-score bonus when the OOS confirmation passes. `0.0` disables it. |
 | `discovery_date` | str \| None | `None` | Discovery date (ISO, e.g. `"2026-01-15"`). When None, uses today's date. |
+| `fixed_target` | TargetConfig \| None | `None` | When set, **skip target derivation** and measure every candidate against the user's `(horizon, min_return, side)`. The horizon is added to the forward-return grid if absent. |
+| `fixed_target_diagnostic` | bool | `True` | Fixed-target mode only: also run the derivation read-only to fill the per-horizon diagnostics and `data_derived_*` convergence fields. `False` = pure bypass. |
+
+#### TargetConfig
+
+User-specified economic target for `AlphaConfig.fixed_target` (TargetOptimizer workflow).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `horizon` | int | — | Holding period in bars (`> 0`). |
+| `min_return` | float | — | Take-profit threshold as a fraction (e.g. `0.02` = 2%), used as `sell_pct` (`> 0`). |
+| `side` | str | — | `"long"` or `"short"` — never overwritten by the data. |
 
 ```python
 from forgedge import AlphaDiscovery, AlphaConfig, PromotionThresholds

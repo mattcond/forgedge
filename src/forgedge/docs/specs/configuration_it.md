@@ -231,6 +231,18 @@ Configurazione principale del Modulo 2. Controlla la grid degli orizzonti, la de
 | `statistically_weak_penalty` | float | `0.6` | Moltiplicatore del composite score quando il target è `statistically_weak`. `1.0` disabilita. |
 | `oos_bonus` | float | `0.05` | Bonus additivo al composite score quando la conferma OOS passa. `0.0` disabilita. |
 | `discovery_date` | str \| None | `None` | Data di scoperta (ISO, es. `"2026-01-15"`). Se None, usa la data corrente. |
+| `fixed_target` | TargetConfig \| None | `None` | Se impostato, **salta la derivazione del target** e misura ogni candidato sul `(horizon, min_return, side)` dell'utente. L'orizzonte è aggiunto alla grid dei forward return se assente. |
+| `fixed_target_diagnostic` | bool | `True` | Solo in fixed-target: esegue comunque la derivazione in read-only per popolare i diagnostici per-orizzonte e i campi di convergenza `data_derived_*`. `False` = bypass puro. |
+
+#### TargetConfig
+
+Target economico specificato dall'utente per `AlphaConfig.fixed_target` (workflow TargetOptimizer).
+
+| Parametro | Tipo | Default | Descrizione |
+|---|---|---|---|
+| `horizon` | int | — | Holding period in barre (`> 0`). |
+| `min_return` | float | — | Soglia take-profit come frazione (es. `0.02` = 2%), usata come `sell_pct` (`> 0`). |
+| `side` | str | — | `"long"` o `"short"` — mai sovrascritto dai dati. |
 
 ```python
 from forgedge import AlphaDiscovery, AlphaConfig, PromotionThresholds
