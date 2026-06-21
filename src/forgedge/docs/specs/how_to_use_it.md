@@ -150,10 +150,8 @@ config = DiscoveryConfig(
         min_pass_rate=0.75,     # l'evento deve passare il gate in ≥75% delle finestre
     ),
     gate_params=GateParams(     # from forgedge.event_discovery.models
-        min_act=50,             # ≥50 attivazioni IS
-        min_months=8,           # attivo in ≥8 mesi diversi
-        max_conc=0.40,          # ≤40% delle attivazioni in un solo mese
         min_tpm=2.0,            # ≥2.0 attivazioni/mese in media
+        max_dispersion=2.5,     # Index of Dispersion ≤ 2.5 (Var/Mean dei conteggi mensili)
     ),
     max_and_components=2,       # max 2 componenti in AND (default conservativo)
 )
@@ -183,7 +181,7 @@ print(c.sql_expression)   # query DuckDB/SQL per filtrare barre attive
 # Statistiche di attivazione
 s = c.activation_stats
 print(f"Attivazioni: {s.n_activations}, Mesi attivi: {s.n_active_months}")
-print(f"Concentrazione max: {s.max_monthly_concentration:.2%}")
+print(f"Quota mensile max: {s.max_monthly_share:.2%}")
 
 # Usare l'evento su nuovi dati (produzione, no look-ahead)
 new_bars_active = c.apply(new_kpi_table)   # pd.Series bool
@@ -194,7 +192,7 @@ new_bars_active = c.apply(new_kpi_table)   # pd.Series bool
 ```python
 # Tutti i candidati con gate dettagliato
 for c in candidates:
-    gate = c.gate_result
+    gate = c.consistency_gate
     print(f"{c.event_id}: acts={gate.n_activations}, "
           f"months={gate.n_active_months}, passed={gate.passed}")
 ```
@@ -565,7 +563,7 @@ result = forge(
     event_discovery_config=DiscoveryConfig(
         train_ratio=0.80,
         walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
-        gate_params=GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0),
+        gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
     ),
     alpha_config=AlphaConfig(
         train_ratio=0.70,
@@ -586,6 +584,15 @@ Switch utili:
 - `run_registry=False` — ferma dopo Rule Discovery, senza costruire il registry del Modulo 4.
 - `only_validated_events=True` — passa ad Alpha Discovery solo i candidati
   walk-forward-validati (quando Event Discovery ha usato `walk_forward`).
+- `rule_discovery_grades=("A", "B")` — limita il costoso backtest di Rule Discovery ai soli
+  Alpha Contract il cui letter grade (`A` / `B` / `C` / `D`) è nell'insieme fornito.
+  I contratti esclusi restano visibili in `result.contracts` / `result.promoted` per audit
+  ma non ottengono una rule response e non raggiungono il Rule Registry.
+  Il confronto è case-insensitive.  Se omesso, tutti i contratti promossi vengono backtestati.
+- `progress=True` — stampa lo stato di avanzamento per ogni stadio e una barra di progresso
+  di Rule Discovery su `stderr` (utile per run lunghe). Indipendentemente dal flag, ogni
+  milestone viene emessa a livello `INFO` sul logger `forgedge.forge`, quindi
+  `logging.basicConfig(level=logging.INFO)` espone le stesse informazioni.
 
 `ForgeResult` espone le istanze vive dei moduli (`result.market_context`,
 `result.event_discovery`, `result.alpha_discovery`) per drill-down, più
@@ -653,7 +660,7 @@ def run_forge_pipeline(
     ed_config = DiscoveryConfig(
         train_ratio=0.80,
         walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
-        gate_params=GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0),
+        gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
         max_and_components=2,
     )
     ed = EventDiscovery(enriched, config=ed_config)
