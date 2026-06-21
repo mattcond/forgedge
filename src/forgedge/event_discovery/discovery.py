@@ -128,6 +128,7 @@ class EventDiscovery:
         self._candidates: Optional[list[EventCandidate]] = None
         self._timestamps: Optional[pd.Series] = None
         self._split_idx: int = 0
+        self._raw_events: Optional[list[RawEvent]] = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -241,6 +242,8 @@ class EventDiscovery:
                         self.df[col], col, cfg.max_categorical_classes
                     )
                 )
+
+        self._raw_events = raw_events
 
         # Step 4 — Consistency Gate on single events (IS)
         gate = ConsistencyGate(cfg.gate_params)
@@ -358,6 +361,11 @@ class EventDiscovery:
                 " and call run() again."
             )
         return [c for c in self._candidates if c.validation is not None and c.validation.passed]
+
+    @property
+    def raw_events(self) -> Optional[list[RawEvent]]:
+        """Pre-gate raw events from Step 3. Available only after run()."""
+        return self._raw_events
 
     @property
     def is_period(self) -> Optional[tuple]:

@@ -495,6 +495,24 @@ class TestWalkForward:
         cands = ed.run()
         assert all(c.validation is None for c in cands)
 
+    def test_raw_events_none_before_run(self, long_df):
+        ed = EventDiscovery(long_df)
+        assert ed.raw_events is None
+
+    def test_raw_events_populated_after_run(self, long_df):
+        ed = EventDiscovery(long_df)
+        cands = ed.run()
+        assert ed.raw_events is not None
+        assert len(ed.raw_events) > 0
+
+    def test_raw_events_count_exceeds_single_event_candidates(self, long_df):
+        cfg = DiscoveryConfig(gate_params=GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0))
+        ed = EventDiscovery(long_df, cfg)
+        cands = ed.run()
+        # raw_events are pre-gate atomic events; passing single-event candidates are a filtered subset
+        single_cands = [c for c in cands if len(c.components) == 1]
+        assert len(ed.raw_events) >= len(single_cands)
+
     def test_walk_forward_populates_validation(self, long_df):
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_act=20, min_months=3, max_conc=0.70, min_tpm=0.8),
