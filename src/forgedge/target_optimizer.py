@@ -270,6 +270,12 @@ class TargetOptimizer:
         that holds (or improves) out of sample is evidence the edge is not an
         in-sample artefact.
 
+        OOS activations below ``target_cfg.min_activations`` are **always
+        scored** — the lift estimate is noisier but the information is still
+        useful.  A ``logger.warning`` is emitted for each such event, and the
+        result table carries a boolean ``low_sample_oos`` column so callers can
+        filter or flag these rows programmatically.
+
         Parameters
         ----------
         full_df : pd.DataFrame
@@ -282,7 +288,9 @@ class TargetOptimizer:
         -------
         pd.DataFrame
             The in-sample rows for the top-``k`` events, left-joined with their
-            out-of-sample counterparts (``*_oos`` columns).
+            out-of-sample counterparts (``*_oos`` columns) plus a boolean
+            ``low_sample_oos`` flag (``True`` when ``n_activations_oos <
+            target_cfg.min_activations``).
 
         Raises
         ------
@@ -308,16 +316,26 @@ class TargetOptimizer:
                 continue
             ev_full = cand.apply(full_df)
             ev_full.index = target_full.index
-            score = _lift_score(ev_full, target_full, cfg.min_activations)
-            row = {"event_id": eid}
-            if score is None:
-                row.update(
-                    n_activations_oos=np.nan, win_rate_oos=np.nan,
-                    base_rate_oos=np.nan, lift_oos=np.nan, z_oos=np.nan,
+            # Count OOS activations independently of scoring so n_activations_oos
+            # is always populated (even when the base rate is degenerate).
+            combined = pd.DataFrame({"event": ev_full, "Y": target_full}).dropna()
+            n_act_oos = int((combined["event"] == 1).sum())
+            low_sample = n_act_oos < cfg.min_activations
+            if low_sample and n_act_oos > 0:
+                logger.warning(
+                    "validate_oos: event '%s' has only %d OOS activations "
+                    "(min_activations=%d) — lift estimate is noisy.",
+                    eid, n_act_oos, cfg.min_activations,
                 )
+            # Always attempt scoring with min_activations=1 so OOS lift is never
+            # silently suppressed by the sample-size gate.
+            score = _lift_score(ev_full, target_full, min_activations=1)
+            row = {"event_id": eid, "n_activations_oos": n_act_oos, "low_sample_oos": low_sample}
+            if score is None:
+                # No scorable activations (zero activations or degenerate base rate).
+                row.update(win_rate_oos=np.nan, base_rate_oos=np.nan, lift_oos=np.nan, z_oos=np.nan)
             else:
                 row.update(
-                    n_activations_oos=score["n_activations"],
                     win_rate_oos=round(score["win_rate_event"], 4),
                     base_rate_oos=round(score["win_rate_base"], 4),
                     lift_oos=round(score["lift"], 3),
