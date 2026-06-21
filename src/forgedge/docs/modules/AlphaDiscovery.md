@@ -376,6 +376,25 @@ Il profilo completo (`advantage_by_h` = Δ_h, `t_stat_by_h` = z_h,
 `score_by_h` = |z_h|, `p_value_by_h`, `h_sig`, `statistically_weak`) viene
 scritto nel contratto per trasparenza.
 
+#### Modalità fixed-target (TargetOptimizer)
+
+Quando l'utente ha già scelto il target — workflow **TargetOptimizer** — la
+derivazione è ridondante e sovrascriverebbe l'intento. Impostando
+`AlphaConfig.fixed_target = TargetConfig(horizon, min_return, side)`, lo Step 1
+**salta la derivazione**: `holding_period_h`, `sell_pct` e `direction` vengono
+dal `TargetConfig` (l'orizzonte è aggiunto alla grid dei forward return se
+assente), `mean_advantage` è `NaN`. Tutto il resto (IC, win rate, lift,
+Cohen's d, regime, OOS, FDR, scoring) gira invariato sul target fissato, quindi
+il contratto è strutturalmente identico a uno standard. Poiché la `direction` è
+sempre data dall'utente, nessun candidato finisce `undetermined`.
+
+Con `fixed_target_diagnostic=True` (default) la derivazione viene comunque
+eseguita in **read-only** per popolare i profili per-orizzonte e i campi di
+convergenza `data_derived_horizon_h` / `data_derived_sell_pct`: quando
+`data_derived_horizon_h ≈ horizon` e `data_derived_sell_pct ≈ min_return`, i
+dati confermano in modo indipendente la scelta dell'utente. `statistically_weak`
+riflette se l'orizzonte *dell'utente* supera Benjamini-Hochberg.
+
 ### 1.3 Target binario e base rate al target derivato
 
 ```python

@@ -9,6 +9,7 @@ from .alpha_discovery import (
     DerivedTarget,
     OOSValidation,
     PromotionThresholds,
+    TargetConfig,
 )
 from .event_discovery import CustomEvent, DiscoveryConfig, EventDiscovery
 from .forge import ForgeResult, forge, forge_multi
@@ -50,6 +51,7 @@ __all__ = [
     "RegimeClassifier",
     "AlphaDiscovery",
     "AlphaConfig",
+    "TargetConfig",
     "DerivedTarget",
     "OOSValidation",
     "PromotionThresholds",

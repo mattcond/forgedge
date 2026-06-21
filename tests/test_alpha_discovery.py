@@ -13,6 +13,7 @@ from forgedge import (
     DiscoveryConfig,
     EventDiscovery,
     PromotionThresholds,
+    TargetConfig,
 )
 from forgedge.alpha_discovery import stats
 from forgedge.alpha_discovery.market_structure import analyse_market_structure
@@ -1068,6 +1069,89 @@ class TestScoreGrading:
         assert len(ad.config.score_weights) == 5
         s = ad._score(*_score_inputs(), None)
         assert 0.0 <= s.composite_score <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Fixed-target mode — user-specified (horizon, min_return, side) (issue #99)
+# ---------------------------------------------------------------------------
+
+class TestFixedTarget:
+    @pytest.fixture(scope="class")
+    def base(self):
+        df = _predictive_kpi_table(n=4000)
+        return _make_candidates(df)        # (ed, candidates)
+
+    def _run(self, base, diagnostic=True, **ft_kwargs):
+        ed, cands = base
+        cfg = AlphaConfig(
+            asset="SYN",
+            fixed_target=TargetConfig(**ft_kwargs),
+            fixed_target_diagnostic=diagnostic,
+        )
+        return AlphaDiscovery(ed.df, cands, cfg).run()
+
+    def test_target_overrides_derivation(self, base):
+        contracts = self._run(base, horizon=6, min_return=0.03, side="short")
+        assert contracts
+        for c in contracts:
+            dt = c.derived_target
+            assert dt.fixed_target is True
+            assert dt.holding_period_h == 6
+            assert dt.sell_pct == pytest.approx(0.03)
+            assert dt.direction == "short"          # never overwritten by the data
+            assert math.isnan(dt.mean_advantage)    # not a derived quantity
+
+    def test_never_undetermined_all_promoted(self, base):
+        """In fixed-target mode the direction is user-given, so no candidate is
+        lost to 'undetermined'."""
+        contracts = self._run(base, horizon=6, min_return=0.03, side="long")
+        assert contracts
+        assert all(c.derived_target.direction == "long" for c in contracts)
+        assert all(c.status == "HYPOTHESIS" and c.promoted for c in contracts)
+
+    def test_diagnostic_populates_convergence_fields(self, base):
+        contracts = self._run(base, horizon=6, min_return=0.03, side="long")
+        dt = contracts[0].derived_target
+        # read-only derivation fills the per-horizon profile + convergence fields
+        assert dt.advantage_by_h            # non-empty diagnostic profile
+        assert dt.data_derived_horizon_h is not None
+        assert dt.data_derived_horizon_h > 0
+
+    def test_diagnostic_off_skips_derivation(self, base):
+        contracts = self._run(base, diagnostic=False,
+                              horizon=6, min_return=0.03, side="long")
+        dt = contracts[0].derived_target
+        assert dt.fixed_target is True
+        assert dt.holding_period_h == 6 and dt.direction == "long"
+        assert dt.advantage_by_h == {}            # no read-only derivation
+        assert dt.data_derived_horizon_h is None
+        assert dt.data_derived_sell_pct is None
+
+    def test_horizon_outside_grid_is_supported(self, base):
+        """A horizon absent from horizon_grid is added to the forward-return
+        grid so all downstream measures can be read at it."""
+        contracts = self._run(base, horizon=7, min_return=0.03, side="long")
+        assert 7 not in AlphaConfig().horizon_grid
+        assert all(c.derived_target.holding_period_h == 7 for c in contracts)
+
+    def test_downstream_measures_run(self, base):
+        """A fixed-target contract is structurally complete: event stats, OOS
+        and grade are all populated against the user's target."""
+        contracts = self._run(base, horizon=6, min_return=0.03, side="long")
+        c = contracts[0]
+        assert c.event_stats.n_activations >= 0
+        assert c.oos_validation is not None
+        assert c.alpha_score.grade in ("A", "B", "C", "D")
+
+    def test_targetconfig_validation(self):
+        with pytest.raises(ValueError):
+            TargetConfig(horizon=0, min_return=0.03, side="long")
+        with pytest.raises(ValueError):
+            TargetConfig(horizon=6, min_return=0.0, side="long")
+        with pytest.raises(ValueError):
+            TargetConfig(horizon=6, min_return=0.03, side="sideways")
+        # side is normalised
+        assert TargetConfig(horizon=6, min_return=0.03, side="LONG").side == "long"
 
 
 # ---------------------------------------------------------------------------

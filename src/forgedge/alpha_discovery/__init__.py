@@ -18,12 +18,14 @@ from .models import (
     PromotionThresholds,
     RegimeAnalysis,
     RegimeStat,
+    TargetConfig,
 )
 from .target import binary_target, forward_returns
 
 __all__ = [
     "AlphaDiscovery",
     "AlphaConfig",
+    "TargetConfig",
     "DerivedTarget",
     "OOSValidation",
     "PromotionThresholds",
