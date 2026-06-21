@@ -248,11 +248,24 @@ class TargetConfig:
     side : str
         ``"long"`` or ``"short"`` — the trade direction, never overwritten by
         the data.
+    min_activations : int
+        Floor for valid lift scoring in the TargetOptimizer workflow: candidates
+        firing on fewer than ``min_activations`` bars are skipped (the
+        conditional win rate would be too noisy to trust).  Ignored by Alpha
+        Discovery's fixed-target mode, which has its own promotion gates.
+        Default ``10``.
+    min_lift : float
+        Prune threshold for the TargetOptimizer workflow: candidates whose
+        conditional win rate gives ``lift < min_lift`` are discarded after each
+        scoring pass.  Ignored by Alpha Discovery's fixed-target mode.
+        Default ``1.0`` (keep only candidates that beat the base rate).
     """
 
     horizon: int
     min_return: float
     side: str
+    min_activations: int = 10
+    min_lift: float = 1.0
 
     def __post_init__(self):
         self.horizon = int(self.horizon)
@@ -264,6 +277,14 @@ class TargetConfig:
         self.side = str(self.side).lower().strip()
         if self.side not in ("long", "short"):
             raise ValueError(f"side must be 'long' or 'short', got {self.side!r}.")
+        self.min_activations = int(self.min_activations)
+        if self.min_activations < 1:
+            raise ValueError(
+                f"min_activations must be >= 1, got {self.min_activations}."
+            )
+        self.min_lift = float(self.min_lift)
+        if self.min_lift < 0:
+            raise ValueError(f"min_lift must be >= 0, got {self.min_lift}.")
 
 
 @dataclass

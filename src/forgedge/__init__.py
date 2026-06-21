@@ -36,6 +36,7 @@ from .rule_registry import (
     RuleRegistry,
     RuleSubmission,
 )
+from .target_optimizer import TargetOptimizer
 
 __all__ = [
     "forge",
@@ -52,6 +53,7 @@ __all__ = [
     "AlphaDiscovery",
     "AlphaConfig",
     "TargetConfig",
+    "TargetOptimizer",
     "DerivedTarget",
     "OOSValidation",
     "PromotionThresholds",
