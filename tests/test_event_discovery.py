@@ -507,7 +507,7 @@ class TestWalkForward:
         assert len(ed.raw_events) > 0
 
     def test_raw_events_count_exceeds_single_event_candidates(self, long_df):
-        cfg = DiscoveryConfig(gate_params=GateParams(min_act=20, min_months=4, max_conc=0.60, min_tpm=1.0))
+        cfg = DiscoveryConfig(gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0))
         ed = EventDiscovery(long_df, cfg)
         cands = ed.run()
         # raw_events are pre-gate atomic events; passing single-event candidates are a filtered subset
@@ -714,6 +714,55 @@ class TestBugRegressions:
             assert abs(ev.gate_result.max_monthly_share - scalar.max_monthly_share) < 1e-9, (
                 "float64 mismatch between ANDComposer and ConsistencyGate.evaluate"
             )
+
+    # ── Issue #98: ANDComposer.compose() gate=None skips full gate ───────────
+
+    def _make_two_events(self, n=8760):
+        """Helper: two volume-passing events for compose() tests."""
+        rng = np.random.default_rng(42)
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=2.0, max_dispersion=2.5))
+        month_idx, n_months = _build_month_index(ts)
+        base = rng.random(n) < 0.30
+        s1 = pd.Series((base & (rng.random(n) < 0.80)).astype(float))
+        s2 = pd.Series((base & (rng.random(n) < 0.80)).astype(float))
+        comp1 = _make_component("feat_x", "identity", {}, [])
+        comp2 = _make_component("feat_y", "identity", {}, [])
+        ev1 = RawEvent(series=s1, component=comp1)
+        ev2 = RawEvent(series=s2, component=comp2)
+        ev1.gate_result = gate.evaluate_series(s1, month_idx, n_months)
+        ev2.gate_result = gate.evaluate_series(s2, month_idx, n_months)
+        return [ev1, ev2], ts, gate
+
+    def test_compose_gate_none_returns_volume_passing_events(self):
+        """gate=None skips full gate; composed events have passed=False."""
+        events, ts, gate = self._make_two_events()
+        composed_no_gate = ANDComposer(gate).compose(events, ts, gate=None)
+        assert len(composed_no_gate) > 0
+        assert all(not ev.gate_result.passed for ev in composed_no_gate)
+
+    def test_compose_gate_none_returns_more_than_with_gate(self):
+        """gate=None returns >= composed events compared to full gate (no events filtered)."""
+        events, ts, gate = self._make_two_events()
+        composed_with_gate = ANDComposer(gate).compose(events, ts)
+        composed_no_gate = ANDComposer(gate).compose(events, ts, gate=None)
+        assert len(composed_no_gate) >= len(composed_with_gate)
+
+    def test_compose_gate_none_subsequent_filter_recovers_standard_results(self):
+        """Applying gate.filter() after gate=None compose() matches standard compose()."""
+        events, ts, gate = self._make_two_events()
+        composed_standard = ANDComposer(gate).compose(events, ts)
+        composed_raw = ANDComposer(gate).compose(events, ts, gate=None)
+        filtered = gate.filter(composed_raw, ts)
+        standard_ids = {ev.component.expression for ev in composed_standard}
+        filtered_ids = {ev.component.expression for ev in filtered}
+        assert standard_ids == filtered_ids
+
+    def test_compose_default_behaviour_unchanged(self):
+        """Omitting gate param preserves current behaviour (passed=True on results)."""
+        events, ts, gate = self._make_two_events()
+        composed = ANDComposer(gate).compose(events, ts)
+        assert all(ev.gate_result.passed for ev in composed)
 
     # ── Bug #3: diffnorm_std == 0 must return all-NaN, not KeyError ─────────
 

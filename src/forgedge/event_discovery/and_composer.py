@@ -50,6 +50,12 @@ import pandas as pd
 from .consistency_gate import ConsistencyGate, _build_month_index
 from .models import EventComponent, GateResult, RawEvent
 
+# Sentinel used as the default for the ``gate`` parameter of
+# ``ANDComposer.compose()``.  Distinguishes "caller did not pass gate"
+# (→ use self.gate, full gate applied) from "caller explicitly passed None"
+# (→ skip full gate, return all volume-passing compositions).
+_COMPOSE_DEFAULT: "ConsistencyGate" = object()  # type: ignore[assignment]
+
 # Number of (i, j) pairs processed per vectorized batch.  Larger values
 # consume more peak memory; smaller values add Python loop overhead.
 # At 5 000 pairs with n_rows ≈ 8 760 (1 year 1H) the uint8 AND costs ~44 MB
@@ -85,6 +91,8 @@ class ANDComposer:
         passing_events: list[RawEvent],
         timestamps: pd.Series,
         max_components: int = 2,
+        *,
+        gate: Optional[ConsistencyGate] = _COMPOSE_DEFAULT,
     ) -> list[RawEvent]:
         """Generate valid AND compositions and return those passing the gate.
 
@@ -141,21 +149,41 @@ class ANDComposer:
         Parameters
         ----------
         passing_events : list[RawEvent]
-            All single events that passed the gate in Step 4.
+            Atoms to compose.  In the standard FORGE pipeline these are
+            events that passed the ConsistencyGate; in TargetOptimizer they
+            may be pre-filtered by lift score instead.
         timestamps : pd.Series
             Datetime series aligned to the KPI table rows.
         max_components : int
             Maximum number of components per composed event (2 or 3).
+        gate : ConsistencyGate or None, keyword-only
+            Controls the full ConsistencyGate evaluation during composition.
+
+            - **Omitted** (default): uses ``self.gate``; composed events are
+              returned only when they pass all four criteria (volume, coverage,
+              concentration, frequency).  Standard FORGE pipeline behaviour.
+            - **``None``**: the cheap volume pre-filter (``min_act`` from
+              ``self.gate.params``) still runs, but the full gate check is
+              skipped.  All volume-passing compositions are returned with
+              ``gate_result.passed=False``; the caller is responsible for a
+              subsequent ``ConsistencyGate.filter()`` pass.
+            - **``ConsistencyGate`` instance**: uses that gate for the full
+              check, overriding ``self.gate`` for this call only.
 
         Returns
         -------
         list[RawEvent]
-            AND-composed events that passed the Consistency Gate.
+            AND-composed events.  When *gate* is provided (or defaulted to
+            ``self.gate``), only events that passed the ConsistencyGate are
+            returned.  When *gate* is ``None``, all volume-passing events are
+            returned with ``gate_result.passed=False``.
         """
         if not passing_events:
             return []
 
-        p = self.gate.params
+        _gate = self.gate if gate is _COMPOSE_DEFAULT else gate
+        # When gate=None, still use self.gate.params for the volume pre-filter
+        p = (_gate or self.gate).params
         month_index, n_total_months = _build_month_index(timestamps)
         n_months_dof = max(n_total_months - 1, 1)
         min_act_floor = max(int(p.min_tpm * n_total_months), 1)
@@ -212,9 +240,13 @@ class ANDComposer:
             sum_sq_dev = ((counts_sub - mean_tpm_sub[:, None]) ** 2).sum(axis=1)
             var_sub = sum_sq_dev / n_months_dof
             id_sub = np.where(mean_tpm_sub > 0, var_sub / mean_tpm_sub, np.inf)
-            gate_pass = (mean_tpm_sub >= p.min_tpm) & (id_sub <= p.max_dispersion)
 
-            passing = np.where(gate_pass)[0]
+            if _gate is not None:
+                gate_pass = (mean_tpm_sub >= p.min_tpm) & (id_sub <= p.max_dispersion)
+                passing = np.where(gate_pass)[0]
+            else:
+                passing = np.arange(len(sub_idx))
+
             remaining = _MAX_COMPOSED - len(composed)
             if len(passing) > remaining:
                 passing = passing[:remaining]
@@ -222,7 +254,7 @@ class ANDComposer:
             for k in passing:
                 orig = sub_idx[k]
                 gate_result = GateResult(
-                    passed=True,
+                    passed=(_gate is not None),
                     n_activations=int(n_act_sub[k]),
                     n_active_months=int(n_active_sub[k]),
                     max_monthly_share=float(max_conc_sub[k]),
@@ -275,9 +307,13 @@ class ANDComposer:
                     sum_sq_dev_t = ((counts_t - mean_tpm_s[:, None]) ** 2).sum(axis=1)
                     var_t = sum_sq_dev_t / n_months_dof
                     id_t = np.where(mean_tpm_s > 0, var_t / mean_tpm_s, np.inf)
-                    gate_t = (mean_tpm_s >= p.min_tpm) & (id_t <= p.max_dispersion)
 
-                    passing_t = np.where(gate_t)[0]
+                    if _gate is not None:
+                        gate_t = (mean_tpm_s >= p.min_tpm) & (id_t <= p.max_dispersion)
+                        passing_t = np.where(gate_t)[0]
+                    else:
+                        passing_t = np.arange(len(sub_t))
+
                     remaining = _MAX_COMPOSED - len(composed)
                     if len(passing_t) > remaining:
                         passing_t = passing_t[:remaining]
@@ -285,7 +321,7 @@ class ANDComposer:
                     for m in passing_t:
                         orig_m = sub_t[m]
                         gate_result = GateResult(
-                            passed=True,
+                            passed=(_gate is not None),
                             n_activations=int(n_act_s[m]),
                             n_active_months=int(n_active_s[m]),
                             max_monthly_share=float(max_conc_s[m]),
