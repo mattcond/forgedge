@@ -23,12 +23,12 @@ Pipeline
 
     EventDiscovery (raw atoms, pre-gate)
         ↓
-    1st pass — score atoms by lift on Y, prune lift < min_lift
+    1st pass — score atoms by lift on Y, prune lift < min_lift_atoms
         ↓  lift-positive atoms
     ANDComposer (guided — combines only lift-positive atoms, gate=None)
         ↓  AND compositions
-    2nd pass — score compositions by lift, prune lift < min_lift
-        ↓  lift-positive compositions
+    2nd pass — score atoms+compositions by lift, prune lift < min_lift_result
+        ↓  lift-positive survivors
     ConsistencyGate (formal quality check)
         ↓  EventCandidates
     [optional] AlphaDiscovery (fixed-target mode) → AlphaContracts
@@ -36,7 +36,10 @@ Pipeline
 Pruning lift-negative atoms before AND composition is lossless within the
 pipeline: an atom with ``lift < 1`` on ``Y`` can only enter a positive-lift AND
 by cherry-picking a degenerate low-support subset, which the ConsistencyGate
-would reject anyway.
+would reject anyway.  That guarantee holds **only at ``min_lift_atoms == 1.0``**:
+a higher 1st-pass threshold removes moderately-positive atoms whose
+*intersection* carries emergent lift, so use ``min_lift_result`` to shorten the
+final list and leave ``min_lift_atoms`` at its default (issue #107).
 
 This module is **standalone** — it does not touch ``forge()`` or
 ``ForgeResult``.  Its only public entry points are :meth:`TargetOptimizer.run`
@@ -139,7 +142,8 @@ class TargetOptimizer:
         :meth:`validate_oos`.
     target_cfg : TargetConfig
         The fixed economic target ``(horizon, min_return, side)`` plus the
-        scoring knobs ``min_activations`` and ``min_lift``.
+        scoring knobs ``min_activations``, ``min_lift_atoms`` and
+        ``min_lift_result``.
     discovery_cfg : DiscoveryConfig, optional
         Event Discovery settings.  Defaults to a full-frame (``train_ratio=1.0``)
         discovery so mined atoms align row-for-row with the target; AND
@@ -221,9 +225,14 @@ class TargetOptimizer:
         # The month index for the gate is taken from the discovery frame's index.
         timestamps = pd.Series(ed.df.index, index=ed.df.index)
 
-        # ── 1st pass — lift-prune the raw atoms ───────────────────────────
-        lift_atoms = self._prune_by_lift(raw_events, target)
-        logger.info("TargetOptimizer: %d atoms with lift >= %.2f", len(lift_atoms), cfg.min_lift)
+        # ── 1st pass — lift-prune the raw atoms (controls AND composition) ─
+        # ``min_lift_atoms`` removes only harmful atoms; keeping it at 1.0 lets
+        # two moderately-positive atoms combine into an emergent-lift AND that a
+        # high single threshold would have suppressed.
+        lift_atoms = self._prune_by_lift(raw_events, target, cfg.min_lift_atoms)
+        logger.info(
+            "TargetOptimizer: %d atoms with lift >= %.2f", len(lift_atoms), cfg.min_lift_atoms
+        )
 
         # ── Guided AND composition over lift-positive atoms ───────────────
         gate = ConsistencyGate(self.discovery_cfg.gate_params)
@@ -238,12 +247,19 @@ class TargetOptimizer:
         )
         logger.info("TargetOptimizer: %d AND compositions to score", len(compositions))
 
-        # ── 2nd pass — lift-prune the compositions ────────────────────────
-        lift_comps = self._prune_by_lift(compositions, target)
-        logger.info("TargetOptimizer: %d compositions with lift >= %.2f", len(lift_comps), cfg.min_lift)
+        # ── 2nd pass — lift-prune the final result set ────────────────────
+        # ``min_lift_result`` filters the candidates actually returned (surviving
+        # atoms *and* compositions), independently of how aggressively the 1st
+        # pass pruned the composition input.
+        survivors = self._prune_by_lift(
+            lift_atoms + compositions, target, cfg.min_lift_result
+        )
+        logger.info(
+            "TargetOptimizer: %d survivors with lift >= %.2f",
+            len(survivors), cfg.min_lift_result,
+        )
 
         # ── Formal ConsistencyGate over all lift-positive survivors ───────
-        survivors = lift_atoms + lift_comps
         passing = gate.filter(survivors, timestamps)
         logger.info("TargetOptimizer: %d candidates passed the ConsistencyGate", len(passing))
 
@@ -394,14 +410,19 @@ class TargetOptimizer:
     # ------------------------------------------------------------------
 
     def _prune_by_lift(
-        self, events: List[RawEvent], target: pd.Series
+        self, events: List[RawEvent], target: pd.Series, min_lift: float
     ) -> List[RawEvent]:
-        """Keep only the events whose lift on ``target`` clears ``min_lift``."""
+        """Keep only the events whose lift on ``target`` clears ``min_lift``.
+
+        The threshold is passed explicitly because the two pruning passes use
+        different ones: ``min_lift_atoms`` guards the AND-composition input, while
+        ``min_lift_result`` filters the final result set (see issue #107).
+        """
         cfg = self.target_cfg
         kept: List[RawEvent] = []
         for ev in events:
             score = _lift_score(ev.series, target, cfg.min_activations)
-            if score is not None and score["lift"] >= cfg.min_lift:
+            if score is not None and score["lift"] >= min_lift:
                 kept.append(ev)
         return kept
 
