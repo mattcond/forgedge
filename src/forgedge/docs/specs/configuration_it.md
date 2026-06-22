@@ -233,16 +233,20 @@ Configurazione principale del Modulo 2. Controlla la grid degli orizzonti, la de
 | `discovery_date` | str \| None | `None` | Data di scoperta (ISO, es. `"2026-01-15"`). Se None, usa la data corrente. |
 | `fixed_target` | TargetConfig \| None | `None` | Se impostato, **salta la derivazione del target** e misura ogni candidato sul `(horizon, min_return, side)` dell'utente. L'orizzonte è aggiunto alla grid dei forward return se assente. |
 | `fixed_target_diagnostic` | bool | `True` | Solo in fixed-target: esegue comunque la derivazione in read-only per popolare i diagnostici per-orizzonte e i campi di convergenza `data_derived_*`. `False` = bypass puro. |
+| `target_mode` | `"abs"` \| `"proj"` | `"proj"` | Definizione del target binario per win rate / lift / base rate. `"proj"` (PROJ_LOG) misura il forward return long in **eccesso sul trend locale** (`log(fwd_max/close) − log(SMA_2h/SMA_2h[−h]) ≥ log(1+sell_pct)`): un long che cavalca il trend non viene accreditato del premio del trend — molto più stabile IS→OOS. `"abs"` = rendimento assoluto legacy. PROJ vale solo per long (short → abs); reverte ad abs se la storia è `< 3·h`. |
 
 #### TargetConfig
 
-Target economico specificato dall'utente per `AlphaConfig.fixed_target` (workflow TargetOptimizer).
+Target economico specificato dall'utente per `AlphaConfig.fixed_target` e il workflow TargetOptimizer.
 
 | Parametro | Tipo | Default | Descrizione |
 |---|---|---|---|
 | `horizon` | int | — | Holding period in barre (`> 0`). |
 | `min_return` | float | — | Soglia take-profit come frazione (es. `0.02` = 2%), usata come `sell_pct` (`> 0`). |
 | `side` | str | — | `"long"` o `"short"` — mai sovrascritto dai dati. |
+| `min_activations` | int | `10` | TargetOptimizer: attivazioni minime per lo scoring del lift. |
+| `min_lift` | float | `1.0` | TargetOptimizer: soglia di prune sul lift condizionato. |
+| `target_mode` | `"abs"` \| `"proj"` | `"proj"` | Definizione del target binario (vedi `AlphaConfig.target_mode`). |
 
 ```python
 from forgedge import AlphaDiscovery, AlphaConfig, PromotionThresholds

@@ -178,19 +178,62 @@ class TestTargetPrimitives:
     def test_long_target_triggers_on_rise(self):
         # Monotonic +2%/bar rise: every early bar reaches +4% within 24 bars.
         close = pd.Series(100.0 * (1.02 ** np.arange(60)))
-        tgt, base = binary_target(close, 24, 0.04, "long")
+        tgt, base = binary_target(close, 24, 0.04, "long", target_mode="abs")
         assert tgt.iloc[0] == 1.0
         assert base > 0.9
 
     def test_short_direction_triggers_on_fall(self):
         close = pd.Series(100.0 * (0.98 ** np.arange(60)))
-        tgt, base = binary_target(close, 24, 0.04, "short")
+        tgt, base = binary_target(close, 24, 0.04, "short", target_mode="abs")
         assert tgt.iloc[0] == 1.0
         assert base > 0.9
 
     def test_invalid_direction_raises(self):
         with pytest.raises(ValueError):
             binary_target(pd.Series([1.0, 2.0, 3.0]), 24, 0.04, "sideways")
+
+    def test_invalid_target_mode_raises(self):
+        with pytest.raises(ValueError):
+            binary_target(pd.Series(100.0 * (1.01 ** np.arange(40))),
+                          5, 0.04, "long", target_mode="relative")
+
+    def test_long_proj_log_no_excess_on_uniform_trend(self):
+        """A uniform +2%/bar trend is pure trend, no excess: ABS fires on every
+        bar (rides the trend) but PROJ_LOG fires on none (price == trend)."""
+        close = pd.Series(100.0 * (1.02 ** np.arange(120)))
+        _, base_abs = binary_target(close, 10, 0.04, "long", target_mode="abs")
+        _, base_proj = binary_target(close, 10, 0.04, "long", target_mode="proj")
+        assert base_abs > 0.9          # ABS credits the trend
+        assert base_proj == 0.0        # PROJ strips it — no genuine excess
+
+    def test_proj_log_long_excess_above_trend(self):
+        """A counter-trend bounce above the prevailing trend triggers PROJ_LOG
+        where it reflects genuine excess (and the series has the 3*h warmup)."""
+        rng = np.random.default_rng(0)
+        n = 200
+        h = 10
+        # gentle uptrend + a sharp temporary spike at t=120 (excess over trend)
+        close = pd.Series(100.0 * (1.002 ** np.arange(n)))
+        close.iloc[121:126] *= 1.20    # forward window of t≈120 beats the trend
+        tgt, _ = binary_target(close, h, 0.05, "long", target_mode="proj")
+        assert tgt.iloc[110:121].max() == 1.0   # the pre-spike bars see the excess
+
+    def test_proj_log_short_reverts_to_abs(self):
+        close = pd.Series(100.0 * (0.99 ** np.arange(120)) +
+                          np.sin(np.arange(120)))
+        abs_t, _ = binary_target(close, 10, 0.04, "short", target_mode="abs")
+        proj_t, _ = binary_target(close, 10, 0.04, "short", target_mode="proj")
+        pd.testing.assert_series_equal(abs_t, proj_t)
+
+    def test_proj_log_warmup_warning_on_short_series(self, caplog):
+        """n < 3*h: PROJ reverts to ABS with a warning."""
+        import logging
+        close = pd.Series(100.0 * (1.01 ** np.arange(20)))   # 20 < 3*10
+        with caplog.at_level(logging.WARNING):
+            proj_t, _ = binary_target(close, 10, 0.04, "long", target_mode="proj")
+        abs_t, _ = binary_target(close, 10, 0.04, "long", target_mode="abs")
+        pd.testing.assert_series_equal(proj_t, abs_t)
+        assert any("PROJ needs" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

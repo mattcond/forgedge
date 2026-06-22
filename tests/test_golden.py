@@ -58,6 +58,21 @@ _RD_GOLDEN = {
     "expectancy":     pytest.approx(0.057913, rel=1e-3),
 }
 
+# A deterministic *long* contract under the default PROJ_LOG target_mode (issue
+# #109).  The golden short contract above reverts to ABS (short → ABS), so this
+# pins the PROJ_LOG long path.
+_AD_GOLDEN_LONG_CANDIDATE_ID = "EVT-ratio_close_vol05_vo-ZS-0287"
+_AD_GOLDEN_LONG = {
+    "expression":    "zs_ratio_close_vol05_vol24_96 > 1",
+    "direction":     "long",
+    "h_star":        16,
+    "sell_pct":      pytest.approx(0.198542, rel=1e-4),
+    "lift":          pytest.approx(0.144720, rel=1e-3),
+    "n_activations": 106,
+    "promoted":      True,
+    "status":        "HYPOTHESIS",
+}
+
 # ---------------------------------------------------------------------------
 # Session fixtures — pipeline runs once, derived fixtures reuse the result
 # ---------------------------------------------------------------------------
@@ -93,6 +108,17 @@ def golden_contract(forge_result):
     assert contract is not None, (
         f"Golden candidate {_AD_GOLDEN_CANDIDATE_ID!r} not found in contracts. "
         "AlphaDiscovery output changed."
+    )
+    return contract
+
+
+@pytest.fixture(scope="session")
+def golden_long_contract(forge_result):
+    by_cand_id = {c.event_candidate_id: c for c in forge_result.contracts}
+    contract = by_cand_id.get(_AD_GOLDEN_LONG_CANDIDATE_ID)
+    assert contract is not None, (
+        f"Golden long candidate {_AD_GOLDEN_LONG_CANDIDATE_ID!r} not found in "
+        "contracts. AlphaDiscovery PROJ_LOG long output changed."
     )
     return contract
 
@@ -170,6 +196,35 @@ class TestGoldenAlphaDiscovery:
 
     def test_status(self, golden_contract):
         assert golden_contract.status == _AD_GOLDEN["status"]
+
+
+class TestGoldenAlphaDiscoveryProjLong:
+    """AlphaDiscovery PROJ_LOG long path: a known long contract under the
+    default ``target_mode="proj"`` (issue #109)."""
+
+    def test_expression(self, golden_long_contract):
+        assert golden_long_contract.event_expression == _AD_GOLDEN_LONG["expression"]
+
+    def test_direction(self, golden_long_contract):
+        assert golden_long_contract.direction == _AD_GOLDEN_LONG["direction"]
+
+    def test_h_star(self, golden_long_contract):
+        assert golden_long_contract.derived_target.holding_period_h == _AD_GOLDEN_LONG["h_star"]
+
+    def test_sell_pct(self, golden_long_contract):
+        assert golden_long_contract.derived_target.sell_pct == _AD_GOLDEN_LONG["sell_pct"]
+
+    def test_lift(self, golden_long_contract):
+        assert golden_long_contract.event_stats.lift == _AD_GOLDEN_LONG["lift"]
+
+    def test_n_activations(self, golden_long_contract):
+        assert golden_long_contract.event_stats.n_activations == _AD_GOLDEN_LONG["n_activations"]
+
+    def test_promoted(self, golden_long_contract):
+        assert golden_long_contract.promoted == _AD_GOLDEN_LONG["promoted"]
+
+    def test_status(self, golden_long_contract):
+        assert golden_long_contract.status == _AD_GOLDEN_LONG["status"]
 
 
 # ---------------------------------------------------------------------------
