@@ -70,6 +70,21 @@ from .models import (
 from .validation import validate
 from .walkforward import walk_forward
 
+# RD-04 — the minimum executed-trade count is scaled to the in-sample length
+# rather than a fixed absolute.  A hardcoded ``min_trades=30`` was architecturally
+# incoherent with the rest of the pipeline: EventDiscovery promotes events with a
+# period-relative ``min_tpm`` gate, so on a short IS (e.g. 12 months of 1D data)
+# a genuinely strong rule could never reach 30 executed trades and was rejected by
+# construction.  The gate is ``n_months * min_tpm`` — the same frequency criterion
+# that admitted the event — floored at an absolute statistical minimum so a very
+# short IS still demands enough trades to mean anything.
+_MIN_TRADES_ABS = 10
+
+
+def _dynamic_min_trades(n_months: float, min_tpm: float) -> int:
+    """Minimum executed trades scaled to the IS period (spec RD-04)."""
+    return max(_MIN_TRADES_ABS, int(n_months * min_tpm))
+
 
 class RuleDiscovery:
     """FORGE Rule Discovery module (Modulo 3).
@@ -303,8 +318,12 @@ class RuleDiscovery:
         """Fast NON-EDGE screen (spec Section 2.3)."""
         cr = self.config.criteria
         reasons = []
-        if s.total_trades < 20:
-            reasons.append(f"total_trades {s.total_trades} < 20 (not significant)")
+        floor = _dynamic_min_trades(s.n_months, cr.min_tpm)
+        if s.total_trades < floor:
+            reasons.append(
+                f"total_trades {s.total_trades} < {floor} "
+                f"({s.n_months}mo × {cr.min_tpm} tpm, not significant)"
+            )
         if np.isfinite(s.profit_factor) and s.profit_factor < 1.0:
             reasons.append(f"profit_factor {s.profit_factor:.2f} < 1.0 (losing in-sample)")
         if np.isfinite(s.fill_rate) and s.fill_rate < cr.min_fill_rate:
@@ -406,8 +425,12 @@ class RuleDiscovery:
             reasons.append(
                 f"in-sample PF {s.profit_factor:.2f} < {cr.partial_min_profit_factor}"
             )
-        if s.total_trades < cr.min_trades:
-            reasons.append(f"total_trades {s.total_trades} < {cr.min_trades}")
+        min_trades = _dynamic_min_trades(s.n_months, cr.min_tpm)
+        if s.total_trades < min_trades:
+            reasons.append(
+                f"total_trades {s.total_trades} < {min_trades} "
+                f"({s.n_months}mo × {cr.min_tpm} tpm)"
+            )
         if stat_val is not None and not (
             np.isfinite(stat_val.ttest_expectancy_p)
             and stat_val.ttest_expectancy_p < cr.max_ttest_p

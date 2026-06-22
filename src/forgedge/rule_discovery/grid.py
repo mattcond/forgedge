@@ -133,7 +133,8 @@ def _passes(summary, criteria) -> bool:
     return (
         np.isfinite(s.profit_factor) and s.profit_factor >= criteria.min_profit_factor
         and np.isfinite(s.win_rate_pct) and s.win_rate_pct >= criteria.min_win_rate
-        and s.total_trades >= criteria.min_trades
+        # No absolute trade-count gate here — frequency is enforced relative to the
+        # IS period via ``min_tpm`` (the dynamic floor lives in the verdict gates).
         and s.tpm_mu >= criteria.min_tpm
         and s.pf_score_tpm >= criteria.min_pf_score_tpm
         and np.isfinite(s.fill_rate) and s.fill_rate >= criteria.min_fill_rate

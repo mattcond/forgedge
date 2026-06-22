@@ -190,7 +190,7 @@ in a single month).
 | Condition | Parameter |
 |---|---|
 | IS PF < `partial_min_profit_factor` (1.5) | — |
-| IS trades < `min_trades` (30) | — |
+| IS trades < `max(10, n_months × min_tpm)` (dynamic floor) | — |
 | t-test expectancy p ≥ `max_ttest_p` (0.05) | — |
 | Walk-forward OOS PF < 1.0 | — |
 
@@ -447,8 +447,7 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 |---|---|---|
 | `min_profit_factor` | `2.0` | Minimum PF for EDGE |
 | `min_win_rate` | `0.55` | Minimum win rate (0–1) |
-| `min_trades` | `30` | Minimum trades |
-| `min_tpm` | `2.0` | Minimum trades/month |
+| `min_tpm` | `2.0` | Minimum trades/month — also sets the dynamic trade floor `max(10, n_months × min_tpm)` |
 | `min_pf_score_tpm` | `0.30` | Minimum composite score |
 | `min_fill_rate` | `0.40` | Minimum fill rate |
 | `partial_min_profit_factor` | `1.5` | Minimum PF for PARTIAL-EDGE |

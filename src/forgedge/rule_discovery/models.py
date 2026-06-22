@@ -183,10 +183,12 @@ class SelectionCriteria:
         Minimum profit factor for ``EDGE``.
     min_win_rate : float
         Minimum win rate (0–1).
-    min_trades : int
-        Minimum number of executed trades.
     min_tpm : float
-        Minimum trades/month.
+        Minimum trades/month.  This is the sole frequency gate: the minimum
+        executed-trade count is **not** a fixed absolute but is derived from it
+        as ``max(10, n_months * min_tpm)`` (see ``_dynamic_min_trades``), so the
+        requirement scales with the in-sample length instead of penalising short
+        IS periods or under-demanding long ones (spec RD-04).
     min_pf_score_tpm : float
         Minimum composite ``pf_score_tpm``.
     min_fill_rate : float
@@ -222,7 +224,6 @@ class SelectionCriteria:
 
     min_profit_factor: float = 2.0
     min_win_rate: float = 0.55
-    min_trades: int = 30
     min_tpm: float = 2.0
     min_pf_score_tpm: float = 0.30
     min_fill_rate: float = 0.40
