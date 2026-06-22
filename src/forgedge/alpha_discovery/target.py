@@ -35,24 +35,43 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def proj_trend_window(h: int, trend_sma_mult: float = 2.0) -> int:
+    """SMA window (in bars) for the PROJ_LOG trend term: ``round(mult · h)``,
+    floored at 1 bar."""
+    return max(1, int(round(float(trend_sma_mult) * int(h))))
+
+
+def proj_warmup_bars(h: int, trend_sma_mult: float = 2.0) -> int:
+    """Bars of history PROJ_LOG needs: the SMA window plus the ``h`` lookback
+    shift (``≈ (mult + 1)·h``)."""
+    return proj_trend_window(h, trend_sma_mult) + int(h)
+
+
 def proj_log_excess(
-    close: pd.Series, fwd_ext: pd.Series, h: int
+    close: pd.Series, fwd_ext: pd.Series, h: int, trend_sma_mult: float = 2.0
 ) -> Tuple[pd.Series, pd.Series]:
     """Forward log-return in **excess of the local trend** (PROJ_LOG core).
 
-    ``log(fwd_ext / close) − log(SMA_2h[t] / SMA_2h[t−h])`` — the log-ratio of
-    the price's forward performance to the trend's own performance over the same
-    span.  Subtracting the trend stops a long event that merely rides a bull
-    move from being credited with that move; the log form is symmetric,
-    time-additive and compresses the extreme IS bars that otherwise inflate the
-    lift without generalising.  The trend lookback is fixed to ``h`` (not exposed).
+    ``log(fwd_ext / close) − log(SMA_w[t] / SMA_w[t−h])`` with the trend SMA
+    window ``w = round(trend_sma_mult · h)`` bars — the log-ratio of the price's
+    forward performance to the trend's own performance over the same span ``h``.
+    Subtracting the trend stops a long event that merely rides a bull move from
+    being credited with that move; the log form is symmetric, time-additive and
+    compresses the extreme IS bars that otherwise inflate the lift without
+    generalising.
+
+    Everything is in **bars** (no wall-clock assumption): ``h`` is the holding
+    horizon and ``trend_sma_mult`` (default ``2.0``) scales the smoothing window
+    relative to it, so the trend term auto-scales across timeframes.  The trend
+    lookback shift is fixed to ``h``.
 
     Returns ``(log_excess, valid)`` where ``valid`` masks the bars with a
-    complete forward window *and* a full ``2h`` trend window (needs ``≈3h`` bars
-    of history).
+    complete forward window *and* a full trend window (needs
+    ``≈ (trend_sma_mult + 1)·h`` bars of history).
     """
     c = close.astype(float)
-    sma = c.rolling(2 * h, min_periods=2 * h).mean()
+    w = proj_trend_window(h, trend_sma_mult)
+    sma = c.rolling(w, min_periods=w).mean()
     sma_prev = sma.shift(h)
     valid = fwd_ext.notna() & sma.notna() & sma_prev.notna() & (c > 0)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -134,6 +153,7 @@ def binary_target(
     sell_pct: float,
     direction: str,
     target_mode: str = "abs",
+    trend_sma_mult: float = 2.0,
 ) -> Tuple[pd.Series, float]:
     """Binary economic target at a derived ``(h, sell_pct, direction)``.
 
@@ -152,11 +172,16 @@ def binary_target(
         ``"abs"`` (default, back-compatible): absolute return from close —
         ``fwd_ext / close − 1 ≥ sell_pct``.  ``"proj"``: PROJ_LOG — the forward
         return in **excess of the local trend**, ``log(fwd_max/close) −
-        log(SMA_2h/SMA_2h[−h]) ≥ log(1+sell_pct)``, so a long event that merely
+        log(SMA_w/SMA_w[−h]) ≥ log(1+sell_pct)``, so a long event that merely
         rides a bull trend is not credited with the trend premium.  PROJ applies
         to **long only**; ``"short"`` reverts to ``"abs"`` (the bear trend *is*
         the alpha to capture).  PROJ also reverts to ``"abs"`` when history is
-        shorter than ``3·h`` (insufficient trend warmup), with a warning.
+        shorter than ``(trend_sma_mult + 1)·h`` (insufficient warmup), with a
+        warning.
+    trend_sma_mult : float
+        PROJ_LOG only.  Multiplier (× ``h``, in bars) for the trend SMA window
+        ``w = round(trend_sma_mult · h)``.  Default ``2.0``.  Lower = the trend
+        tracks the horizon more tightly; higher = a smoother, longer trend.
 
     Returns
     -------
@@ -190,13 +215,14 @@ def binary_target(
     if direction == "long":
         fwd_ext = c.rolling(h, min_periods=h).max().shift(-h)
         if target_mode == "proj":
-            if len(c) < 3 * h:
+            warmup = proj_warmup_bars(h, trend_sma_mult)
+            if len(c) < warmup:
                 logger.warning(
-                    "binary_target: PROJ needs >= 3*h=%d bars for the trend "
-                    "warmup, got %d — reverting to ABS.", 3 * h, len(c),
+                    "binary_target: PROJ needs >= %d bars for the trend warmup, "
+                    "got %d — reverting to ABS.", warmup, len(c),
                 )
             else:
-                log_excess, valid = proj_log_excess(c, fwd_ext, h)
+                log_excess, valid = proj_log_excess(c, fwd_ext, h, trend_sma_mult)
                 hit = log_excess >= np.log(1.0 + sell_pct)
                 target_binary = hit.astype(float).where(valid, np.nan)
                 return target_binary, float(target_binary.mean())

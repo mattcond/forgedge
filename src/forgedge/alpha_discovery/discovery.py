@@ -75,7 +75,12 @@ from .models import (
     RegimeAnalysis,
     RegimeStat,
 )
-from .target import forward_log_returns, forward_returns, proj_log_excess
+from .target import (
+    forward_log_returns,
+    forward_returns,
+    proj_log_excess,
+    proj_warmup_bars,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +214,7 @@ class AlphaDiscovery:
                     min_direction_t=cfg.thresholds.min_direction_t,
                     require_significant=cfg.thresholds.require_significant_direction,
                     target_mode=cfg.target_mode,
+                    trend_sma_mult=cfg.trend_sma_mult,
                 )
             h_star = derived.holding_period_h
             j_star = horizons.index(h_star)
@@ -220,7 +226,8 @@ class AlphaDiscovery:
             )
 
             target_binary, base_rate_is = self._binary_target_cached(
-                fwd_ext_cache, close, derived, split, cfg.target_mode
+                fwd_ext_cache, close, derived, split, cfg.target_mode,
+                cfg.trend_sma_mult,
             )
 
             ev_stats = self._measure_event(
@@ -306,6 +313,7 @@ class AlphaDiscovery:
         min_direction_t: float = 0.0,
         require_significant: bool = True,
         target_mode: str = "abs",
+        trend_sma_mult: float = 2.0,
     ) -> DerivedTarget:
         """Scan the horizon grid and derive ``(h*, sell_pct*, direction*)``.
 
@@ -408,7 +416,7 @@ class AlphaDiscovery:
         sell_pct = (
             AlphaDiscovery._compute_mfe_quantile(
                 close_is, active_is, h_star, direction, mfe_quantile, mfe_floor,
-                target_mode,
+                target_mode, trend_sma_mult,
             )
             if close_is is not None
             else max(float(abs(adv)), mfe_floor)
@@ -467,6 +475,7 @@ class AlphaDiscovery:
             min_direction_t=cfg.thresholds.min_direction_t,
             require_significant=cfg.thresholds.require_significant_direction,
             target_mode=cfg.target_mode,
+            trend_sma_mult=cfg.trend_sma_mult,
         )
         return replace(
             diag,
@@ -543,6 +552,7 @@ class AlphaDiscovery:
         q: float,
         floor: float,
         target_mode: str = "abs",
+        trend_sma_mult: float = 2.0,
     ) -> float:
         """``q``-quantile of MFE over active IS bars at horizon ``h``.
 
@@ -585,10 +595,13 @@ class AlphaDiscovery:
         # PROJ (long): keep only bars whose forward max outran the local trend,
         # so the take-profit is estimated on genuine-excess bars.  Needs the 3*h
         # warmup; otherwise fall through to the plain ABS quantile.
-        if target_mode == "proj" and direction == "long" and n >= 3 * h:
+        if (
+            target_mode == "proj" and direction == "long"
+            and n >= proj_warmup_bars(h, trend_sma_mult)
+        ):
             close_s = pd.Series(close_is)
             fwd_max = close_s.rolling(h, min_periods=h).max().shift(-h)
-            log_excess, valid = proj_log_excess(close_s, fwd_max, h)
+            log_excess, valid = proj_log_excess(close_s, fwd_max, h, trend_sma_mult)
             excess_pos = (
                 valid.to_numpy()[:max_bars]
                 & (log_excess.to_numpy()[:max_bars] >= 0.0)
@@ -608,6 +621,7 @@ class AlphaDiscovery:
         derived: DerivedTarget,
         split: int,
         target_mode: str = "abs",
+        trend_sma_mult: float = 2.0,
     ) -> Tuple[Optional[pd.Series], float]:
         """Binary target at the derived parameters, with the rolling forward
         extreme (and, for PROJ, the trend log-excess) cached per
@@ -639,17 +653,18 @@ class AlphaDiscovery:
                 "to ABS (the bear trend is the alpha to capture, not noise)."
             )
             use_proj = False
-        if use_proj and len(close) < 3 * h:
+        warmup = proj_warmup_bars(h, trend_sma_mult)
+        if use_proj and len(close) < warmup:
             logger.warning(
-                "binary target: PROJ needs >= 3*h=%d bars for the trend warmup, "
-                "got %d — reverting to ABS for h=%d.", 3 * h, len(close), h,
+                "binary target: PROJ needs >= %d bars for the trend warmup, "
+                "got %d — reverting to ABS for h=%d.", warmup, len(close), h,
             )
             use_proj = False
 
         if use_proj:
             proj_key = (h, "proj_excess")
             if proj_key not in fwd_ext_cache:
-                log_excess, valid = proj_log_excess(close, ext, h)
+                log_excess, valid = proj_log_excess(close, ext, h, trend_sma_mult)
                 fwd_ext_cache[proj_key] = log_excess.where(valid, np.nan)
             log_excess = fwd_ext_cache[proj_key]
             hit = log_excess >= np.log(1.0 + derived.sell_pct)

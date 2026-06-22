@@ -266,6 +266,11 @@ class TargetConfig:
         a long event would otherwise harvest in a bull market.  PROJ applies to
         **long** only — short reverts to ``"abs"`` (the bear trend *is* the alpha
         to capture, not noise to subtract).
+    trend_sma_mult : float
+        PROJ_LOG only.  Multiplier (× ``horizon``, in bars) for the trend SMA
+        window.  Default ``2.0`` (SMA over ``2·h`` bars).  Everything is in
+        bars, so the trend term auto-scales across timeframes; raise/lower this
+        to smooth the trend more/less without touching ``horizon``.
     """
 
     horizon: int
@@ -274,6 +279,7 @@ class TargetConfig:
     min_activations: int = 10
     min_lift: float = 1.0
     target_mode: Literal["abs", "proj"] = "proj"
+    trend_sma_mult: float = 2.0
 
     def __post_init__(self):
         self.horizon = int(self.horizon)
@@ -298,6 +304,9 @@ class TargetConfig:
         self.min_lift = float(self.min_lift)
         if self.min_lift < 0:
             raise ValueError(f"min_lift must be >= 0, got {self.min_lift}.")
+        self.trend_sma_mult = float(self.trend_sma_mult)
+        if self.trend_sma_mult <= 0:
+            raise ValueError(f"trend_sma_mult must be > 0, got {self.trend_sma_mult}.")
 
 
 @dataclass
@@ -399,7 +408,11 @@ class AlphaConfig:
         rides a bull trend is not credited with that trend's premium — markedly
         more stable IS→OOS.  ``"abs"`` is the legacy absolute-return target.
         PROJ applies to long only; short reverts to ``"abs"``.  Falls back to
-        ``"abs"`` (with a warning) when history is shorter than ``3·h``.
+        ``"abs"`` (with a warning) when history is shorter than the warmup.
+    trend_sma_mult : float
+        PROJ_LOG only.  Multiplier (× ``h``, in bars) for the trend SMA window
+        ``w = round(trend_sma_mult · h)``.  Default ``2.0``.  Bar-relative, so it
+        auto-scales across timeframes; the PROJ warmup is ``(trend_sma_mult+1)·h``.
     """
 
     horizon_grid: Tuple[int, ...] = (1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48)
@@ -426,6 +439,7 @@ class AlphaConfig:
     fixed_target: Optional[TargetConfig] = None
     fixed_target_diagnostic: bool = True
     target_mode: Literal["abs", "proj"] = "proj"
+    trend_sma_mult: float = 2.0
 
     def __post_init__(self):
         if not self.horizon_grid or any(int(h) <= 0 for h in self.horizon_grid):
@@ -442,6 +456,9 @@ class AlphaConfig:
             raise ValueError(
                 f"target_mode must be 'abs' or 'proj', got {self.target_mode!r}."
             )
+        self.trend_sma_mult = float(self.trend_sma_mult)
+        if self.trend_sma_mult <= 0:
+            raise ValueError(f"trend_sma_mult must be > 0, got {self.trend_sma_mult}.")
         # Back-compat: a legacy 4-tuple (ic, lift, cohens_d, breadth) is upgraded
         # to the 5-tuple (ic, lift, cohens_d, z, breadth) with a default z weight.
         w = tuple(float(x) for x in self.score_weights)

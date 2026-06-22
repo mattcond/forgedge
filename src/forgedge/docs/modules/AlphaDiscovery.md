@@ -421,23 +421,33 @@ trend**, non un edge predittivo genuino — il lift IS è gonfiato e crolla in O
 **eccesso sul trend locale** con la formula **PROJ_LOG**:
 
 ```python
-sma      = close.rolling(2*H_STAR).mean()
+w        = round(trend_sma_mult * H_STAR)   # finestra SMA in barre (default 2*H)
+sma      = close.rolling(w).mean()
 sma_prev = sma.shift(H_STAR)
 log_excess = log(fwd_max / close) - log(sma / sma_prev)   # prezzo vs trend
 target     = (log_excess >= log(1 + SELL_PCT)).astype(float)   # solo long
 ```
 
 È il log-ratio della performance del prezzo rispetto a quella del trend sullo
-stesso span (lookback trend = `H_STAR`, non esposto). La forma logaritmica è
-simmetrica, time-additive e comprime i bar estremi IS che gonfiano il lift senza
+stesso span (shift del lookback = `H_STAR`). La forma logaritmica è simmetrica,
+time-additive e comprime i bar estremi IS che gonfiano il lift senza
 generalizzare. Evidenza su ADA 1D (H=10, R=10%): il rapporto lift OOS/IS passa da
 ~0.54 (ABS) a ~1.0 (PROJ), e la quota di eventi con lift OOS > IS da 34% a 51%.
+
+**Tutto in barre, nessun vincolo di timeframe.** `H_STAR` è in barre e la
+finestra del trend è `round(trend_sma_mult · H_STAR)` barre — `trend_sma_mult`
+(default `2.0`, configurabile su `AlphaConfig`/`TargetConfig`) scala il
+livellamento del trend rispetto all'orizzonte, quindi la formula si auto-adatta a
+qualsiasi timeframe (1m, 1H, 1D…) senza parametri temporali hardcoded. Su
+timeframe molto rumorosi alza `trend_sma_mult` per un trend più liscio; abbassalo
+per seguire l'orizzonte più da vicino.
 
 **Asimmetria long/short.** PROJ vale **solo per long**. Per short il trend
 ribassista **è** l'alpha da catturare, non rumore da sottrarre: applicare PROJ
 richiederebbe un crollo estremo (trend + sell_pct sommati) e fa collassare il
 base rate OOS. Quindi `direction="short"` reverte silenziosamente ad ABS
-(`logger.debug`). PROJ richiede `3·H` barre di warmup (SMA₂ₕ + shift H): se la
+(`logger.debug`). PROJ richiede `(trend_sma_mult+1)·H` barre di warmup (finestra
+SMA + shift H; `3·H` col default): se la
 storia è insufficiente, reverte ad ABS con `logger.warning`.
 
 `sell_pct*` resta in **unità semplici assolute** anche in PROJ (RuleDiscovery

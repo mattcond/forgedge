@@ -226,7 +226,7 @@ class TestTargetPrimitives:
         pd.testing.assert_series_equal(abs_t, proj_t)
 
     def test_proj_log_warmup_warning_on_short_series(self, caplog):
-        """n < 3*h: PROJ reverts to ABS with a warning."""
+        """n < (mult+1)*h: PROJ reverts to ABS with a warning."""
         import logging
         close = pd.Series(100.0 * (1.01 ** np.arange(20)))   # 20 < 3*10
         with caplog.at_level(logging.WARNING):
@@ -234,6 +234,31 @@ class TestTargetPrimitives:
         abs_t, _ = binary_target(close, 10, 0.04, "long", target_mode="abs")
         pd.testing.assert_series_equal(proj_t, abs_t)
         assert any("PROJ needs" in r.message for r in caplog.records)
+
+    def test_trend_sma_mult_changes_the_window(self):
+        """``trend_sma_mult`` scales the trend SMA window relative to ``h`` and
+        changes the PROJ classification (it is genuinely parametric)."""
+        from forgedge.alpha_discovery.target import (
+            proj_trend_window,
+            proj_warmup_bars,
+        )
+        assert proj_trend_window(10, 2.0) == 20
+        assert proj_trend_window(10, 1.0) == 10
+        assert proj_trend_window(10, 3.0) == 30
+        assert proj_warmup_bars(10, 2.0) == 30      # 2h + h
+        assert proj_warmup_bars(10, 1.0) == 20      # 1h + h
+
+        rng = np.random.default_rng(1)
+        close = pd.Series(100.0 * np.cumprod(1 + rng.normal(0.001, 0.02, 400)))
+        _, br2 = binary_target(close, 10, 0.03, "long", "proj", trend_sma_mult=2.0)
+        _, br1 = binary_target(close, 10, 0.03, "long", "proj", trend_sma_mult=1.0)
+        assert br1 != br2          # different trend window → different target
+
+    def test_trend_sma_mult_validation(self):
+        with pytest.raises(ValueError):
+            TargetConfig(horizon=6, min_return=0.03, side="long", trend_sma_mult=0)
+        with pytest.raises(ValueError):
+            AlphaConfig(trend_sma_mult=-1.0)
 
 
 # ---------------------------------------------------------------------------
