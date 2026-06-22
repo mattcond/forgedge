@@ -42,7 +42,8 @@ class TestTargetConfig:
     def test_defaults(self):
         cfg = TargetConfig(horizon=20, min_return=0.10, side="long")
         assert cfg.min_activations == 10
-        assert cfg.min_lift == 1.0
+        assert cfg.min_lift_atoms == 1.0
+        assert cfg.min_lift_result == 1.0
 
     def test_side_normalised(self):
         assert TargetConfig(horizon=1, min_return=0.01, side="SHORT").side == "short"
@@ -54,12 +55,26 @@ class TestTargetConfig:
             {"horizon": 1, "min_return": 0.0, "side": "long"},
             {"horizon": 1, "min_return": 0.1, "side": "sideways"},
             {"horizon": 1, "min_return": 0.1, "side": "long", "min_activations": 0},
-            {"horizon": 1, "min_return": 0.1, "side": "long", "min_lift": -0.5},
+            {"horizon": 1, "min_return": 0.1, "side": "long", "min_lift_atoms": -0.5},
+            {"horizon": 1, "min_return": 0.1, "side": "long", "min_lift_result": -0.5},
         ],
     )
     def test_invalid_raises(self, kwargs):
         with pytest.raises(ValueError):
             TargetConfig(**kwargs)
+
+    def test_deprecated_min_lift_warns_and_maps_to_both(self):
+        # The legacy single threshold is applied to both passes, with a warning.
+        with pytest.warns(DeprecationWarning):
+            cfg = TargetConfig(horizon=6, min_return=0.02, side="long", min_lift=1.3)
+        assert cfg.min_lift_atoms == 1.3
+        assert cfg.min_lift_result == 1.3
+
+    def test_deprecated_min_lift_still_validates(self):
+        # A negative legacy value maps through and trips the new validation.
+        with pytest.raises(ValueError):
+            with pytest.warns(DeprecationWarning):
+                TargetConfig(horizon=1, min_return=0.1, side="long", min_lift=-0.5)
 
 
 class TestLiftScore:
@@ -108,7 +123,7 @@ class TestTargetOptimizerRun:
 
     def test_every_survivor_beats_min_lift(self, opt_and_results):
         opt, results, _ = opt_and_results
-        assert (results["lift"] >= opt.target_cfg.min_lift).all()
+        assert (results["lift"] >= opt.target_cfg.min_lift_result).all()
 
     def test_base_rate_recorded(self, opt_and_results):
         opt, _, _ = opt_and_results
@@ -118,16 +133,62 @@ class TestTargetOptimizerRun:
         opt, results, _ = opt_and_results
         assert [c.event_id for c in opt.candidates] == results["event_id"].tolist()
 
-    def test_higher_min_lift_is_stricter(self):
+    def test_higher_min_lift_result_is_stricter(self):
         df = _ohlc_table()
         loose = TargetOptimizer(
-            df, TargetConfig(horizon=6, min_return=0.02, side="long", min_lift=1.0)
+            df, TargetConfig(horizon=6, min_return=0.02, side="long", min_lift_result=1.0)
         ).run()
         strict = TargetOptimizer(
-            df, TargetConfig(horizon=6, min_return=0.02, side="long", min_lift=1.5)
+            df, TargetConfig(horizon=6, min_return=0.02, side="long", min_lift_result=1.5)
         ).run()
         assert len(strict) <= len(loose)
         assert (strict["lift"] >= 1.5).all()
+
+
+class TestTargetOptimizerLiftSplit:
+    """min_lift_atoms / min_lift_result decouple AND discovery from result filtering (issue #107)."""
+
+    def test_atoms_floor_preserves_emergent_and(self):
+        # Same final lift floor (1.4), two different atom floors.
+        df = _ohlc_table()
+        keep_atoms = TargetOptimizer(
+            df,
+            TargetConfig(
+                horizon=6, min_return=0.02, side="long",
+                min_lift_atoms=1.0, min_lift_result=1.4,
+            ),
+        ).run()
+        prune_atoms = TargetOptimizer(
+            df,
+            TargetConfig(
+                horizon=6, min_return=0.02, side="long",
+                min_lift_atoms=1.4, min_lift_result=1.4,
+            ),
+        ).run()
+
+        n2_keep = int((keep_atoms["n_components"] == 2).sum())
+        n2_prune = int((prune_atoms["n_components"] == 2).sum())
+        # Keeping moderately-positive atoms surfaces emergent-lift AND pairs that
+        # over-pruning the atoms (legacy single-threshold behaviour) suppresses.
+        assert n2_keep > n2_prune
+        # And those AND pairs genuinely clear the result floor.
+        assert (keep_atoms.loc[keep_atoms["n_components"] == 2, "lift"] >= 1.4).all()
+
+    def test_legacy_single_threshold_matches_symmetric_split(self):
+        # min_lift=X (deprecated) must equal min_lift_atoms=X, min_lift_result=X.
+        df = _ohlc_table()
+        with pytest.warns(DeprecationWarning):
+            legacy = TargetOptimizer(
+                df, TargetConfig(horizon=6, min_return=0.02, side="long", min_lift=1.3)
+            ).run()
+        split = TargetOptimizer(
+            df,
+            TargetConfig(
+                horizon=6, min_return=0.02, side="long",
+                min_lift_atoms=1.3, min_lift_result=1.3,
+            ),
+        ).run()
+        assert legacy["event_id"].tolist() == split["event_id"].tolist()
 
 
 class TestTargetOptimizerOOS:
@@ -204,7 +265,7 @@ class TestTargetOptimizerAlphaHandoff:
     def test_discover_alpha_uses_fixed_target(self):
         df = _ohlc_table()
         opt = TargetOptimizer(
-            df, TargetConfig(horizon=6, min_return=0.02, side="long", min_lift=1.5)
+            df, TargetConfig(horizon=6, min_return=0.02, side="long", min_lift_result=1.5)
         )
         results = opt.run()
         contracts = opt.discover_alpha()

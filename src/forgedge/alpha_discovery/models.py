@@ -13,6 +13,7 @@ the Event Candidate exactly as received and only adds statistical measures.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Literal, Optional, Tuple
 
@@ -254,11 +255,30 @@ class TargetConfig:
         conditional win rate would be too noisy to trust).  Ignored by Alpha
         Discovery's fixed-target mode, which has its own promotion gates.
         Default ``10``.
-    min_lift : float
-        Prune threshold for the TargetOptimizer workflow: candidates whose
-        conditional win rate gives ``lift < min_lift`` are discarded after each
-        scoring pass.  Ignored by Alpha Discovery's fixed-target mode.
-        Default ``1.0`` (keep only candidates that beat the base rate).
+    min_lift_atoms : float
+        Prune threshold for the TargetOptimizer's **1st pass** (atomic events,
+        before AND composition).  Atoms whose conditional win rate gives
+        ``lift < min_lift_atoms`` are discarded.  The "lossless" property — that
+        pruning can only remove atoms a positive-lift AND would need to recover
+        by cherry-picking a degenerate low-support subset — holds **only at the
+        default ``1.0``**.  Values above ``1.0`` are supported but actively
+        suppress the discovery of AND compositions with *emergent* lift (two
+        moderately-positive atoms whose intersection captures a regime neither
+        identifies alone); use ``min_lift_result`` to filter the final list
+        instead.  Ignored by Alpha Discovery's fixed-target mode.  Default
+        ``1.0``.
+    min_lift_result : float
+        Prune threshold for the TargetOptimizer's **2nd pass** — the final
+        result set (surviving atoms *and* compositions).  Raise it to shorten
+        the result list to the strongest signals without touching AND discovery.
+        Ignored by Alpha Discovery's fixed-target mode.  Default ``1.0`` (keep
+        only candidates that beat the base rate).
+    min_lift : float, optional
+        **Deprecated** — use ``min_lift_atoms`` / ``min_lift_result``.  When
+        provided, its value is applied to *both* passes (the legacy behaviour)
+        and a ``DeprecationWarning`` is emitted.  Because the legacy single
+        threshold drove the 1st pass too, a value above ``1.0`` suppressed AND
+        discovery — exactly the trap the split avoids.
     target_mode : {"abs", "proj"}
         Binary-target definition (see :func:`binary_target`).  ``"abs"`` =
         absolute return from close; ``"proj"`` (default) = excess of the forward
@@ -277,9 +297,11 @@ class TargetConfig:
     min_return: float
     side: str
     min_activations: int = 10
-    min_lift: float = 1.0
+    min_lift_atoms: float = 1.0
+    min_lift_result: float = 1.0
     target_mode: Literal["abs", "proj"] = "proj"
     trend_sma_mult: float = 2.0
+    min_lift: Optional[float] = None  # DEPRECATED — see min_lift_atoms/min_lift_result
 
     def __post_init__(self):
         self.horizon = int(self.horizon)
@@ -301,9 +323,24 @@ class TargetConfig:
             raise ValueError(
                 f"target_mode must be 'abs' or 'proj', got {self.target_mode!r}."
             )
-        self.min_lift = float(self.min_lift)
-        if self.min_lift < 0:
-            raise ValueError(f"min_lift must be >= 0, got {self.min_lift}.")
+        # Backward-compat shim: the legacy single ``min_lift`` drove both passes.
+        if self.min_lift is not None:
+            warnings.warn(
+                "TargetConfig.min_lift is deprecated; use min_lift_atoms and "
+                "min_lift_result instead.  The given value is applied to both "
+                "scoring passes (the legacy behaviour), which suppresses AND "
+                "discovery for values above 1.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.min_lift_atoms = float(self.min_lift)
+            self.min_lift_result = float(self.min_lift)
+        self.min_lift_atoms = float(self.min_lift_atoms)
+        if self.min_lift_atoms < 0:
+            raise ValueError(f"min_lift_atoms must be >= 0, got {self.min_lift_atoms}.")
+        self.min_lift_result = float(self.min_lift_result)
+        if self.min_lift_result < 0:
+            raise ValueError(f"min_lift_result must be >= 0, got {self.min_lift_result}.")
         self.trend_sma_mult = float(self.trend_sma_mult)
         if self.trend_sma_mult <= 0:
             raise ValueError(f"trend_sma_mult must be > 0, got {self.trend_sma_mult}.")
