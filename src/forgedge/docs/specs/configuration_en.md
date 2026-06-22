@@ -249,16 +249,22 @@ IS/OOS split, and traceability metadata.
 | `discovery_date` | str \| None | `None` | Discovery date (ISO, e.g. `"2026-01-15"`). When None, uses today's date. |
 | `fixed_target` | TargetConfig \| None | `None` | When set, **skip target derivation** and measure every candidate against the user's `(horizon, min_return, side)`. The horizon is added to the forward-return grid if absent. |
 | `fixed_target_diagnostic` | bool | `True` | Fixed-target mode only: also run the derivation read-only to fill the per-horizon diagnostics and `data_derived_*` convergence fields. `False` = pure bypass. |
+| `target_mode` | `"abs"` \| `"proj"` | `"proj"` | Binary-target definition for win rate / lift / base rate. `"proj"` (PROJ_LOG) scores the long forward return in **excess of the local trend** (`log(fwd_max/close) − log(SMA_w/SMA_w[−h]) ≥ log(1+sell_pct)`), so a trend-riding long is not credited with the trend premium — markedly more stable IS→OOS. `"abs"` = legacy absolute return. PROJ applies to long only (short → abs); reverts to abs when history `< (trend_sma_mult+1)·h`. |
+| `trend_sma_mult` | float | `2.0` | PROJ_LOG only: trend SMA window = `round(trend_sma_mult·h)` bars. Bar-relative (auto-scales across timeframes); lower tracks the horizon more tightly, higher smooths the trend. |
 
 #### TargetConfig
 
-User-specified economic target for `AlphaConfig.fixed_target` (TargetOptimizer workflow).
+User-specified economic target for `AlphaConfig.fixed_target` and the TargetOptimizer workflow.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `horizon` | int | — | Holding period in bars (`> 0`). |
 | `min_return` | float | — | Take-profit threshold as a fraction (e.g. `0.02` = 2%), used as `sell_pct` (`> 0`). |
 | `side` | str | — | `"long"` or `"short"` — never overwritten by the data. |
+| `min_activations` | int | `10` | TargetOptimizer: min activations for valid lift scoring. |
+| `min_lift` | float | `1.0` | TargetOptimizer: prune threshold on conditional lift. |
+| `target_mode` | `"abs"` \| `"proj"` | `"proj"` | Binary-target definition (see `AlphaConfig.target_mode`). |
+| `trend_sma_mult` | float | `2.0` | PROJ_LOG trend SMA window multiplier (see `AlphaConfig.trend_sma_mult`). |
 
 ```python
 from forgedge import AlphaDiscovery, AlphaConfig, PromotionThresholds

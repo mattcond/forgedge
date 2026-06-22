@@ -208,7 +208,10 @@ class TargetOptimizer:
 
         # ── Target Y on the post-normalisation close ──────────────────────
         close = ed.df["close"]
-        target, base_rate = binary_target(close, cfg.horizon, cfg.min_return, cfg.side)
+        target, base_rate = binary_target(
+            close, cfg.horizon, cfg.min_return, cfg.side, cfg.target_mode,
+            cfg.trend_sma_mult,
+        )
         self._base_rate = base_rate
         logger.info(
             "TargetOptimizer: target +%.1f%% in %d bars (%s) — base rate %.1f%%",
@@ -306,7 +309,10 @@ class TargetOptimizer:
             return is_top.copy()
 
         close_full = full_df["close"]
-        target_full, _ = binary_target(close_full, cfg.horizon, cfg.min_return, cfg.side)
+        target_full, _ = binary_target(
+            close_full, cfg.horizon, cfg.min_return, cfg.side, cfg.target_mode,
+            cfg.trend_sma_mult,
+        )
 
         cand_by_id = {c.event_id: c for c in self._candidates}
         rows = []
@@ -376,6 +382,10 @@ class TargetOptimizer:
 
         cfg = config or AlphaConfig()
         cfg.fixed_target = self.target_cfg
+        # Keep the binary-target definition consistent with the optimizer's
+        # IS/OOS scoring (PROJ vs ABS, and the trend SMA window).
+        cfg.target_mode = self.target_cfg.target_mode
+        cfg.trend_sma_mult = self.target_cfg.trend_sma_mult
         ad = AlphaDiscovery(self._ed.df, self._candidates, cfg)
         return ad.run()
 

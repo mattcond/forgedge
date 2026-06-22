@@ -48,6 +48,7 @@ Usage
 """
 from __future__ import annotations
 
+import logging
 import math
 import warnings
 from dataclasses import replace
@@ -74,7 +75,14 @@ from .models import (
     RegimeAnalysis,
     RegimeStat,
 )
-from .target import forward_log_returns, forward_returns
+from .target import (
+    forward_log_returns,
+    forward_returns,
+    proj_log_excess,
+    proj_warmup_bars,
+)
+
+logger = logging.getLogger(__name__)
 
 
 # Non-parametrizable floor: below this count the t-test is numerically
@@ -205,6 +213,8 @@ class AlphaDiscovery:
                     fdr_q=cfg.thresholds.fdr_q,
                     min_direction_t=cfg.thresholds.min_direction_t,
                     require_significant=cfg.thresholds.require_significant_direction,
+                    target_mode=cfg.target_mode,
+                    trend_sma_mult=cfg.trend_sma_mult,
                 )
             h_star = derived.holding_period_h
             j_star = horizons.index(h_star)
@@ -216,7 +226,8 @@ class AlphaDiscovery:
             )
 
             target_binary, base_rate_is = self._binary_target_cached(
-                fwd_ext_cache, close, derived, split
+                fwd_ext_cache, close, derived, split, cfg.target_mode,
+                cfg.trend_sma_mult,
             )
 
             ev_stats = self._measure_event(
@@ -301,6 +312,8 @@ class AlphaDiscovery:
         fdr_q: float = 0.10,
         min_direction_t: float = 0.0,
         require_significant: bool = True,
+        target_mode: str = "abs",
+        trend_sma_mult: float = 2.0,
     ) -> DerivedTarget:
         """Scan the horizon grid and derive ``(h*, sell_pct*, direction*)``.
 
@@ -403,6 +416,7 @@ class AlphaDiscovery:
         sell_pct = (
             AlphaDiscovery._compute_mfe_quantile(
                 close_is, active_is, h_star, direction, mfe_quantile, mfe_floor,
+                target_mode, trend_sma_mult,
             )
             if close_is is not None
             else max(float(abs(adv)), mfe_floor)
@@ -460,6 +474,8 @@ class AlphaDiscovery:
             cfg.mfe_quantile, cfg.mfe_floor, fdr_q=cfg.thresholds.fdr_q,
             min_direction_t=cfg.thresholds.min_direction_t,
             require_significant=cfg.thresholds.require_significant_direction,
+            target_mode=cfg.target_mode,
+            trend_sma_mult=cfg.trend_sma_mult,
         )
         return replace(
             diag,
@@ -535,6 +551,8 @@ class AlphaDiscovery:
         direction: str,
         q: float,
         floor: float,
+        target_mode: str = "abs",
+        trend_sma_mult: float = 2.0,
     ) -> float:
         """``q``-quantile of MFE over active IS bars at horizon ``h``.
 
@@ -543,8 +561,15 @@ class AlphaDiscovery:
           long:  ``max(close_is[i+1..i+h]) / close_is[i] - 1``
           short: ``1 - min(close_is[i+1..i+h]) / close_is[i]``
 
-        Returns ``nan`` when fewer than two active bars have a complete
-        forward window, or when direction is undetermined.
+        ``sell_pct`` stays in **simple absolute** units in every mode (so Rule
+        Discovery is unchanged).  In ``target_mode="proj"`` (long only, with
+        enough history) the quantile is taken over the subset of active bars
+        whose forward excursion *beat the local trend* — i.e. the PROJ_LOG excess
+        is positive — so the take-profit reflects genuine-edge bars rather than
+        bars that merely rode the trend.
+
+        Returns ``nan`` when fewer than two qualifying active bars have a
+        complete forward window, or when direction is undetermined.
         """
         n = len(close_is)
         max_bars = n - h  # bars with a complete h-bar forward window
@@ -566,8 +591,24 @@ class AlphaDiscovery:
             mfe = np.where(valid_c0, 1.0 - extreme / c0, np.nan)
 
         active_mask = active_is[:max_bars] & (mfe > 0) & np.isfinite(mfe)
-        active_mfe = mfe[active_mask]
 
+        # PROJ (long): keep only bars whose forward max outran the local trend,
+        # so the take-profit is estimated on genuine-excess bars.  Needs the 3*h
+        # warmup; otherwise fall through to the plain ABS quantile.
+        if (
+            target_mode == "proj" and direction == "long"
+            and n >= proj_warmup_bars(h, trend_sma_mult)
+        ):
+            close_s = pd.Series(close_is)
+            fwd_max = close_s.rolling(h, min_periods=h).max().shift(-h)
+            log_excess, valid = proj_log_excess(close_s, fwd_max, h, trend_sma_mult)
+            excess_pos = (
+                valid.to_numpy()[:max_bars]
+                & (log_excess.to_numpy()[:max_bars] >= 0.0)
+            )
+            active_mask = active_mask & excess_pos
+
+        active_mfe = mfe[active_mask]
         if len(active_mfe) < 2:
             return float("nan")
 
@@ -579,28 +620,61 @@ class AlphaDiscovery:
         close: pd.Series,
         derived: DerivedTarget,
         split: int,
+        target_mode: str = "abs",
+        trend_sma_mult: float = 2.0,
     ) -> Tuple[Optional[pd.Series], float]:
         """Binary target at the derived parameters, with the rolling forward
-        extreme cached per ``(h, direction)`` (``sell_pct`` varies per
-        candidate but the extreme does not)."""
+        extreme (and, for PROJ, the trend log-excess) cached per
+        ``(h, direction)`` — ``sell_pct`` varies per candidate but the extreme
+        and the trend do not.
+
+        ``target_mode="proj"`` scores the long forward return in excess of the
+        local trend (PROJ_LOG); it reverts to ABS for shorts (``logger.debug``)
+        and when history is shorter than ``3·h`` (``logger.warning``)."""
         if derived.direction not in ("long", "short") or not np.isfinite(derived.sell_pct):
             return None, float("nan")
 
         h = derived.holding_period_h
-        key = (h, derived.direction)
+        direction = derived.direction
+        key = (h, direction)
         if key not in fwd_ext_cache:
-            if derived.direction == "long":
+            if direction == "long":
                 ext = close.rolling(h, min_periods=h).max().shift(-h)
             else:
                 ext = close.rolling(h, min_periods=h).min().shift(-h)
             fwd_ext_cache[key] = ext
         ext = fwd_ext_cache[key]
 
-        if derived.direction == "long":
-            hit = ext / close - 1.0 >= derived.sell_pct
+        # Decide the effective mode (PROJ_LOG only for long, with enough warmup).
+        use_proj = target_mode == "proj"
+        if use_proj and direction == "short":
+            logger.debug(
+                "binary target: PROJ requested for a short contract — reverting "
+                "to ABS (the bear trend is the alpha to capture, not noise)."
+            )
+            use_proj = False
+        warmup = proj_warmup_bars(h, trend_sma_mult)
+        if use_proj and len(close) < warmup:
+            logger.warning(
+                "binary target: PROJ needs >= %d bars for the trend warmup, "
+                "got %d — reverting to ABS for h=%d.", warmup, len(close), h,
+            )
+            use_proj = False
+
+        if use_proj:
+            proj_key = (h, "proj_excess")
+            if proj_key not in fwd_ext_cache:
+                log_excess, valid = proj_log_excess(close, ext, h, trend_sma_mult)
+                fwd_ext_cache[proj_key] = log_excess.where(valid, np.nan)
+            log_excess = fwd_ext_cache[proj_key]
+            hit = log_excess >= np.log(1.0 + derived.sell_pct)
+            target = hit.astype(float).where(log_excess.notna(), np.nan)
         else:
-            hit = ext / close - 1.0 <= -derived.sell_pct
-        target = hit.astype(float).where(ext.notna(), np.nan)
+            if direction == "long":
+                hit = ext / close - 1.0 >= derived.sell_pct
+            else:
+                hit = ext / close - 1.0 <= -derived.sell_pct
+            target = hit.astype(float).where(ext.notna(), np.nan)
 
         base_rate_is = float(target.iloc[:split].mean())
         return target, base_rate_is

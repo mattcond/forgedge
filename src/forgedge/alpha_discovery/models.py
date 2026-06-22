@@ -14,7 +14,7 @@ the Event Candidate exactly as received and only adds statistical measures.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +259,18 @@ class TargetConfig:
         conditional win rate gives ``lift < min_lift`` are discarded after each
         scoring pass.  Ignored by Alpha Discovery's fixed-target mode.
         Default ``1.0`` (keep only candidates that beat the base rate).
+    target_mode : {"abs", "proj"}
+        Binary-target definition (see :func:`binary_target`).  ``"abs"`` =
+        absolute return from close; ``"proj"`` (default) = excess of the forward
+        return over the local trend (PROJ_LOG), which strips the trend premium
+        a long event would otherwise harvest in a bull market.  PROJ applies to
+        **long** only — short reverts to ``"abs"`` (the bear trend *is* the alpha
+        to capture, not noise to subtract).
+    trend_sma_mult : float
+        PROJ_LOG only.  Multiplier (× ``horizon``, in bars) for the trend SMA
+        window.  Default ``2.0`` (SMA over ``2·h`` bars).  Everything is in
+        bars, so the trend term auto-scales across timeframes; raise/lower this
+        to smooth the trend more/less without touching ``horizon``.
     """
 
     horizon: int
@@ -266,6 +278,8 @@ class TargetConfig:
     side: str
     min_activations: int = 10
     min_lift: float = 1.0
+    target_mode: Literal["abs", "proj"] = "proj"
+    trend_sma_mult: float = 2.0
 
     def __post_init__(self):
         self.horizon = int(self.horizon)
@@ -282,9 +296,17 @@ class TargetConfig:
             raise ValueError(
                 f"min_activations must be >= 1, got {self.min_activations}."
             )
+        self.target_mode = str(self.target_mode).lower().strip()
+        if self.target_mode not in ("abs", "proj"):
+            raise ValueError(
+                f"target_mode must be 'abs' or 'proj', got {self.target_mode!r}."
+            )
         self.min_lift = float(self.min_lift)
         if self.min_lift < 0:
             raise ValueError(f"min_lift must be >= 0, got {self.min_lift}.")
+        self.trend_sma_mult = float(self.trend_sma_mult)
+        if self.trend_sma_mult <= 0:
+            raise ValueError(f"trend_sma_mult must be > 0, got {self.trend_sma_mult}.")
 
 
 @dataclass
@@ -379,6 +401,18 @@ class AlphaConfig:
         per-horizon diagnostics and the ``data_derived_*`` convergence fields on
         the contract (the user's target is still what's measured).  ``False``
         skips it for a pure, slightly faster bypass (diagnostics left empty).
+    target_mode : {"abs", "proj"}
+        Binary-target definition used for win rate / lift / base rate (see
+        :func:`binary_target`).  ``"proj"`` (default) measures the forward return
+        in **excess of the local trend** (PROJ_LOG) so a long event that merely
+        rides a bull trend is not credited with that trend's premium — markedly
+        more stable IS→OOS.  ``"abs"`` is the legacy absolute-return target.
+        PROJ applies to long only; short reverts to ``"abs"``.  Falls back to
+        ``"abs"`` (with a warning) when history is shorter than the warmup.
+    trend_sma_mult : float
+        PROJ_LOG only.  Multiplier (× ``h``, in bars) for the trend SMA window
+        ``w = round(trend_sma_mult · h)``.  Default ``2.0``.  Bar-relative, so it
+        auto-scales across timeframes; the PROJ warmup is ``(trend_sma_mult+1)·h``.
     """
 
     horizon_grid: Tuple[int, ...] = (1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48)
@@ -404,6 +438,8 @@ class AlphaConfig:
     discovery_date: Optional[str] = None
     fixed_target: Optional[TargetConfig] = None
     fixed_target_diagnostic: bool = True
+    target_mode: Literal["abs", "proj"] = "proj"
+    trend_sma_mult: float = 2.0
 
     def __post_init__(self):
         if not self.horizon_grid or any(int(h) <= 0 for h in self.horizon_grid):
@@ -415,6 +451,14 @@ class AlphaConfig:
             raise ValueError(f"mfe_quantile must be in (0, 1], got {self.mfe_quantile}.")
         if self.mfe_floor < 0:
             raise ValueError(f"mfe_floor must be >= 0, got {self.mfe_floor}.")
+        self.target_mode = str(self.target_mode).lower().strip()
+        if self.target_mode not in ("abs", "proj"):
+            raise ValueError(
+                f"target_mode must be 'abs' or 'proj', got {self.target_mode!r}."
+            )
+        self.trend_sma_mult = float(self.trend_sma_mult)
+        if self.trend_sma_mult <= 0:
+            raise ValueError(f"trend_sma_mult must be > 0, got {self.trend_sma_mult}.")
         # Back-compat: a legacy 4-tuple (ic, lift, cohens_d, breadth) is upgraded
         # to the 5-tuple (ic, lift, cohens_d, z, breadth) with a default z weight.
         w = tuple(float(x) for x in self.score_weights)
