@@ -470,8 +470,29 @@ class TestGrid:
         df = _candle_with_signal(n=4000, signal_every=40, drift_after_signal=0.06)
         spec = GridSpec(buy_drop_pct=[0.005], sell_pct=[0.03], target_h=[24])
         results = run_grid(df, "__sig__", BacktestParams(), spec)
-        best = select_best(results, SelectionCriteria(min_trades=5, min_profit_factor=1.0))
+        best = select_best(results, SelectionCriteria(min_tpm=0.5, min_profit_factor=1.0))
         assert best is not None
+
+
+class TestDynamicMinTrades:
+    """RD-04 — trade-count gate scaled to the IS length instead of a fixed 30."""
+
+    def test_floor_applies_on_short_is(self):
+        from forgedge.rule_discovery.discovery import _MIN_TRADES_ABS, _dynamic_min_trades
+        # 3 months × 2 tpm = 6 → clamped to the absolute statistical floor.
+        assert _MIN_TRADES_ABS == 10
+        assert _dynamic_min_trades(3, 2.0) == 10
+
+    def test_scales_with_is_length(self):
+        from forgedge.rule_discovery.discovery import _dynamic_min_trades
+        assert _dynamic_min_trades(12, 2.0) == 24   # 12 mo × 2/mo
+        assert _dynamic_min_trades(24, 2.0) == 48   # longer IS ⇒ stricter
+        assert _dynamic_min_trades(12, 3.0) == 36
+
+    def test_min_trades_removed_from_criteria(self):
+        assert not hasattr(SelectionCriteria(), "min_trades")
+        with pytest.raises(TypeError):
+            SelectionCriteria(min_trades=30)
 
 
 # ---------------------------------------------------------------------------

@@ -379,8 +379,7 @@ NON-EDGE verdicts.
 |---|---|---|---|
 | `min_profit_factor` | float | `2.0` | Minimum IS PF for EDGE. |
 | `min_win_rate` | float | `0.55` | Minimum IS win rate for EDGE (55%). |
-| `min_trades` | int | `30` | Minimum IS trade count for EDGE. |
-| `min_tpm` | float | `2.0` | Minimum average trading frequency (trades/month) for EDGE. |
+| `min_tpm` | float | `2.0` | Minimum average trading frequency (trades/month) for EDGE. Also the sole trade-count gate: the minimum executed-trade count is dynamic, `max(10, n_months × min_tpm)`, scaling with the IS length (spec RD-04) instead of a fixed absolute threshold. |
 | `min_pf_score_tpm` | float | `0.30` | Minimum composite PF×TPM score to include a configuration in the selection. |
 | `min_fill_rate` | float | `0.40` | Minimum limit order fill rate: at least 40% of events must result in a trade. |
 | `partial_min_profit_factor` | float | `1.5` | Minimum IS PF for PARTIAL-EDGE (does not reach EDGE but not NON-EDGE). |

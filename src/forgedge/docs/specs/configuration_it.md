@@ -355,8 +355,7 @@ Gate di promozione del Modulo 3. Definisce le condizioni per i verdetti `EDGE`, 
 |---|---|---|---|
 | `min_profit_factor` | float | `2.0` | PF IS minimo per EDGE. |
 | `min_win_rate` | float | `0.55` | Win rate IS minimo per EDGE (55%). |
-| `min_trades` | int | `30` | Numero minimo di trade IS per EDGE. |
-| `min_tpm` | float | `2.0` | Frequenza media minima (trades/mese) per EDGE. |
+| `min_tpm` | float | `2.0` | Frequenza media minima (trades/mese) per EDGE. È anche l'unico gate sul numero di trade: la soglia minima di trade eseguiti è dinamica, `max(10, n_months × min_tpm)`, e scala con la lunghezza dell'IS (spec RD-04) invece di una soglia assoluta fissa. |
 | `min_pf_score_tpm` | float | `0.30` | Score composito minimo PF×TPM per includere una configurazione nella selezione. |
 | `min_fill_rate` | float | `0.40` | Fill rate minimo del limit order: almeno il 40% degli eventi deve tradursi in un trade. |
 | `partial_min_profit_factor` | float | `1.5` | PF IS minimo per PARTIAL-EDGE (non raggiunge EDGE ma non è NON-EDGE). |

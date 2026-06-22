@@ -189,7 +189,7 @@ performance sui trade IS: PF, win rate, expectancy, net gain cumulato.
 | Condizione | Parametro |
 |---|---|
 | PF IS < `partial_min_profit_factor` (1.5) | — |
-| Trade IS < `min_trades` (30) | — |
+| Trade IS < `max(10, n_months × min_tpm)` (soglia dinamica) | — |
 | t-test expectancy p ≥ `max_ttest_p` (0.05) | — |
 | PF OOS walk-forward < 1.0 | — |
 
@@ -444,8 +444,7 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 |---|---|---|
 | `min_profit_factor` | `2.0` | PF minimo per EDGE |
 | `min_win_rate` | `0.55` | Win rate minimo (0–1) |
-| `min_trades` | `30` | Trade minimi |
-| `min_tpm` | `2.0` | Trade/mese minimi |
+| `min_tpm` | `2.0` | Trade/mese minimi — definisce anche la soglia dinamica di trade `max(10, n_months × min_tpm)` |
 | `min_pf_score_tpm` | `0.30` | Score composito minimo |
 | `min_fill_rate` | `0.40` | Fill rate minimo |
 | `partial_min_profit_factor` | `1.5` | PF minimo per PARTIAL-EDGE |
