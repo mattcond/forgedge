@@ -641,6 +641,14 @@ class AlphaContract:
     rejection_reasons: List[str] = field(default_factory=list)
     fdr_promoted: Optional[bool] = None
 
+    # Search-level rotation null calibration (issue #116, RotationCalibrator).
+    # Non-blocking diagnostics — same status as fdr_promoted.
+    # rotation_p    : Tippett empirical p of this contract's best in-sample stat
+    #                 against the rotation null (lower = stronger evidence).
+    # rotation_threshold : q(1-alpha) null bar used for this run's best statistic.
+    rotation_p: Optional[float] = None
+    rotation_threshold: Optional[float] = None
+
     handoff_status: str = "PENDING_RULE_DISCOVERY"
     rule_discovery_response: Optional[dict] = None
 

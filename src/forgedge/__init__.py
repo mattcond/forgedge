@@ -11,6 +11,7 @@ from .alpha_discovery import (
     PromotionThresholds,
     TargetConfig,
 )
+from .calibration import CalibrationReport, RotationCalibrator, RotationConfig
 from .event_discovery import CustomEvent, DiscoveryConfig, EventDiscovery
 from .forge import ForgeResult, forge, forge_multi
 from .market_context import (
@@ -42,6 +43,9 @@ __all__ = [
     "forge",
     "forge_multi",
     "ForgeResult",
+    "RotationCalibrator",
+    "RotationConfig",
+    "CalibrationReport",
     "EventDiscovery",
     "DiscoveryConfig",
     "CustomEvent",
