@@ -63,6 +63,8 @@ import pandas as pd
 
 from .alpha_discovery.discovery import AlphaDiscovery
 from .alpha_discovery.models import AlphaConfig, AlphaContract
+from .calibration import RotationCalibrator
+from .calibration.models import RotationConfig
 from .event_discovery.discovery import DiscoveryConfig, EventDiscovery
 from .event_discovery.models import (
     ActivationStats,
@@ -286,6 +288,7 @@ def forge(
     market_context_config: Optional[MarketContextConfig] = None,
     event_discovery_config: Optional[DiscoveryConfig] = None,
     alpha_config: Optional[AlphaConfig] = None,
+    rotation_calibration: Optional[RotationConfig] = None,
     rule_discovery_config: Optional[RuleDiscoveryConfig] = None,
     registry_config: Optional[RegistryConfig] = None,
     manual_events: Optional[List[CustomEvent]] = None,
@@ -331,6 +334,19 @@ def forge(
     alpha_config : AlphaConfig, optional
         Modulo 2 configuration.  When omitted, a default is built carrying the
         resolved ticker as ``asset`` and ``timeframe``.
+    rotation_calibration : RotationConfig, optional
+        When set, run the search-level rotation null calibrator inline after
+        Alpha Discovery.  Rotates only the ``close`` column K times and re-runs
+        AlphaDiscovery on each draw, producing a Tippett (min-p) p-value that
+        controls for the multiple-testing surface of the full search.  Results
+        are stored as ``AlphaContract.rotation_p`` / ``rotation_threshold`` on
+        each promoted contract.  Default ``None`` — skip calibration, zero extra
+        cost, backward-compatible.
+
+        For large K (≥ 100 draws) consider the standalone / disaccoppiato mode
+        instead: run ``forge()`` without this parameter, then call
+        ``RotationCalibrator(result.event_frame, result.candidates, alpha_config)``
+        separately — same results, no impact on the main pipeline runtime.
     rule_discovery_config : RuleDiscoveryConfig, optional
         Modulo 3 configuration.  Defaults to the standard grid and acceptance
         gates.
@@ -443,6 +459,19 @@ def forge(
     contracts = ad.run()
     promoted = ad.promoted_contracts()
     report.stage(f"M2 Alpha Discovery — {len(promoted)}/{len(contracts)} promoted")
+
+    # ── Rotation null calibration (inline, optional) ──────────────────────
+    if rotation_calibration is not None and promoted:
+        report.stage(
+            f"Rotation Calibrator — K={rotation_calibration.k} draws "
+            f"(alpha={rotation_calibration.alpha})…"
+        )
+        cal = RotationCalibrator(alpha_frame, alpha_candidates, cfg)
+        cal_report = cal.run(promoted, rotation_calibration)
+        report.stage(
+            f"Rotation Calibrator — Tippett p={cal_report.tippett_p:.4f}, "
+            f"{len(cal_report.survivors)}/{len(promoted)} above null bar"
+        )
 
     # ── Modulo 3 — Rule Discovery ─────────────────────────────────────────
     by_id = {c.event_id: c for c in candidates}
