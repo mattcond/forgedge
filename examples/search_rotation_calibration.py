@@ -50,6 +50,7 @@ PARQUET = os.environ.get(
     "/root/.claude/uploads/97a39385-fb76-5589-adb0-bb331ce97505/39e65776-ADA_1D_FULL.parquet",
 )
 CLOSE_COL = "close"
+MIN_TPM = float(os.environ.get("FORGEDGE_MIN_TPM", "1.5"))
 
 
 def build_alpha_config(label: str) -> AlphaConfig:
@@ -117,10 +118,11 @@ def main():
     t0 = time.time()
     enriched = MarketContext(df_is.copy()).run()
     ed = EventDiscovery(enriched.copy(), DiscoveryConfig(
-        gate_params=GateParams(min_tpm=1.5, max_dispersion=3.0),
+        gate_params=GateParams(min_tpm=MIN_TPM, max_dispersion=3.0),
         timestamp_col="open_dt", max_and_components=2, train_ratio=1.0))
     cands = ed.run()
     base_frame = ed.df  # post-ED table: features + regime + close, DatetimeIndex
+    print(f"min_tpm = {MIN_TPM}  ->  activation floor ~ {MIN_TPM*12:.0f} over 12 IS months")
 
     ad_real = AlphaDiscovery(base_frame, cands, build_alpha_config("ADA_REAL"))
     ad_real.run()
@@ -202,9 +204,14 @@ def main():
                      if np.isfinite(_stat(c, best)) and _stat(c, best) > bar]
         print(f"Real promoted above q95 null bar ({best} > {bar:.3f}): "
               f"{len(survivors)} / {len(real_promoted)}")
-        for c in sorted(survivors, key=lambda c: _stat(c, best), reverse=True)[:10]:
-            print(f"  {best}={_stat(c, best):.3f} comp={c.alpha_score.composite_score:.3f} "
-                  f"{c.direction:5s}  {c.event_expression[:52]}")
+        for c in sorted(survivors, key=lambda c: _stat(c, best), reverse=True)[:12]:
+            es = c.event_stats
+            oos = c.oos_validation
+            oos_s = (f"OOS n={oos.n_activations} WR={oos.win_rate:.2f} "
+                     f"p={oos.p_value:.3f} pass={oos.passed}") if oos else "OOS n/a"
+            print(f"  {best}={_stat(c, best):.3f} IS n_act={es.n_activations:>2} "
+                  f"WR={es.win_rate:.2f} | {oos_s} | {c.direction:5s} "
+                  f"{c.event_expression[:42]}")
 
 
 if __name__ == "__main__":

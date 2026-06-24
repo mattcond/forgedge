@@ -27,15 +27,20 @@ feature columns (already in the table) are used; features are never regenerated.
 gates on tpm/dispersion — outcome-independent — so the candidate set is identical
 under real and null and only AlphaDiscovery is re-run (~4 s/draw here).
 
-## Result (K = 40)
+## Result (K = 100, min_tpm = 1.5)
 
 | statistic | real | null mean | null q95 | emp p | verdict |
 |---|---|---|---|---|---|
-| composite_score | 1.000 | 0.906 | 1.000 | 0.098 | **saturates** (clamped to [0,1]) |
-| abs_z (rotation z) | 3.67 | 3.65 | 4.48 | 0.41 | does **not** separate |
-| is_t (IS t-test) | 6.36 | 5.45 | 7.96 | 0.17 | does **not** separate |
-| oos_t (OOS t-test) | 3.64 | 3.05 | 5.98 | 0.24 | does **not** separate |
-| **is_lift** | **0.707** | 0.472 | 0.643 | **0.024** | **separates** (+2.4 sd) |
+| composite_score | 1.000 | 0.898 | 0.979 | 0.0495 | **saturates** (4/100 noise draws also hit ~1.0) |
+| abs_z (rotation z) | 3.67 | 3.64 | 4.61 | 0.45 | does **not** separate |
+| is_t (IS t-test) | 6.36 | 5.39 | 7.96 | 0.17 | does **not** separate |
+| oos_t (OOS t-test) | 3.64 | 2.99 | 5.51 | 0.23 | does **not** separate |
+| **is_lift** | **0.707** | 0.467 | 0.644 | **0.0099** | **separates** (+2.5 sd) |
+
+The 2 alphas that clear the lift bar are *not* the top-by-composite events but two
+*long* `delta_ratio_close_ema` events — and on inspection both have only **9 IS
+activations** and **fail OOS** (WR 0.78 IS → 0.40 OOS). High lift on 9 samples is
+WR=7/9: impressive but fragile. This motivates the upstream `min_tpm` fix below.
 
 ## Findings
 
@@ -71,6 +76,48 @@ under real and null and only AlphaDiscovery is re-run (~4 s/draw here).
   `lowfreq_robustness.md`).
 - This is a candidate for the v2 calibrator (issue #115) that does **not** need
   the feature-construction module: it is implementable today.
+
+## Upstream fix: raise `min_tpm` instead of filtering downstream (K=40)
+
+The 2 survivors above had only **9 IS activations** and **failed OOS** — elegant
+false positives. The right lever is to raise Event Discovery's `min_tpm` so events
+must fire more often. `mean_tpm = n_act / n_total_months`, so `min_tpm=3` over 12 IS
+months floors activations at ~36.
+
+| | min_tpm=1.5 | min_tpm=3.0 |
+|---|---|---|
+| candidates mined | 2621 | **584** |
+| directed contracts | 111 | **16** |
+| best real lift | 0.707 | 0.287 |
+| separating statistic | lift (p=0.0099) | composite (p=0.049) |
+| survivors above null | 2 | 1 |
+| survivor IS activations | 9, 9 | **29** |
+| survivor OOS | **failed** (WR 0.78→0.40) | **passed** (p=0.000, OOS WR 0.50) |
+
+Key points:
+
+1. **`min_tpm` filters during mining, not after.** 584 candidates vs 2621 means a
+   smaller "best-of-N" search, so the rotation null bar itself drops (null is_t
+   mean 5.39 → 4.82; null composite q95 0.979 → 0.964). A *downstream*
+   `min_is_activations` gate cannot do this — the multiple-testing damage is
+   already done by the time 2621 candidates exist. The upstream lever is
+   structurally better.
+
+2. **The single survivor confirms OOS.** `pr_diffnorm_close_vol12_vol24_48 < 0.167`
+   (short, h=10, 29 activations) is the only alpha in this study that is *both*
+   above the rotation null *and* OOS-confirmed (p=0.000). The min_tpm=1.5 survivors
+   were not.
+
+3. **Trade-off:** higher `min_tpm` lowers lift (frequent events are less
+   selective), so lift stops being the discriminator — you trade "extreme but
+   fragile" for "modest but confirmable". On 1D with little data this is the right
+   trade; on 1H you lose less. The pipeline core is not weak — the **default
+   `min_tpm` is simply not scaled for low-frequency data** (ties into the
+   frequency-aware defaults of Fix #1). Because `min_tpm` is trades-per-*month*, a
+   fixed value yields a roughly constant *absolute* activation count across
+   timeframes — exactly what sample-size robustness needs.
+
+Reproduce: `FORGEDGE_MIN_TPM=3.0 python examples/search_rotation_calibration.py 40`
 
 ## Caveats
 
