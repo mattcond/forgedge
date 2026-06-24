@@ -264,11 +264,28 @@ class AlphaDiscovery:
         self._contracts = contracts
         return contracts
 
-    def promoted_contracts(self) -> List[AlphaContract]:
-        """Return only the contracts that cleared every gate (``HYPOTHESIS``)."""
+    def promoted_contracts(
+        self, min_lift: Optional[float] = None
+    ) -> List[AlphaContract]:
+        """Return only the contracts that cleared every gate (``HYPOTHESIS``).
+
+        Parameters
+        ----------
+        min_lift : float, optional
+            When set, further filters to contracts whose IS lift
+            (``event_stats.lift``) is >= *min_lift*.  Useful values:
+            ``0.0`` for strictly positive lift, ``0.05`` for the sweep preset.
+            ``None`` (default) applies no additional lift filter.
+        """
         if self._contracts is None:
             raise RuntimeError("Call run() before promoted_contracts().")
-        return [c for c in self._contracts if c.promoted]
+        contracts = [c for c in self._contracts if c.promoted]
+        if min_lift is not None:
+            contracts = [
+                c for c in contracts
+                if np.isfinite(c.event_stats.lift) and c.event_stats.lift >= min_lift
+            ]
+        return contracts
 
     def summary(self) -> pd.DataFrame:
         """Flat, sortable summary of every evaluated candidate.
