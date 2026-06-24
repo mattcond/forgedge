@@ -38,6 +38,7 @@ from .rule_registry import (
     RuleSubmission,
 )
 from .target_optimizer import TargetOptimizer
+from .presets import forge_preset, preset_info, PRESETS
 
 __all__ = [
     "forge",
@@ -74,4 +75,7 @@ __all__ = [
     "RegistryConfig",
     "RuleDocument",
     "CrossTickerResult",
+    "forge_preset",
+    "preset_info",
+    "PRESETS",
 ]
