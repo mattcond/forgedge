@@ -158,8 +158,9 @@ def main():
         for name, v in st.items():
             null[name].append(v)
         print(f"  draw {j:>2}  shift={k:>4}  "
-              f"comp={st['composite']:.3f} |z|={st['abs_z']:.2f} "
-              f"is_t={st['is_t']:.2f} oos_t={st['oos_t']:.2f}  ({time.time()-t0:.0f}s)")
+              f"comp={st['composite']:.3f} lift={st['is_lift']:.3f} "
+              f"|z|={st['abs_z']:.2f} is_t={st['is_t']:.2f} oos_t={st['oos_t']:.2f}  "
+              f"({time.time()-t0:.0f}s)")
 
     # ── 3. Verdict, per statistic ────────────────────────────────────────────
     print("\n" + "=" * 70)
@@ -212,6 +213,64 @@ def main():
             print(f"  {best}={_stat(c, best):.3f} IS n_act={es.n_activations:>2} "
                   f"WR={es.win_rate:.2f} | {oos_s} | {c.direction:5s} "
                   f"{c.event_expression[:42]}")
+
+    tippett_combination(real_stats, null)
+
+
+def tippett_combination(real_stats: dict, null: dict) -> None:
+    """Tippett (min-p) combination across all yardsticks.
+
+    For each draw j, compute the empirical p-value of null[s][j] against the
+    full null array of s (inclusive, conservative), then take the minimum over
+    statistics.  The real Tippett statistic is min_s p_s(real).  The null
+    distribution of the combined statistic is the K minima computed the same
+    way.  Empirical p = (1 + #{min_p_null <= min_p_real}) / (1+K).
+
+    Why this is the honest version of "pick the best statistic": the selection
+    is paid for by the combination step — null draws that look good on *any*
+    single yardstick also produce small min-p and compete against the real.
+    No threshold on n_act, no choice of discriminant: the data picks.
+    """
+    valid = {s: np.array([x for x in null[s] if np.isfinite(x)])
+             for s in real_stats
+             if any(np.isfinite(x) for x in null[s]) and np.isfinite(real_stats[s])}
+    if not valid:
+        return
+
+    def ep(val, arr):
+        return (1 + int(np.sum(arr >= val))) / (1 + len(arr))
+
+    # Per-statistic p-values for the real run
+    p_real = {s: ep(real_stats[s], arr) for s, arr in valid.items()}
+    min_p_real = min(p_real.values())
+    best_s = min(p_real, key=p_real.get)
+
+    # Null distribution of min-p: for each draw j take min over statistics
+    K_eff = min(len(arr) for arr in valid.values())
+    min_p_null = []
+    for j in range(K_eff):
+        p_j = {s: ep(arr[j], arr) for s, arr in valid.items() if j < len(arr)}
+        if p_j:
+            min_p_null.append(min(p_j.values()))
+    min_p_null = np.array(min_p_null)
+
+    # Count null draws at least as extreme (min-p is "smaller = stronger")
+    p_tippett = (1 + int(np.sum(min_p_null <= min_p_real))) / (1 + len(min_p_null))
+    q05 = np.quantile(min_p_null, 0.05)
+
+    print("\n" + "=" * 70)
+    print("TIPPETT (min-p) COMBINATION — adaptive multi-statistic test")
+    print("=" * 70)
+    print("Per-statistic empirical p (real vs rotation null):")
+    for s, p in sorted(p_real.items(), key=lambda x: x[1]):
+        flag = " <-- drives min-p" if s == best_s else ""
+        print(f"  {s:10s}  p={p:.4f}{flag}")
+    print(f"\nTippett min-p (real) : {min_p_real:.4f}  (driven by '{best_s}')")
+    print(f"Null min-p  mean     : {min_p_null.mean():.4f}   q05={q05:.4f}")
+    print(f"Tippett empirical p  : {p_tippett:.4f}  "
+          f"({'SEPARATES' if p_tippett < 0.05 else 'borderline' if p_tippett < 0.10 else 'weak'})")
+    print(f"({int(np.sum(min_p_null <= min_p_real))}/{len(min_p_null)} null draws "
+          f"produced a min-p <= {min_p_real:.4f})")
 
 
 if __name__ == "__main__":

@@ -149,3 +149,40 @@ Reproduce: `FORGEDGE_MIN_TPM=3.0 python examples/search_rotation_calibration.py 
   vs the rotated outcome and are properly nulled.
 - With min_tpm=3.0 the composite separates at p=0.030; this is credible at K=100
   but borderline. The survivor's OOS confirmation (p=0.000) is the stronger signal.
+
+## Tippett (min-p) combination — honest adaptive statistic selection
+
+The natural next question is: can we let the data pick the best discriminating
+statistic without cherry-picking? Yes, via Tippett's combination:
+
+1. For each of the 5 yardsticks, compute the empirical p-value of the real
+   maximum against its own null rotation distribution: `p_s`.
+2. `min_p_real = min_s p_s` — the Tippett statistic.
+3. For each null draw j, compute `p_j[s]` (empirical rank of `null[s][j]`
+   within its null array) and take `min_p_j = min_s p_j[s]`.
+4. Empirical Tippett p = `(1 + #{min_p_null ≤ min_p_real}) / (1+K)`.
+
+This pays the price of having looked at 5 yardsticks: if several statistics
+are correlated (they are — all driven by the same underlying edge), the
+correction is mild; if they were independent it would be Bonferroni-like.
+No threshold on n_act, no prior choice of discriminant — the data drives.
+
+**K=100, min_tpm=3.0 results:**
+
+| | value |
+|---|---|
+| Per-statistic p-values | composite: 0.030, is_t: 0.069, oos_t: 0.149, is_lift: 0.624, abs_z: 0.693 |
+| Tippett min-p (real) | 0.0297 (driven by composite) |
+| Null min-p mean | 0.263   null q05 = 0.039 |
+| **Tippett empirical p** | **0.059** (5/100 null draws produced min-p ≤ 0.030) |
+
+The Tippett correction moves the composite p from 0.030 to 0.059 — the cost
+of looking across 5 yardsticks. The result is borderline at 0.05, but this
+is only the rotation-null test. The survivor also passes the independent OOS
+(p=0.000, n=18, WR=0.50), which is a third evidence source orthogonal to the
+rotation null. The combined picture (borderline search-level test + OOS
+confirmation + 29 IS activations) is defensible.
+
+**Design recommendation:** use Tippett combination in the v2 calibrator instead
+of hardcoding which statistic to use. It is implementable on top of the same K
+rotation draws at zero extra cost.
