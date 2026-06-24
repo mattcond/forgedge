@@ -77,20 +77,32 @@ WR=7/9: impressive but fragile. This motivates the upstream `min_tpm` fix below.
 - This is a candidate for the v2 calibrator (issue #115) that does **not** need
   the feature-construction module: it is implementable today.
 
-## Upstream fix: raise `min_tpm` instead of filtering downstream (K=40)
+## Upstream fix: raise `min_tpm` instead of filtering downstream (K=100)
 
 The 2 survivors above had only **9 IS activations** and **failed OOS** — elegant
 false positives. The right lever is to raise Event Discovery's `min_tpm` so events
 must fire more often. `mean_tpm = n_act / n_total_months`, so `min_tpm=3` over 12 IS
 months floors activations at ~36.
 
-| | min_tpm=1.5 | min_tpm=3.0 |
+Full K=100 results with min_tpm=3.0:
+
+| statistic | real | null mean | null sd | null q95 | emp p | verdict |
+|---|---|---|---|---|---|---|
+| **composite** | **1.000** | 0.819 | 0.088 | 0.941 | **0.0297** | **separates** (+2.1 sd) |
+| abs_z | 2.963 | 3.216 | 0.458 | 3.959 | 0.693 | does not separate |
+| is_lift | 0.287 | 0.312 | 0.080 | 0.440 | 0.624 | **saturates** (real < null mean) |
+| is_t | 6.357 | 4.767 | 1.055 | 6.455 | 0.069 | borderline |
+| oos_t | 3.638 | 2.458 | 1.340 | 4.968 | 0.149 | does not separate |
+
+Comparison across both `min_tpm` regimes (K=100 for 1.5, K=100 for 3.0):
+
+| | min_tpm=1.5 (K=100) | min_tpm=3.0 (K=100) |
 |---|---|---|
 | candidates mined | 2621 | **584** |
 | directed contracts | 111 | **16** |
 | best real lift | 0.707 | 0.287 |
-| separating statistic | lift (p=0.0099) | composite (p=0.049) |
-| survivors above null | 2 | 1 |
+| separating statistic | is_lift (p=0.0099) | **composite** (p=0.030) |
+| survivors above null | 2 | **1** |
 | survivor IS activations | 9, 9 | **29** |
 | survivor OOS | **failed** (WR 0.78→0.40) | **passed** (p=0.000, OOS WR 0.50) |
 
@@ -98,34 +110,42 @@ Key points:
 
 1. **`min_tpm` filters during mining, not after.** 584 candidates vs 2621 means a
    smaller "best-of-N" search, so the rotation null bar itself drops (null is_t
-   mean 5.39 → 4.82; null composite q95 0.979 → 0.964). A *downstream*
+   mean 5.39 → 4.77; null composite q95 0.979 → 0.941). A *downstream*
    `min_is_activations` gate cannot do this — the multiple-testing damage is
    already done by the time 2621 candidates exist. The upstream lever is
    structurally better.
 
 2. **The single survivor confirms OOS.** `pr_diffnorm_close_vol12_vol24_48 < 0.167`
-   (short, h=10, 29 activations) is the only alpha in this study that is *both*
-   above the rotation null *and* OOS-confirmed (p=0.000). The min_tpm=1.5 survivors
-   were not.
+   (short, h=10, 29 IS activations, IS WR=0.48) is the only alpha in this study that
+   is *both* above the rotation null *and* OOS-confirmed (n=18, WR=0.50, p=0.000).
+   The min_tpm=1.5 survivors were not.
 
-3. **Trade-off:** higher `min_tpm` lowers lift (frequent events are less
-   selective), so lift stops being the discriminator — you trade "extreme but
-   fragile" for "modest but confirmable". On 1D with little data this is the right
-   trade; on 1H you lose less. The pipeline core is not weak — the **default
-   `min_tpm` is simply not scaled for low-frequency data** (ties into the
-   frequency-aware defaults of Fix #1). Because `min_tpm` is trades-per-*month*, a
-   fixed value yields a roughly constant *absolute* activation count across
-   timeframes — exactly what sample-size robustness needs.
+3. **The discriminating statistic switches.** With min_tpm=3.0, `is_lift` *saturates*
+   in the other direction: the real lift (0.287) falls *below* the null mean (0.312).
+   Frequent events fire too often to produce high lift, so noise's lift distribution
+   overlaps or exceeds the real one. `composite` takes over as discriminator because
+   it aggregates IC, stability, and regime breadth — dimensions that noise cannot
+   simultaneously inflate even with 584 candidates. This switch is expected: the
+   effective search size dropped 4.5× and each surviving event has 3× the IS sample.
 
-Reproduce: `FORGEDGE_MIN_TPM=3.0 python examples/search_rotation_calibration.py 40`
+4. **Trade-off:** higher `min_tpm` lowers lift (frequent events are less selective),
+   so lift stops being the discriminator — you trade "extreme but fragile" for
+   "modest but confirmable". On 1D with little data this is the right trade; on 1H
+   you lose less. The pipeline core is not weak — the **default `min_tpm` is simply
+   not scaled for low-frequency data** (ties into the frequency-aware defaults of
+   Fix #1). Because `min_tpm` is trades-per-*month*, a fixed value yields a roughly
+   constant *absolute* activation count across timeframes — exactly what sample-size
+   robustness needs.
+
+Reproduce: `FORGEDGE_MIN_TPM=3.0 python examples/search_rotation_calibration.py 100`
 
 ## Caveats
 
-- p = 0.024 at K = 40 is encouraging, not overwhelming; K ≈ 100 would tighten the
-  quantile. The 2 survivors deserve individual scrutiny.
 - The wrap seam corrupts ~h forward returns per draw; with a random offset this
   adds noise to the null max and, if anything, *inflates* it (conservative).
 - Single asset, single IS window. A close-derived event whose `source_feature`
   is the raw `close` column would partially leak in the IC term only (a minor,
   weight-0.20 component); lift/z/t/OOS are driven by the cached real activations
   vs the rotated outcome and are properly nulled.
+- With min_tpm=3.0 the composite separates at p=0.030; this is credible at K=100
+  but borderline. The survivor's OOS confirmation (p=0.000) is the stronger signal.
