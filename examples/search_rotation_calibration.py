@@ -214,11 +214,26 @@ def main():
                   f"WR={es.win_rate:.2f} | {oos_s} | {c.direction:5s} "
                   f"{c.event_expression[:42]}")
 
-    tippett_combination(real_stats, null)
+    # Stage 1 (selection): Tippett over in-sample yardsticks only.
+    tippett_combination(real_stats, null, which=IN_SAMPLE_STATS,
+                        label="in-sample only — OOS held out")
+    # For contrast: the (incorrect) version that mixes OOS into selection.
+    tippett_combination(real_stats, null,
+                        which=("composite", "abs_z", "is_lift", "is_t", "oos_t"),
+                        label="all 5 incl. oos_t — double-dips OOS")
 
 
-def tippett_combination(real_stats: dict, null: dict) -> None:
-    """Tippett (min-p) combination across all yardsticks.
+# OOS is held out of the SELECTION stage on purpose: using it to choose the
+# discriminant would burn the holdout's independence (model selection on the
+# holdout = the holdout stops being a holdout).  The Tippett combination runs
+# over IN-SAMPLE yardsticks only; OOS is applied once afterwards as a fixed
+# independent confirmation gate (two-stage test on disjoint data partitions).
+IN_SAMPLE_STATS = ("composite", "abs_z", "is_lift", "is_t")
+
+
+def tippett_combination(real_stats: dict, null: dict,
+                        which=IN_SAMPLE_STATS, label: str = "in-sample only") -> None:
+    """Tippett (min-p) combination across the given yardsticks.
 
     For each draw j, compute the empirical p-value of null[s][j] against the
     full null array of s (inclusive, conservative), then take the minimum over
@@ -230,10 +245,14 @@ def tippett_combination(real_stats: dict, null: dict) -> None:
     is paid for by the combination step — null draws that look good on *any*
     single yardstick also produce small min-p and compete against the real.
     No threshold on n_act, no choice of discriminant: the data picks.
+
+    ``which`` restricts the combination to a subset of statistics; by default
+    only the in-sample yardsticks, so OOS stays a sealed confirmation gate.
     """
     valid = {s: np.array([x for x in null[s] if np.isfinite(x)])
-             for s in real_stats
-             if any(np.isfinite(x) for x in null[s]) and np.isfinite(real_stats[s])}
+             for s in which
+             if s in real_stats
+             and any(np.isfinite(x) for x in null[s]) and np.isfinite(real_stats[s])}
     if not valid:
         return
 
@@ -259,7 +278,7 @@ def tippett_combination(real_stats: dict, null: dict) -> None:
     q05 = np.quantile(min_p_null, 0.05)
 
     print("\n" + "=" * 70)
-    print("TIPPETT (min-p) COMBINATION — adaptive multi-statistic test")
+    print(f"TIPPETT (min-p) COMBINATION — adaptive multi-statistic test [{label}]")
     print("=" * 70)
     print("Per-statistic empirical p (real vs rotation null):")
     for s, p in sorted(p_real.items(), key=lambda x: x[1]):

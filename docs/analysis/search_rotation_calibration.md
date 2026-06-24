@@ -162,27 +162,51 @@ statistic without cherry-picking? Yes, via Tippett's combination:
    within its null array) and take `min_p_j = min_s p_j[s]`.
 4. Empirical Tippett p = `(1 + #{min_p_null ≤ min_p_real}) / (1+K)`.
 
-This pays the price of having looked at 5 yardsticks: if several statistics
-are correlated (they are — all driven by the same underlying edge), the
-correction is mild; if they were independent it would be Bonferroni-like.
-No threshold on n_act, no prior choice of discriminant — the data drives.
+This pays the price of having looked at several yardsticks: if statistics are
+correlated (they are — all driven by the same underlying edge), the correction
+is mild; if they were independent it would be Bonferroni-like. No threshold on
+n_act, no prior choice of discriminant — the data drives.
 
-**K=100, min_tpm=3.0 results:**
+### Two-stage architecture: OOS held out of selection
+
+Selection and confirmation must run on **disjoint data partitions**:
+
+| stage | data | role | mechanism |
+|---|---|---|---|
+| 1 — Tippett | in-sample | **selection** | data picks among `composite, abs_z, is_lift, is_t` vs rotation null |
+| 2 — OOS | out-of-sample | **confirmation** | fixed gate, applied **once** to the stage-1 survivor |
+
+`oos_t` is therefore **excluded** from the Tippett combination. Using OOS to
+choose the discriminant would be model-selection on the holdout — and a holdout
+you have selected on is no longer a holdout. Stage 1 picks *which* in-sample
+yardstick discriminates; stage 2 is an independent gate, not a choice. The
+overall false-positive rate multiplies (≈ p_Tippett × p_OOS).
+
+**K=100, min_tpm=3.0 results (Tippett over in-sample yardsticks only):**
 
 | | value |
 |---|---|
-| Per-statistic p-values | composite: 0.030, is_t: 0.069, oos_t: 0.149, is_lift: 0.624, abs_z: 0.693 |
+| Per-statistic p-values | composite: 0.030, is_t: 0.069, is_lift: 0.624, abs_z: 0.693 |
 | Tippett min-p (real) | 0.0297 (driven by composite) |
-| Null min-p mean | 0.263   null q05 = 0.039 |
+| Null min-p mean | 0.322   null q05 = 0.039 |
 | **Tippett empirical p** | **0.059** (5/100 null draws produced min-p ≤ 0.030) |
 
-The Tippett correction moves the composite p from 0.030 to 0.059 — the cost
-of looking across 5 yardsticks. The result is borderline at 0.05, but this
-is only the rotation-null test. The survivor also passes the independent OOS
-(p=0.000, n=18, WR=0.50), which is a third evidence source orthogonal to the
+The Tippett correction moves the composite p from 0.030 to 0.059 — the cost of
+looking across the in-sample yardsticks. Borderline at 0.05, but this is only
+the search-level test. The survivor also passes the independent OOS (p=0.000,
+n=18, WR=0.50) — a third evidence source now genuinely orthogonal to the
 rotation null. The combined picture (borderline search-level test + OOS
 confirmation + 29 IS activations) is defensible.
 
-**Design recommendation:** use Tippett combination in the v2 calibrator instead
-of hardcoding which statistic to use. It is implementable on top of the same K
-rotation draws at zero extra cost.
+**Including vs excluding `oos_t` is numerically neutral here, architecturally not.**
+Running the combination with all 5 statistics (oos_t mixed into selection) gives
+the *same* Tippett p = 0.059. The null min-p *mean* drops (0.322 → 0.263, since
+oos_t adds another chance at a small p), but the *tail* crossing the 0.030
+threshold is unchanged — the null draws with a small oos_t p are the same draws
+already crossing via composite/is_t (correlated: one spurious edge measured from
+several angles). So oos_t brings no new competitors into the decisive tail.
+Excluding it costs nothing on the p-value and buys a genuinely sealed OOS gate.
+
+**Design recommendation:** use the two-stage Tippett-over-in-sample + sealed-OOS
+design in the v2 calibrator instead of hardcoding which statistic to use. It is
+implementable on top of the same K rotation draws at zero extra cost.
