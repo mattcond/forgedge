@@ -250,6 +250,17 @@ contracts = ad.run()
 promoted = ad.promoted_contracts()
 ```
 
+`promoted_contracts()` accepts an optional `min_lift` filter that further
+restricts the promoted set to contracts whose IS lift (`event_stats.lift`) is
+`>= min_lift` — useful to trim the long tail of marginal-lift hypotheses before
+the expensive Rule Discovery backtest:
+
+```python
+promoted = ad.promoted_contracts(min_lift=0.05)   # keep only lift >= 0.05
+```
+
+`None` (the default) applies no lift filter; `0.0` keeps strictly-positive lift.
+
 **Critical note:** pass `ed.df`, not the original KPI Table. `ed.df` already
 contains the derived features (ratio, spread) computed during Event Discovery;
 passing the original table works but is slightly slower as features are
@@ -266,6 +277,8 @@ config = AlphaConfig(
     timeframe="4H",
     horizon_grid=(4, 8, 12, 24, 48, 72, 96),  # horizons in 4H bars
     train_ratio=0.75,
+    target_mode="proj",             # "proj" (default) | "abs" — see below
+    trend_sma_mult=2.0,             # PROJ trend SMA window = round(2.0 * h) bars
     thresholds=PromotionThresholds(
         ic_min_abs=0.02,
         ic_max_p=0.05,
@@ -279,6 +292,20 @@ config = AlphaConfig(
 )
 ad = AlphaDiscovery(ed.df, candidates, config)
 ```
+
+**Target mode — `target_mode="proj"` (default) vs `"abs"`.** The binary target
+that drives win rate, lift and the derived take-profit can be scored two ways:
+
+- `"abs"` — absolute forward return: `log(fwd_max / close)`.
+- `"proj"` — *excess return over the local trend*:
+  `log(fwd_max / close) − log(SMA_w[t] / SMA_w[t−h])`, where the trend SMA window
+  is `w = round(trend_sma_mult * h)` bars. A long event that merely rides a bull
+  trend is therefore not credited with that trend premium — only the edge *above*
+  the drift counts. `"proj"` is the default and applies to **long** events only;
+  for shorts it reverts to `"abs"` (the bear drift *is* the alpha to capture).
+  When the IS history is shorter than `≈ (trend_sma_mult + 1) * h` bars, scoring
+  also reverts to `"abs"` with a warning.
+
 
 ### Reading the results
 
@@ -404,9 +431,14 @@ for contract in promoted:
 
 ### Full diagnostics on NON-EDGE rules (`early_elimination=False`)
 
-By default, a rule that fails the fast IS screen (< 20 trades, PF < 1, or
+By default, a rule that fails the fast IS screen (too few trades, PF < 1, or
 insufficient fill rate) is rejected immediately without running the walk-forward
-and diagnostics — saving compute. With `early_elimination=False` the full
+and diagnostics — saving compute. The trade-count floor is **not** a fixed
+absolute: it scales with the in-sample length as
+`max(10, n_months * min_tpm)` (spec RD-04), so the requirement is neither too
+strict on short IS periods nor too lax on long ones. `min_tpm` (default `2.0`)
+on `SelectionCriteria` is the sole frequency gate that drives it. With
+`early_elimination=False` the full
 pipeline runs regardless: the verdict is still `NON-EDGE`, but walk-forward,
 regime analysis, and MAE/MFE are all populated — useful for uniform reporting
 or to inspect the OOS behaviour of weak rules:
@@ -541,6 +573,33 @@ for contract, response in result.edges():    # EDGE / PARTIAL-EDGE only
 print(result.registry.summary())             # Module 4 — catalogued rules
 ```
 
+### Quick start with presets: `forge_preset`
+
+Rather than hand-tuning every gate, `forge_preset` returns a ready-made
+`(DiscoveryConfig, AlphaConfig)` pair calibrated for a named search profile and
+your timeframe. The four presets are:
+
+| Preset | Profile |
+|---|---|
+| `"sniper"` | Rare, regular, high-precision events with simple rules. Needs a long IS (≥ 2 years on 1D). Do **not** pair with the rotation calibrator. |
+| `"balanced"` | Moderate frequency, good IS/OOS balance. Sensible default for most assets/timeframes. |
+| `"sweep"` | Wide sweep, many candidates, permissive thresholds. Designed to run with the rotation calibrator — pair with `rotation_calibration=RotationConfig(k>=100)` and `promoted_contracts(min_lift=0.05)`. |
+| `"burst"` | Time-concentrated events (regime-change, momentum, volume spikes). High dispersion explicitly allowed. |
+
+```python
+from forgedge import forge, forge_preset
+
+disc_cfg, alpha_cfg = forge_preset("balanced", timeframe="1D", asset="BTC")
+result = forge(kpi, event_discovery_config=disc_cfg, alpha_config=alpha_cfg)
+```
+
+`forge_preset(preset, timeframe, asset="ASSET", train_ratio=0.70, **overrides)`
+accepts keyword overrides for any computed parameter — `min_tpm`,
+`max_dispersion`, `max_and_components`, `timestamp_col` (Discovery side) and
+`min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`
+(Alpha side). Call `preset_info()` (all presets) or `preset_info("sweep")` (one)
+to print the resolved parameters, and `PRESETS` for the list of names.
+
 Per-module configuration is passed through dedicated keyword arguments:
 
 ```python
@@ -586,6 +645,10 @@ Useful switches:
   Contracts filtered out still appear in `result.contracts` / `result.promoted` for audit
   but receive no rule response and never reach the Rule Registry.  Comparison is
   case-insensitive.  When omitted, every promoted contract is backtested.
+- `rotation_calibration=RotationConfig(k=100)` — run the search-level rotation null inline
+  after Alpha Discovery (see *Search-level calibration* below). Each promoted contract then
+  carries `rotation_p` / `rotation_threshold`. Default `None` skips it at zero extra cost;
+  for large K prefer the standalone `RotationCalibrator` to keep the main run fast.
 - `progress=True` — print per-stage status and a Rule Discovery progress bar to `stderr`
   (useful for long runs). Independently of the flag, every milestone is logged at `INFO`
   on the `forgedge.forge` logger, so `logging.basicConfig(level=logging.INFO)` surfaces the
@@ -626,6 +689,46 @@ Pass the per-module config objects (`event_discovery_config`, `alpha_config`, �
 as keyword arguments — they are forwarded to every per-ticker run. Do **not**
 pass `ticker` / `asset` (set automatically per ticker) or `run_registry` (the
 pooled registry supersedes the per-ticker ones).
+
+### Search-level calibration: `RotationCalibrator`
+
+A promoted contract can still be an artefact of FORGE's multiple-testing
+surface — with enough candidates and horizons, *some* edge appears by chance.
+`RotationCalibrator` quantifies that risk without rebuilding any feature column:
+it circularly rotates **only** the `close` column by a random offset `K` times
+and re-runs Alpha Discovery on each draw, reusing the real candidate set. The
+rotation preserves the exact return distribution and autocorrelation but
+decouples each event's activations from the forward outcome, giving a true
+search-level null. A Tippett (min-p) combination over the in-sample yardsticks
+yields a single p-value that already pays the FWER cost.
+
+```python
+from forgedge import forge, RotationCalibrator, RotationConfig
+
+result = forge(kpi, ticker="BTCUSDC", timeframe="1H", run_rule_discovery=False)
+
+cal = RotationCalibrator(
+    result.event_frame,     # post-EventDiscovery table
+    result.candidates,      # the real candidate set (reused on every draw)
+    alpha_cfg,              # the same AlphaConfig used in the run
+)
+report = cal.run(result.promoted, RotationConfig(k=100))
+
+print(report.summary())             # human-readable verdict
+print(report.tippett_p)             # primary calibration p-value
+print(len(report.survivors), "contracts above the null bar")
+```
+
+`RotationConfig(k=100, alpha=0.05, seed=..., in_sample_stats=...)` controls the
+number of draws (K≥100 for a stable q95; K=40 for a quick sanity check), the
+Type-I target and the yardsticks fed to the Tippett combination. The returned
+`CalibrationReport` exposes `tippett_p`, `tippett_best_stat`, `per_stat_p`,
+`null_q`, `real_stats`, `null_arrays` and `survivors` (the promoted contracts
+whose winning statistic clears the null bar). The same calibration can run
+**inline** during `forge()` via `rotation_calibration=RotationConfig(...)` — that
+path writes `rotation_p` / `rotation_threshold` onto each promoted contract; use
+the standalone calibrator above when you want the full report object or a large
+K without slowing the main pipeline.
 
 ### Building it by hand
 
@@ -736,7 +839,76 @@ for contract, resp in rule_responses:
 
 ---
 
-## 8. Multi-asset workflow
+## 8. Target-first workflow: `TargetOptimizer`
+
+The standard pipeline is *event-first*: discover structurally-consistent events,
+then derive the best target for each. `TargetOptimizer` inverts this — you
+**fix** the economic target up front (a horizon, an excess-return threshold and a
+side) and it finds the events that best predict it. It reuses Event Discovery,
+AND composition and the Consistency Gate internally, scoring every candidate by
+two-proportion **lift** against the fixed binary target.
+
+It is a fully standalone module — it does **not** touch `forge()` or
+`ForgeResult`. The only entry point is the constructor:
+
+```python
+from forgedge import TargetOptimizer, TargetConfig
+
+opt = TargetOptimizer(
+    train_df,                       # IS OHLCV (+ features); needs 'close' + datetime
+    TargetConfig(horizon=20, min_return=0.10, side="long"),
+)
+results = opt.run()                 # pd.DataFrame, one row per surviving candidate,
+                                    # sorted by lift descending
+```
+
+`results` columns: `event_id`, `n_components`, `expression`, `n_activations`,
+`win_rate_event` (conditional rate), `win_rate_base` (unconditional rate),
+`lift` (= `win_rate_event / win_rate_base`) and `z_score`.
+
+### `TargetConfig`
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `horizon` | `int` | *required* | Holding period in bars (> 0). |
+| `min_return` | `float` | *required* | Take-profit threshold as a fraction (e.g. `0.10` = 10%). |
+| `side` | `str` | *required* | `"long"` or `"short"`. |
+| `min_activations` | `int` | `10` | Candidates firing on fewer bars are skipped (lift unstable). |
+| `min_lift_atoms` | `float` | `1.0` | 1st-pass prune: keep only raw atoms with lift ≥ this *before* AND composition. Lossless at the default `1.0`. |
+| `min_lift_result` | `float` | `1.0` | 2nd-pass prune: filter the final result set (atoms + compositions). Raise to keep only the strongest signals. |
+| `target_mode` | `"abs"` \| `"proj"` | `"proj"` | Binary-target definition — same `abs`/`proj` semantics as Alpha Discovery (§4). |
+| `trend_sma_mult` | `float` | `2.0` | PROJ trend SMA window = `round(trend_sma_mult * horizon)` bars. |
+
+> The two thresholds were split from a single `min_lift` (still accepted but
+> deprecated, applied to both passes with a `DeprecationWarning`). `min_lift_atoms`
+> gates discovery; `min_lift_result` only trims the output.
+
+`TargetOptimizer(train_df, target_cfg, discovery_cfg=None)` accepts an optional
+`DiscoveryConfig`; when omitted it defaults to `DiscoveryConfig(train_ratio=1.0)`
+(full-frame discovery).
+
+### Validating and handing off
+
+```python
+# Candidate objects aligned with the results table
+cands = opt.candidates              # list[EventCandidate]
+print(opt.base_rate)                # unconditional win rate of the target (set after run())
+
+# Out-of-sample lift on the full dataset for the top-K survivors
+oos = opt.validate_oos(full_df, top_k=10)
+
+# Promote the survivors into Alpha Contracts in fixed-target mode
+#   (standard IC / regime / OOS / FDR / scoring against the *fixed* target)
+contracts = opt.discover_alpha()    # list[AlphaContract]
+```
+
+`discover_alpha()` keeps the binary-target definition (`target_mode`,
+`trend_sma_mult`) consistent with the optimizer's own scoring, so the lift you
+saw in `run()` matches what Alpha Discovery measures.
+
+---
+
+## 9. Multi-asset workflow
 
 Run an independent session per asset — sessions share no state. Each asset
 gets its own distributional thresholds, OU half-lives, and contracts.
@@ -773,7 +945,7 @@ print(cross)
 
 ---
 
-## 9. OOS replay: applying discovered events to new data
+## 10. OOS replay: applying discovered events to new data
 
 `EventCandidate.apply(df)` deterministically replays the event on any DataFrame
 with the same native columns, using the thresholds fixed at discovery time. This
@@ -857,7 +1029,7 @@ resolved by switching to Rule Discovery rather than re-running Alpha Discovery.
 
 ---
 
-## 10. Persisting artefacts
+## 11. Persisting artefacts
 
 ### Saving promoted contracts
 
@@ -916,7 +1088,7 @@ pd.DataFrame(candidates_data).to_csv("event_candidates.csv", index=False)
 
 ---
 
-## 11. Pre-production checklist
+## 12. Pre-production checklist
 
 Before promoting a `ValidatedRule` to the Rule Registry, verify:
 
