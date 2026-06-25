@@ -68,8 +68,12 @@ _CHUNK_SIZE = 5_000
 # containing the total pair count.
 _MAX_PER_SLOT = 3
 
-# Maximum composed events returned (pairs + triples combined).
-_MAX_COMPOSED = 2000
+# Maximum pair events returned (2-component AND compositions).
+_MAX_PAIRS = 2000
+
+# Maximum triple events returned (3-component AND compositions).
+# Independent of _MAX_PAIRS so pairs never starve triples.
+_MAX_TRIPLES = 500
 
 
 class ANDComposer:
@@ -143,8 +147,9 @@ class ANDComposer:
            This reduces the search space from ``O(n³)`` to
            ``O(n_vol_pairs × n_pool)`` with no pool cap.
 
-        6. **Hard cap**: ``_MAX_COMPOSED`` limits the total composed events
-           returned to avoid memory explosions.
+        6. **Hard caps**: ``_MAX_PAIRS`` limits pair compositions and
+           ``_MAX_TRIPLES`` limits triple compositions independently, so
+           pairs never starve triples.
 
         Parameters
         ----------
@@ -155,7 +160,9 @@ class ANDComposer:
         timestamps : pd.Series
             Datetime series aligned to the KPI table rows.
         max_components : int
-            Maximum number of components per composed event (2 or 3).
+            Maximum number of components per composed event.
+            ``1`` disables AND composition entirely (returns ``[]``).
+            ``2`` generates pairs only.  ``3`` generates pairs and triples.
         gate : ConsistencyGate or None, keyword-only
             Controls the full ConsistencyGate evaluation during composition.
 
@@ -178,7 +185,7 @@ class ANDComposer:
             returned.  When *gate* is ``None``, all volume-passing events are
             returned with ``gate_result.passed=False``.
         """
-        if not passing_events:
+        if not passing_events or max_components < 2:
             return []
 
         _gate = self.gate if gate is _COMPOSE_DEFAULT else gate
@@ -197,7 +204,8 @@ class ANDComposer:
             [ev.series.fillna(0).values.astype(np.uint8) for ev in pool]
         )  # (n_pool, n_rows)
 
-        composed: list[RawEvent] = []
+        pairs: list[RawEvent] = []
+        triples: list[RawEvent] = []
 
         valid_mask = _validity_mask(pool)
         ii_all, jj_all = np.where(np.triu(valid_mask, k=1))
@@ -210,7 +218,7 @@ class ANDComposer:
         # Pair enumeration — two-pass: cheap volume filter, then matmul
         # ----------------------------------------------------------------
         for chunk_start in range(0, n_pairs, _CHUNK_SIZE):
-            if len(composed) >= _MAX_COMPOSED:
+            if len(pairs) >= _MAX_PAIRS:
                 break
             chunk_end = min(chunk_start + _CHUNK_SIZE, n_pairs)
             ii = ii_all[chunk_start:chunk_end]
@@ -247,7 +255,7 @@ class ANDComposer:
             else:
                 passing = np.arange(len(sub_idx))
 
-            remaining = _MAX_COMPOSED - len(composed)
+            remaining = _MAX_PAIRS - len(pairs)
             if len(passing) > remaining:
                 passing = passing[:remaining]
 
@@ -264,7 +272,7 @@ class ANDComposer:
                 and_series = pd.Series(
                     and_chunk[orig].astype(float), index=pool[ii[orig]].series.index
                 )
-                composed.append(
+                pairs.append(
                     _make_composed_event(pool[ii[orig]], pool[jj[orig]], and_series, gate_result)
                 )
 
@@ -273,7 +281,7 @@ class ANDComposer:
         # ----------------------------------------------------------------
         if max_components >= 3 and vol_passing_ii:
             for idx_a, idx_b in zip(vol_passing_ii, vol_passing_jj):
-                if len(composed) >= _MAX_COMPOSED:
+                if len(triples) >= _MAX_TRIPLES:
                     break
 
                 and_ij = bool_matrix[idx_a] & bool_matrix[idx_b]  # (n_rows,)
@@ -285,7 +293,7 @@ class ANDComposer:
                     continue
 
                 for k_start in range(0, len(valid_k), _CHUNK_SIZE):
-                    if len(composed) >= _MAX_COMPOSED:
+                    if len(triples) >= _MAX_TRIPLES:
                         break
                     k_end = min(k_start + _CHUNK_SIZE, len(valid_k))
                     k_chunk = valid_k[k_start:k_end]
@@ -314,7 +322,7 @@ class ANDComposer:
                     else:
                         passing_t = np.arange(len(sub_t))
 
-                    remaining = _MAX_COMPOSED - len(composed)
+                    remaining = _MAX_TRIPLES - len(triples)
                     if len(passing_t) > remaining:
                         passing_t = passing_t[:remaining]
 
@@ -332,7 +340,7 @@ class ANDComposer:
                             and_ijk[orig_m].astype(float),
                             index=pool[idx_a].series.index,
                         )
-                        composed.append(
+                        triples.append(
                             _make_composed_event(
                                 pool[idx_a],
                                 pool[idx_b],
@@ -342,7 +350,7 @@ class ANDComposer:
                             )
                         )
 
-        return composed
+        return pairs + triples
 
     # ------------------------------------------------------------------
     # Validity checks (kept for external / testing use)

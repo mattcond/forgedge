@@ -56,9 +56,11 @@ class DiscoveryConfig:
         Name of the datetime column in the KPI table.  Also accepted as the
         index name when the DataFrame uses a DatetimeIndex.
     max_and_components : int
-        Maximum number of single events to combine in one AND composition
-        (2 or 3).  Values above 3 are technically accepted but strongly
-        discouraged — they risk structural overfitting.
+        Maximum number of single events to combine in one AND composition.
+        ``1`` disables AND composition entirely (only single events are
+        returned).  ``2`` generates single + pair events.  ``3`` generates
+        single + pair + triple events.  Values above 3 are technically
+        accepted but strongly discouraged — they risk structural overfitting.
     train_ratio : float
         Fraction of bars (0 < train_ratio ≤ 1.0) used for the in-sample
         discovery pipeline.  The remaining ``1 - train_ratio`` fraction

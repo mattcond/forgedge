@@ -764,6 +764,55 @@ class TestBugRegressions:
         composed = ANDComposer(gate).compose(events, ts)
         assert all(ev.gate_result.passed for ev in composed)
 
+    # ── Issue #124: max_and_components=1 must produce no composed events ─────
+
+    def test_max_components_1_returns_no_compositions(self):
+        """max_components=1 must return [] — no AND composition at all."""
+        events, ts, gate = self._make_two_events()
+        result = ANDComposer(gate).compose(events, ts, max_components=1)
+        assert result == []
+
+    def test_max_components_1_via_discovery_config(self):
+        """DiscoveryConfig(max_and_components=1) produces only single-component candidates."""
+        cfg = DiscoveryConfig(
+            gate_params=GateParams(min_tpm=0.5, max_dispersion=15.0),
+            max_and_components=1,
+        )
+        ed = EventDiscovery(_make_kpi_table(n=8760), cfg)
+        cands = ed.run()
+        assert all(len(c.components) == 1 for c in cands), (
+            "max_and_components=1 must not produce 2- or 3-component candidates"
+        )
+
+    def test_max_components_2_produces_only_pairs(self):
+        """max_and_components=2 produces single+pair candidates, no triples."""
+        cfg = DiscoveryConfig(
+            gate_params=GateParams(min_tpm=0.5, max_dispersion=15.0),
+            max_and_components=2,
+        )
+        ed = EventDiscovery(_make_kpi_table(n=8760), cfg)
+        cands = ed.run()
+        assert all(len(c.components) <= 2 for c in cands), (
+            "max_and_components=2 must not produce 3-component candidates"
+        )
+
+    def test_triples_not_starved_by_pair_cap(self):
+        """With max_and_components=3, triples are generated even when pairs cap is hit."""
+        from forgedge.event_discovery.and_composer import _MAX_PAIRS
+        cfg = DiscoveryConfig(
+            gate_params=GateParams(min_tpm=0.5, max_dispersion=15.0),
+            max_and_components=3,
+        )
+        ed = EventDiscovery(_make_kpi_table(n=8760), cfg)
+        cands = ed.run()
+        pairs = [c for c in cands if len(c.components) == 2]
+        triples = [c for c in cands if len(c.components) == 3]
+        # If pairs are at cap and triples exist, starvation bug is fixed
+        if len(pairs) >= _MAX_PAIRS:
+            assert len(triples) > 0, (
+                "triples must not be starved when pairs reach _MAX_PAIRS"
+            )
+
     # ── Bug #3: diffnorm_std == 0 must return all-NaN, not KeyError ─────────
 
     def test_diffnorm_std_zero_returns_all_nan(self):
