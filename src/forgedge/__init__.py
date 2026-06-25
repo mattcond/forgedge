@@ -39,6 +39,7 @@ from .rule_registry import (
 )
 from .target_optimizer import TargetOptimizer
 from .presets import forge_preset, preset_info, PRESETS
+from .summary_report import summary_report, DataQualityReport, Finding
 
 __all__ = [
     "forge",
@@ -78,4 +79,7 @@ __all__ = [
     "forge_preset",
     "preset_info",
     "PRESETS",
+    "summary_report",
+    "DataQualityReport",
+    "Finding",
 ]
