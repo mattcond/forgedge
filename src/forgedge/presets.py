@@ -1,11 +1,15 @@
 """Preset configurations for forge() — opinionated starting points.
 
 Traduce un'intenzione di alto livello ("sniper", "balanced", "sweep", "burst")
-in una coppia (DiscoveryConfig, AlphaConfig) pronta da passare a forge().
+in una tripla (DiscoveryConfig, AlphaConfig, RuleDiscoveryConfig) pronta da
+passare a forge(), con M1/M2/M3 allineati sullo stesso criterio di frequenza.
 
-I parametri core (min_tpm, max_dispersion, soglie alpha) sono validati
-empiricamente su ADA 1D 2024 e scalati al timeframe tramite la classe
-interna ``_TFClass``.
+Coerenza M1–M2–M3
+------------------
+Il ``min_tpm`` usato da EventDiscovery (M1) e RuleDiscovery (M3) devono essere
+consistenti: un evento ammesso da M1 con tpm=1.0 non può essere rifiutato da M3
+che richiede tpm=2.0 per default.  forge_preset() imposta lo stesso floor di
+frequenza per tutti e tre i moduli, scalato al timeframe.
 
 Scaling dei parametri per timeframe
 ------------------------------------
@@ -23,25 +27,27 @@ Utilizzo
     from forgedge.presets import forge_preset
     from forgedge import forge, RotationConfig
 
-    disc_cfg, alpha_cfg = forge_preset("balanced", timeframe="1D", asset="ADA")
-    result = forge(df, event_discovery_config=disc_cfg, alpha_config=alpha_cfg)
+    disc_cfg, alpha_cfg, rd_cfg = forge_preset("balanced", timeframe="1D", asset="ADA")
+    result = forge(df, event_discovery_config=disc_cfg, alpha_config=alpha_cfg,
+                   rule_discovery_config=rd_cfg)
 
     # Con RotationCalibrator (raccomandato per "sweep")
-    disc_cfg, alpha_cfg = forge_preset("sweep", timeframe="1H", asset="ETH")
+    disc_cfg, alpha_cfg, rd_cfg = forge_preset("sweep", timeframe="1H", asset="ETH")
     result = forge(df, event_discovery_config=disc_cfg, alpha_config=alpha_cfg,
+                   rule_discovery_config=rd_cfg,
                    rotation_calibration=RotationConfig(k=100))
 """
 from __future__ import annotations
 
 import re
-from dataclasses import replace
 from typing import Optional, Tuple
 
 from .alpha_discovery.models import AlphaConfig, PromotionThresholds
 from .event_discovery.discovery import DiscoveryConfig
 from .event_discovery.models import GateParams
+from .rule_discovery.models import RuleDiscoveryConfig, SelectionCriteria
 
-__all__ = ["forge_preset", "PRESETS"]
+__all__ = ["forge_preset", "preset_info", "PRESETS"]
 
 
 # ── Timeframe parsing ─────────────────────────────────────────────────────────
@@ -83,10 +89,9 @@ class _TFClass:
     def __init__(self, timeframe: str) -> None:
         self.timeframe = timeframe
         mins = _tf_minutes(timeframe)
-        # daily: >= 1D (1440 min); intraday: >= 1H (60 min); hft: < 1H
         if mins >= 1440:
             self.cls = self.DAILY
-            self.bars_per_month = 1440 / mins * 30  # ~30 for 1D
+            self.bars_per_month = 1440 / mins * 30
             self.bars_per_day = max(1, round(1440 / mins))
             self.horizon_grid = (1, 2, 3, 5, 7, 10)
         elif mins >= 60:
@@ -101,34 +106,27 @@ class _TFClass:
             self.horizon_grid = (1, 2, 5, 10, 20, 50)
 
     def scale_tpm(self, daily_tpm: float) -> float:
-        """Scale a daily-calibrated min_tpm to this timeframe.
-
-        Preserves the target absolute activation count: ~30 activations/year
-        on daily becomes the same count on intraday, but expressed as a
-        higher tpm because there are more bars per month.
-        """
+        """Scale a daily-calibrated min_tpm to this timeframe."""
         daily_bars_per_month = 30.0
         return daily_tpm * (self.bars_per_month / daily_bars_per_month)
 
     def scale_dispersion(self, daily_dispersion: float) -> float:
-        """Scale max_dispersion down for shorter timeframes.
-
-        On intraday/HFT, the law of large numbers stabilises monthly counts
-        (more bars → lower natural ID), so the same discriminatory power
-        requires a tighter threshold.
-        """
+        """Scale max_dispersion down for shorter timeframes."""
         if self.cls == self.DAILY:
             return daily_dispersion
         if self.cls == self.INTRADAY:
             return round(daily_dispersion * 0.45, 2)
-        # HFT
         return round(daily_dispersion * 0.20, 2)
 
 
 # ── Preset definitions (daily-calibrated) ─────────────────────────────────────
 
-# Ogni preset è definito con valori calibrati su daily (1D).
-# Lo scaling al timeframe avviene in forge_preset().
+# Ogni preset definisce:
+#   daily_min_tpm          — gate M1 (EventDiscovery) e M3 (RuleDiscovery), daily
+#   daily_rd_min_tpm       — gate M3, leggermente più largo di M1 per tollerare
+#                            la naturale variabilità tra attivazioni e trade eseguiti
+#   daily_max_dispersion   — gate M1
+#   parametri alpha        — gate M2 (AlphaDiscovery)
 _PRESET_SPECS: dict = {
     "sniper": {
         "description": (
@@ -137,6 +135,7 @@ _PRESET_SPECS: dict = {
             "Non abbinare a RotationCalibrator."
         ),
         "daily_min_tpm": 1.0,
+        "daily_rd_min_tpm": 1.0,
         "daily_max_dispersion": 1.0,
         "min_lift": 0.10,
         "min_cohens_d": 0.15,
@@ -150,6 +149,7 @@ _PRESET_SPECS: dict = {
             "Default sensato per la maggior parte degli asset e timeframe."
         ),
         "daily_min_tpm": 3.0,
+        "daily_rd_min_tpm": 2.5,
         "daily_max_dispersion": 2.0,
         "min_lift": 0.06,
         "min_cohens_d": 0.10,
@@ -165,6 +165,7 @@ _PRESET_SPECS: dict = {
             "promoted_contracts(min_lift=0.05)."
         ),
         "daily_min_tpm": 1.0,
+        "daily_rd_min_tpm": 1.0,
         "daily_max_dispersion": 2.5,
         "min_lift": 0.05,
         "min_cohens_d": 0.05,
@@ -179,6 +180,7 @@ _PRESET_SPECS: dict = {
             "Ottimo su mercati con forte stagionalità o bull/bear run."
         ),
         "daily_min_tpm": 2.5,
+        "daily_rd_min_tpm": 2.0,
         "daily_max_dispersion": 5.0,
         "min_lift": 0.08,
         "min_cohens_d": 0.12,
@@ -199,8 +201,12 @@ def forge_preset(
     asset: str = "ASSET",
     train_ratio: float = 0.70,
     **overrides,
-) -> Tuple[DiscoveryConfig, AlphaConfig]:
-    """Return a (DiscoveryConfig, AlphaConfig) pair for the given preset.
+) -> Tuple[DiscoveryConfig, AlphaConfig, RuleDiscoveryConfig]:
+    """Return a ``(DiscoveryConfig, AlphaConfig, RuleDiscoveryConfig)`` triple.
+
+    M1 (EventDiscovery), M2 (AlphaDiscovery) e M3 (RuleDiscovery) sono
+    configurati con lo stesso criterio di frequenza (``min_tpm``) per evitare
+    inconsistenze lungo la pipeline.
 
     Parameters
     ----------
@@ -217,38 +223,39 @@ def forge_preset(
     **overrides
         Override any computed parameter by name.  Supported keys:
 
-        DiscoveryConfig-level: ``min_tpm``, ``max_dispersion``,
-        ``max_and_components``, ``timestamp_col``.
+        M1: ``min_tpm``, ``max_dispersion``, ``max_and_components``,
+        ``timestamp_col``.
 
-        AlphaConfig/PromotionThresholds-level: ``min_lift``,
-        ``min_cohens_d``, ``fdr_q``, ``oos_max_p``, ``horizon_grid``,
-        ``bars_per_day``.
+        M2: ``min_lift``, ``min_cohens_d``, ``fdr_q``, ``oos_max_p``,
+        ``horizon_grid``, ``bars_per_day``.
+
+        M3: ``rd_min_tpm``.
 
     Returns
     -------
     disc_cfg : DiscoveryConfig
     alpha_cfg : AlphaConfig
+    rd_cfg : RuleDiscoveryConfig
 
     Examples
     --------
-    >>> disc_cfg, alpha_cfg = forge_preset("balanced", "1D", asset="BTC")
-    >>> result = forge(df, event_discovery_config=disc_cfg, alpha_config=alpha_cfg)
+    >>> disc_cfg, alpha_cfg, rd_cfg = forge_preset("balanced", "1D", asset="BTC")
+    >>> result = forge(df, event_discovery_config=disc_cfg, alpha_config=alpha_cfg,
+    ...               rule_discovery_config=rd_cfg)
 
     >>> # Sweep + RotationCalibrator
-    >>> disc_cfg, alpha_cfg = forge_preset("sweep", "4H", asset="ETH")
+    >>> disc_cfg, alpha_cfg, rd_cfg = forge_preset("sweep", "4H", asset="ETH")
     >>> result = forge(df, event_discovery_config=disc_cfg, alpha_config=alpha_cfg,
+    ...               rule_discovery_config=rd_cfg,
     ...               rotation_calibration=RotationConfig(k=100))
-    >>> contracts = result.alpha_discovery.promoted_contracts(min_lift=0.05)
     """
     if preset not in _PRESET_SPECS:
-        raise ValueError(
-            f"Unknown preset '{preset}'. Available: {PRESETS}"
-        )
+        raise ValueError(f"Unknown preset '{preset}'. Available: {PRESETS}")
 
     spec = _PRESET_SPECS[preset]
     tf = _TFClass(timeframe)
 
-    # ── Scale gate parameters ────────────────────────────────────────────
+    # ── M1: EventDiscovery ───────────────────────────────────────────────
     min_tpm = overrides.pop("min_tpm", tf.scale_tpm(spec["daily_min_tpm"]))
     max_dispersion = overrides.pop(
         "max_dispersion", tf.scale_dispersion(spec["daily_max_dispersion"])
@@ -263,16 +270,13 @@ def forge_preset(
         train_ratio=1.0,
     )
 
-    # ── Scale alpha parameters ───────────────────────────────────────────
+    # ── M2: AlphaDiscovery ───────────────────────────────────────────────
     horizon_grid = overrides.pop("horizon_grid", tf.horizon_grid)
     bars_per_day = overrides.pop("bars_per_day", tf.bars_per_day)
     min_lift = overrides.pop("min_lift", spec["min_lift"])
     min_cohens_d = overrides.pop("min_cohens_d", spec["min_cohens_d"])
     fdr_q = overrides.pop("fdr_q", spec["fdr_q"])
     oos_max_p = overrides.pop("oos_max_p", spec["oos_max_p"])
-
-    if overrides:
-        raise TypeError(f"Unexpected override keys: {list(overrides)}")
 
     alpha_cfg = AlphaConfig(
         asset=asset,
@@ -289,7 +293,23 @@ def forge_preset(
         ),
     )
 
-    return disc_cfg, alpha_cfg
+    # ── M3: RuleDiscovery ────────────────────────────────────────────────
+    # rd_min_tpm è leggermente più largo di min_tpm M1: non tutti i segnali
+    # prodotti da AlphaDiscovery si traducono in trade eseguiti (fill rate,
+    # overlap delle regole), quindi il gate M3 può essere appena più permissivo
+    # senza creare incoerenza.
+    rd_min_tpm = overrides.pop(
+        "rd_min_tpm", tf.scale_tpm(spec["daily_rd_min_tpm"])
+    )
+
+    if overrides:
+        raise TypeError(f"Unexpected override keys: {list(overrides)}")
+
+    rd_cfg = RuleDiscoveryConfig(
+        criteria=SelectionCriteria(min_tpm=rd_min_tpm),
+    )
+
+    return disc_cfg, alpha_cfg, rd_cfg
 
 
 def preset_info(preset: Optional[str] = None) -> None:
@@ -302,9 +322,10 @@ def preset_info(preset: Optional[str] = None) -> None:
         print(f"\n{'─'*60}")
         print(f"  {name.upper()}")
         print(f"  {spec['description']}")
-        print(f"  daily gate  : min_tpm={spec['daily_min_tpm']}  "
+        print(f"  M1 gate : min_tpm={spec['daily_min_tpm']}  "
               f"max_dispersion={spec['daily_max_dispersion']}  "
               f"max_and={spec['max_and_components']}")
-        print(f"  alpha       : min_lift={spec['min_lift']}  "
+        print(f"  M2 alpha: min_lift={spec['min_lift']}  "
               f"cohens_d={spec['min_cohens_d']}  "
               f"fdr_q={spec['fdr_q']}  oos_max_p={spec['oos_max_p']}")
+        print(f"  M3 gate : rd_min_tpm={spec['daily_rd_min_tpm']}")
