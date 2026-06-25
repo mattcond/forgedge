@@ -2,13 +2,14 @@
 
 Standalone, external to :func:`forge`: it produces a FORGE-ready ``DataFrame``
 from raw OHLCV candles and a KPI configuration.  The user passes :func:`forge`
-either their own table or the output of :func:`build_kpi_table`.
+either their own table or the output of :func:`build_features` / :func:`lag_features`.
 """
-from .builder import build_kpi_table, INDICATORS
+from .builder import build_features, lag_features, INDICATORS
 from .config import DEFAULT_CONFIG, DEFAULT_CONFIG_PATH, load_kpi_config
 
 __all__ = [
-    "build_kpi_table",
+    "build_features",
+    "lag_features",
     "INDICATORS",
     "DEFAULT_CONFIG",
     "DEFAULT_CONFIG_PATH",

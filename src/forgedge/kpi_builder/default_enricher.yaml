@@ -3,11 +3,11 @@
 # Struttura: <nome_indicatore>: { enabled: bool, params: { periods: [...], columns: [...] } }
 #
 # Note:
-#  - La colonna del timestamp NON va qui: è il parametro `timestamp_col` di build_kpi_table().
+#  - La colonna del timestamp NON va qui: è il parametro `timestamp_col` di build_features().
 #  - I nomi delle colonne di output sono fissati dalle funzioni indicatore
 #    (es. close_ema_25, close_bb_lower_20) perché il FeatureGenerator di FORGE li riconosce.
 #  - Le colonne referenziate ma assenti nei dati (es. volume su dati OHLC) vengono saltate.
-#  - 'lagging' è la FASE 2: può ritardare anche colonne DERIVATE in fase 1 (es. close_ema_03).
+#  - Il LAG non è qui: si applica dopo, con lag_features(df, *cols), su colonne reali.
 
 moving_average:
   enabled: true
@@ -62,12 +62,3 @@ max_drawdown:
   params:
     periods: [12, 24, 48, 120, 240]
     columns: [close]
-
-lagging:
-  enabled: true
-  params:
-    periods: [1, 2, 3]
-    columns: [close, high, low, volume, color,
-              close_ema_03, close_ema_12, close_ema_25,
-              close_sma_03, close_sma_12, close_sma_25, volume_sma_03,
-              high_max_168, close_max_168, low_min_168, close_min_168]

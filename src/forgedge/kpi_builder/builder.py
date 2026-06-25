@@ -1,36 +1,34 @@
-"""``build_kpi_table`` — turn raw candles into a FORGE-ready KPI Table.
+"""``build_features`` + ``lag_features`` — candles → KPI Table for forge().
 
 This module is **external to** :func:`forge`: it produces a ``DataFrame`` that
-:func:`forge` can consume, but never calls it.  The user is free to feed
-:func:`forge` their own table or the output of :func:`build_kpi_table`.
+:func:`forge` can consume, but never calls it.  The user feeds :func:`forge`
+either their own table or the output here.
 
-Pipeline
---------
-1. Resolve the KPI configuration (a ``dict`` or a YAML path; the packaged
-   default is used when ``None``).
-2. Derive the output datetime column (``output_timestamp_col``, default
-   ``open_dt`` — what FORGE expects) from the user-declared ``timestamp_col``
-   and sort chronologically.
-3. **Phase 1 — base indicators**: every enabled indicator is dispatched to its
-   ``ta.multiple_*`` function over each configured column.  Columns referenced
-   by the config but absent in the candles are skipped with a warning.
-4. **Phase 2 — lagging**: computed last, so it can lag columns *derived* in
-   phase 1 (e.g. ``close_ema_03`` → ``close_ema_03_prev_01``).
-5. ``NaN`` warm-up values are preserved (never coerced to ``None``) and the
-   column names are exactly those FORGE's ``FeatureGenerator`` recognises.
+Two composable steps
+--------------------
+1. :func:`build_features` — from raw candles + a KPI config, compute the base
+   indicators (SMA, EMA, RSI, Bollinger, rolling min/max, returns, volatility,
+   max-drawdown) plus the built-in ``color``.  It also derives the ``open_dt``
+   datetime column FORGE expects and sorts chronologically.
 
-Example
--------
-    from forgedge import build_kpi_table, forge
+2. :func:`lag_features` — lag *columns that already exist* in the built table.
+   Because it runs after the build, the caller selects real, inspectable columns
+   (by name or by substring via ``like=``) instead of having to know the derived
+   names up front:
 
-    kpi = build_kpi_table(candles, timestamp_col="open_time")   # ms epoch
-    result = forge(kpi, ticker="ADAUSDC", timeframe="1H")
+       kpi = build_features(candles, config, timestamp_col="open_time")
+       kpi = lag_features(kpi, "close_ema_03", like="_rsi_", periods=[1, 2, 3])
+       result = forge(kpi, ticker="ADAUSDC", timeframe="1H")
+
+This makes lagging derived features trivial (e.g. lag every EMA:
+``lag_features(kpi, *[c for c in kpi if "_ema_" in c])``) without coupling the
+caller to the internal naming convention.
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Mapping, Optional, Union
+from typing import Mapping, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -53,12 +51,12 @@ INDICATORS = {
     "bollinger_bands": ta.multiple_bollinger,
     "max_drawdown":    ta.multiple_max_drawdown,
 }
-_LAGGING = "lagging"
+_LAG_SUFFIX = "prev"
 
 ConfigType = Union[Mapping, str, Path, None]
 
 
-def build_kpi_table(
+def build_features(
     candles: pd.DataFrame,
     config: ConfigType = None,
     *,
@@ -68,40 +66,39 @@ def build_kpi_table(
     add_color: bool = True,
     sort_output: bool = True,
 ) -> pd.DataFrame:
-    """Build a KPI Table from raw candles, ready to pass to :func:`forge`.
+    """Compute the base KPI features from raw candles.
+
+    Lagging is **not** done here — use :func:`lag_features` on the result so you
+    can lag real, inspectable columns by name or pattern.
 
     Parameters
     ----------
     candles : pd.DataFrame
         Raw OHLCV candles.  Must contain ``timestamp_col`` and the price/volume
-        columns referenced by ``config`` (typically ``open``/``high``/``low``/
-        ``close``/``volume``).  Columns referenced by the config but missing here
-        are skipped with a warning (so OHLC-only data is fine).
+        columns referenced by ``config``.  Columns referenced by the config but
+        missing here are skipped with a warning (so OHLC-only data is fine).
     config : dict | str | Path | None
         KPI configuration.  ``dict`` is used as-is; ``str``/``Path`` is loaded as
         YAML (requires PyYAML); ``None`` uses the packaged default
-        (:data:`~forgedge.kpi_builder.config.DEFAULT_CONFIG`).
+        (:data:`~forgedge.kpi_builder.config.DEFAULT_CONFIG`).  Any ``lagging``
+        block is ignored — lagging now lives in :func:`lag_features`.
     timestamp_col : str, keyword-only, required
-        Name of the column holding each candle's timestamp.  Used both to order
-        the series and to derive ``output_timestamp_col``.
+        Column holding each candle's timestamp.  Used to order the series and to
+        derive ``output_timestamp_col``.
     output_timestamp_col : str
-        Name of the datetime column produced for FORGE (default ``open_dt`` — the
-        column :func:`forge` looks for).
+        Datetime column produced for FORGE (default ``open_dt``).
     timestamp_unit : str
-        Epoch unit used when ``timestamp_col`` is numeric (default ``"ms"``).
-        Ignored when the column is already datetime or a parseable string.
+        Epoch unit when ``timestamp_col`` is numeric (default ``"ms"``).
     add_color : bool
-        Add the built-in ``color`` column (+1 green / -1 red / 0 doji), available
-        to phase-2 lagging.  Requires ``open`` and ``close``.
+        Add the built-in ``color`` column (+1 green / -1 red / 0 doji).
     sort_output : bool
-        Return the table sorted chronologically by ``output_timestamp_col``.
+        Return sorted chronologically by ``output_timestamp_col``.
 
     Returns
     -------
     pd.DataFrame
-        The original candle columns plus all configured indicators (and lags),
-        with ``output_timestamp_col`` as a datetime column.  ``NaN`` warm-up
-        values are preserved.
+        Candle columns + configured base indicators (+ ``color`` + ``open_dt``).
+        ``NaN`` warm-up values are preserved.
     """
     if not isinstance(candles, pd.DataFrame):
         raise TypeError("`candles` deve essere un pandas.DataFrame")
@@ -114,15 +111,16 @@ def build_kpi_table(
     cfg = _resolve_config(config)
     df = candles.copy()
 
-    # ── Output datetime column (also used as the ordering key) ────────────────
+    # ── Output datetime column (also the ordering key) ────────────────────────
     df[output_timestamp_col] = _to_datetime(df[timestamp_col], timestamp_unit)
     df = df.sort_values(output_timestamp_col).reset_index(drop=True)
     order_on = output_timestamp_col
 
-    # ── Phase 1 — base indicators ─────────────────────────────────────────────
-    base_outputs = []
+    # ── Base indicators (dispatch) ────────────────────────────────────────────
+    outputs = []
     for name, conf in cfg.items():
-        if name == _LAGGING:
+        if name == "lagging":
+            logger.info("config: blocco 'lagging' ignorato — usa lag_features() dopo build_features()")
             continue
         if not _enabled(conf):
             logger.info("indicatore '%s' disabilitato, salto", name)
@@ -136,7 +134,7 @@ def build_kpi_table(
             if col not in df.columns:
                 logger.warning("indicatore '%s': colonna assente '%s', salto", name, col)
                 continue
-            base_outputs.append(fn(df, periods, on=col, order_on=order_on))
+            outputs.append(fn(df, periods, on=col, order_on=order_on))
 
     if add_color:
         if {"open", "close"}.issubset(df.columns):
@@ -145,25 +143,95 @@ def build_kpi_table(
         else:
             logger.warning("color richiede 'open' e 'close': salto")
 
-    for res in base_outputs:
+    for res in outputs:
         df = df.join(res, how="left")
-
-    # ── Phase 2 — lagging (può riferirsi a colonne DERIVATE in fase 1) ─────────
-    lag_conf = cfg.get(_LAGGING)
-    if lag_conf and _enabled(lag_conf):
-        periods, columns = _params(lag_conf)
-        lag_outputs = []
-        for col in columns:
-            if col not in df.columns:
-                logger.warning("lagging: colonna assente '%s', salto", col)
-                continue
-            lag_outputs.append(ta.multiple_lagging(df, periods, on=col, order_on=order_on))
-        for res in lag_outputs:
-            df = df.join(res, how="left")
 
     if sort_output:
         df = df.sort_values(output_timestamp_col).reset_index(drop=True)
     return df
+
+
+def lag_features(
+    df: pd.DataFrame,
+    *cols: str,
+    periods: Union[int, Sequence[int]] = (1, 2, 3),
+    like: Optional[str] = None,
+    order_on: str = "open_dt",
+) -> pd.DataFrame:
+    """Add lagged copies of existing columns to a built feature table.
+
+    Runs *after* :func:`build_features`, so columns are real and inspectable —
+    no need to know the derived names up front.  Each requested column ``c`` and
+    period ``w`` produces ``{c}_prev_{w:02d}`` (the value ``w`` bars earlier).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        A table produced by :func:`build_features` (or any frame ordered by
+        ``order_on``).
+    *cols : str
+        Explicit column names to lag.  A name not present raises ``KeyError``
+        (it is almost always a typo — the columns are known at this point).
+    periods : int or sequence of int
+        Lag lengths in bars (default ``(1, 2, 3)``).
+    like : str, optional
+        Also lag every column whose name *contains* this substring (e.g.
+        ``like="_ema_"`` lags all EMAs).  The ``order_on`` column is never
+        selected this way.
+    order_on : str
+        Column used to order the series before shifting (default ``open_dt``).
+        When absent and the index is a ``DatetimeIndex`` the index is used;
+        otherwise the existing row order is assumed chronological.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy of ``df`` with the lag columns appended.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("`df` deve essere un pandas.DataFrame")
+
+    selected: list[str] = []
+    for c in cols:
+        if c not in df.columns:
+            sample = list(df.columns)[:12]
+            raise KeyError(
+                f"lag_features: colonna '{c}' non presente nel DataFrame. "
+                f"Colonne (prime {len(sample)}): {sample}…"
+            )
+        if c not in selected:
+            selected.append(c)
+    if like is not None:
+        for c in df.columns:
+            if like in c and c != order_on and c not in selected:
+                selected.append(c)
+    if not selected:
+        raise ValueError(
+            "lag_features: nessuna colonna selezionata. "
+            "Passa nomi espliciti (lag_features(df, 'close_ema_03', …)) o like=…"
+        )
+
+    if isinstance(periods, int):
+        periods = (periods,)
+
+    out = df.copy()
+    if order_on in out.columns:
+        base = out.sort_values(order_on)
+    elif isinstance(out.index, pd.DatetimeIndex):
+        base = out.sort_index()
+    else:
+        logger.debug("lag_features: '%s' assente e nessun DatetimeIndex; assumo già ordinato", order_on)
+        base = out
+
+    for col in selected:
+        s = base[col]
+        is_num = pd.api.types.is_numeric_dtype(s)
+        for w in periods:
+            shifted = s.shift(w)
+            if is_num:
+                shifted = shifted.round(5)
+            out[f"{col}_{_LAG_SUFFIX}_{int(w):02d}"] = shifted  # index-aligned back to out
+    return out
 
 
 # ---------------------------------------------------------------------------

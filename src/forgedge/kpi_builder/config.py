@@ -8,7 +8,7 @@ ships only ``pandas``/``numpy``); YAML files are supported as an opt-in via
 
 The ``time_column`` and ``suffix`` keys of the original *enricher* YAML are
 intentionally dropped: the timestamp column is now a top-level argument of
-:func:`~forgedge.kpi_builder.builder.build_kpi_table`, and the output column
+:func:`~forgedge.kpi_builder.builder.build_features`, and the output column
 names are fixed by the indicator functions (and must stay so for FORGE's
 ``FeatureGenerator`` to recognise them).
 """
@@ -41,14 +41,9 @@ DEFAULT_CONFIG: Mapping = {
     "bollinger_bands": {"enabled": True, "params": {"periods": [20], "columns": ["close"]}},
     "max_drawdown":   {"enabled": True, "params": {"periods": [12, 24, 48, 120, 240],
                                                    "columns": ["close"]}},
-    # Phase 2 — lagging may reference columns DERIVED in phase 1 (e.g. close_ema_03).
-    "lagging":        {"enabled": True, "params": {"periods": [1, 2, 3], "columns": [
-        "close", "high", "low", "volume", "color",
-        "close_ema_03", "close_ema_12", "close_ema_25",
-        "close_sma_03", "close_sma_12", "close_sma_25", "volume_sma_03",
-        "high_max_168", "close_max_168", "low_min_168", "close_min_168",
-    ]}},
 }
+# NB: il lag non è nel config. Si applica dopo build_features() con lag_features(),
+# così si ritardano colonne reali (anche derivate) senza conoscerne i nomi a priori.
 
 
 def load_kpi_config(path: "str | Path") -> dict:
