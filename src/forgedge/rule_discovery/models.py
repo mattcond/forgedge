@@ -193,6 +193,13 @@ class SelectionCriteria:
         Minimum composite ``pf_score_tpm``.
     min_fill_rate : float
         Minimum fill rate — below it the limit discount is too deep.
+    min_fill_rate_opt : float
+        Fill-rate floor for the ``entry_mode="auto"`` limit-optimisation stage.
+        Distinct from ``min_fill_rate`` (the general gate): the limit optimiser
+        may only improve the operating point of an already-real market edge if
+        the optimised entry still fills at ``>= min_fill_rate_opt`` — high by
+        design (default ``0.80``), so a deep, rarely-filled limit cannot inflate
+        PF on a non-tradeable subset of trades (the "fill confound").
     partial_min_profit_factor : float
         Lower PF bound for a ``PARTIAL-EDGE`` (between this and
         ``min_profit_factor``).
@@ -227,6 +234,7 @@ class SelectionCriteria:
     min_tpm: float = 2.0
     min_pf_score_tpm: float = 0.30
     min_fill_rate: float = 0.40
+    min_fill_rate_opt: float = 0.80
     partial_min_profit_factor: float = 1.5
     min_active_month_rate: float = 0.80
     max_regime_dependency: float = 0.30
@@ -253,6 +261,26 @@ class RuleDiscoveryConfig:
         OOS walk-forward settings.
     criteria : SelectionCriteria
         Acceptance / verdict thresholds.
+    entry_mode : str
+        How the entry order is evaluated — ``"limit"`` (default), ``"market"``
+        or ``"auto"``.
+
+        * ``"limit"`` — current behaviour: the grid varies ``buy_drop_pct`` and
+          the limit entry doubles as an entry-price optimiser.  **Default, fully
+          backward-compatible.**
+        * ``"market"`` — pure baseline: enter at the next bar's open (fill
+          ≈ 100%), no entry optimiser.  Isolates the *signal's* edge; the
+          ``fill_rate`` gate is effectively inert.
+        * ``"auto"`` — two-stage pipeline.  Stage 1 evaluates the rule in
+          **market** mode and that verdict is authoritative.  Stage 2 then runs
+          a **limit** optimiser (varying ``buy_drop_pct``) *only* on EDGE /
+          PARTIAL survivors, crediting the improved operating point **only** at a
+          comparable fill (``>= criteria.min_fill_rate_opt``).  The optimiser can
+          improve the operating point but can never turn a NON-EDGE-market rule
+          into an EDGE — eliminating the fill confound while keeping the
+          diagnostic separation baseline ↔ optimiser.  The chosen operating point
+          and the before/after metrics are reported on
+          ``RuleDiscoveryResponse.entry_optimization``.
     use_contract_target : bool
         Seed ``sell_pct``/``target_h`` from the contract's derived target.
     timestamp_col : str
@@ -269,6 +297,7 @@ class RuleDiscoveryConfig:
     grid: GridSpec = field(default_factory=GridSpec)
     walk_forward: WalkForwardConfig = field(default_factory=WalkForwardConfig)
     criteria: SelectionCriteria = field(default_factory=SelectionCriteria)
+    entry_mode: str = "limit"
     use_contract_target: bool = True
     timestamp_col: str = "open_dt"
     signal_col: str = "__rule_signal__"
@@ -507,6 +536,51 @@ class ValidatedRule:
 
 
 @dataclass
+class EntryOptimization:
+    """Outcome of the ``entry_mode="auto"`` two-stage entry evaluation.
+
+    The verdict always comes from the market baseline (Stage 1).  Stage 2 runs a
+    limit optimiser over ``buy_drop_pct`` on the survivor and reports here whether
+    a tradeable improvement was found and adopted, with the before/after metrics
+    for full transparency.
+
+    Attributes
+    ----------
+    selected_entry : str
+        Entry mechanism of the adopted operating point — ``"market"`` (baseline
+        kept) or ``"limit"`` (optimiser improved it at an acceptable fill).
+    adopted : bool
+        ``True`` when the limit optimiser improved ``pf_score_tpm`` at a fill
+        ``>= min_fill_rate_opt`` and was adopted as the operating point.
+    min_fill_rate_opt : float
+        The fill floor enforced on the optimisation stage.
+    market_profit_factor, market_fill_rate, market_pf_score_tpm : float
+        Stage-1 (market baseline) in-sample metrics.
+    limit_profit_factor, limit_fill_rate, limit_pf_score_tpm : float or None
+        Best limit candidate meeting the fill floor (``None`` when none did).
+    limit_buy_drop_pct : float or None
+        ``buy_drop_pct`` of that candidate.
+    reason : str
+        Human-readable explanation of the decision.
+    """
+
+    selected_entry: str
+    adopted: bool
+    min_fill_rate_opt: float
+    market_profit_factor: float
+    market_fill_rate: float
+    market_pf_score_tpm: float
+    limit_profit_factor: Optional[float]
+    limit_fill_rate: Optional[float]
+    limit_pf_score_tpm: Optional[float]
+    limit_buy_drop_pct: Optional[float]
+    reason: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class RuleDiscoveryResponse:
     """Verdict and full evidence produced by Rule Discovery (Section 8).
 
@@ -527,6 +601,7 @@ class RuleDiscoveryResponse:
     regime_analysis: Optional[RegimeBreakdown]
     execution_envelope: Optional[ExecutionEnvelope] = None
     excursion: Optional[ExcursionStats] = None
+    entry_optimization: Optional[EntryOptimization] = None
     grid_results: List[GridResult] = field(default_factory=list)
     rejection_reasons: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
@@ -585,6 +660,9 @@ class RuleDiscoveryResponse:
                 self.execution_envelope.to_dict() if self.execution_envelope else None
             ),
             "excursion": self.excursion.to_dict() if self.excursion else None,
+            "entry_optimization": (
+                self.entry_optimization.to_dict() if self.entry_optimization else None
+            ),
             "regime_analysis": (
                 {
                     "dependency_score": ra.dependency_score,

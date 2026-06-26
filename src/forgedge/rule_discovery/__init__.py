@@ -12,6 +12,7 @@ from .grid import build_grid, grid_dataframe, run_grid, select_best
 from .models import (
     BacktestParams,
     BacktestSummary,
+    EntryOptimization,
     ExcursionStats,
     ExecutionEnvelope,
     GridResult,
@@ -47,6 +48,7 @@ __all__ = [
     "StatisticalValidation",
     "RegimeBreakdown",
     "ExecutionEnvelope",
+    "EntryOptimization",
     "ExcursionStats",
     "ValidatedRule",
     "run_backtest",
