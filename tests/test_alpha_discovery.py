@@ -29,7 +29,14 @@ from forgedge.alpha_discovery.target import (
     forward_log_returns,
     forward_returns,
 )
-from forgedge.event_discovery.models import GateParams
+from forgedge.event_discovery.models import (
+    ActivationStats,
+    EventCandidate,
+    EventComponent,
+    GateParams,
+    GateResult,
+    build_feature_series,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1240,3 +1247,149 @@ class TestInputHandling:
         ad = AlphaDiscovery(indexed, cands, AlphaConfig())
         contracts = ad.run()
         assert len(contracts) == len(cands)
+
+
+# ---------------------------------------------------------------------------
+# Issue #128 — categorical features must be binarised before IC measurement
+# ---------------------------------------------------------------------------
+
+def _kpi_with_pattern(n: int = 6000, seed: int = 7) -> pd.DataFrame:
+    """KPI table that extends _predictive_kpi_table with a categorical column.
+
+    HAMMER fires ~20 % of bars and is given a mild positive return boost so
+    that AlphaDiscovery can derive a target and compute a point-biserial IC.
+    """
+    df = _predictive_kpi_table(n=n, seed=seed)
+    rng = np.random.default_rng(seed + 1)
+    hammer_mask = rng.uniform(size=n) < 0.20
+    labels = np.where(hammer_mask, "HAMMER", np.where(rng.uniform(size=n) < 0.25, "DOJI", None))
+    df["pattern"] = labels
+    # Inject a mild edge: bars after HAMMER see a slightly higher close
+    shift = np.zeros(n)
+    shift[1:] = np.where(hammer_mask[:-1], 0.003, 0.0)
+    df["close"] = df["close"] * np.exp(np.cumsum(shift))
+    return df
+
+
+def _make_categorical_candidate(df: pd.DataFrame, cls: str = "HAMMER") -> EventCandidate:
+    """Build a minimal categorical_onehot EventCandidate for ``df['pattern']``."""
+    col = "pattern"
+    raw = df[col]
+    series = (raw == cls).astype(float).where(raw.notna(), float("nan"))
+    comp = EventComponent(
+        source_feature=col,
+        transform="categorical_onehot",
+        transform_params={"class": cls},
+        transformed_col=f"is_{col}_{cls}",
+        threshold=1.0,
+        threshold_type="categorical_onehot",
+        direction="above",
+        event_type="threshold",
+        expression=f"{col} == '{cls}'",
+    )
+    n_act = int(series.fillna(0).sum())
+    gate = GateResult(
+        passed=True,
+        n_activations=n_act,
+        n_active_months=0,
+        max_monthly_share=float("nan"),
+        mean_tpm=float("nan"),
+    )
+    stats = ActivationStats(
+        n_activations=n_act,
+        n_active_months=0,
+        zero_months=0,
+        max_monthly_share=float("nan"),
+        mean_tpm=float("nan"),
+    )
+    return EventCandidate(
+        event_id=f"EVT-{col}_{cls}-OH-0000",
+        status="CANDIDATE",
+        components=[comp],
+        expression=comp.expression,
+        activation_stats=stats,
+        consistency_gate=gate,
+        event_series=series,
+    )
+
+
+class TestCategoricalFeature:
+    """Alpha Discovery must handle categorical_onehot events end-to-end (issue #128)."""
+
+    # ------------------------------------------------------------------
+    # Unit tests — build_feature_series returns 0/1 not raw values
+    # ------------------------------------------------------------------
+
+    def test_build_feature_series_categorical_returns_binary(self):
+        """build_feature_series returns 0/1 floats, not raw strings."""
+        df = pd.DataFrame({"pattern": ["HAMMER", "DOJI", None, "HAMMER", "DOJI"]})
+        comp = EventComponent(
+            source_feature="pattern",
+            transform="categorical_onehot",
+            transform_params={"class": "HAMMER"},
+            transformed_col="is_pattern_HAMMER",
+            threshold=1.0,
+            threshold_type="categorical_onehot",
+            direction="above",
+            event_type="threshold",
+            expression="pattern == 'HAMMER'",
+        )
+        result = build_feature_series(comp, df)
+        assert result.dtype == float
+        assert list(result.dropna()) == [1.0, 0.0, 1.0, 0.0]
+        assert pd.isna(result.iloc[2])
+
+    def test_build_feature_series_binary_native_returns_binary(self):
+        """build_feature_series returns 0/1 floats for binary_native."""
+        df = pd.DataFrame({"flag": [0, 1, 1, 0, None]})
+        comp = EventComponent(
+            source_feature="flag",
+            transform="binary_native",
+            transform_params={},
+            transformed_col="is_flag_1",
+            threshold=1,
+            threshold_type="binary_native",
+            direction="above",
+            event_type="threshold",
+            expression="flag == 1",
+        )
+        result = build_feature_series(comp, df)
+        assert result.dtype == float
+        assert list(result.dropna()) == [0.0, 1.0, 1.0, 0.0]
+        assert pd.isna(result.iloc[4])
+
+    # ------------------------------------------------------------------
+    # Integration — AlphaDiscovery must not crash on categorical events
+    # ------------------------------------------------------------------
+
+    def test_alpha_discovery_does_not_crash_on_categorical_candidate(self):
+        """AlphaDiscovery must complete without ValueError when given a
+        categorical_onehot EventCandidate (regression test for issue #128).
+
+        The candidate is constructed directly to avoid dependence on the
+        consistency gate's dispersion criterion (which may reject sparse
+        categoricals depending on dataset length).
+        """
+        df = _kpi_with_pattern()
+        cat_cand = _make_categorical_candidate(df, cls="HAMMER")
+        _, cont_cands = _make_candidates(df)
+        all_cands = cont_cands + [cat_cand]
+
+        alpha_cfg = AlphaConfig(timestamp_col="open_dt", target_mode="abs")
+        ad = AlphaDiscovery(df, all_cands, alpha_cfg)
+        contracts = ad.run()  # must not raise ValueError
+        assert len(contracts) == len(all_cands)
+
+    def test_categorical_contract_has_finite_ic(self):
+        """The categorical event contract must record a finite IC value,
+        confirming point-biserial IC measurement succeeded (not a crash)."""
+        df = _kpi_with_pattern()
+        cat_cand = _make_categorical_candidate(df, cls="HAMMER")
+
+        alpha_cfg = AlphaConfig(timestamp_col="open_dt", target_mode="abs")
+        ad = AlphaDiscovery(df, [cat_cand], alpha_cfg)
+        contracts = ad.run()
+        assert len(contracts) == 1
+        contract = contracts[0]
+        assert contract.underlying_feature is not None
+        assert math.isfinite(contract.underlying_feature.ic)

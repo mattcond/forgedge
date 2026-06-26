@@ -851,9 +851,16 @@ def build_feature_series(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
         # itself (Alpha Discovery measures a point-biserial IC against it).
         return _eval_custom_formula(comp.transform_params["formula"], df)
 
-    if comp.transform in ("binary_native", "categorical_onehot"):
-        # No continuous feature underneath — return the raw column.
-        return df[sf]
+    if comp.transform == "categorical_onehot":
+        # Return 0/1 binary so Alpha Discovery measures a point-biserial IC.
+        cls = comp.transform_params.get("class")
+        raw = df[sf]
+        return (raw == cls).astype(float).where(raw.notna(), float("nan"))
+
+    if comp.transform == "binary_native":
+        # Return 0/1 binary so Alpha Discovery measures a point-biserial IC.
+        raw = df[sf]
+        return (raw == comp.threshold).astype(float).where(raw.notna(), float("nan"))
 
     sc = comp.source_cols
     if sf.startswith("ratio_") and len(sc) == 2:
