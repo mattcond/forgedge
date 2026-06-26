@@ -40,7 +40,7 @@ from .rule_registry import (
 from .target_optimizer import TargetOptimizer
 from .presets import forge_preset, preset_info, PRESETS
 from .summary_report import summary_report, DataQualityReport, Finding
-from .kpi_builder import build_features, lag_features, candle_features
+from .kpi_builder import build_features, lag_features, candle_features, pattern_features
 
 __all__ = [
     "forge",
@@ -86,4 +86,5 @@ __all__ = [
     "build_features",
     "lag_features",
     "candle_features",
+    "pattern_features",
 ]

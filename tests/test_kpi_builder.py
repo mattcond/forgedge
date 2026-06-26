@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from forgedge import build_features, lag_features, candle_features
-from forgedge.kpi_builder import DEFAULT_CONFIG
+from forgedge import build_features, lag_features, candle_features, pattern_features
+from forgedge.kpi_builder import DEFAULT_CONFIG, PATTERNS, is_hammer, is_doji
 
 
 def _candles(n: int = 300, with_volume: bool = True, seed: int = 0) -> pd.DataFrame:
@@ -227,3 +227,83 @@ def test_candle_features_compose_with_build_and_lag():
     assert "upper_wick_prev_01" in kpi.columns and "lower_wick_prev_01" in kpi.columns
     # no column was upcast to object
     assert not any(kpi[c].dtype == object for c in _GEOMETRY)
+
+
+# ── pattern_features (named, categorical, opt-in) ─────────────────────────────
+
+def _pattern_frame() -> pd.DataFrame:
+    # row0 bearish, row1 bullish-engulfs-row0, row2 hammer, row3 doji, row4 plain
+    rows = [
+        (10.0, 10.1, 8.9, 9.0),    # bearish
+        (8.9, 10.2, 8.8, 10.1),    # bullish engulfing of row0
+        (10.0, 10.5, 8.5, 10.4),   # hammer (long lower wick, small upper)
+        (10.0, 10.5, 9.5, 10.01),  # doji (tiny body)
+        (10.0, 10.3, 9.8, 10.2),   # plain
+    ]
+    df = pd.DataFrame(rows, columns=["open", "high", "low", "close"])
+    df["open_dt"] = pd.date_range("2022-01-01", periods=len(df), freq="D")
+    return df
+
+
+def test_pattern_features_single_categorical_column():
+    out = pattern_features(_pattern_frame())
+    assert "candle_pattern" in out.columns
+    assert out["candle_pattern"].dtype == object          # categorical, not numeric
+    # only pattern names or None — never 1/0
+    assert set(out["candle_pattern"].dropna().unique()) <= set(
+        {"DOJI", "HAMMER", "SHOOTING_STAR", "MARUBOZU",
+         "BULLISH_ENGULFING", "BEARISH_ENGULFING", "BULLISH_HARAMI",
+         "BEARISH_HARAMI", "MORNING_STAR", "EVENING_STAR"})
+
+
+def test_pattern_features_is_classifiable_by_forge():
+    """The single column must have ≥2 distinct values so FORGE keeps it."""
+    from forgedge.event_discovery.classifier import TypeClassifier
+    from forgedge.event_discovery.models import ColumnType
+    out = pattern_features(_pattern_frame())
+    cls = TypeClassifier().fit(out[["candle_pattern"]])
+    assert "candle_pattern" in cls  # not skipped as constant
+    assert cls["candle_pattern"].col_type == ColumnType.CATEGORICAL
+
+
+def test_pattern_detectors_return_name_or_none():
+    df = _pattern_frame()
+    assert is_hammer(df).iloc[2] == "HAMMER"
+    assert is_hammer(df).iloc[3] is None        # the doji bar is not a hammer
+    assert is_doji(df).iloc[3] == "DOJI"
+
+
+def test_pattern_features_detects_engulfing_hammer_doji():
+    out = pattern_features(_pattern_frame())
+    assert out["candle_pattern"].iloc[1] == "BULLISH_ENGULFING"
+    assert out["candle_pattern"].iloc[2] == "HAMMER"
+    assert out["candle_pattern"].iloc[3] == "DOJI"
+
+
+def test_pattern_features_precedence_hammer_over_doji():
+    # a dragonfly-doji bar matches both doji and hammer; hammer wins by precedence
+    df = pd.DataFrame(
+        [(10.0, 10.05, 8.5, 10.02)], columns=["open", "high", "low", "close"])
+    df["open_dt"] = pd.date_range("2022-01-01", periods=1, freq="D")
+    assert is_doji(df).iloc[0] == "DOJI"
+    assert is_hammer(df).iloc[0] == "HAMMER"
+    assert pattern_features(df)["candle_pattern"].iloc[0] == "HAMMER"
+
+
+def test_pattern_features_subset_and_unknown():
+    out = pattern_features(_pattern_frame(), patterns=["doji"])
+    assert out["candle_pattern"].iloc[2] is None    # hammer not considered
+    assert out["candle_pattern"].iloc[3] == "DOJI"
+    with pytest.raises(KeyError):
+        pattern_features(_pattern_frame(), patterns=["not_a_pattern"])
+
+
+def test_pattern_features_requires_ohlc():
+    with pytest.raises(KeyError):
+        pattern_features(_pattern_frame().drop(columns=["high"]))
+
+
+def test_pattern_features_not_in_default_build():
+    """Named patterns must be opt-in — build_features never emits the column."""
+    kpi = build_features(_candles(), timestamp_col="open_time")
+    assert "candle_pattern" not in kpi.columns
