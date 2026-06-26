@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from forgedge import build_features, lag_features
+from forgedge import build_features, lag_features, candle_features
 from forgedge.kpi_builder import DEFAULT_CONFIG
 
 
@@ -164,3 +164,66 @@ def test_lag_features_preserves_row_order_and_count():
     out = lag_features(kpi, "close", periods=[1])
     assert len(out) == len(kpi)
     assert out["open_dt"].is_monotonic_increasing
+
+
+# ── candle_features ───────────────────────────────────────────────────────────
+
+_GEOMETRY = ("body", "upper_wick", "lower_wick", "close_pos", "range_pct", "gap")
+
+
+def test_candle_features_adds_geometry_columns():
+    out = candle_features(_candles())
+    for col in _GEOMETRY:
+        assert col in out.columns, col
+
+
+def test_candle_features_requires_ohlc():
+    with pytest.raises(KeyError):
+        candle_features(_candles().drop(columns=["high"]))
+
+
+def test_candle_features_value_ranges_and_invariant():
+    out = candle_features(_candles(n=500))
+    g = out.dropna(subset=["body", "upper_wick", "lower_wick", "close_pos"])
+    assert (g["body"].abs() <= 1 + 1e-9).all()
+    assert ((g["upper_wick"] >= -1e-9) & (g["upper_wick"] <= 1 + 1e-9)).all()
+    assert ((g["lower_wick"] >= -1e-9) & (g["lower_wick"] <= 1 + 1e-9)).all()
+    assert ((g["close_pos"] >= -1e-9) & (g["close_pos"] <= 1 + 1e-9)).all()
+    # geometric identity: |body| + upper_wick + lower_wick == 1 on non-flat bars
+    total = g["body"].abs() + g["upper_wick"] + g["lower_wick"]
+    np.testing.assert_allclose(total.to_numpy(), 1.0, atol=1e-4)
+
+
+def test_candle_features_are_scale_free():
+    base = _candles(n=300)
+    scaled = base.copy()
+    for c in ("open", "high", "low", "close"):
+        scaled[c] = scaled[c] * 1000.0
+    a = candle_features(base)[list(_GEOMETRY)]
+    b = candle_features(scaled)[list(_GEOMETRY)]
+    np.testing.assert_allclose(a.to_numpy(), b.to_numpy(), atol=1e-4, equal_nan=True)
+
+
+def test_candle_features_flat_bar_is_nan_not_inf():
+    df = _candles(n=50)
+    df.loc[10, ["open", "high", "low", "close"]] = 100.0  # flat bar, range == 0
+    out = candle_features(df)
+    row = out.loc[10]
+    assert np.isnan(row["body"]) and np.isnan(row["close_pos"])
+    assert not np.isinf(out[list(_GEOMETRY)].to_numpy(dtype="float64")).any()
+
+
+def test_candle_features_gap_is_pct_change_of_open_vs_prev_close():
+    df = _candles(n=100)
+    out = candle_features(df)
+    expected = (df["open"].to_numpy()[1:] / df["close"].to_numpy()[:-1]) - 1.0
+    np.testing.assert_allclose(out["gap"].to_numpy()[1:], np.round(expected, 5), atol=1e-4)
+
+
+def test_candle_features_compose_with_build_and_lag():
+    kpi = build_features(_candles(), timestamp_col="open_time")
+    kpi = candle_features(kpi)
+    kpi = lag_features(kpi, like="wick", periods=[1])
+    assert "upper_wick_prev_01" in kpi.columns and "lower_wick_prev_01" in kpi.columns
+    # no column was upcast to object
+    assert not any(kpi[c].dtype == object for c in _GEOMETRY)
