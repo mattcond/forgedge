@@ -1,0 +1,64 @@
+# KPI Builder — configurazione di riferimento (esempio modificabile).
+#
+# Struttura: <nome_indicatore>: { enabled: bool, params: { periods: [...], columns: [...] } }
+#
+# Note:
+#  - La colonna del timestamp NON va qui: è il parametro `timestamp_col` di build_features().
+#  - I nomi delle colonne di output sono fissati dalle funzioni indicatore
+#    (es. close_ema_25, close_bb_lower_20) perché il FeatureGenerator di FORGE li riconosce.
+#  - Le colonne referenziate ma assenti nei dati (es. volume su dati OHLC) vengono saltate.
+#  - Il LAG non è qui: si applica dopo, con lag_features(df, *cols), su colonne reali.
+
+moving_average:
+  enabled: true
+  params:
+    periods: [3, 9, 12, 25, 96, 168]
+    columns: [close, high, low, volume]
+
+ema:
+  enabled: true
+  params:
+    periods: [3, 9, 12, 25, 96, 168]
+    columns: [close, high, low]
+
+volatility:
+  enabled: true
+  params:
+    periods: [5, 12, 24, 96, 168]
+    columns: [close]
+
+min:
+  enabled: true
+  params:
+    periods: [3, 6, 12, 24, 48, 96, 168]
+    columns: [close, high, low]
+
+max:
+  enabled: true
+  params:
+    periods: [3, 6, 12, 24, 48, 96, 168]
+    columns: [close, high, low]
+
+return:
+  enabled: true
+  params:
+    periods: [1, 3, 6, 12, 24, 48, 96, 168]
+    columns: [close]
+
+rsi:
+  enabled: true
+  params:
+    periods: [14, 25]
+    columns: [close]
+
+bollinger_bands:
+  enabled: true
+  params:
+    periods: [20]
+    columns: [close]
+
+max_drawdown:
+  enabled: true
+  params:
+    periods: [12, 24, 48, 120, 240]
+    columns: [close]
