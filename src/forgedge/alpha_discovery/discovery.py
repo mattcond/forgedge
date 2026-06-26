@@ -1312,6 +1312,11 @@ class AlphaDiscovery:
         (deterministic algebra on native columns — no re-fitting).
         """
         name = comp.source_feature
+        # For categorical/binary transforms the raw column contains non-numeric
+        # values; build_feature_series returns the 0/1 binarized version needed
+        # for point-biserial IC measurement.
+        if comp.transform in ("categorical_onehot", "binary_native"):
+            return build_feature_series(comp, self._frame)
         if name in self._frame.columns:
             return self._frame[name]
         return build_feature_series(comp, self._frame)
