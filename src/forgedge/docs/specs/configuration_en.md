@@ -382,6 +382,7 @@ NON-EDGE verdicts.
 | `min_tpm` | float | `2.0` | Minimum average trading frequency (trades/month) for EDGE. Also the sole trade-count gate: the minimum executed-trade count is dynamic, `max(10, n_months × min_tpm)`, scaling with the IS length (spec RD-04) instead of a fixed absolute threshold. |
 | `min_pf_score_tpm` | float | `0.30` | Minimum composite PF×TPM score to include a configuration in the selection. |
 | `min_fill_rate` | float | `0.40` | Minimum limit order fill rate: at least 40% of events must result in a trade. |
+| `min_fill_rate_opt` | float | `0.80` | Fill floor for the `entry_mode="auto"` limit-optimisation stage: the limit may improve the operating point only if it still fills at ≥ 80%, avoiding the fill-collapse confound. |
 | `partial_min_profit_factor` | float | `1.5` | Minimum IS PF for PARTIAL-EDGE (does not reach EDGE but not NON-EDGE). |
 | `max_zero_months_edge` | int | `1` | Maximum zero-or-negative months allowed for EDGE. |
 | `max_zero_months_partial` | int | `4` | Maximum zero-or-negative months allowed for PARTIAL-EDGE. |
@@ -416,6 +417,7 @@ Main configuration for Module 3. Aggregates all sub-configurators.
 | `grid` | GridSpec | `GridSpec()` | Grid search space. When all fields are None, the default grid is used. |
 | `walk_forward` | WalkForwardConfig | `WalkForwardConfig()` | Walk-forward OOS configuration. |
 | `criteria` | SelectionCriteria | `SelectionCriteria()` | EDGE/PARTIAL-EDGE/NON-EDGE verdict criteria. |
+| `entry_mode` | str | `"limit"` | Entry evaluation mode: `"limit"` (default, backward-compatible), `"market"` (next-open baseline, fill ≈ 100%, no optimiser) or `"auto"` (two-stage pipeline: **market** decides the verdict, **limit** refines the operating point of survivors only at fill ≥ `min_fill_rate_opt`). |
 | `use_contract_target` | bool | `True` | When True, uses `direction`, `sell_pct`, and `target_h` from the AlphaContract as the grid starting point. |
 | `timestamp_col` | str | `"open_dt"` | Datetime column. |
 | `signal_col` | str | `"__rule_signal__"` | Internal temporary column for the event signal. |

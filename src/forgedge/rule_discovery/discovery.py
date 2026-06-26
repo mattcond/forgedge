@@ -61,7 +61,9 @@ from .backtest import _as_datetime64, _months_m, run_backtest
 from .grid import grid_dataframe, run_grid, select_best
 from .models import (
     BacktestParams,
+    EntryOptimization,
     GridResult,
+    GridSpec,
     RegimeBreakdown,
     RuleDiscoveryConfig,
     RuleDiscoveryResponse,
@@ -133,8 +135,17 @@ class RuleDiscovery:
     # ------------------------------------------------------------------
 
     def run(self) -> RuleDiscoveryResponse:
-        """Execute the full pipeline and return the verdict response."""
-        cfg = self.config
+        """Execute the full pipeline and return the verdict response.
+
+        The entry mechanism is selected by ``config.entry_mode`` (RD-130):
+
+        * ``"limit"`` (default) — single-stage limit evaluation (unchanged).
+        * ``"market"`` — single-stage baseline at next-open fill.
+        * ``"auto"`` — two-stage: the **market** baseline decides the verdict, a
+          **limit** optimiser then refines the operating point of EDGE/PARTIAL
+          survivors at a comparable fill (see :meth:`_run_auto`).
+        """
+        mode = self._resolve_entry_mode()
 
         # ── Step 1 — setup ───────────────────────────────────────────────
         notes: List[str] = []
@@ -149,9 +160,31 @@ class RuleDiscovery:
 
         self._inject_signal()
 
+        if mode == "market":
+            market_base = base.merged(buy_type="market")
+            notes.append(
+                "entry_mode=market — baseline entry (next-open fill, no entry optimiser)"
+            )
+            return self._run_stage(market_base, self._market_grid(market_base), notes)
+        if mode == "auto":
+            return self._run_auto(base, notes)
+        return self._run_stage(base, self.config.grid, notes)
+
+    def _run_stage(
+        self, base: BacktestParams, grid_spec: GridSpec, notes: List[str]
+    ) -> RuleDiscoveryResponse:
+        """Single-entry-mode evaluation: grid screen → verdict → response.
+
+        Parameterised by ``base`` (carrying the entry ``buy_type``) and the grid
+        ``grid_spec`` so the same core serves the limit, market and auto stages.
+        With ``base``/``grid_spec`` left at their defaults this is bit-for-bit the
+        pre-RD-130 ``run`` body.
+        """
+        cfg = self.config
+
         # ── Step 2/3 — in-sample grid screening and selection ────────────
         grid_results = run_grid(
-            self._frame, cfg.signal_col, base, cfg.grid,
+            self._frame, cfg.signal_col, base, grid_spec,
             scoring=cfg.scoring, timestamp_col=cfg.timestamp_col,
         )
         best = select_best(grid_results, cfg.criteria)
@@ -187,7 +220,7 @@ class RuleDiscovery:
 
         # ── Step 4 — walk-forward OOS ────────────────────────────────────
         wf = walk_forward(
-            self._frame, cfg.signal_col, base, cfg.grid, cfg.walk_forward,
+            self._frame, cfg.signal_col, base, grid_spec, cfg.walk_forward,
             scoring=cfg.scoring, criteria=cfg.criteria, timestamp_col=cfg.timestamp_col,
             base_rate=float(self.contract.base_rate or 0.0),
         )
@@ -239,6 +272,141 @@ class RuleDiscovery:
             notes=notes,
         )
         return self.response
+
+    # ------------------------------------------------------------------
+    # RD-130 — entry mode (limit / market / auto)
+    # ------------------------------------------------------------------
+
+    def _resolve_entry_mode(self) -> str:
+        mode = getattr(self.config, "entry_mode", "limit")
+        if mode not in ("limit", "market", "auto"):
+            raise ValueError(
+                f"entry_mode must be 'limit', 'market' or 'auto', got {mode!r}"
+            )
+        return mode
+
+    def _market_grid(self, market_base: BacktestParams) -> GridSpec:
+        """Grid for a market stage.
+
+        ``buy_drop_pct`` and ``buy_delay_bar`` are inert at next-open fill, so
+        collapse them to a single value (avoiding redundant identical backtests)
+        and only sweep the exit axes the user configured.
+        """
+        g = self.config.grid
+        return GridSpec(
+            buy_drop_pct=[market_base.buy_drop_pct],
+            buy_delay_bar=[market_base.buy_delay_bar],
+            sell_pct=g.sell_pct,
+            target_h=g.target_h,
+        )
+
+    def _run_auto(self, base: BacktestParams, notes: List[str]) -> RuleDiscoveryResponse:
+        """Two-stage evaluation: market decides the verdict, limit refines entry.
+
+        Stage 1 runs the full pipeline in **market** mode — that verdict and all
+        its evidence (walk-forward, statistics, regime, envelope) are
+        authoritative.  Stage 2 runs a **limit** optimiser over ``buy_drop_pct``
+        *only* on EDGE / PARTIAL survivors and adopts the improved operating point
+        only when it still fills at ``>= criteria.min_fill_rate_opt``.  The
+        optimiser can never change the verdict — it cannot fabricate an edge from a
+        NON-EDGE-market rule.
+        """
+        market_base = base.merged(buy_type="market")
+        notes.append("entry_mode=auto — Stage 1 market baseline (authoritative verdict)")
+        resp = self._run_stage(market_base, self._market_grid(market_base), notes)
+
+        if not resp.is_edge:
+            resp.notes.append(
+                "entry_mode=auto — market verdict NON-EDGE; limit optimiser skipped"
+            )
+            return resp
+
+        opt = self._optimize_limit_entry(resp, base)
+        resp.entry_optimization = opt
+        resp.notes.append(f"entry_mode=auto — {opt.reason}")
+        if opt.adopted:
+            # Swap only the entry mechanics of the operating point; the exit
+            # (sell_pct / target_h) and the verdict are unchanged.
+            resp.validated_rule = ValidatedRule(
+                expression=self.contract.event_expression,
+                event_candidate_id=self.candidate.event_id,
+                params=resp.validated_rule.params.merged(
+                    buy_type="limit", buy_drop_pct=opt.limit_buy_drop_pct,
+                ),
+            )
+        return resp
+
+    def _optimize_limit_entry(
+        self, resp: RuleDiscoveryResponse, base: BacktestParams
+    ) -> EntryOptimization:
+        """Optimise the limit entry price for an already-validated market edge.
+
+        Sweeps ``buy_drop_pct`` around the configured centre while holding the
+        market winner's exit (``sell_pct`` / ``target_h``) fixed, then adopts the
+        best candidate that both reaches the fill floor and improves the
+        composite ``pf_score_tpm`` over the market baseline.
+        """
+        cfg = self.config
+        floor = cfg.criteria.min_fill_rate_opt
+        market = resp.in_sample_summary
+        winner = resp.validated_rule.params  # market operating point
+
+        limit_base = winner.merged(buy_type="limit")
+        limit_grid = GridSpec(
+            buy_drop_pct=cfg.grid.buy_drop_pct,        # None → fanned around base
+            sell_pct=[winner.sell_pct],                # exit held fixed
+            target_h=[winner.target_h],
+            buy_delay_bar=[base.buy_delay_bar],
+        )
+        results = run_grid(
+            self._frame, cfg.signal_col, limit_base, limit_grid,
+            scoring=cfg.scoring, timestamp_col=cfg.timestamp_col,
+        )
+
+        market_score = market.pf_score_tpm
+        tradeable = [
+            r for r in results
+            if np.isfinite(r.summary.fill_rate) and r.summary.fill_rate >= floor
+        ]
+        if not tradeable:
+            return EntryOptimization(
+                selected_entry="market", adopted=False, min_fill_rate_opt=floor,
+                market_profit_factor=market.profit_factor,
+                market_fill_rate=market.fill_rate,
+                market_pf_score_tpm=market_score,
+                limit_profit_factor=None, limit_fill_rate=None,
+                limit_pf_score_tpm=None, limit_buy_drop_pct=None,
+                reason=(f"no limit entry reached fill ≥ {floor:.2f}; "
+                        "kept market operating point"),
+            )
+
+        best_limit = max(tradeable, key=lambda r: r.summary.pf_score_tpm)
+        ls = best_limit.summary
+        improved = ls.pf_score_tpm > market_score
+        if improved:
+            reason = (
+                f"limit @ buy_drop={best_limit.params.buy_drop_pct} improved "
+                f"pf_score_tpm {market_score:.3f}→{ls.pf_score_tpm:.3f} at fill "
+                f"{ls.fill_rate:.2f} ≥ {floor:.2f}; operating point adopted"
+            )
+        else:
+            reason = (
+                f"limit did not improve pf_score_tpm at fill ≥ {floor:.2f} "
+                f"(market {market_score:.3f} ≥ limit {ls.pf_score_tpm:.3f}); "
+                "kept market operating point"
+            )
+        return EntryOptimization(
+            selected_entry="limit" if improved else "market",
+            adopted=improved, min_fill_rate_opt=floor,
+            market_profit_factor=market.profit_factor,
+            market_fill_rate=market.fill_rate,
+            market_pf_score_tpm=market_score,
+            limit_profit_factor=ls.profit_factor,
+            limit_fill_rate=ls.fill_rate,
+            limit_pf_score_tpm=ls.pf_score_tpm,
+            limit_buy_drop_pct=best_limit.params.buy_drop_pct,
+            reason=reason,
+        )
 
     def grid_summary(self) -> pd.DataFrame:
         """Flat DataFrame of the in-sample grid screening (call after ``run``)."""

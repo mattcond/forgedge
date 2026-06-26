@@ -1,5 +1,6 @@
 """Tests for the Rule Discovery module (FORGE Modulo 3)."""
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,7 @@ from forgedge import (
 )
 from forgedge.rule_discovery import (
     BacktestParams,
+    EntryOptimization,
     GridSpec,
     ScoringParams,
     SelectionCriteria,
@@ -753,6 +755,110 @@ class TestEndToEnd:
         assert reloaded.verdict == resp.verdict
         assert reloaded.alpha_id == resp.alpha_id
         assert reloaded.to_dict() == resp.to_dict()
+
+    # ── RD-130 — entry mode (limit / market / auto) ──────────────────────
+
+    def test_entry_mode_invalid_raises(self, pipeline):
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        rd = RuleDiscovery(
+            ed.df, c, by_id[c.event_candidate_id],
+            RuleDiscoveryConfig(entry_mode="bogus"),
+        )
+        with pytest.raises(ValueError, match="entry_mode"):
+            rd.run()
+
+    def test_entry_mode_limit_matches_default(self, pipeline):
+        """entry_mode='limit' is the default path — bit-for-bit identical output."""
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        cand = by_id[c.event_candidate_id]
+        default = RuleDiscovery(ed.df, c, cand).run()
+        explicit = RuleDiscovery(
+            ed.df, c, cand, RuleDiscoveryConfig(entry_mode="limit")
+        ).run()
+        assert explicit.to_dict() == default.to_dict()
+
+    def test_entry_mode_market_fills_and_no_buydrop_reject(self, pipeline):
+        """Market baseline: ~100% fill, never rejected for 'buy_drop too deep'."""
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        resp = RuleDiscovery(
+            ed.df, c, by_id[c.event_candidate_id],
+            RuleDiscoveryConfig(entry_mode="market"),
+        ).run()
+        assert resp.in_sample_summary.fill_rate >= 0.95
+        assert not any("buy_drop too deep" in r for r in resp.rejection_reasons)
+        if resp.validated_rule is not None:
+            assert resp.validated_rule.params.buy_type == "market"
+
+    def test_entry_mode_auto_verdict_is_market_verdict(self, pipeline):
+        """The auto verdict is authoritative from the market stage."""
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        cand = by_id[c.event_candidate_id]
+        market = RuleDiscovery(
+            ed.df, c, cand, RuleDiscoveryConfig(entry_mode="market")
+        ).run()
+        auto = RuleDiscovery(
+            ed.df, c, cand, RuleDiscoveryConfig(entry_mode="auto")
+        ).run()
+        assert auto.verdict == market.verdict
+        # The optimiser can never fabricate an edge from a NON-EDGE market rule.
+        if market.verdict == "NON-EDGE":
+            assert auto.verdict == "NON-EDGE"
+            assert auto.validated_rule is None
+
+    def test_optimize_limit_floor_blocks_adoption(self, pipeline):
+        """An unreachable fill floor (1.01) → no limit qualifies → market kept."""
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        cfg = RuleDiscoveryConfig(
+            entry_mode="auto",
+            criteria=SelectionCriteria(min_fill_rate_opt=1.01),
+        )
+        rd = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id], cfg)
+        rd._inject_signal()
+        base = rd._seed_base_params([])
+        mkt = run_backtest(
+            rd._frame, cfg.signal_col, base.merged(buy_type="market"),
+            scoring=cfg.scoring, timestamp_col=cfg.timestamp_col,
+        )
+        fake = SimpleNamespace(
+            in_sample_summary=mkt,
+            validated_rule=SimpleNamespace(params=base.merged(buy_type="market")),
+        )
+        opt = rd._optimize_limit_entry(fake, base)
+        assert isinstance(opt, EntryOptimization)
+        assert opt.min_fill_rate_opt == 1.01
+        assert opt.adopted is False
+        assert opt.selected_entry == "market"
+        assert opt.limit_fill_rate is None      # nothing reached the floor
+
+    def test_optimize_limit_adopts_when_it_improves(self, pipeline):
+        """With a weak market baseline, a tradeable limit at fill ≥ floor is adopted."""
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        cfg = RuleDiscoveryConfig(
+            entry_mode="auto",
+            criteria=SelectionCriteria(min_fill_rate_opt=0.40),
+        )
+        rd = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id], cfg)
+        rd._inject_signal()
+        base = rd._seed_base_params([])
+        # Force a deliberately weak market baseline (pf_score_tpm = 0) so any
+        # tradeable limit candidate constitutes an improvement.
+        weak_market = SimpleNamespace(profit_factor=1.0, fill_rate=1.0, pf_score_tpm=0.0)
+        fake = SimpleNamespace(
+            in_sample_summary=weak_market,
+            validated_rule=SimpleNamespace(params=base.merged(buy_type="market")),
+        )
+        opt = rd._optimize_limit_entry(fake, base)
+        if opt.limit_pf_score_tpm is not None and opt.limit_pf_score_tpm > 0.0:
+            assert opt.adopted is True
+            assert opt.selected_entry == "limit"
+            assert opt.limit_fill_rate >= 0.40
+            assert opt.limit_buy_drop_pct is not None
 
 
 # ---------------------------------------------------------------------------
