@@ -44,7 +44,10 @@ asset-adaptive thresholds — is preferred for automatic discovery.
 Patterns implemented (precedence order): ``MORNING_STAR``, ``EVENING_STAR``,
 ``BULLISH_ENGULFING``, ``BEARISH_ENGULFING``, ``BULLISH_HARAMI``,
 ``BEARISH_HARAMI``, ``MARUBOZU``, ``HAMMER``, ``SHOOTING_STAR``, ``DOJI``.
-Multi-bar patterns assume chronological order (``pattern_features`` sorts first).
+Multi-bar patterns (2-/3-bar) read the previous bar(s) via ``shift``, so they
+need chronologically ordered candles: both the detectors and ``pattern_features``
+order by the ``order_on`` timestamp column (default ``open_dt``); when it is
+missing ``pattern_features`` raises rather than silently assuming sorted input.
 """
 from __future__ import annotations
 
@@ -87,6 +90,20 @@ def _named(mask: pd.Series, name: str) -> pd.Series:
     return pd.Series(arr, index=mask.index, dtype=object)
 
 
+def _order(df: pd.DataFrame, order_on: str) -> pd.DataFrame:
+    """Return ``df`` ordered chronologically for ``.shift()``-based patterns.
+
+    Sorts by the ``order_on`` timestamp column when present, else by a
+    ``DatetimeIndex``; otherwise the existing row order is assumed chronological.
+    The index is preserved so callers can ``reindex`` back to the input order.
+    """
+    if order_on in df.columns:
+        return df.sort_values(order_on)
+    if isinstance(df.index, pd.DatetimeIndex):
+        return df.sort_index()
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Single-bar patterns
 # ---------------------------------------------------------------------------
@@ -120,67 +137,69 @@ def is_marubozu(df: pd.DataFrame, *, body_min: float = 0.9) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
-# Two-bar patterns (assume chronological order)
+# Two-bar patterns — ordered by `order_on` so "previous bar" is the real one
 # ---------------------------------------------------------------------------
 
-def is_bullish_engulfing(df: pd.DataFrame) -> pd.Series:
+def is_bullish_engulfing(df: pd.DataFrame, *, order_on: str = "open_dt") -> pd.Series:
     """Down bar followed by an up bar whose body engulfs it → ``"BULLISH_ENGULFING"``."""
-    o, _, _, c = _ohlc(df)
+    o, _, _, c = _ohlc(_order(df, order_on))
     po, pc = o.shift(1), c.shift(1)
     mask = (pc < po) & (c > o) & (o <= pc) & (c >= po)
-    return _named(mask, "BULLISH_ENGULFING")
+    return _named(mask, "BULLISH_ENGULFING").reindex(df.index)
 
 
-def is_bearish_engulfing(df: pd.DataFrame) -> pd.Series:
+def is_bearish_engulfing(df: pd.DataFrame, *, order_on: str = "open_dt") -> pd.Series:
     """Up bar followed by a down bar whose body engulfs it → ``"BEARISH_ENGULFING"``."""
-    o, _, _, c = _ohlc(df)
+    o, _, _, c = _ohlc(_order(df, order_on))
     po, pc = o.shift(1), c.shift(1)
     mask = (pc > po) & (c < o) & (o >= pc) & (c <= po)
-    return _named(mask, "BEARISH_ENGULFING")
+    return _named(mask, "BEARISH_ENGULFING").reindex(df.index)
 
 
-def is_bullish_harami(df: pd.DataFrame) -> pd.Series:
+def is_bullish_harami(df: pd.DataFrame, *, order_on: str = "open_dt") -> pd.Series:
     """Large down bar then a small up bar contained in its body → ``"BULLISH_HARAMI"``."""
-    o, _, _, c = _ohlc(df)
+    o, _, _, c = _ohlc(_order(df, order_on))
     po, pc = o.shift(1), c.shift(1)
     top, bot = np.maximum(o, c), np.minimum(o, c)
     mask = (pc < po) & (c > o) & (top <= po) & (bot >= pc)
-    return _named(mask, "BULLISH_HARAMI")
+    return _named(mask, "BULLISH_HARAMI").reindex(df.index)
 
 
-def is_bearish_harami(df: pd.DataFrame) -> pd.Series:
+def is_bearish_harami(df: pd.DataFrame, *, order_on: str = "open_dt") -> pd.Series:
     """Large up bar then a small down bar contained in its body → ``"BEARISH_HARAMI"``."""
-    o, _, _, c = _ohlc(df)
+    o, _, _, c = _ohlc(_order(df, order_on))
     po, pc = o.shift(1), c.shift(1)
     top, bot = np.maximum(o, c), np.minimum(o, c)
     mask = (pc > po) & (c < o) & (top <= pc) & (bot >= po)
-    return _named(mask, "BEARISH_HARAMI")
+    return _named(mask, "BEARISH_HARAMI").reindex(df.index)
 
 
 # ---------------------------------------------------------------------------
 # Three-bar patterns (simplified: gap not required; reclaim of bar-1 body)
 # ---------------------------------------------------------------------------
 
-def is_morning_star(df: pd.DataFrame, *, star_body_max: float = 0.3) -> pd.Series:
+def is_morning_star(df: pd.DataFrame, *, order_on: str = "open_dt",
+                    star_body_max: float = 0.3) -> pd.Series:
     """Bearish bar, small-bodied star, bullish bar reclaiming bar-1 → ``"MORNING_STAR"``."""
-    o, h, l, c = _ohlc(df)
-    o1, c1, h1, l1 = o.shift(2), c.shift(2), h.shift(2), l.shift(2)
+    o, h, l, c = _ohlc(_order(df, order_on))
+    o1, c1 = o.shift(2), c.shift(2)
     o2, c2, h2, l2 = o.shift(1), c.shift(1), h.shift(1), l.shift(1)
     f_body2 = (c2 - o2).abs() / (h2 - l2).replace(0, np.nan)
     mid1 = (o1 + c1) / 2.0
     mask = (c1 < o1) & (f_body2 <= star_body_max) & (c > o) & (c >= mid1)
-    return _named(mask, "MORNING_STAR")
+    return _named(mask, "MORNING_STAR").reindex(df.index)
 
 
-def is_evening_star(df: pd.DataFrame, *, star_body_max: float = 0.3) -> pd.Series:
+def is_evening_star(df: pd.DataFrame, *, order_on: str = "open_dt",
+                    star_body_max: float = 0.3) -> pd.Series:
     """Bullish bar, small-bodied star, bearish bar breaking bar-1 → ``"EVENING_STAR"``."""
-    o, h, l, c = _ohlc(df)
-    o1, c1, h1, l1 = o.shift(2), c.shift(2), h.shift(2), l.shift(2)
+    o, h, l, c = _ohlc(_order(df, order_on))
+    o1, c1 = o.shift(2), c.shift(2)
     o2, c2, h2, l2 = o.shift(1), c.shift(1), h.shift(1), l.shift(1)
     f_body2 = (c2 - o2).abs() / (h2 - l2).replace(0, np.nan)
     mid1 = (o1 + c1) / 2.0
     mask = (c1 > o1) & (f_body2 <= star_body_max) & (c < o) & (c <= mid1)
-    return _named(mask, "EVENING_STAR")
+    return _named(mask, "EVENING_STAR").reindex(df.index)
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +220,15 @@ PATTERNS = {
     "shooting_star": is_shooting_star,
     "doji": is_doji,
 }
+
+# Patterns that look at the previous bar(s): they need the candles ordered by the
+# timestamp column, and receive ``order_on``.  The single-bar patterns are
+# order-independent.
+_MULTIBAR = frozenset({
+    "morning_star", "evening_star",
+    "bullish_engulfing", "bearish_engulfing",
+    "bullish_harami", "bearish_harami",
+})
 
 
 def pattern_features(
@@ -232,8 +260,11 @@ def pattern_features(
         Subset of :data:`PATTERNS` keys to consider (in precedence order).
         ``None`` uses all.
     order_on : str
-        Column used to order the frame before evaluating multi-bar patterns
-        (default ``open_dt``); falls back to a ``DatetimeIndex``.
+        Timestamp column used to **order the candles** before evaluating the
+        2-/3-bar patterns (default ``open_dt``); a ``DatetimeIndex`` is accepted
+        as a fallback.  When a multi-bar pattern is requested and neither is
+        available, a ``KeyError`` is raised — the previous-bar relationship can
+        only be guaranteed on chronologically ordered candles.
     col : str
         Name of the produced categorical column (default ``"candle_pattern"``).
 
@@ -248,19 +279,24 @@ def pattern_features(
         raise KeyError(f"pattern sconosciuti: {unknown}. Disponibili: {list(PATTERNS)}")
     _ohlc(df)  # validate OHLC presence up front
 
-    out = df.copy()
-    if order_on in out.columns:
-        base = out.sort_values(order_on)
-    elif isinstance(out.index, pd.DatetimeIndex):
-        base = out.sort_index()
-    else:
-        logger.debug("pattern_features: '%s' assente e nessun DatetimeIndex; assumo già ordinato", order_on)
-        base = out
+    # Guarantee chronological order for 2-/3-bar patterns (they read the previous
+    # bar via shift): require the timestamp column (or a DatetimeIndex).
+    if any(k in _MULTIBAR for k in keys):
+        if order_on not in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+            raise KeyError(
+                f"pattern_features: i pattern a 2-3 candele richiedono la colonna "
+                f"timestamp '{order_on}' (o un DatetimeIndex) per ordinare le candele. "
+                f"Passa order_on=<colonna> oppure costruisci la tabella con build_features()."
+            )
 
-    # Coalesce detectors in precedence order: first non-null name wins.
-    result = pd.Series(None, index=base.index, dtype=object)
+    # Coalesce detectors in precedence order: first non-null name wins.  Multi-bar
+    # detectors order internally via order_on and realign to df's index.
+    result = pd.Series(None, index=df.index, dtype=object)
     for key in keys:
-        series = PATTERNS[key](base)
+        det = PATTERNS[key]
+        series = det(df, order_on=order_on) if key in _MULTIBAR else det(df)
         result = result.where(result.notna(), series)
-    out[col] = result  # index-aligned back to out
+
+    out = df.copy()
+    out[col] = result  # index-aligned
     return out

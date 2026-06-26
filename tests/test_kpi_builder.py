@@ -6,7 +6,9 @@ import pandas as pd
 import pytest
 
 from forgedge import build_features, lag_features, candle_features, pattern_features
-from forgedge.kpi_builder import DEFAULT_CONFIG, PATTERNS, is_hammer, is_doji
+from forgedge.kpi_builder import (
+    DEFAULT_CONFIG, PATTERNS, is_hammer, is_doji, is_bullish_engulfing,
+)
 
 
 def _candles(n: int = 300, with_volume: bool = True, seed: int = 0) -> pd.DataFrame:
@@ -307,3 +309,43 @@ def test_pattern_features_not_in_default_build():
     """Named patterns must be opt-in — build_features never emits the column."""
     kpi = build_features(_candles(), timestamp_col="open_time")
     assert "candle_pattern" not in kpi.columns
+
+
+def test_pattern_features_orders_shuffled_candles():
+    """2-bar patterns must be correct even if rows arrive out of order."""
+    frame = _pattern_frame()
+    engulf_dt = frame["open_dt"].iloc[1]            # the bullish-engulfing bar
+    shuffled = frame.sample(frac=1.0, random_state=3).reset_index(drop=True)
+    out = pattern_features(shuffled)                # order_on='open_dt' present
+    got = out.loc[out["open_dt"] == engulf_dt, "candle_pattern"].iloc[0]
+    assert got == "BULLISH_ENGULFING"
+
+
+def test_multibar_detector_orders_standalone():
+    """A multi-bar detector sorts by order_on internally (standalone-safe)."""
+    frame = _pattern_frame()
+    engulf_dt = frame["open_dt"].iloc[1]
+    shuffled = frame.sample(frac=1.0, random_state=5).reset_index(drop=True)
+    s = is_bullish_engulfing(shuffled, order_on="open_dt")
+    assert s[shuffled["open_dt"] == engulf_dt].iloc[0] == "BULLISH_ENGULFING"
+
+
+def test_pattern_features_multibar_requires_timestamp():
+    """Without a timestamp column / DatetimeIndex, multi-bar patterns raise."""
+    frame = _pattern_frame().drop(columns=["open_dt"]).reset_index(drop=True)
+    with pytest.raises(KeyError):
+        pattern_features(frame, patterns=["bullish_engulfing"])
+
+
+def test_pattern_features_singlebar_ok_without_timestamp():
+    """Single-bar patterns are order-independent → no timestamp required."""
+    frame = _pattern_frame().drop(columns=["open_dt"]).reset_index(drop=True)
+    out = pattern_features(frame, patterns=["hammer", "doji"])
+    assert "candle_pattern" in out.columns
+
+
+def test_pattern_features_datetimeindex_fallback():
+    """A DatetimeIndex (no open_dt column) is accepted for ordering."""
+    frame = _pattern_frame().set_index("open_dt")
+    out = pattern_features(frame)
+    assert "candle_pattern" in out.columns
