@@ -31,6 +31,16 @@ patterns match the same bar, the first by precedence wins (see ``PATTERNS``).
     s = is_hammer(candles)                 # Series of "HAMMER" / None
     kpi = pattern_features(kpi)            # single 'candle_pattern' categorical column
 
+Limitation — not scorable by the full ``forge()`` yet
+-----------------------------------------------------
+Event Discovery (M1) classifies ``candle_pattern`` as categorical and mines
+``== "HAMMER"`` events from it, but **Alpha Discovery (M2) cannot score them**:
+it measures the Information Coefficient via ``feature.astype(float)`` (see
+``alpha_discovery/discovery.py``), which raises on string values.  Use this
+column for Event Discovery / your own analysis, but keep it out of a full
+``forge()`` run — prefer the continuous :mod:`~forgedge.kpi_builder.candle`
+features, which FORGE scores end-to-end.
+
 Patterns implemented (precedence order): ``MORNING_STAR``, ``EVENING_STAR``,
 ``BULLISH_ENGULFING``, ``BEARISH_ENGULFING``, ``BULLISH_HARAMI``,
 ``BEARISH_HARAMI``, ``MARUBOZU``, ``HAMMER``, ``SHOOTING_STAR``, ``DOJI``.
