@@ -144,10 +144,10 @@ print(f"forge(kpi)      : M1 candidati = {len(result.candidates)}  "
 #    pattern_features aggiunge una sola colonna 'candle_pattern'
 #    ("HAMMER"/"DOJI"/.../None) che FORGE classifica categorica.
 #
-#    NB: passare colonne categoriche all'INTERA forge() oggi non è supportato —
-#    Alpha Discovery (M2) calcola l'IC con feature.astype(float) e fallisce sui
-#    valori stringa. Usa quindi i pattern per analisi esterne / Event Discovery,
-#    e preferisci candle_features() (continua) per la discovery automatica.
+#    'candle_pattern' è scorabile end-to-end da forge(): Alpha Discovery misura
+#    un IC point-biserial sull'one-hot binarizzato. Resta opt-in per QUALITÀ,
+#    non per limiti tecnici: i pattern nominali usano soglie fisse, quindi per
+#    la discovery automatica si preferisce candle_features() (continua).
 # ---------------------------------------------------------------------------
 kpi_pat = pattern_features(kpi)
 print("\npattern_features (opt-in) — colonna categorica 'candle_pattern':")
