@@ -193,7 +193,9 @@ class ANDComposer:
         p = (_gate or self.gate).params
         month_index, n_total_months = _build_month_index(timestamps)
         n_months_dof = max(n_total_months - 1, 1)
-        min_act_floor = max(int(p.min_tpm * n_total_months), 1)
+        # Volume pre-filter: n_act >= min_episodes is a necessary condition for
+        # n_episodes >= min_episodes (since n_episodes <= n_act always).
+        min_act_floor = max(p.min_episodes, 1)
 
         pool = _build_composition_pool(passing_events)
         if len(pool) < 2:
@@ -239,18 +241,35 @@ class ANDComposer:
             if len(sub_idx) == 0:
                 continue
 
-            counts_sub = and_chunk[sub_idx].astype(np.float64) @ one_hot  # (S, n_months)
+            and_sub = and_chunk[sub_idx]  # (S, n_rows) uint8
+            counts_sub = and_sub.astype(np.float64) @ one_hot  # (S, n_months)
             n_act_sub = n_act[sub_idx].astype(np.float64)
             n_active_sub = (counts_sub > 0).sum(axis=1)  # diagnostic only
             max_conc_sub = counts_sub.max(axis=1) / n_act_sub  # diagnostic only
             mean_tpm_sub = n_act_sub / n_total_months
-            # Index of Dispersion for each pair
+            # Bar-level ID (kept for diagnostics)
             sum_sq_dev = ((counts_sub - mean_tpm_sub[:, None]) ** 2).sum(axis=1)
             var_sub = sum_sq_dev / n_months_dof
             id_sub = np.where(mean_tpm_sub > 0, var_sub / mean_tpm_sub, np.inf)
 
+            # Episode-based statistics (the gate criterion)
+            zeros_col = np.zeros((len(sub_idx), 1), dtype=np.uint8)
+            ep_sub = and_sub & ~np.concatenate([zeros_col, and_sub[:, :-1]], axis=1)
+            n_episodes_sub = ep_sub.sum(axis=1).astype(np.float64)  # (S,)
+            ep_counts_sub = ep_sub.astype(np.float64) @ one_hot  # (S, n_months)
+            ep_mean_sub = ep_counts_sub.mean(axis=1)
+            ep_sq_dev_sub = ((ep_counts_sub - ep_mean_sub[:, None]) ** 2).sum(axis=1)
+            ep_var_sub = ep_sq_dev_sub / n_months_dof
+            episode_id_sub = np.where(ep_mean_sub > 0, ep_var_sub / ep_mean_sub, np.inf)
+            n_eff_sub = n_episodes_sub / np.maximum(1.0, episode_id_sub)
+
             if _gate is not None:
-                gate_pass = (mean_tpm_sub >= p.min_tpm) & (id_sub <= p.max_dispersion)
+                gate_pass = (
+                    (n_episodes_sub >= p.min_episodes) &
+                    (episode_id_sub <= p.max_dispersion)
+                )
+                if p.min_tpm > 0:
+                    gate_pass = gate_pass & (mean_tpm_sub >= p.min_tpm)
                 passing = np.where(gate_pass)[0]
             else:
                 passing = np.arange(len(sub_idx))
@@ -268,6 +287,9 @@ class ANDComposer:
                     max_monthly_share=float(max_conc_sub[k]),
                     mean_tpm=float(mean_tpm_sub[k]),
                     index_of_dispersion=float(id_sub[k]),
+                    n_episodes=int(n_episodes_sub[k]),
+                    episode_id=float(episode_id_sub[k]),
+                    n_eff=float(n_eff_sub[k]),
                 )
                 and_series = pd.Series(
                     and_chunk[orig].astype(float), index=pool[ii[orig]].series.index
@@ -307,7 +329,8 @@ class ANDComposer:
                         continue
 
                     # Pass 2: full gate on volume-passing subset
-                    counts_t = and_ijk[sub_t].astype(np.float64) @ one_hot
+                    and_ijk_sub = and_ijk[sub_t]  # (S, n_rows) uint8
+                    counts_t = and_ijk_sub.astype(np.float64) @ one_hot
                     n_act_s = n_act_t[sub_t].astype(np.float64)
                     n_active_s = (counts_t > 0).sum(axis=1)  # diagnostic only
                     max_conc_s = counts_t.max(axis=1) / n_act_s  # diagnostic only
@@ -316,8 +339,26 @@ class ANDComposer:
                     var_t = sum_sq_dev_t / n_months_dof
                     id_t = np.where(mean_tpm_s > 0, var_t / mean_tpm_s, np.inf)
 
+                    # Episode-based statistics for triples
+                    zeros_col_t = np.zeros((len(sub_t), 1), dtype=np.uint8)
+                    ep_t = and_ijk_sub & ~np.concatenate(
+                        [zeros_col_t, and_ijk_sub[:, :-1]], axis=1
+                    )
+                    n_episodes_t = ep_t.sum(axis=1).astype(np.float64)  # (S,)
+                    ep_counts_t = ep_t.astype(np.float64) @ one_hot  # (S, n_months)
+                    ep_mean_t = ep_counts_t.mean(axis=1)
+                    ep_sq_dev_t = ((ep_counts_t - ep_mean_t[:, None]) ** 2).sum(axis=1)
+                    ep_var_t = ep_sq_dev_t / n_months_dof
+                    episode_id_t = np.where(ep_mean_t > 0, ep_var_t / ep_mean_t, np.inf)
+                    n_eff_t = n_episodes_t / np.maximum(1.0, episode_id_t)
+
                     if _gate is not None:
-                        gate_t = (mean_tpm_s >= p.min_tpm) & (id_t <= p.max_dispersion)
+                        gate_t = (
+                            (n_episodes_t >= p.min_episodes) &
+                            (episode_id_t <= p.max_dispersion)
+                        )
+                        if p.min_tpm > 0:
+                            gate_t = gate_t & (mean_tpm_s >= p.min_tpm)
                         passing_t = np.where(gate_t)[0]
                     else:
                         passing_t = np.arange(len(sub_t))
@@ -335,6 +376,9 @@ class ANDComposer:
                             max_monthly_share=float(max_conc_s[m]),
                             mean_tpm=float(mean_tpm_s[m]),
                             index_of_dispersion=float(id_t[m]),
+                            n_episodes=int(n_episodes_t[m]),
+                            episode_id=float(episode_id_t[m]),
+                            n_eff=float(n_eff_t[m]),
                         )
                         and_series = pd.Series(
                             and_ijk[orig_m].astype(float),
