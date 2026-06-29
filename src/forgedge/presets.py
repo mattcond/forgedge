@@ -4,18 +4,19 @@ Traduce un'intenzione di alto livello ("sniper", "balanced", "sweep", "burst")
 in una tripla (DiscoveryConfig, AlphaConfig, RuleDiscoveryConfig) pronta da
 passare a forge(), con M1/M2/M3 allineati sullo stesso criterio di frequenza.
 
-Coerenza M1–M2–M3
-------------------
-Il ``min_tpm`` usato da EventDiscovery (M1) e RuleDiscovery (M3) devono essere
-consistenti: un evento ammesso da M1 con tpm=1.0 non può essere rifiutato da M3
-che richiede tpm=2.0 per default.  forge_preset() imposta lo stesso floor di
-frequenza per tutti e tre i moduli, scalato al timeframe.
+Coerenza M1–M3
+--------------
+M1 (EventDiscovery) è ora "consistency/validity-first": il gate M1 usa
+``min_episodes`` (floor assoluto sugli episodi distinti) e la dispersione a
+livello di episodio (``max_dispersion`` su ID_episodi) come criteri principali.
+Il criterio di frequenza (``min_tpm``) è responsabilità di M3
+(``SelectionCriteria.min_tpm``), che è il posto giusto per filtrare la
+tradabilità: eventi rari ma ben distribuiti possono avere edge reale.
+``daily_min_tpm`` nei preset è quindi 0.0 (disabilitato a M1) per tutti i
+preset; la frequenza è imposta solo a M3 via ``daily_rd_min_tpm``.
 
 Scaling dei parametri per timeframe
 ------------------------------------
-* ``min_tpm`` scala linearmente con le barre/mese: lo stesso numero minimo
-  di attivazioni IS richiesto per potere statistico (~30–50) si traduce in
-  tpm molto diversi a seconda della densità di barre.
 * ``max_dispersion`` scala verso il basso sui timeframe corti: la legge dei
   grandi numeri stabilizza i conteggi mensili all'aumentare delle barre,
   quindi lo stesso ID naturale dei "buoni" eventi è più basso su intraday/HFT
@@ -122,10 +123,9 @@ class _TFClass:
 # ── Preset definitions (daily-calibrated) ─────────────────────────────────────
 
 # Ogni preset definisce:
-#   daily_min_tpm          — gate M1 (EventDiscovery) e M3 (RuleDiscovery), daily
-#   daily_rd_min_tpm       — gate M3, leggermente più largo di M1 per tollerare
-#                            la naturale variabilità tra attivazioni e trade eseguiti
-#   daily_max_dispersion   — gate M1
+#   daily_min_tpm          — gate M1, 0.0 = disabilitato (frequenza → M3 via rd_min_tpm)
+#   daily_rd_min_tpm       — gate M3 (SelectionCriteria.min_tpm), daily
+#   daily_max_dispersion   — gate M1 su episode-ID
 #   parametri alpha        — gate M2 (AlphaDiscovery)
 _PRESET_SPECS: dict = {
     "sniper": {
@@ -134,7 +134,7 @@ _PRESET_SPECS: dict = {
             "Richiede IS lungo (>=2 anni su 1D). "
             "Non abbinare a RotationCalibrator."
         ),
-        "daily_min_tpm": 1.0,
+        "daily_min_tpm": 0.0,
         "daily_rd_min_tpm": 1.0,
         "daily_max_dispersion": 1.0,
         "min_lift": 0.10,
@@ -148,7 +148,7 @@ _PRESET_SPECS: dict = {
             "Compromesso ragionato. Frequenza moderata, buon equilibrio IS/OOS. "
             "Default sensato per la maggior parte degli asset e timeframe."
         ),
-        "daily_min_tpm": 3.0,
+        "daily_min_tpm": 0.0,
         "daily_rd_min_tpm": 2.5,
         "daily_max_dispersion": 2.0,
         "min_lift": 0.06,
@@ -164,7 +164,7 @@ _PRESET_SPECS: dict = {
             "usare sempre rotation_calibration=RotationConfig(k>=100) e "
             "promoted_contracts(min_lift=0.05)."
         ),
-        "daily_min_tpm": 1.0,
+        "daily_min_tpm": 0.0,
         "daily_rd_min_tpm": 1.0,
         "daily_max_dispersion": 2.5,
         "min_lift": 0.05,
@@ -179,7 +179,7 @@ _PRESET_SPECS: dict = {
             "volume). Dispersione alta esplicitamente permessa. "
             "Ottimo su mercati con forte stagionalità o bull/bear run."
         ),
-        "daily_min_tpm": 2.5,
+        "daily_min_tpm": 0.0,
         "daily_rd_min_tpm": 2.0,
         "daily_max_dispersion": 5.0,
         "min_lift": 0.08,
@@ -322,9 +322,9 @@ def preset_info(preset: Optional[str] = None) -> None:
         print(f"\n{'─'*60}")
         print(f"  {name.upper()}")
         print(f"  {spec['description']}")
-        print(f"  M1 gate : min_tpm={spec['daily_min_tpm']}  "
-              f"max_dispersion={spec['daily_max_dispersion']}  "
-              f"max_and={spec['max_and_components']}")
+        print(f"  M1 gate : episode_disp={spec['daily_max_dispersion']}  "
+              f"max_and={spec['max_and_components']}"
+              + (f"  min_tpm={spec['daily_min_tpm']}" if spec['daily_min_tpm'] > 0 else ""))
         print(f"  M2 alpha: min_lift={spec['min_lift']}  "
               f"cohens_d={spec['min_cohens_d']}  "
               f"fdr_q={spec['fdr_q']}  oos_max_p={spec['oos_max_p']}")

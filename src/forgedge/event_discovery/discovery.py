@@ -325,7 +325,8 @@ class EventDiscovery:
         _base_cols = [
             "event_id", "status", "expression",
             "n_activations", "n_active_months", "zero_months",
-            "max_monthly_share", "mean_tpm", "index_of_dispersion", "gate_passed",
+            "max_monthly_share", "mean_tpm", "index_of_dispersion",
+            "n_episodes", "episode_id", "n_eff", "gate_passed",
         ]
         _oos_cols = ["oos_pass_rate", "oos_n_passed", "oos_n_folds", "oos_stable"]
         rows = [c.to_dict() for c in self._candidates]
@@ -517,6 +518,9 @@ class EventDiscovery:
             max_monthly_share=g.max_monthly_share if g else float("nan"),
             mean_tpm=g.mean_tpm if g else float("nan"),
             index_of_dispersion=g.index_of_dispersion if g else float("nan"),
+            n_episodes=g.n_episodes if g else 0,
+            episode_id=g.episode_id if g else float("nan"),
+            n_eff=g.n_eff if g else float("nan"),
         )
 
         # Attach DatetimeIndex so callers can call .resample() directly

@@ -18,6 +18,7 @@ from forgedge.event_discovery.consistency_gate import (
     _build_month_index,
     _count_by_month,
     _monthly_counts,
+    _to_episodes,
 )
 from forgedge.event_discovery.discovery import _count_zero_months
 from forgedge.event_discovery.event_generator import EventGenerator
@@ -287,29 +288,33 @@ class TestConsistencyGate:
     def _timestamps(self, n: int = 720) -> pd.Series:
         return pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
 
-    def test_sparse_event_fails_volume(self):
-        # Use a 12-month series with only 2 activations → mean_tpm = 2/12 < min_tpm=1.0
+    def test_sparse_event_fails_episodes(self):
+        # 2 isolated activations in 12-month series → n_episodes=2 < min_episodes=5
         ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
         month_idx, n_m = _build_month_index(ts)
-        event = pd.Series([1.0] * 2 + [0.0] * 8758)
-        active = event.fillna(0).values.astype(bool)
-        counts = _count_by_month(active, month_idx, n_m)
-        result = self._make_gate().evaluate(active, counts, n_m)
+        event = pd.Series([1.0, 0.0, 1.0] + [0.0] * 8757)
+        result = self._make_gate().evaluate_series(event, month_idx, n_m)
         assert not result.passed
-        assert "rate" in result.fail_reason
+        assert "episodes" in result.fail_reason
+        assert result.n_episodes == 2
 
-    def test_concentrated_event_fails_concentration(self):
-        # 12-month series, 50 activations all in first month → high dispersion
+    def test_concentrated_event_fails_dispersion(self):
+        # 12-month series: 50 isolated activations all in the first month.
+        # n_episodes=50 >= min_episodes → passes episode floor.
+        # All episodes concentrated in month 0 → episode_ID >> 2.5 → fails dispersion.
         ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
         month_idx, n_m = _build_month_index(ts)
-        # All 50 activations in first month (first 744 hours), none after
-        active = np.array([True] * 50 + [False] * (8760 - 50), dtype=bool)
+        # Isolated bars (every other hour) for 100 hours, then all False
+        active = np.zeros(8760, dtype=bool)
+        active[np.arange(0, 100, 2)] = True  # 50 isolated activations in month 0
         counts = _count_by_month(active, month_idx, n_m)
+        ep_counts = _count_by_month(_to_episodes(active), month_idx, n_m)
         result = ConsistencyGate(GateParams(min_tpm=1.0, max_dispersion=2.5)).evaluate(
-            active, counts, n_m
+            active, counts, n_m, ep_counts
         )
         assert not result.passed
         assert "dispersion" in result.fail_reason
+        assert result.n_episodes == 50
 
     def test_uniform_event_passes(self):
         ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
@@ -318,10 +323,36 @@ class TestConsistencyGate:
         event = pd.Series((rng.random(8760) < 0.10).astype(float))
         active = event.values.astype(bool)
         counts = _count_by_month(active, month_idx, n_m)
+        ep_counts = _count_by_month(_to_episodes(active), month_idx, n_m)
         result = ConsistencyGate(GateParams(min_tpm=2.0, max_dispersion=2.5)).evaluate(
-            active, counts, n_m
+            active, counts, n_m, ep_counts
         )
         assert result.passed
+
+    def test_episode_id_near_one_for_poisson_like(self):
+        # Well-distributed isolated activations (~5% rate) should have episode_ID ≈ 1.
+        ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
+        month_idx, n_m = _build_month_index(ts)
+        rng = np.random.default_rng(1)
+        event = pd.Series((rng.random(8760) < 0.05).astype(float))
+        result = self._make_gate().evaluate_series(event, month_idx, n_m)
+        assert result.passed
+        # Episode ID should be close to 1 (Poisson baseline) for random activations
+        assert not np.isnan(result.episode_id)
+        assert result.episode_id < 2.5
+
+    def test_burned_alpha_rejected(self):
+        # Events concentrated in first 3 months only → high episode_ID → rejected.
+        ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
+        month_idx, n_m = _build_month_index(ts)
+        # 30 isolated activations in first ~2000 hours (≈3 months), nothing after
+        active = np.zeros(8760, dtype=bool)
+        active[np.arange(0, 60, 2)] = True   # 30 isolated activations early
+        result = ConsistencyGate(GateParams(min_tpm=0.0, max_dispersion=2.5)).evaluate_series(
+            pd.Series(active.astype(float)), month_idx, n_m
+        )
+        assert not result.passed
+        assert "dispersion" in result.fail_reason
 
 
 # ---------------------------------------------------------------------------
