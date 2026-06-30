@@ -37,6 +37,88 @@ kpi = pd.DataFrame({
 })
 ```
 
+### Building a KPI Table from raw candles: `kpi_builder`
+
+If you only have raw OHLCV candles (no indicators yet), `forgedge.kpi_builder`
+turns them into a FORGE-ready KPI Table in three steps:
+
+```python
+from forgedge import build_features, candle_features, lag_features, forge_preset, forge
+
+# 1. Base indicators (SMA, EMA, RSI, Bollinger, rolling min/max, returns, vol, MDD)
+#    from a dict or YAML config; also derives 'open_dt' and sorts chronologically
+kpi = build_features(
+    candles,                  # raw OHLCV, any timestamp column
+    timestamp_col="open_time",  # required keyword arg
+)
+
+# 2. Candlestick geometry — continuous, scale-free (body, wicks, close_pos, range_pct, gap)
+kpi = candle_features(kpi)
+
+# 3. Lagged copies of selected columns (or all columns matching a substring)
+kpi = lag_features(kpi, "close", "color", like="_ema_", periods=[1, 2, 3])
+
+disc, alpha, rd = forge_preset("balanced", timeframe="1D", asset="DEMO")
+result = forge(kpi, event_discovery_config=disc, alpha_config=alpha, rule_discovery_config=rd)
+```
+
+`build_features(candles, config=None, *, timestamp_col, output_timestamp_col="open_dt", timestamp_unit="ms", add_color=True, sort_output=True)`
+accepts `config` as a `dict`, a path to a YAML file, or `None` for the packaged
+default (`DEFAULT_CONFIG` / `default_enricher.yaml` — copy and edit it to
+change periods/columns/enabled indicators). Indicators referencing columns
+absent from `candles` are skipped with a warning, so OHLC-only input is safe.
+
+`candle_features(df, *, order_on="open_dt", add_gap=True, round_to=5)` adds six
+scale-free geometry columns (`body`, `upper_wick`, `lower_wick`, `close_pos`,
+`range_pct`, `gap`) in `[-1, 1]`/`[0, 1]`, so FORGE derives its own
+asset-adaptive thresholds instead of relying on fixed pattern definitions.
+
+`lag_features(df, *cols, periods=(1, 2, 3), like=None, order_on="open_dt")`
+appends `{col}_prev_{w:02d}` columns; pass explicit column names and/or
+`like="_ema_"` to lag every column containing that substring.
+
+All three functions sort by `order_on` (default `open_dt`) internally, so
+input does not need to be pre-sorted — but a `pattern_features()` call (below)
+on data lacking both `open_dt` and a `DatetimeIndex` raises `KeyError` if any
+multi-bar pattern is requested.
+
+**Optional, opt-in:** `pattern_features(df, *, patterns=None, order_on="open_dt", col="candle_pattern")`
+adds a single categorical `candle_pattern` column (e.g. `"HAMMER"`, `"DOJI"`,
+or `None`) from ten named candlestick formations. It flows end-to-end through
+`forge()` — Event Discovery one-hots it into `== "HAMMER"` events and Alpha
+Discovery scores them via point-biserial IC — but it stays opt-in **on quality
+grounds, not technical ones**: named patterns encode fixed human thresholds,
+whereas `candle_features()`'s continuous geometry lets FORGE derive its own
+asset-adaptive thresholds, which is preferred for automatic discovery.
+
+### Validating data quality: `summary_report`
+
+Before feeding a table to `forge()`, run a cheap diagnostic pass over the
+price columns — it never raises or blocks the pipeline, it only reports:
+
+```python
+from forgedge import summary_report
+
+summary_report(kpi)   # prints a multi-section report to stdout
+
+rep = summary_report(kpi, return_report=True, verbose=False)
+if rep.has_critical:
+    raise ValueError(f"Fix data issues first: {rep.one_line()}")
+elif rep.has_warnings:
+    print(rep.one_line())
+```
+
+`summary_report(df, *, timestamp_col="open_dt", price_cols=("open", "high", "low", "close"), timeframe=None, return_high_move=0.5, top_n=5, verbose=True, return_report=False)`
+checks schema/NaNs/infinities, price-scale consistency (mixed magnitudes),
+OHLC internal consistency (`high >= low`, `close` within `[low, high]`, …),
+return outliers (MAD z-score and an absolute `return_high_move` threshold) and
+time continuity (gaps, duplicate timestamps, out-of-order bars). Each
+`Finding` carries a `level` (`"OK"` / `"WARN"` / `"FAIL"`), a stable `code`
+(e.g. `"scale_mixed"`, `"ohlc_hl"`, `"gaps"`) and a human-readable `message`.
+The returned `DataQualityReport` exposes `.worst`, `.has_critical`,
+`.has_warnings`, `.one_line()` and `.to_text()`; `.findings` is the full list
+for programmatic filtering.
+
 ### EMA naming convention
 
 Market Context looks for EMA columns in the table using the pattern
@@ -149,10 +231,10 @@ config = DiscoveryConfig(
         min_pass_rate=0.75,     # event must pass the gate in ≥75% of windows
     ),
     gate_params=GateParams(     # ConsistencyGate thresholds
-        min_tpm=2.0,            # ≥2.0 activations/month on average
-        max_dispersion=2.5,     # Index of Dispersion ≤ 2.5 (Var/Mean of monthly counts)
+        min_tpm=0.5,             # ≥0.5 episodes/month on average (default)
+        max_dispersion=1.5,      # Index of Dispersion ≤ 1.5 (Var/Mean of monthly counts, default)
     ),
-    max_and_components=2,       # max 2 components in AND (conservative default)
+    max_and_components=2,       # 1=singles only, 2=+pairs, 3=+pairs+triples (conservative default)
 )
 ed = EventDiscovery(enriched, config=config)
 candidates = ed.run()
@@ -161,6 +243,28 @@ candidates = ed.run()
 wf_stable = [c for c in candidates if c.validation and c.validation.passed]
 print(f"{len(wf_stable)} OOS-stable events out of {len(candidates)} total")
 ```
+
+**Episode vs bar counting (`GateParams.event_counting`).** The rate
+(`min_tpm`) and dispersion (`max_dispersion`) criteria count either **bars**
+or **episodes** (maximal runs of consecutive activations bridged by gaps of
+up to `episode_gap` bars, default `1`). `"episode"` is the default: it
+removes the per-bar counting artifact whereby a persistent multi-bar state
+(e.g. a 3–5 bar `RSI < 30` stretch) inflates monthly variance and gets
+wrongly rejected — a single episode counts once, regardless of how many bars
+it spans. For impulse events (crossovers, one-bar candlestick patterns) the
+two modes are identical. `event_counting="bar"` reproduces the historical
+(pre-episode) gate behaviour exactly:
+
+```python
+GateParams(min_tpm=2.0, max_dispersion=2.5, event_counting="bar")
+```
+
+`min_episodes` (default `10`) is an additional statistical-power floor on the
+absolute episode count, applied only in `"episode"` mode. In `"episode"` mode
+the effective dispersion threshold is also automatically raised to a Poisson
+χ² floor whenever the user's `max_dispersion` would reject an event that is
+statistically indistinguishable from a random (Poisson) process at the
+observed rate — so the gate never rejects pure-noise-consistent timing.
 
 With `train_ratio < 1.0` and `walk_forward` active, each candidate exposes
 `c.validation` (a `ValidationResult`) with:
@@ -409,6 +513,44 @@ from forgedge.rule_discovery import text_report
 print(text_report(resp))
 ```
 
+### Selecting an entry mode (`entry_mode`)
+
+`RuleDiscoveryConfig.entry_mode` (default `"limit"`) controls how the entry
+order is evaluated during backtesting:
+
+```python
+from forgedge import RuleDiscovery, RuleDiscoveryConfig
+
+config = RuleDiscoveryConfig(entry_mode="auto")
+rd = RuleDiscovery(ed.df, contract, cand, config=config)
+resp = rd.run()
+```
+
+- `"limit"` (default) — the original behaviour: the entry is a limit order at
+  `anchor * (1 ∓ buy_drop_pct)`, and the grid optimises `buy_drop_pct` as an
+  entry-price lever. Can suffer from the "fill confound" — a deep, low-fill
+  limit can show a high profit factor on a rare, non-representative subset of
+  trades.
+- `"market"` — pure baseline at next-open fill (≈100% fill rate), no entry
+  optimiser. Isolates the signal's edge from the entry mechanism.
+- `"auto"` — two-stage: Stage 1 evaluates in market mode and that verdict
+  (plus walk-forward, regime and envelope evidence) is authoritative. Stage 2
+  runs the limit optimiser only on EDGE/PARTIAL-EDGE survivors, adopting the
+  improved entry only if it still fills at `>= criteria.min_fill_rate_opt`
+  (default `0.80`). The optimiser can refine but never fabricate an edge from
+  a market-mode NON-EDGE.
+
+When `entry_mode="auto"`, `resp.entry_optimization` (an `EntryOptimization`)
+records the decision:
+
+```python
+eo = resp.entry_optimization
+print(eo.selected_entry)   # "market" | "limit" — the adopted mode
+print(eo.adopted)          # True if the limit optimiser improved on market
+print(eo.reason)           # human-readable explanation
+print(f"market PF={eo.market_profit_factor:.2f} fill={eo.market_fill_rate:.0%}")
+```
+
 ### Generating HTML reports for review
 
 ```python
@@ -576,8 +718,9 @@ print(result.registry.summary())             # Module 4 — catalogued rules
 ### Quick start with presets: `forge_preset`
 
 Rather than hand-tuning every gate, `forge_preset` returns a ready-made
-`(DiscoveryConfig, AlphaConfig)` pair calibrated for a named search profile and
-your timeframe. The four presets are:
+`(DiscoveryConfig, AlphaConfig, RuleDiscoveryConfig)` **triple** — one
+calibrated config per module (M1/M2/M3) — for a named search profile and your
+timeframe. The four presets are:
 
 | Preset | Profile |
 |---|---|
@@ -589,16 +732,25 @@ your timeframe. The four presets are:
 ```python
 from forgedge import forge, forge_preset
 
-disc_cfg, alpha_cfg = forge_preset("balanced", timeframe="1D", asset="BTC")
-result = forge(kpi, event_discovery_config=disc_cfg, alpha_config=alpha_cfg)
+disc_cfg, alpha_cfg, rd_cfg = forge_preset("balanced", timeframe="1D", asset="BTC")
+result = forge(
+    kpi,
+    event_discovery_config=disc_cfg,
+    alpha_config=alpha_cfg,
+    rule_discovery_config=rd_cfg,
+)
 ```
 
 `forge_preset(preset, timeframe, asset="ASSET", train_ratio=0.70, **overrides)`
 accepts keyword overrides for any computed parameter — `min_tpm`,
-`max_dispersion`, `max_and_components`, `timestamp_col` (Discovery side) and
-`min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`
-(Alpha side). Call `preset_info()` (all presets) or `preset_info("sweep")` (one)
-to print the resolved parameters, and `PRESETS` for the list of names.
+`max_dispersion`, `max_and_components`, `timestamp_col`, `event_counting`
+(Discovery side), `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`,
+`horizon_grid`, `bars_per_day` (Alpha side), and `rd_min_tpm` (Rule Discovery
+side). Each preset calibrates `min_tpm` from a per-mode daily rate —
+`event_counting="episode"` (the default) uses an episodes/month target,
+`"bar"` uses a bars/month target — scaled to your timeframe. Call
+`preset_info()` (all presets) or `preset_info("sweep")` (one) to print the
+resolved parameters, and `PRESETS` for the list of names.
 
 Per-module configuration is passed through dedicated keyword arguments:
 
@@ -620,7 +772,7 @@ result = forge(
     event_discovery_config=DiscoveryConfig(
         train_ratio=0.80,
         walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
-        gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
+        gate_params=GateParams(min_tpm=0.5, max_dispersion=1.5),  # defaults shown explicitly
     ),
     alpha_config=AlphaConfig(
         train_ratio=0.70,
@@ -790,7 +942,7 @@ def run_forge_pipeline(
     ed_config = DiscoveryConfig(
         train_ratio=0.80,
         walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
-        gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
+        gate_params=GateParams(min_tpm=0.5, max_dispersion=1.5),
         max_and_components=2,
     )
     ed = EventDiscovery(enriched, config=ed_config)
@@ -1091,6 +1243,9 @@ pd.DataFrame(candidates_data).to_csv("event_candidates.csv", index=False)
 ## 12. Pre-production checklist
 
 Before promoting a `ValidatedRule` to the Rule Registry, verify:
+
+**Input data**
+- [ ] `summary_report(kpi, return_report=True, verbose=False).has_critical == False` — no FAIL-level data-quality findings
 
 **Module 0**
 - [ ] `mc.window_resolution["source"] == "hurst_ou"` — adaptive EMAs derived from data

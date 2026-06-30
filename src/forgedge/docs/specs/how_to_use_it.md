@@ -38,6 +38,91 @@ kpi = pd.DataFrame({
 })
 ```
 
+### Costruire una KPI Table da candele grezze: `kpi_builder`
+
+Se disponi solo di candele OHLCV grezze (senza indicatori), `forgedge.kpi_builder`
+le trasforma in una KPI Table pronta per FORGE in tre passi:
+
+```python
+from forgedge import build_features, candle_features, lag_features, forge_preset, forge
+
+# 1. Indicatori base (SMA, EMA, RSI, Bollinger, min/max mobili, return, vol, MDD)
+#    da dict o YAML; deriva anche 'open_dt' e ordina cronologicamente
+kpi = build_features(
+    candles,                    # OHLCV grezzo, qualsiasi colonna timestamp
+    timestamp_col="open_time",  # keyword arg obbligatorio
+)
+
+# 2. Geometria delle candele — continua, scale-free (body, wick, close_pos, range_pct, gap)
+kpi = candle_features(kpi)
+
+# 3. Copie laggate di colonne selezionate (o tutte quelle che matchano una sottostringa)
+kpi = lag_features(kpi, "close", "color", like="_ema_", periods=[1, 2, 3])
+
+disc, alpha, rd = forge_preset("balanced", timeframe="1D", asset="DEMO")
+result = forge(kpi, event_discovery_config=disc, alpha_config=alpha, rule_discovery_config=rd)
+```
+
+`build_features(candles, config=None, *, timestamp_col, output_timestamp_col="open_dt", timestamp_unit="ms", add_color=True, sort_output=True)`
+accetta `config` come `dict`, percorso a un file YAML, oppure `None` per il
+default pacchettizzato (`DEFAULT_CONFIG` / `default_enricher.yaml` — copialo e
+modificalo per cambiare periodi/colonne/indicatori abilitati). Gli indicatori
+che referenziano colonne assenti in `candles` vengono saltati con un warning,
+quindi input solo-OHLC è sicuro.
+
+`candle_features(df, *, order_on="open_dt", add_gap=True, round_to=5)` aggiunge
+sei colonne di geometria scale-free (`body`, `upper_wick`, `lower_wick`,
+`close_pos`, `range_pct`, `gap`) in `[-1, 1]`/`[0, 1]`, così FORGE deriva le sue
+soglie asset-adattive invece di affidarsi a definizioni di pattern fisse.
+
+`lag_features(df, *cols, periods=(1, 2, 3), like=None, order_on="open_dt")`
+aggiunge colonne `{col}_prev_{w:02d}`; passa nomi colonna espliciti e/o
+`like="_ema_"` per laggare ogni colonna che contiene quella sottostringa.
+
+Tutte e tre le funzioni ordinano per `order_on` (default `open_dt`)
+internamente, quindi l'input non deve essere pre-ordinato — ma una chiamata a
+`pattern_features()` (sotto) su dati privi sia di `open_dt` sia di
+`DatetimeIndex` solleva `KeyError` se viene richiesto un pattern multi-barra.
+
+**Opzionale, opt-in:** `pattern_features(df, *, patterns=None, order_on="open_dt", col="candle_pattern")`
+aggiunge un'unica colonna categoriale `candle_pattern` (es. `"HAMMER"`,
+`"DOJI"`, o `None`) da dieci formazioni candlestick con nome. Attraversa
+`forge()` end-to-end — Event Discovery la one-hot-codifica in eventi
+`== "HAMMER"` e Alpha Discovery li valuta tramite IC point-biseriale — ma resta
+opt-in **per ragioni di qualità, non tecniche**: i pattern con nome codificano
+soglie umane fisse, mentre la geometria continua di `candle_features()` lascia
+che FORGE derivi le proprie soglie asset-adattive, preferibile per la discovery
+automatica.
+
+### Validare la qualità dei dati: `summary_report`
+
+Prima di passare una tabella a `forge()`, esegui un controllo diagnostico
+economico sulle colonne di prezzo — non solleva mai eccezioni né blocca la
+pipeline, si limita a riportare:
+
+```python
+from forgedge import summary_report
+
+summary_report(kpi)   # stampa un report multi-sezione su stdout
+
+rep = summary_report(kpi, return_report=True, verbose=False)
+if rep.has_critical:
+    raise ValueError(f"Risolvi i problemi sui dati prima: {rep.one_line()}")
+elif rep.has_warnings:
+    print(rep.one_line())
+```
+
+`summary_report(df, *, timestamp_col="open_dt", price_cols=("open", "high", "low", "close"), timeframe=None, return_high_move=0.5, top_n=5, verbose=True, return_report=False)`
+controlla schema/NaN/infiniti, coerenza di scala dei prezzi (magnitudini
+miste), coerenza interna OHLC (`high >= low`, `close` dentro `[low, high]`, …),
+outlier sui return (z-score MAD e soglia assoluta `return_high_move`) e
+continuità temporale (gap, timestamp duplicati, barre fuori ordine). Ogni
+`Finding` porta un `level` (`"OK"` / `"WARN"` / `"FAIL"`), un `code` stabile
+(es. `"scale_mixed"`, `"ohlc_hl"`, `"gaps"`) e un `message` leggibile. Il
+`DataQualityReport` restituito espone `.worst`, `.has_critical`,
+`.has_warnings`, `.one_line()` e `.to_text()`; `.findings` è la lista completa
+per il filtraggio programmatico.
+
 ### Convenzione naming per le EMA
 
 Market Context cerca le EMA nella tabella usando il pattern
@@ -141,7 +226,7 @@ Per produzione, è fortemente raccomandato abilitare la validazione walk-forward
 
 ```python
 from forgedge import EventDiscovery, DiscoveryConfig
-from forgedge.event_discovery.models import WalkForwardConfig
+from forgedge.event_discovery.models import WalkForwardConfig, GateParams
 
 config = DiscoveryConfig(
     train_ratio=0.80,           # 80% IS per la scoperta, 20% riservato all'OOS
@@ -149,11 +234,11 @@ config = DiscoveryConfig(
         n_splits=4,             # dividi l'OOS in 4 finestre
         min_pass_rate=0.75,     # l'evento deve passare il gate in ≥75% delle finestre
     ),
-    gate_params=GateParams(     # from forgedge.event_discovery.models
-        min_tpm=2.0,            # ≥2.0 attivazioni/mese in media
-        max_dispersion=2.5,     # Index of Dispersion ≤ 2.5 (Var/Mean dei conteggi mensili)
+    gate_params=GateParams(     # soglie del ConsistencyGate
+        min_tpm=0.5,             # ≥0.5 episodi/mese in media (default)
+        max_dispersion=1.5,      # Index of Dispersion ≤ 1.5 (Var/Mean dei conteggi mensili, default)
     ),
-    max_and_components=2,       # max 2 componenti in AND (default conservativo)
+    max_and_components=2,       # 1=solo singoli, 2=+coppie, 3=+coppie+triple (default conservativo)
 )
 ed = EventDiscovery(enriched, config=config)
 candidates = ed.run()
@@ -162,6 +247,29 @@ candidates = ed.run()
 wf_stable = [c for c in candidates if c.validation and c.validation.passed]
 print(f"{len(wf_stable)} eventi stabili OOS su {len(candidates)} totali")
 ```
+
+**Conteggio per episodi vs per barra (`GateParams.event_counting`).** I criteri
+di rate (`min_tpm`) e dispersione (`max_dispersion`) contano **barre** oppure
+**episodi** (run massimali di attivazioni consecutive, ponti su gap fino a
+`episode_gap` barre, default `1`). `"episode"` è il default: rimuove
+l'artefatto di conteggio per cui uno stato persistente multi-barra (es. un
+tratto di 3-5 barre con `RSI < 30`) gonfia la varianza mensile e viene
+respinto a torto — un singolo episodio conta una volta, indipendentemente da
+quante barre copre. Per eventi impulsivi (incroci, pattern candlestick a una
+barra) i due modi sono identici. `event_counting="bar"` riproduce esattamente
+il comportamento storico del gate (pre-episodi):
+
+```python
+GateParams(min_tpm=2.0, max_dispersion=2.5, event_counting="bar")
+```
+
+`min_episodes` (default `10`) è un ulteriore floor di potenza statistica
+sul conteggio assoluto di episodi, applicato solo in modalità `"episode"`. In
+modalità `"episode"` la soglia di dispersione effettiva viene anche alzata
+automaticamente a un floor χ² di Poisson ogni volta che il `max_dispersion`
+dell'utente respingerebbe un evento statisticamente indistinguibile da un
+processo casuale (Poisson) al rate osservato — quindi il gate non respinge mai
+una cadenza compatibile col puro rumore.
 
 Con `train_ratio < 1.0` e `walk_forward` attivo, ogni candidato espone
 `c.validation` (un `ValidationResult`) con:
@@ -410,6 +518,44 @@ from forgedge.rule_discovery import text_report
 print(text_report(resp))
 ```
 
+### Scegliere una modalità di ingresso (`entry_mode`)
+
+`RuleDiscoveryConfig.entry_mode` (default `"limit"`) controlla come viene
+valutato l'ordine di ingresso durante il backtest:
+
+```python
+from forgedge import RuleDiscovery, RuleDiscoveryConfig
+
+config = RuleDiscoveryConfig(entry_mode="auto")
+rd = RuleDiscovery(ed.df, contract, cand, config=config)
+resp = rd.run()
+```
+
+- `"limit"` (default) — comportamento originale: l'ingresso è un ordine limite
+  a `anchor * (1 ∓ buy_drop_pct)`, e la grid ottimizza `buy_drop_pct` come leva
+  sul prezzo d'ingresso. Può soffrire del "fill confound" — un limite profondo
+  e a basso fill rate può mostrare un profit factor alto su un sottoinsieme
+  raro e non rappresentativo di trade.
+- `"market"` — baseline pura a fill al prossimo open (fill rate ≈100%), nessun
+  ottimizzatore d'ingresso. Isola l'edge del segnale dal meccanismo d'ingresso.
+- `"auto"` — due stadi: lo Stage 1 valuta in modalità market e quel verdetto
+  (più walk-forward, regime ed envelope) è autoritativo. Lo Stage 2 esegue
+  l'ottimizzatore limite solo sui sopravvissuti EDGE/PARTIAL-EDGE, adottando
+  l'ingresso migliorato solo se continua a riempire a
+  `>= criteria.min_fill_rate_opt` (default `0.80`). L'ottimizzatore può
+  raffinare ma mai fabbricare un edge da un NON-EDGE in modalità market.
+
+Quando `entry_mode="auto"`, `resp.entry_optimization` (un `EntryOptimization`)
+registra la decisione:
+
+```python
+eo = resp.entry_optimization
+print(eo.selected_entry)   # "market" | "limit" — la modalità adottata
+print(eo.adopted)          # True se l'ottimizzatore limite ha migliorato il market
+print(eo.reason)           # spiegazione leggibile
+print(f"market PF={eo.market_profit_factor:.2f} fill={eo.market_fill_rate:.0%}")
+```
+
 ### Generare report HTML per review
 
 ```python
@@ -576,9 +722,10 @@ print(result.registry.summary())                # Modulo 4 — regole catalogate
 
 ### Avvio rapido con i preset: `forge_preset`
 
-Invece di tarare a mano ogni gate, `forge_preset` restituisce una coppia
-`(DiscoveryConfig, AlphaConfig)` già calibrata per un profilo di ricerca e per il
-tuo timeframe. I quattro preset sono:
+Invece di tarare a mano ogni gate, `forge_preset` restituisce una **tripla**
+`(DiscoveryConfig, AlphaConfig, RuleDiscoveryConfig)` — una config calibrata
+per modulo (M1/M2/M3) — per un profilo di ricerca e per il tuo timeframe.
+I quattro preset sono:
 
 | Preset | Profilo |
 |---|---|
@@ -590,15 +737,23 @@ tuo timeframe. I quattro preset sono:
 ```python
 from forgedge import forge, forge_preset
 
-disc_cfg, alpha_cfg = forge_preset("balanced", timeframe="1D", asset="BTC")
-result = forge(kpi, event_discovery_config=disc_cfg, alpha_config=alpha_cfg)
+disc_cfg, alpha_cfg, rd_cfg = forge_preset("balanced", timeframe="1D", asset="BTC")
+result = forge(
+    kpi,
+    event_discovery_config=disc_cfg,
+    alpha_config=alpha_cfg,
+    rule_discovery_config=rd_cfg,
+)
 ```
 
 `forge_preset(preset, timeframe, asset="ASSET", train_ratio=0.70, **overrides)`
 accetta override keyword per qualunque parametro calcolato — `min_tpm`,
-`max_dispersion`, `max_and_components`, `timestamp_col` (lato Discovery) e
-`min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`
-(lato Alpha). Usa `preset_info()` (tutti) o `preset_info("sweep")` (uno solo) per
+`max_dispersion`, `max_and_components`, `timestamp_col`, `event_counting`
+(lato Discovery), `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`,
+`horizon_grid`, `bars_per_day` (lato Alpha), e `rd_min_tpm` (lato Rule
+Discovery). Ogni preset calibra `min_tpm` a partire da un rate giornaliero per
+modalità — `event_counting="episode"` (default) usa un target episodi/mese,
+`"bar"` un target barre/mese — scalato sul tuo timeframe. Usa `preset_info()` (tutti) o `preset_info("sweep")` (uno solo) per
 stampare i parametri risolti, e `PRESETS` per la lista dei nomi.
 
 La configurazione per modulo si passa come argomento keyword dedicato:
@@ -621,7 +776,7 @@ result = forge(
     event_discovery_config=DiscoveryConfig(
         train_ratio=0.80,
         walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
-        gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
+        gate_params=GateParams(min_tpm=0.5, max_dispersion=1.5),  # default espliciti
     ),
     alpha_config=AlphaConfig(
         train_ratio=0.70,
@@ -723,7 +878,7 @@ def run_forge_pipeline(
     ed_config = DiscoveryConfig(
         train_ratio=0.80,
         walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
-        gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
+        gate_params=GateParams(min_tpm=0.5, max_dispersion=1.5),
         max_and_components=2,
     )
     ed = EventDiscovery(enriched, config=ed_config)
@@ -1094,6 +1249,9 @@ pd.DataFrame(candidates_data).to_csv("event_candidates.csv", index=False)
 ## 12. Checklist pre-produzione
 
 Prima di portare una `ValidatedRule` nel Rule Registry, verificare:
+
+**Dati di input**
+- [ ] `summary_report(kpi, return_report=True, verbose=False).has_critical == False` — nessun finding di livello FAIL sulla qualità dei dati
 
 **Modulo 0**
 - [ ] `mc.window_resolution["source"] == "hurst_ou"` — le EMA sono adattive
