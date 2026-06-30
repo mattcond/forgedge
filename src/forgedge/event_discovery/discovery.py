@@ -517,6 +517,9 @@ class EventDiscovery:
             max_monthly_share=g.max_monthly_share if g else float("nan"),
             mean_tpm=g.mean_tpm if g else float("nan"),
             index_of_dispersion=g.index_of_dispersion if g else float("nan"),
+            n_episodes=g.n_episodes if g else 0,
+            episode_index_of_dispersion=g.episode_index_of_dispersion if g else float("nan"),
+            n_eff=g.n_eff if g else float("nan"),
         )
 
         # Attach DatetimeIndex so callers can call .resample() directly

@@ -80,7 +80,7 @@ class ColumnClassification:
 class GateParams:
     """Thresholds that govern the Consistency Gate (Step 4).
 
-    Both parameters are rate/ratio invariant, making the same
+    All parameters are rate/ratio invariant, making the same
     ``GateParams`` instance valid for both in-sample discovery and
     out-of-sample walk-forward validation without any scaling.
 
@@ -89,7 +89,10 @@ class GateParams:
     min_tpm : float
         Minimum average activations per month
         (total_activations / n_calendar_months).  Events below this rate
-        lack statistical power and are discarded.
+        lack statistical power and are discarded.  **Ignored when
+        ``admit_rare`` is True** — there it becomes informational only and
+        the frequency preference is expected to live at M3
+        (``SelectionCriteria.min_tpm``).
     max_dispersion : float
         Maximum allowed Index of Dispersion:
         ``Var(monthly_counts) / Mean(monthly_counts)``.
@@ -97,10 +100,32 @@ class GateParams:
         indicate over-dispersed activations — bursty (concentrated in a
         few months) or periodic (clustered with regular gaps).
         Default 2.5 passes realistic financial signals while rejecting
-        periodic bursts and single-month concentration.
+        periodic bursts and single-month concentration.  When ``admit_rare``
+        is True the criterion is applied to the **episode-level** ID instead
+        of the per-bar ID (see ``admit_rare``).
+    admit_rare : bool
+        Opt-in mode for rare, episodic events (issue #134).  Default False
+        keeps the standard two-criterion gate (rate floor + per-bar
+        dispersion) unchanged — no regression on intraday / frequent-event
+        pipelines.  When True:
+
+        * the ``min_tpm`` rate floor is **not** applied (rare oscillator
+          extremes such as ``RSI < 30`` are no longer dropped for low rate);
+        * dispersion is measured on **episodes** — maximal runs of
+          consecutive activations collapsed to their first bar — instead of
+          per bar, removing the inflation that persistent states (a multi-bar
+          ``RSI < 30`` stretch) cause in the per-bar monthly counts;
+        * a ``min_episodes`` floor guards statistical power in place of the
+          rate floor.
+    min_episodes : int
+        Minimum number of distinct activation episodes required to pass when
+        ``admit_rare`` is True.  Replaces the rate floor as the power guard.
+        Ignored when ``admit_rare`` is False.
     """
     min_tpm: float = 2.0
     max_dispersion: float = 2.5
+    admit_rare: bool = False
+    min_episodes: int = 12
 
 
 @dataclass
@@ -121,8 +146,21 @@ class GateResult:
     mean_tpm : float
         Average activations per calendar month (n_activations / n_total_months).
     index_of_dispersion : float
-        Index of Dispersion (Var/Mean of monthly counts).  NaN when
-        insufficient months for sample variance (n_total_months <= 1).
+        Per-bar Index of Dispersion (Var/Mean of monthly activation counts).
+        NaN when insufficient months for sample variance (n_total_months <= 1).
+    n_episodes : int
+        Number of distinct activation episodes (maximal runs of consecutive
+        active bars).  Always reported as a diagnostic; the gate only acts on
+        it when ``admit_rare`` is True.
+    episode_index_of_dispersion : float
+        Index of Dispersion of the monthly **episode** counts.  Removes the
+        inflation that persistent multi-bar states cause in the per-bar ID.
+        NaN when not computed (no month index available).
+    n_eff : float
+        Effective sample size ``n_episodes / max(episode_ID, 1.0)`` — a
+        first-order design-effect deflation that never inflates above
+        ``n_episodes``.  Intended for downstream significance tests (M2/M3).
+        NaN when the episode ID was not computed.
     fail_reason : str or None
         Human-readable explanation of the first criterion that caused failure,
         or None when the gate passed.
@@ -134,8 +172,11 @@ class GateResult:
     max_monthly_share: float
     mean_tpm: float
     index_of_dispersion: float = float("nan")
-    """Index of Dispersion (Var/Mean of monthly counts).  NaN when
+    """Per-bar Index of Dispersion (Var/Mean of monthly counts).  NaN when
     insufficient months for sample variance (n_total_months <= 1)."""
+    n_episodes: int = 0
+    episode_index_of_dispersion: float = float("nan")
+    n_eff: float = float("nan")
     fail_reason: Optional[str] = None
 
 
@@ -340,6 +381,13 @@ class ActivationStats:
     index_of_dispersion : float
         Index of Dispersion (Var/Mean of monthly counts).  NaN when
         insufficient months for sample variance (n_total_months <= 1).
+    n_episodes : int
+        Number of distinct activation episodes (consecutive-activation runs).
+    episode_index_of_dispersion : float
+        Index of Dispersion of the monthly episode counts (issue #134).
+    n_eff : float
+        Effective sample size ``n_episodes / max(episode_ID, 1.0)``; intended
+        for downstream significance deflation.  NaN when not computed.
     """
 
     n_activations: int
@@ -348,6 +396,9 @@ class ActivationStats:
     max_monthly_share: float
     mean_tpm: float
     index_of_dispersion: float = float("nan")
+    n_episodes: int = 0
+    episode_index_of_dispersion: float = float("nan")
+    n_eff: float = float("nan")
 
 
 @dataclass
@@ -559,6 +610,9 @@ class EventCandidate:
             "max_monthly_share": self.activation_stats.max_monthly_share,
             "mean_tpm": self.activation_stats.mean_tpm,
             "index_of_dispersion": self.activation_stats.index_of_dispersion,
+            "n_episodes": self.activation_stats.n_episodes,
+            "episode_index_of_dispersion": self.activation_stats.episode_index_of_dispersion,
+            "n_eff": self.activation_stats.n_eff,
             "gate_passed": self.consistency_gate.passed,
         }
         if self.validation is not None:
@@ -649,6 +703,9 @@ class EventCandidate:
                 max_monthly_share=gate.max_monthly_share,
                 mean_tpm=gate.mean_tpm,
                 index_of_dispersion=gate.index_of_dispersion,
+                n_episodes=gate.n_episodes,
+                episode_index_of_dispersion=gate.episode_index_of_dispersion,
+                n_eff=gate.n_eff,
                 fail_reason="gate_params not stored on this candidate",
             )
 
@@ -667,6 +724,9 @@ class EventCandidate:
             max_monthly_share=g.max_monthly_share,
             mean_tpm=g.mean_tpm,
             index_of_dispersion=g.index_of_dispersion,
+            n_episodes=g.n_episodes,
+            episode_index_of_dispersion=g.episode_index_of_dispersion,
+            n_eff=g.n_eff,
         )
 
 

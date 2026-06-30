@@ -3,9 +3,16 @@
 Filters events based solely on the temporal distribution of their activations.
 No forward return is observed here.
 
-Two criteria:
+Default mode — two criteria:
   1. Rate        — minimum activations per month (MIN_TPM)
-  2. Dispersion  — Index of Dispersion ≤ MAX_DISPERSION
+  2. Dispersion  — per-bar Index of Dispersion ≤ MAX_DISPERSION
+
+Rare mode (``GateParams.admit_rare``, issue #134) — for rare episodic events:
+  1. Episode power      — at least MIN_EPISODES distinct activation episodes
+  2. Episode dispersion — episode-level Index of Dispersion ≤ MAX_DISPERSION
+  The MIN_TPM rate floor is dropped (informational only) and dispersion is
+  measured on episodes (consecutive-activation runs) instead of per bar, so a
+  persistent multi-bar state no longer inflates the monthly variance.
 """
 from __future__ import annotations
 
@@ -40,29 +47,45 @@ class ConsistencyGate:
         active: np.ndarray,
         period_counts: np.ndarray,
         n_total_months: int,
+        month_index: Optional[np.ndarray] = None,
     ) -> GateResult:
-        """Evaluate the two gate criteria given pre-computed counts.
+        """Evaluate the gate criteria given pre-computed counts.
 
-        Criteria are checked in order:
+        Default mode (``admit_rare=False``) — two criteria, checked in order:
 
         1. **Rate** (``n_activations / n_total_months >= min_tpm``): rejects
            events whose average activation rate is too low.
-        2. **Dispersion** (``Var(monthly_counts) / Mean(monthly_counts) <=
-           max_dispersion``): rejects over-dispersed events — bursty signals
-           concentrated in a few months or periodic signals with regular gaps.
+        2. **Dispersion** (per-bar ``Var(monthly_counts) / Mean(monthly_counts)
+           <= max_dispersion``): rejects over-dispersed events.
 
-        Failing any criterion terminates evaluation immediately and returns
-        a ``GateResult`` with ``passed=False`` and a ``fail_reason`` string.
+        Rare mode (``admit_rare=True``, issue #134) — the rate floor is
+        dropped and dispersion is measured on **episodes** (maximal runs of
+        consecutive active bars collapsed to their first bar):
+
+        1. **Episode power** (``n_episodes >= min_episodes``): replaces the
+           rate floor as the statistical-power guard.
+        2. **Episode dispersion** (episode-level ID ``<= max_dispersion``):
+           a persistent multi-bar state (e.g. a 3–5 bar ``RSI < 30`` stretch)
+           no longer inflates the per-bar monthly variance, so genuinely
+           well-distributed rare events pass.
+
+        Episode metrics (``n_episodes``, ``episode_index_of_dispersion``,
+        ``n_eff``) are reported as diagnostics whenever ``month_index`` is
+        supplied, regardless of mode.
 
         Parameters
         ----------
         active : np.ndarray
             Boolean array (True = activated) of length = n_rows in the dataset.
         period_counts : np.ndarray
-            Per-month activation counts, length = n_total_months.  Computed
-            via ``_count_by_month``.
+            Per-month activation counts, length = n_total_months.
         n_total_months : int
             Total number of calendar months spanned by the dataset.
+        month_index : np.ndarray or None
+            Per-row month index (as from ``_build_month_index``).  Required to
+            compute episode-level metrics; when None the episode ID / n_eff are
+            left NaN and ``admit_rare`` falls back to a per-bar episode count
+            with no monthly dispersion (it still drops the rate floor).
 
         Returns
         -------
@@ -80,7 +103,7 @@ class ConsistencyGate:
         max_conc = max_month_count / n_act if n_act > 0 else float("nan")
         mean_tpm = n_act / n_total_months if n_total_months > 0 else 0.0
 
-        # Index of Dispersion: Var(monthly_counts) / Mean(monthly_counts)
+        # Per-bar Index of Dispersion: Var(monthly_counts) / Mean(monthly_counts)
         # When n_total_months <= 1 there is no temporal spread to measure;
         # set id_score = 0.0 so the dispersion criterion trivially passes.
         if n_total_months > 1 and n_act > 0:
@@ -90,38 +113,51 @@ class ConsistencyGate:
         else:
             id_score = 0.0
 
-        # Criterion 1: activation rate
+        # Episode metrics (diagnostic; the gate acts on them only in rare mode)
+        episodes = _episode_starts(active)
+        n_episodes = int(episodes.sum())
+        episode_id = float("nan")
+        n_eff = float("nan")
+        if month_index is not None and n_total_months > 1 and n_episodes > 0:
+            epi_counts = _count_by_month(episodes, month_index, n_total_months)
+            emu = float(epi_counts.mean())
+            evar = float(epi_counts.var(ddof=1))
+            episode_id = float(evar / emu) if emu > 0 else float("inf")
+            # First-order design effect — deflates only, never inflates.
+            n_eff = n_episodes / max(episode_id, 1.0)
+
+        def _result(passed: bool, fail_reason: Optional[str] = None) -> GateResult:
+            return GateResult(
+                passed=passed,
+                n_activations=n_act,
+                n_active_months=n_active_months,
+                max_monthly_share=max_conc,
+                mean_tpm=mean_tpm,
+                index_of_dispersion=id_score,
+                n_episodes=n_episodes,
+                episode_index_of_dispersion=episode_id,
+                n_eff=n_eff,
+                fail_reason=fail_reason,
+            )
+
+        if p.admit_rare:
+            # Criterion 1: episode power (replaces the rate floor)
+            if n_episodes < p.min_episodes:
+                return _result(False, f"episodes: {n_episodes} < {p.min_episodes}")
+            # Criterion 2: episode-level dispersion (skipped if not computable)
+            if episode_id == episode_id and episode_id > p.max_dispersion:  # not NaN
+                return _result(
+                    False,
+                    f"episode dispersion: ID={episode_id:.2f} > {p.max_dispersion}",
+                )
+            return _result(True)
+
+        # Default mode — rate floor + per-bar dispersion
         if mean_tpm < p.min_tpm:
-            return GateResult(
-                passed=False,
-                n_activations=n_act,
-                n_active_months=n_active_months,
-                max_monthly_share=max_conc,
-                mean_tpm=mean_tpm,
-                index_of_dispersion=id_score,
-                fail_reason=f"rate: {mean_tpm:.2f} tpm < {p.min_tpm}",
-            )
-
-        # Criterion 2: temporal dispersion
+            return _result(False, f"rate: {mean_tpm:.2f} tpm < {p.min_tpm}")
         if id_score > p.max_dispersion:
-            return GateResult(
-                passed=False,
-                n_activations=n_act,
-                n_active_months=n_active_months,
-                max_monthly_share=max_conc,
-                mean_tpm=mean_tpm,
-                index_of_dispersion=id_score,
-                fail_reason=f"dispersion: ID={id_score:.2f} > {p.max_dispersion}",
-            )
-
-        return GateResult(
-            passed=True,
-            n_activations=n_act,
-            n_active_months=n_active_months,
-            max_monthly_share=max_conc,
-            mean_tpm=mean_tpm,
-            index_of_dispersion=id_score,
-        )
+            return _result(False, f"dispersion: ID={id_score:.2f} > {p.max_dispersion}")
+        return _result(True)
 
     def evaluate_series(
         self,
@@ -154,7 +190,7 @@ class ConsistencyGate:
         """
         active = event_series.fillna(0).values.astype(bool)
         period_counts = _count_by_month(active, month_index, n_total_months)
-        return self.evaluate(active, period_counts, n_total_months)
+        return self.evaluate(active, period_counts, n_total_months, month_index)
 
     def filter(
         self,
@@ -218,14 +254,42 @@ class ConsistencyGate:
         -------
         GateResult
         """
-        active = s1 & s2
+        active = (s1 & s2).astype(bool)
         period_counts = _count_by_month(active, month_index, n_total_months)
-        return self.evaluate(active, period_counts, n_total_months)
+        return self.evaluate(active, period_counts, n_total_months, month_index)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _episode_starts(active: np.ndarray) -> np.ndarray:
+    """Mark the first bar of each maximal run of consecutive active bars.
+
+    An *episode* is a stretch of contiguous ``True`` values; collapsing each
+    run to its first bar lets dispersion be measured per-episode rather than
+    per-bar, removing the inflation that persistent states (a multi-bar
+    ``RSI < 30`` stretch) cause in per-bar monthly counts (issue #134).  A
+    single-bar gap splits the run into two episodes (strict runs, matching the
+    issue's definition).
+
+    Parameters
+    ----------
+    active : np.ndarray
+        Boolean activation array (dtype bool or uint8).
+
+    Returns
+    -------
+    np.ndarray
+        Boolean array, True only at the first bar of each consecutive run.
+    """
+    active = active.astype(bool)
+    if active.size == 0:
+        return active
+    prev = np.empty_like(active)
+    prev[0] = False
+    prev[1:] = active[:-1]
+    return active & ~prev
 
 def _build_month_index(timestamps: pd.Series) -> tuple[np.ndarray, int]:
     """Map each row to a zero-based integer month index.
