@@ -34,9 +34,10 @@ class TypeClassifier:
         Additional column names to skip, merged with the built-in ``_SKIP_COLS``
         set (datetime, OHLCV raw columns, regime labels).
     scale_free_drift_threshold : float
-        Maximum allowed drift ratio for the scale-free heuristic.  A column
-        passes if ``std(window_means) / overall_std <= threshold``.
-        Lower values are stricter; default 0.25 is conservative.
+        Maximum allowed support-drift ratio for the scale-free heuristic.  A
+        column passes if the drift of its extreme quantiles (q10, q90) across
+        rolling windows, normalised by the global inter-quantile range, stays
+        ``<= threshold``.  Lower values are stricter; default 0.20.
     """
 
     def __init__(
@@ -44,7 +45,7 @@ class TypeClassifier:
         max_categorical_classes: int = 20,
         scale_free_overrides: Optional[dict[str, bool]] = None,
         skip_cols: Optional[set[str]] = None,
-        scale_free_drift_threshold: float = 0.25,
+        scale_free_drift_threshold: float = 0.20,
     ):
         self.max_categorical_classes = max_categorical_classes
         self.scale_free_overrides = scale_free_overrides or {}
@@ -127,32 +128,47 @@ class TypeClassifier:
         )
 
     def _is_scale_free(self, series: pd.Series) -> bool:
-        """Return True only if the series level is stable across rolling windows.
+        """Return True only if the series *support* is stable across rolling windows.
 
         The heuristic splits the series into four equal-length windows and
-        measures how much the window means drift relative to the overall
-        series standard deviation::
+        measures how much the extreme quantiles (q10 and q90) drift between
+        windows, normalised by the global inter-quantile range::
 
-            drift_ratio = std(window_means) / overall_std
+            range_global = q90(series) - q10(series)
+            drift_lo = std(q10 per window) / range_global
+            drift_hi = std(q90 per window) / range_global
+            scale_free = max(drift_lo, drift_hi) <= threshold
 
-        A series is considered scale-free when ``drift_ratio <=
-        scale_free_drift_threshold`` (default 0.25).
+        A series is considered scale-free when the worst of the two drifts is
+        within ``scale_free_drift_threshold`` (default 0.20).
+
+        Why support-stability, not mean-drift
+        -------------------------------------
+        The previous heuristic measured the drift of the *window mean*
+        relative to the overall standard deviation.  On a trending market the
+        mean of a bounded oscillator (RSI, %B) moves with the regime — RSI is
+        higher on average in an uptrend — so the mean-drift test produced a
+        systematic false negative on RSI and %B even though their domain is
+        fixed (issue #133).  The extreme quantiles of a bounded oscillator are
+        regime-invariant (q10 of RSI stays around ~30, q90 around ~70), so the
+        support-stability test classifies them correctly as scale-free while
+        still rejecting trending price/EMA series whose quantiles drift.
 
         Design rationale
         ----------------
-        The check is deliberately conservative.  A false positive (declaring
-        a trending price series scale-free) would corrupt the identity-transform
+        The check stays conservative.  A false positive (declaring a trending
+        price series scale-free) would corrupt the identity-transform
         thresholds by anchoring them to a level that no longer holds out-of-
-        sample.  A false negative (missing that RSI is scale-free) only costs
-        some identity events — far less damaging.
+        sample.  A false negative only costs some identity events — far less
+        damaging.
 
         Minimum data requirements
         -------------------------
         * ``n >= 48`` total non-null observations.
         * Each window must be at least 12 bars (``w = n // 4 >= 12``).
 
-        Columns with zero standard deviation (constant series) always return
-        False because they carry no information.
+        Columns with a degenerate support (``range_global == 0``) always return
+        False because they carry no level information.
 
         Parameters
         ----------
@@ -162,8 +178,8 @@ class TypeClassifier:
         Returns
         -------
         bool
-            True if the drift ratio is within the threshold; False otherwise
-            or when there is insufficient data.
+            True if the worst support-drift is within the threshold; False
+            otherwise or when there is insufficient data.
         """
         series = series.dropna()
         n = len(series)
@@ -175,13 +191,18 @@ class TypeClassifier:
         if w < 12:
             return False
 
-        overall_std = float(series.std())
-        if overall_std == 0:
+        range_global = float(series.quantile(0.90) - series.quantile(0.10))
+        if range_global == 0:
             return False
 
-        window_means = np.array(
-            [series.iloc[i * w: (i + 1) * w].mean() for i in range(n_windows)],
+        q_lo = np.array(
+            [series.iloc[i * w: (i + 1) * w].quantile(0.10) for i in range(n_windows)],
             dtype=float,
         )
-        drift_ratio = float(np.std(window_means, ddof=1)) / overall_std
-        return drift_ratio <= self.scale_free_drift_threshold
+        q_hi = np.array(
+            [series.iloc[i * w: (i + 1) * w].quantile(0.90) for i in range(n_windows)],
+            dtype=float,
+        )
+        drift_lo = float(np.std(q_lo, ddof=1)) / range_global
+        drift_hi = float(np.std(q_hi, ddof=1)) / range_global
+        return max(drift_lo, drift_hi) <= self.scale_free_drift_threshold

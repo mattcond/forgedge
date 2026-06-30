@@ -131,6 +131,42 @@ class TestTypeClassifier:
         assert cls["close"].effective_scale_free is True
         assert cls["close"].scale_free_overridden is True
 
+    def test_bounded_oscillator_with_trending_mean_is_scale_free(self):
+        """Regression for issue #133: a bounded oscillator whose mean drifts
+        with the regime must still be detected as scale-free.
+
+        The old mean-drift heuristic produced a false negative on RSI/%B
+        because the window mean rises in an uptrend.  The support-stability
+        test keys off the extreme quantiles, which stay regime-invariant.
+        """
+        rng = np.random.default_rng(0)
+        n = 2000
+        # Oscillator bounded in [0, 100] whose centre ramps from 35 → 65
+        # across the sample (regime drift), with stable ±20 dispersion clipped
+        # to the domain.  Mean drifts strongly; q10/q90 stay near the bounds.
+        centre = np.linspace(35, 65, n)
+        osc = np.clip(centre + rng.normal(0, 20, n), 0, 100)
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2020-01-01", periods=n, freq="1D"),
+            "osc": osc,
+        })
+        cls = TypeClassifier().fit(df)
+        assert cls["osc"].col_type == ColumnType.CONTINUOUS
+        assert cls["osc"].effective_scale_free is True
+
+    def test_trending_price_not_scale_free(self):
+        """A trending unbounded price series must NOT be scale-free: its
+        extreme quantiles drift far beyond the threshold."""
+        rng = np.random.default_rng(1)
+        n = 2000
+        price = 100 * np.cumprod(1 + rng.normal(0.0005, 0.01, n))
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2020-01-01", periods=n, freq="1D"),
+            "price": price,
+        })
+        cls = TypeClassifier().fit(df)
+        assert cls["price"].effective_scale_free is False
+
 
 # ---------------------------------------------------------------------------
 # Step 1 — FeatureGenerator
