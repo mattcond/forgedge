@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -84,48 +84,49 @@ class GateParams:
     ``GateParams`` instance valid for both in-sample discovery and
     out-of-sample walk-forward validation without any scaling.
 
+    Counting unit (issue #134)
+    --------------------------
+    ``event_counting`` selects whether the rate and dispersion criteria count
+    individual **bars** or **episodes** (maximal runs of consecutive
+    activations).  The default is ``"episode"``: it removes the per-bar
+    counting artifact whereby a persistent state (a 3–5 bar ``RSI < 30``
+    stretch) inflates the monthly variance and is wrongly rejected.  For
+    impulse events (crossovers, candlestick patterns — one bar per episode)
+    the two modes are identical.  ``"bar"`` reproduces the historical
+    behaviour exactly (100% backward compatible).
+
     Attributes
     ----------
     min_tpm : float
-        Minimum average activations per month
-        (total_activations / n_calendar_months).  Events below this rate
-        lack statistical power and are discarded.  **Ignored when
-        ``admit_rare`` is True** — there it becomes informational only and
-        the frequency preference is expected to live at M3
-        (``SelectionCriteria.min_tpm``).
+        Minimum average *triggers* per month, measured in the unit chosen by
+        ``event_counting`` (episodes/month in ``"episode"`` mode, bars/month
+        in ``"bar"`` mode).  Default 0.5 ≈ "at least one episode every two
+        months".
     max_dispersion : float
-        Maximum allowed Index of Dispersion:
-        ``Var(monthly_counts) / Mean(monthly_counts)``.
-        For a pure Poisson process, ID = 1.  Values above the threshold
-        indicate over-dispersed activations — bursty (concentrated in a
-        few months) or periodic (clustered with regular gaps).
-        Default 2.5 passes realistic financial signals while rejecting
-        periodic bursts and single-month concentration.  When ``admit_rare``
-        is True the criterion is applied to the **episode-level** ID instead
-        of the per-bar ID (see ``admit_rare``).
-    admit_rare : bool
-        Opt-in mode for rare, episodic events (issue #134).  Default False
-        keeps the standard two-criterion gate (rate floor + per-bar
-        dispersion) unchanged — no regression on intraday / frequent-event
-        pipelines.  When True:
-
-        * the ``min_tpm`` rate floor is **not** applied (rare oscillator
-          extremes such as ``RSI < 30`` are no longer dropped for low rate);
-        * dispersion is measured on **episodes** — maximal runs of
-          consecutive activations collapsed to their first bar — instead of
-          per bar, removing the inflation that persistent states (a multi-bar
-          ``RSI < 30`` stretch) cause in the per-bar monthly counts;
-        * a ``min_episodes`` floor guards statistical power in place of the
-          rate floor.
+        Maximum allowed Index of Dispersion (``Var/Mean`` of the monthly
+        counts in the chosen unit).  For a Poisson process ID = 1.  Default
+        1.5.  In ``"episode"`` mode the threshold is automatically raised to
+        a Poisson χ² floor when the user's value would reject events that are
+        statistically consistent with a random process at the observed rate
+        (see ``ConsistencyGate``); the raw value is used in ``"bar"`` mode.
+    event_counting : {"episode", "bar"}
+        Counting unit for the rate and dispersion criteria.  Default
+        ``"episode"``.
     min_episodes : int
-        Minimum number of distinct activation episodes required to pass when
-        ``admit_rare`` is True.  Replaces the rate floor as the power guard.
-        Ignored when ``admit_rare`` is False.
+        Absolute floor on the number of episodes required to pass in
+        ``"episode"`` mode (statistical-power guard).  Ignored in ``"bar"``
+        mode.  Default 10.
+    episode_gap : int
+        Maximum gap, in bars, that still belongs to the same episode.  With
+        the default 1, a single missing bar inside a run does not start a new
+        episode (on daily data, a one-day interruption is not a new event).
+        ``0`` gives strict consecutive runs.
     """
-    min_tpm: float = 2.0
-    max_dispersion: float = 2.5
-    admit_rare: bool = False
-    min_episodes: int = 12
+    min_tpm: float = 0.5
+    max_dispersion: float = 1.5
+    event_counting: Literal["episode", "bar"] = "episode"
+    min_episodes: int = 10
+    episode_gap: int = 1
 
 
 @dataclass

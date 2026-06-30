@@ -411,33 +411,33 @@ class TestTransformLayer:
 
 
 class TestConsistencyGate:
-    def _make_gate(self):
-        return ConsistencyGate(GateParams(min_tpm=1.0, max_dispersion=2.5))
+    """The default gate is episode-counting (issue #134); ``event_counting="bar"``
+    reproduces the historical behaviour and is pinned where bar semantics are
+    under test."""
 
-    def _timestamps(self, n: int = 720) -> pd.Series:
-        return pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+    def _bar_gate(self, **kw):
+        kw.setdefault("min_tpm", 1.0)
+        kw.setdefault("max_dispersion", 2.5)
+        return ConsistencyGate(GateParams(event_counting="bar", **kw))
 
     def test_sparse_event_fails_volume(self):
-        # Use a 12-month series with only 2 activations → mean_tpm = 2/12 < min_tpm=1.0
+        # 12-month series with only 2 activations → 2/12 < min_tpm=1.0 (bar mode)
         ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
         month_idx, n_m = _build_month_index(ts)
         event = pd.Series([1.0] * 2 + [0.0] * 8758)
         active = event.fillna(0).values.astype(bool)
         counts = _count_by_month(active, month_idx, n_m)
-        result = self._make_gate().evaluate(active, counts, n_m)
+        result = self._bar_gate().evaluate(active, counts, n_m)
         assert not result.passed
         assert "rate" in result.fail_reason
 
     def test_concentrated_event_fails_concentration(self):
-        # 12-month series, 50 activations all in first month → high dispersion
+        # 50 activations all in the first month → high per-bar dispersion (bar mode)
         ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
         month_idx, n_m = _build_month_index(ts)
-        # All 50 activations in first month (first 744 hours), none after
         active = np.array([True] * 50 + [False] * (8760 - 50), dtype=bool)
         counts = _count_by_month(active, month_idx, n_m)
-        result = ConsistencyGate(GateParams(min_tpm=1.0, max_dispersion=2.5)).evaluate(
-            active, counts, n_m
-        )
+        result = self._bar_gate().evaluate(active, counts, n_m)
         assert not result.passed
         assert "dispersion" in result.fail_reason
 
@@ -448,12 +448,10 @@ class TestConsistencyGate:
         event = pd.Series((rng.random(8760) < 0.10).astype(float))
         active = event.values.astype(bool)
         counts = _count_by_month(active, month_idx, n_m)
-        result = ConsistencyGate(GateParams(min_tpm=2.0, max_dispersion=2.5)).evaluate(
-            active, counts, n_m
-        )
+        result = self._bar_gate(min_tpm=2.0).evaluate(active, counts, n_m)
         assert result.passed
 
-    # ── Issue #134: episode-level dispersion + admit_rare ───────────────────
+    # ── Issue #134: episode counting, χ² floor, n_eff ───────────────────────
 
     def _persistent_rare_event(self, seed: int = 1):
         """A rare, well-distributed event whose activations come in multi-bar
@@ -473,76 +471,92 @@ class TestConsistencyGate:
                 mask[s: s + rng.integers(3, 6)] = True
         return pd.Series(mask.astype(float)), ts
 
-    def test_episode_metrics_reported_in_default_mode(self):
-        """Episode diagnostics are populated even when admit_rare is False."""
-        event, ts = self._persistent_rare_event()
-        mi, nm = _build_month_index(ts)
-        r = ConsistencyGate(GateParams()).evaluate_series(event, mi, nm)
-        assert r.n_episodes > 0
-        # persistent state: per-bar ID is inflated above the per-episode ID
-        assert r.index_of_dispersion > r.episode_index_of_dispersion
-        assert not np.isnan(r.n_eff)
-
-    def test_persistent_state_rejected_by_default_gate(self):
-        """The per-bar dispersion gate wrongly rejects the rare persistent
-        event (the issue #134 defect)."""
-        event, ts = self._persistent_rare_event()
-        mi, nm = _build_month_index(ts)
-        r = ConsistencyGate(GateParams(max_dispersion=2.5)).evaluate_series(event, mi, nm)
-        assert not r.passed
-        assert "dispersion" in r.fail_reason
-
-    def test_admit_rare_passes_well_distributed_persistent_event(self):
-        """admit_rare measures dispersion per-episode, so the same event passes."""
+    def test_persistent_state_rejected_by_bar_gate(self):
+        """Bar mode wrongly rejects the rare persistent event for dispersion
+        (the issue #134 defect that episode mode fixes)."""
         event, ts = self._persistent_rare_event()
         mi, nm = _build_month_index(ts)
         r = ConsistencyGate(
-            GateParams(admit_rare=True, min_episodes=12, max_dispersion=2.5)
+            GateParams(event_counting="bar", min_tpm=0.5, max_dispersion=2.5)
         ).evaluate_series(event, mi, nm)
-        assert r.passed
-        assert r.episode_index_of_dispersion <= 2.5
-        # n_eff never exceeds the episode count (deflation only)
-        assert r.n_eff <= r.n_episodes + 1e-9
+        assert not r.passed
+        assert "dispersion" in r.fail_reason
 
-    def test_admit_rare_no_rate_floor(self):
-        """admit_rare drops the min_tpm rate floor: a low-rate event that the
-        default gate rejects for rate now clears the rate criterion."""
+    def test_episode_mode_passes_well_distributed_persistent_event(self):
+        """Default (episode) mode measures dispersion per-episode, so the same
+        event passes; episode metrics are populated."""
+        event, ts = self._persistent_rare_event()
+        mi, nm = _build_month_index(ts)
+        r = ConsistencyGate(GateParams()).evaluate_series(event, mi, nm)
+        assert r.passed
+        # per-bar ID is inflated well above the per-episode ID
+        assert r.index_of_dispersion > r.episode_index_of_dispersion
+        assert r.n_episodes > 0 and not np.isnan(r.n_eff)
+
+    def test_min_tpm_counts_episodes_in_episode_mode(self):
+        """In episode mode the rate criterion counts episodes per month, not
+        bars: a low-episode-rate event fails the rate criterion."""
         ts = pd.Series(pd.date_range("2019-01-01", periods=1825, freq="1D"))
         mi, nm = _build_month_index(ts)
-        # ~1 activation/month → rate ≈ 1.0 tpm, below a min_tpm=2.0 floor,
-        # spread one per month so there are enough episodes and low dispersion.
         mon = pd.Series(ts.dt.to_period("M"))
+        # one episode every ~3 months → ~0.33 episodes/month
         mask = np.zeros(1825, dtype=bool)
-        for m in mon.unique():
-            idx = np.where(mon.values == m)[0]
-            mask[idx[len(idx) // 2]] = True
-        event = pd.Series(mask.astype(float))
-        default = ConsistencyGate(GateParams(min_tpm=2.0)).evaluate_series(event, mi, nm)
-        rare = ConsistencyGate(
-            GateParams(admit_rare=True, min_episodes=12)
-        ).evaluate_series(event, mi, nm)
-        assert not default.passed and "rate" in default.fail_reason
-        assert rare.passed
+        for i, m in enumerate(mon.unique()):
+            if i % 3 == 0:
+                idx = np.where(mon.values == m)[0]
+                mask[idx[len(idx) // 2]] = True
+        r = ConsistencyGate(
+            GateParams(min_tpm=0.5, min_episodes=1)
+        ).evaluate_series(pd.Series(mask.astype(float)), mi, nm)
+        assert not r.passed
+        assert "rate" in r.fail_reason
 
-    def test_admit_rare_min_episodes_floor(self):
-        """admit_rare still rejects events with too few episodes for power."""
+    def test_min_episodes_power_floor(self):
+        """Episode mode rejects events with too few episodes for power."""
         ts = pd.Series(pd.date_range("2019-01-01", periods=1825, freq="1D"))
         mi, nm = _build_month_index(ts)
         mask = np.zeros(1825, dtype=bool)
         mask[100] = True
-        mask[400:403] = True  # 2 episodes total
+        mask[400:403] = True  # 2 episodes
         r = ConsistencyGate(
-            GateParams(admit_rare=True, min_episodes=12)
+            GateParams(min_tpm=0.0, min_episodes=10)
         ).evaluate_series(pd.Series(mask.astype(float)), mi, nm)
         assert not r.passed
         assert "episodes" in r.fail_reason
 
-    def test_episode_starts_counts_runs(self):
-        """_episode_starts marks the first bar of each consecutive run."""
-        a = np.array([0, 1, 1, 0, 1, 0, 0, 1, 1, 1], dtype=bool)
-        starts = _episode_starts(a)
-        assert starts.astype(int).tolist() == [0, 1, 0, 0, 1, 0, 0, 1, 0, 0]
-        assert int(starts.sum()) == 3
+    def test_poisson_chi2_floor_raises_low_max_dispersion(self):
+        """A user max_dispersion below the Poisson χ² floor never rejects an
+        event statistically consistent with randomness: a Poisson-distributed
+        episodic event passes even with max_dispersion=1.0."""
+        rng = np.random.default_rng(4)
+        ts = pd.Series(pd.date_range("2019-01-01", periods=1825, freq="1D"))
+        mi, nm = _build_month_index(ts)
+        mon = pd.Series(ts.dt.to_period("M"))
+        mask = np.zeros(1825, dtype=bool)
+        for m in mon.unique():
+            idx = np.where(mon.values == m)[0]
+            for _ in range(rng.poisson(1.5)):  # Poisson arrivals, isolated bars
+                mask[rng.choice(idx)] = True
+        r = ConsistencyGate(
+            GateParams(min_tpm=0.3, max_dispersion=1.0, min_episodes=10)
+        ).evaluate_series(pd.Series(mask.astype(float)), mi, nm)
+        # raw ID may sit slightly above 1.0 by sampling noise but below the
+        # χ² floor (~1.32 for 60 months), so the event still passes
+        assert r.passed
+
+    def test_n_eff_is_episodes_over_id(self):
+        """n_eff = n_episodes / episode_ID (issue #134 design effect)."""
+        event, ts = self._persistent_rare_event()
+        mi, nm = _build_month_index(ts)
+        r = ConsistencyGate(GateParams()).evaluate_series(event, mi, nm)
+        assert abs(r.n_eff - r.n_episodes / r.episode_index_of_dispersion) < 1e-6
+
+    def test_episode_gap_merging(self):
+        """A one-bar interruption does not start a new episode (gap=1);
+        gap=0 gives strict consecutive runs."""
+        a = np.array([0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1], dtype=bool)
+        assert int(_episode_starts(a, gap=0).sum()) == 4
+        assert int(_episode_starts(a, gap=1).sum()) == 3  # idx1..4 merge over 1-bar hole
 
 
 # ---------------------------------------------------------------------------

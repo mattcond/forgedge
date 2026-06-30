@@ -603,12 +603,13 @@ class TestNoRecompute:
         df = _predictive_kpi_table()
         ed, cands = _make_candidates(df)
         stripped = cands[:5]
+        assert stripped, "fixture must yield at least one candidate"
         for c in stripped:
             c.event_series = None
 
         ad = AlphaDiscovery(ed.df, stripped, AlphaConfig())
         contracts = ad.run()
-        assert len(contracts) == 5
+        assert len(contracts) == len(stripped)
 
     def test_activation_counts_match_event_discovery(self):
         """The activations Alpha Discovery sees are Event Discovery's, bar for

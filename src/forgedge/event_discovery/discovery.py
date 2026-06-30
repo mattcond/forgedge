@@ -44,7 +44,7 @@ class DiscoveryConfig:
     ----------
     gate_params : GateParams
         Thresholds for the Consistency Gate (Step 4).  Defaults to
-        ``GateParams()`` (min_tpm=2.0, max_dispersion=2.5).
+        ``GateParams()`` — episode counting, min_tpm=0.5, max_dispersion=1.5.
     max_categorical_classes : int
         Categorical columns with more distinct values than this limit are
         classified but excluded from the event generation pipeline.
