@@ -214,3 +214,72 @@ def multiple_ema(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.
         tmp.name = f"{on.lower()}_ema_{w:02d}"
         out.append(tmp)
     return pd.concat(out, axis=1)
+
+
+def atr(df: pd.DataFrame, window: int, on: str, order_on: str) -> pd.Series:
+    """Average True Range (Wilder smoothing).
+
+    True range combines the current bar's range with any gap versus the
+    previous close, so it needs ``high``/``low`` in addition to ``on`` (the
+    close-equivalent column). ``on`` is normally ``"close"``.
+    """
+    sorted_df = df.sort_values(order_on, ascending=True)
+    high = sorted_df["high"].astype(float)
+    low = sorted_df["low"].astype(float)
+    prev_close = sorted_df[on].astype(float).shift(1)
+    true_range = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return true_range.ewm(alpha=1 / window, adjust=False).mean().round(5)
+
+
+def multiple_atr(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.DataFrame:
+    """ATR over several windows (``{on}_atr_{w:02d}``). Requires ``high``/``low``."""
+    out = []
+    for w in windows:
+        tmp = atr(df, w, on, order_on)
+        tmp.name = f"{on.lower()}_atr_{w:02d}"
+        out.append(tmp)
+    return pd.concat(out, axis=1)
+
+
+def macd(df: pd.DataFrame, fast: int, slow: int, signal: int, on: str, order_on: str) -> pd.DataFrame:
+    """MACD line, signal line and histogram for one ``(fast, slow, signal)`` triple."""
+    sorted_series = df.sort_values(order_on, ascending=True)[on].astype(float)
+    ema_fast = sorted_series.ewm(span=fast, adjust=False).mean()
+    ema_slow = sorted_series.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    hist = macd_line - signal_line
+
+    base = f"{on.lower()}_macd_{fast:02d}_{slow:02d}"
+    macd_line = macd_line.round(5)
+    macd_line.name = base
+    signal_line = signal_line.round(5)
+    signal_line.name = f"{base}_signal_{signal:02d}"
+    hist = hist.round(5)
+    hist.name = f"{base}_hist_{signal:02d}"
+    return pd.concat([macd_line, signal_line, hist], axis=1)
+
+
+def multiple_macd(df: pd.DataFrame, periods: list, on: str, order_on: str) -> pd.DataFrame:
+    """MACD over one or more ``(fast, slow, signal)`` triples.
+
+    ``periods`` is read as a flat list of triples, e.g. ``[12, 26, 9]`` for a
+    single MACD(12,26,9), or ``[12, 26, 9, 5, 35, 5]`` for two configurations.
+    Each triple produces three columns: the MACD line
+    (``{on}_macd_{fast:02d}_{slow:02d}``), the signal line
+    (``..._signal_{signal:02d}``) and the histogram (``..._hist_{signal:02d}``).
+    """
+    if len(periods) % 3 != 0:
+        raise ValueError(
+            f"macd: 'periods' deve contenere triple (fast, slow, signal); "
+            f"ricevuti {len(periods)} valori: {periods}"
+        )
+    out = []
+    for i in range(0, len(periods), 3):
+        fast, slow, signal = periods[i:i + 3]
+        out.append(macd(df, fast, slow, signal, on, order_on))
+    return pd.concat(out, axis=1)

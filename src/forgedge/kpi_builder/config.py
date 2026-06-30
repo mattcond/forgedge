@@ -41,6 +41,14 @@ DEFAULT_CONFIG: Mapping = {
     "bollinger_bands": {"enabled": True, "params": {"periods": [20], "columns": ["close"]}},
     "max_drawdown":   {"enabled": True, "params": {"periods": [12, 24, 48, 120, 240],
                                                    "columns": ["close"]}},
+    # ATR requires `high`/`low` in addition to `columns` (normally just
+    # "close"); disabled by default so OHLC-only consumers stay unaffected.
+    "atr":            {"enabled": False, "params": {"periods": [14],
+                                                   "columns": ["close"]}},
+    # MACD's `periods` is read as a flat list of (fast, slow, signal) triples,
+    # not independent window lengths — see indicators.multiple_macd.
+    "macd":           {"enabled": False, "params": {"periods": [12, 26, 9],
+                                                   "columns": ["close"]}},
 }
 # NB: il lag non è nel config. Si applica dopo build_features() con lag_features(),
 # così si ritardano colonne reali (anche derivate) senza conoscerne i nomi a priori.

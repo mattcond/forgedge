@@ -67,6 +67,54 @@ def test_missing_columns_are_skipped():
     assert "close_ema_03" in kpi.columns
 
 
+# ── atr / macd (opt-in, disabled in DEFAULT_CONFIG) ────────────────────────────
+
+def test_atr_disabled_by_default():
+    kpi = build_features(_candles(), timestamp_col="open_time")
+    assert not any("_atr_" in c for c in kpi.columns)
+
+
+def test_atr_enabled_produces_column():
+    cfg = {"atr": {"enabled": True, "params": {"periods": [14], "columns": ["close"]}}}
+    kpi = build_features(_candles(), cfg, timestamp_col="open_time")
+    assert "close_atr_14" in kpi.columns
+    assert kpi["close_atr_14"].dropna().ge(0).all()
+
+
+def test_atr_skipped_without_high_low():
+    candles = _candles().drop(columns=["high", "low"])
+    cfg = {"atr": {"enabled": True, "params": {"periods": [14], "columns": ["close"]}}}
+    kpi = build_features(candles, cfg, timestamp_col="open_time")
+    assert not any("_atr_" in c for c in kpi.columns)
+
+
+def test_macd_disabled_by_default():
+    kpi = build_features(_candles(), timestamp_col="open_time")
+    assert not any("_macd_" in c for c in kpi.columns)
+
+
+def test_macd_enabled_produces_line_signal_hist():
+    cfg = {"macd": {"enabled": True, "params": {"periods": [12, 26, 9], "columns": ["close"]}}}
+    kpi = build_features(_candles(), cfg, timestamp_col="open_time")
+    assert "close_macd_12_26" in kpi.columns
+    assert "close_macd_12_26_signal_09" in kpi.columns
+    assert "close_macd_12_26_hist_09" in kpi.columns
+
+
+def test_macd_multiple_triples():
+    cfg = {"macd": {"enabled": True,
+                    "params": {"periods": [12, 26, 9, 5, 35, 5], "columns": ["close"]}}}
+    kpi = build_features(_candles(), cfg, timestamp_col="open_time")
+    assert "close_macd_12_26" in kpi.columns
+    assert "close_macd_05_35" in kpi.columns
+
+
+def test_macd_invalid_periods_length_raises():
+    cfg = {"macd": {"enabled": True, "params": {"periods": [12, 26], "columns": ["close"]}}}
+    with pytest.raises(ValueError):
+        build_features(_candles(), cfg, timestamp_col="open_time")
+
+
 def test_lagging_block_in_config_is_ignored():
     """A stray 'lagging' block (legacy config) must not error and must not lag."""
     cfg = {
