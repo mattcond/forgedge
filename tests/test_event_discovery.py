@@ -40,7 +40,10 @@ from forgedge.event_discovery.transform_layer import TransformLayer
 def _make_kpi_table(n: int = 4380, seed: int = 42) -> pd.DataFrame:
     """Create a synthetic KPI table.  Default n=4380 ≈ 6 months of 1H data."""
     rng = np.random.default_rng(seed)
-    price = 100 * np.cumprod(1 + rng.normal(0.0001, 0.005, n))
+    # Modest positive drift so the synthetic price actually trends like a real
+    # asset (~1.6x over the default horizon).  A near-flat random walk would be
+    # support-stationary and wrongly read as scale-free by the classifier.
+    price = 100 * np.cumprod(1 + rng.normal(0.0002, 0.005, n))
     vol = np.abs(rng.normal(1e6, 2e5, n))
     dates = pd.date_range("2024-01-01", periods=n, freq="1h")
 
@@ -136,14 +139,15 @@ class TestTypeClassifier:
         with the regime must still be detected as scale-free.
 
         The old mean-drift heuristic produced a false negative on RSI/%B
-        because the window mean rises in an uptrend.  The support-stability
-        test keys off the extreme quantiles, which stay regime-invariant.
+        because the window mean rises in an uptrend.  The support-overlap test
+        keys off the value range revisited by both halves, which stays stable.
         """
         rng = np.random.default_rng(0)
         n = 2000
         # Oscillator bounded in [0, 100] whose centre ramps from 35 → 65
         # across the sample (regime drift), with stable ±20 dispersion clipped
-        # to the domain.  Mean drifts strongly; q10/q90 stay near the bounds.
+        # to the domain.  Mean drifts strongly; the [q05,q95] support stays
+        # overlapping between the two halves.
         centre = np.linspace(35, 65, n)
         osc = np.clip(centre + rng.normal(0, 20, n), 0, 100)
         df = pd.DataFrame({
@@ -156,7 +160,8 @@ class TestTypeClassifier:
 
     def test_trending_price_not_scale_free(self):
         """A trending unbounded price series must NOT be scale-free: its
-        extreme quantiles drift far beyond the threshold."""
+        second half makes new extremes its first half never reached, so the
+        supports barely overlap."""
         rng = np.random.default_rng(1)
         n = 2000
         price = 100 * np.cumprod(1 + rng.normal(0.0005, 0.01, n))
@@ -166,6 +171,94 @@ class TestTypeClassifier:
         })
         cls = TypeClassifier().fit(df)
         assert cls["price"].effective_scale_free is False
+
+    def test_scale_free_is_period_invariant(self):
+        """Regression for issue #136: a fast and a slow oscillator computed on
+        the SAME trending price must receive the SAME scale-free verdict.
+
+        The windowed quantile-drift test (issue #133's fix) classified RSI25
+        as not-scale-free while RSI14 passed, because the slower indicator
+        drags the regime through its windows longer.  The support-overlap test
+        is computed once over the whole series and is period-invariant.
+        """
+        rng = np.random.default_rng(7)
+        n = 3000
+        price = 100 * np.cumprod(1 + rng.normal(0.0006, 0.006, n))
+
+        def rsi(s, w):
+            s = pd.Series(s)
+            d = s.diff()
+            g = d.clip(lower=0).rolling(w, min_periods=1).mean()
+            l = (-d.clip(upper=0)).rolling(w, min_periods=1).mean()
+            return (100 - 100 / (1 + g / l.replace(0, np.nan))).fillna(50).values
+
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2018-01-01", periods=n, freq="1D"),
+            "rsi_14": rsi(price, 14),
+            "rsi_25": rsi(price, 25),
+        })
+        cls = TypeClassifier().fit(df)
+        assert cls["rsi_14"].effective_scale_free is True
+        assert cls["rsi_25"].effective_scale_free is True
+        assert cls["rsi_14"].effective_scale_free == cls["rsi_25"].effective_scale_free
+
+    def test_scale_free_drift_threshold_deprecated(self):
+        """The legacy scale_free_drift_threshold kwarg is accepted but ignored,
+        emitting a DeprecationWarning (issue #136)."""
+        with pytest.warns(DeprecationWarning):
+            TypeClassifier(scale_free_drift_threshold=0.2)
+
+    def test_block_count_adapts_to_series_length(self):
+        """The scale-free heuristic uses k=2 for short series and grows to
+        max_scale_free_blocks for long ones (each block >= min_block_size)."""
+        c = TypeClassifier(max_scale_free_blocks=4, min_block_size=250)
+        rng = np.random.default_rng(0)
+
+        def k_for(n):
+            return max(2, min(c.max_scale_free_blocks, n // c.min_block_size))
+
+        assert k_for(365) == 2     # 1 year daily -> two blocks
+        assert k_for(900) == 3
+        assert k_for(1300) == 4
+        assert k_for(5000) == 4    # capped at max_scale_free_blocks
+
+    def test_roundtrip_path_not_scale_free(self):
+        """A price that trends up then symmetrically back down is a
+        non-stationary *path*: with k>=4 blocks at least one block's support
+        sits far from the global support, so it is not scale-free.
+
+        A single two-way split would wrongly pass it (both halves share a
+        similar overall range); the adaptive multi-block test catches it.
+        """
+        rng = np.random.default_rng(3)
+        half = 1500
+        up = 100 * np.cumprod(1 + rng.normal(0.0015, 0.005, half))
+        down = up[-1] * np.cumprod(1 + rng.normal(-0.0015, 0.005, half))
+        path = np.concatenate([up, down])
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2015-01-01", periods=len(path), freq="1D"),
+            "path": path,
+        })
+        cls = TypeClassifier().fit(df)
+        assert cls["path"].effective_scale_free is False
+
+    def test_short_series_override_forces_scale_free(self):
+        """On a short history (~1 year) the heuristic falls back to k=2 and is
+        unreliable; an explicit override is the supported path and takes
+        precedence over whatever the heuristic decides.  Here a trending price
+        (auto-detected NOT scale-free) is forced scale-free via override."""
+        rng = np.random.default_rng(5)
+        n = 365
+        price = 100 * np.cumprod(1 + rng.normal(0.0008, 0.008, n))
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2023-01-01", periods=n, freq="1D"),
+            "px": price,
+        })
+        auto = TypeClassifier().fit(df)
+        forced = TypeClassifier(scale_free_overrides={"px": True}).fit(df)
+        assert auto["px"].effective_scale_free is False        # heuristic says no
+        assert forced["px"].effective_scale_free is True       # override wins
+        assert forced["px"].scale_free_overridden is True
 
 
 # ---------------------------------------------------------------------------
