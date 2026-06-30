@@ -208,6 +208,58 @@ class TestTypeClassifier:
         with pytest.warns(DeprecationWarning):
             TypeClassifier(scale_free_drift_threshold=0.2)
 
+    def test_block_count_adapts_to_series_length(self):
+        """The scale-free heuristic uses k=2 for short series and grows to
+        max_scale_free_blocks for long ones (each block >= min_block_size)."""
+        c = TypeClassifier(max_scale_free_blocks=4, min_block_size=250)
+        rng = np.random.default_rng(0)
+
+        def k_for(n):
+            return max(2, min(c.max_scale_free_blocks, n // c.min_block_size))
+
+        assert k_for(365) == 2     # 1 year daily -> two blocks
+        assert k_for(900) == 3
+        assert k_for(1300) == 4
+        assert k_for(5000) == 4    # capped at max_scale_free_blocks
+
+    def test_roundtrip_path_not_scale_free(self):
+        """A price that trends up then symmetrically back down is a
+        non-stationary *path*: with k>=4 blocks at least one block's support
+        sits far from the global support, so it is not scale-free.
+
+        A single two-way split would wrongly pass it (both halves share a
+        similar overall range); the adaptive multi-block test catches it.
+        """
+        rng = np.random.default_rng(3)
+        half = 1500
+        up = 100 * np.cumprod(1 + rng.normal(0.0015, 0.005, half))
+        down = up[-1] * np.cumprod(1 + rng.normal(-0.0015, 0.005, half))
+        path = np.concatenate([up, down])
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2015-01-01", periods=len(path), freq="1D"),
+            "path": path,
+        })
+        cls = TypeClassifier().fit(df)
+        assert cls["path"].effective_scale_free is False
+
+    def test_short_series_override_forces_scale_free(self):
+        """On a short history (~1 year) the heuristic falls back to k=2 and is
+        unreliable; an explicit override is the supported path and takes
+        precedence over whatever the heuristic decides.  Here a trending price
+        (auto-detected NOT scale-free) is forced scale-free via override."""
+        rng = np.random.default_rng(5)
+        n = 365
+        price = 100 * np.cumprod(1 + rng.normal(0.0008, 0.008, n))
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2023-01-01", periods=n, freq="1D"),
+            "px": price,
+        })
+        auto = TypeClassifier().fit(df)
+        forced = TypeClassifier(scale_free_overrides={"px": True}).fit(df)
+        assert auto["px"].effective_scale_free is False        # heuristic says no
+        assert forced["px"].effective_scale_free is True       # override wins
+        assert forced["px"].scale_free_overridden is True
+
 
 # ---------------------------------------------------------------------------
 # Step 1 — FeatureGenerator
