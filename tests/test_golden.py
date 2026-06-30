@@ -28,18 +28,21 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "ADA_1D_TRAIN.parquet"
 # Expected values — captured from first deterministic run, never changed
 # ---------------------------------------------------------------------------
 
+# Golden values re-pinned after fix #134 (episode counting as default, PR #138).
+# Event IDs changed because episode-mode gate reorders candidate numbering;
+# the underlying expressions, signals, and RD metrics are unchanged.
 _ED_GOLDEN_ID = "EVT-close_ret_03-ID-0000"
 _ED_GOLDEN = {
-    "expression":           "close_ret_03 < -0.094248",
-    "n_activations":        71,
-    "mean_tpm":             pytest.approx(2.448276, rel=1e-4),
-    "zero_months":          8,
-    "index_of_dispersion":  pytest.approx(2.088531, rel=1e-4),
+    "expression":           "close_ret_03 < -0.138425",
+    "n_activations":        27,
+    "mean_tpm":             pytest.approx(0.931034, rel=1e-4),
+    "zero_months":          15,
+    "index_of_dispersion":  pytest.approx(1.605820, rel=1e-4),
     "gate_passed":          True,
     "n_components":         1,
 }
 
-_AD_GOLDEN_CANDIDATE_ID = "EVT-close_vol_05-DL-0067"
+_AD_GOLDEN_CANDIDATE_ID = "EVT-close_vol_05-DL-0281"
 _AD_GOLDEN = {
     "expression":   "delta_close_vol_05_12 < -0.0257995",
     "direction":    "short",
@@ -61,7 +64,7 @@ _RD_GOLDEN = {
 # A deterministic *long* contract under the default PROJ_LOG target_mode (issue
 # #109).  The golden short contract above reverts to ABS (short → ABS), so this
 # pins the PROJ_LOG long path.
-_AD_GOLDEN_LONG_CANDIDATE_ID = "EVT-ratio_close_vol05_vo-ZS-0287"
+_AD_GOLDEN_LONG_CANDIDATE_ID = "EVT-ratio_close_vol05_vo-ZS-1160"
 _AD_GOLDEN_LONG = {
     "expression":    "zs_ratio_close_vol05_vol24_96 > 1",
     "direction":     "long",
