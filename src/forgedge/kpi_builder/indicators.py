@@ -217,7 +217,7 @@ def multiple_ema(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.
 
 
 def atr(df: pd.DataFrame, window: int, on: str, order_on: str) -> pd.Series:
-    """Average True Range (Wilder smoothing).
+    """Average True Range (Wilder smoothing), in the price units of ``on``.
 
     True range combines the current bar's range with any gap versus the
     previous close, so it needs ``high``/``low`` in addition to ``on`` (the
@@ -236,21 +236,51 @@ def atr(df: pd.DataFrame, window: int, on: str, order_on: str) -> pd.Series:
 
 
 def multiple_atr(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.DataFrame:
-    """ATR over several windows (``{on}_atr_{w:02d}``). Requires ``high``/``low``."""
+    """ATR (raw) and NATR (normalised) over several windows.
+
+    Two columns per window: ``{on}_atr_{w:02d}`` (raw, in price units — handy
+    for stop-loss sizing) and ``{on}_natr_{w:02d}`` (= atr / ``on``, a
+    dimensionless fraction).
+
+    Unlike bounded oscillators (RSI, %B), neither is *guaranteed* scale-free
+    standalone: both track volatility, which can drift across market regimes
+    over a long history, so FORGE's empirical scale-free heuristic may still
+    reject a single configured period. The robust path — the same one EMA
+    and SMA already rely on — is configuring **two or more periods**: both
+    ``atr`` and ``natr`` are recognised by ``parse_feature`` (family ``atr``/
+    ``natr``), so FeatureGenerator auto-derives a same-family ratio (e.g.
+    ``ratio_close_atr14_atr28``) that's scale-free by construction regardless
+    of the inputs' own classification.
+    """
     out = []
+    close = df.sort_values(order_on, ascending=True)[on].astype(float)
     for w in windows:
-        tmp = atr(df, w, on, order_on)
-        tmp.name = f"{on.lower()}_atr_{w:02d}"
-        out.append(tmp)
+        raw = atr(df, w, on, order_on)
+        raw.name = f"{on.lower()}_atr_{w:02d}"
+        natr = (raw / close).round(5)
+        natr.name = f"{on.lower()}_natr_{w:02d}"
+        out.append(raw)
+        out.append(natr)
     return pd.concat(out, axis=1)
 
 
 def macd(df: pd.DataFrame, fast: int, slow: int, signal: int, on: str, order_on: str) -> pd.DataFrame:
-    """MACD line, signal line and histogram for one ``(fast, slow, signal)`` triple."""
+    """MACD line, signal line and histogram for one ``(fast, slow, signal)`` triple.
+
+    The line is normalised by ``on`` (``(ema_fast - ema_slow) / on``) instead
+    of the textbook raw price-unit difference, which improves (but, being
+    momentum rather than a bounded oscillator, does not guarantee) the odds
+    of passing FORGE's empirical scale-free check. Unlike ATR, MACD's column
+    name carries two period parameters (``fast``/``slow``) and isn't
+    recognised by ``parse_feature``, so there is no same-family ratio to
+    rescue it if a given asset/period combination is classified non
+    scale-free — configuring multiple ``(fast, slow, signal)`` triples does
+    not help here the way extra periods help ATR/MDD.
+    """
     sorted_series = df.sort_values(order_on, ascending=True)[on].astype(float)
     ema_fast = sorted_series.ewm(span=fast, adjust=False).mean()
     ema_slow = sorted_series.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
+    macd_line = (ema_fast - ema_slow) / sorted_series
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     hist = macd_line - signal_line
 

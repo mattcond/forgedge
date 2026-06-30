@@ -60,12 +60,18 @@ _PATTERNS: list[tuple[str, str, str]] = [
     # (regex, indicator_template, family)
     # Bollinger bands — must come before generic {base}_{type}_{param}
     (r'^(close|high|low|open)_bb_(lower|upper|width|mid)_(\d+)$', "bb_{1}", "bollinger"),
-    # Standard MA / oscillator
-    (r'^(close|high|low|open|volume)_(ema|sma|rsi|dema|tema|wma|hma)_(\d+)$', "{1}", "{1}"),
+    # Volume MA expressed as volume_sma_N or volume_ema_N — must precede the
+    # generic base+indicator pattern below, whose base alternation already
+    # includes "volume" and would otherwise match first and shadow this rule
+    # (issue: dead pattern, never reached — base/indicator are captured here
+    # explicitly so they resolve to "volume"/"sma" instead of the generic
+    # rule's "volume"/"sma" reusing the same group positions incorrectly).
+    (r'^(volume)_(sma|ema)_(\d+)$', "{1}", "volume_ma"),
+    # Standard MA / oscillator (also scale-free ratio-style indicators that
+    # benefit from same-family multi-period pairing: max_drawdown, ATR, NATR)
+    (r'^(close|high|low|open|volume)_(ema|sma|rsi|dema|tema|wma|hma|mdd|atr|natr)_(\d+)$', "{1}", "{1}"),
     # Rolling min/max on a price column
     (r'^(close|high|low)_(min|max)_(\d+)$', "{1}", "rolling_{1}"),
-    # Volume MA expressed as volume_sma_N or volume_ema_N
-    (r'^volume_(sma|ema)_(\d+)$', "vol_{0}", "volume_ma"),
     # Volatility / return series
     (r'^(close|high|low)_vol_(\d+)$', "vol", "volatility"),
     (r'^(close|high|low)_ret_(\d+)$', "ret", "return"),
@@ -378,17 +384,19 @@ class FeatureGenerator:
                     source_cols=[price_col, ma_col],
                 )
 
-        # Volume vs volume MA
-        vol_raw = [col for col, pf in parsed.items() if pf.family == "volume"]
+        # Volume vs volume MA. Reads raw "volume" straight from df rather than
+        # from `parsed` — TypeClassifier never classifies raw OHLCV columns
+        # (see classifier._SKIP_COLS), so "volume" never appears there and a
+        # `parsed`-only lookup left this block permanently dead.
         vol_ma = [col for col, pf in parsed.items() if pf.family == "volume_ma"]
-        for v_col in vol_raw:
+        if vol_ma and "volume" in df.columns:
             for vm_col in vol_ma:
                 pf_vm = parsed[vm_col]
                 param = pf_vm.params[0] if pf_vm.params else 0
                 new_col = f"ratio_volume_{pf_vm.indicator}{param:02d}"
                 if new_col in extended.columns:
                     continue
-                series = _safe_ratio(df[v_col], df[vm_col])
+                series = _safe_ratio(df["volume"], df[vm_col])
                 extended[new_col] = series
                 meta[new_col] = DerivedFeature(
                     col=new_col,
@@ -396,7 +404,7 @@ class FeatureGenerator:
                     is_scale_free=True,
                     arity=2,
                     operation="ratio",
-                    source_cols=[v_col, vm_col],
+                    source_cols=["volume", vm_col],
                 )
 
     # ------------------------------------------------------------------

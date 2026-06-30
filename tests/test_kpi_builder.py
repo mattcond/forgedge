@@ -81,11 +81,30 @@ def test_atr_enabled_produces_column():
     assert kpi["close_atr_14"].dropna().ge(0).all()
 
 
+def test_atr_emits_normalised_companion():
+    """`natr` (= atr / price) is the dimensionless companion of raw `atr`.
+
+    Neither is guaranteed scale-free standalone (both track volatility, which
+    can drift across regimes) — see indicators.multiple_atr docstring; the
+    DEFAULT_CONFIG uses 2 periods so FeatureGenerator can pair them into a
+    same-family ratio instead.
+    """
+    cfg = {"atr": {"enabled": True, "params": {"periods": [14], "columns": ["close"]}}}
+    kpi = build_features(_candles(), cfg, timestamp_col="open_time")
+    assert "close_natr_14" in kpi.columns
+    valid = kpi[["close_atr_14", "close_natr_14", "close"]].dropna()
+    assert valid["close_natr_14"].ge(0).all()
+    np.testing.assert_allclose(
+        valid["close_natr_14"], valid["close_atr_14"] / valid["close"], atol=1e-4,
+    )
+
+
 def test_atr_skipped_without_high_low():
     candles = _candles().drop(columns=["high", "low"])
     cfg = {"atr": {"enabled": True, "params": {"periods": [14], "columns": ["close"]}}}
     kpi = build_features(candles, cfg, timestamp_col="open_time")
     assert not any("_atr_" in c for c in kpi.columns)
+    assert not any("_natr_" in c for c in kpi.columns)
 
 
 def test_macd_disabled_by_default():
@@ -99,6 +118,16 @@ def test_macd_enabled_produces_line_signal_hist():
     assert "close_macd_12_26" in kpi.columns
     assert "close_macd_12_26_signal_09" in kpi.columns
     assert "close_macd_12_26_hist_09" in kpi.columns
+
+
+def test_macd_is_normalised_by_price():
+    """The MACD line is (ema_fast - ema_slow) / price, not the raw price-unit
+    difference — keeps it scale-free regardless of the asset's price level."""
+    cfg = {"macd": {"enabled": True, "params": {"periods": [12, 26, 9], "columns": ["close"]}}}
+    kpi = build_features(_candles(), cfg, timestamp_col="open_time")
+    line = kpi["close_macd_12_26"].dropna()
+    # A normalised MACD on a series with ~1% daily moves stays within a few %.
+    assert line.abs().max() < 0.5
 
 
 def test_macd_multiple_triples():

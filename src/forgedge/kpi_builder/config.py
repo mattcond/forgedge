@@ -43,7 +43,10 @@ DEFAULT_CONFIG: Mapping = {
                                                    "columns": ["close"]}},
     # ATR requires `high`/`low` in addition to `columns` (normally just
     # "close"); disabled by default so OHLC-only consumers stay unaffected.
-    "atr":            {"enabled": False, "params": {"periods": [14],
+    # Two periods (not one) so FeatureGenerator can pair atr14/atr28 (and
+    # natr14/natr28) into a same-family ratio — like EMA, ATR is unbounded
+    # and not reliably scale-free standalone; see indicators.multiple_atr.
+    "atr":            {"enabled": False, "params": {"periods": [14, 28],
                                                    "columns": ["close"]}},
     # MACD's `periods` is read as a flat list of (fast, slow, signal) triples,
     # not independent window lengths — see indicators.multiple_macd.
