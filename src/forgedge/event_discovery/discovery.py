@@ -44,7 +44,7 @@ class DiscoveryConfig:
     ----------
     gate_params : GateParams
         Thresholds for the Consistency Gate (Step 4).  Defaults to
-        ``GateParams()`` (min_tpm=2.0, max_dispersion=2.5).
+        ``GateParams()`` — episode counting, min_tpm=0.5, max_dispersion=1.5.
     max_categorical_classes : int
         Categorical columns with more distinct values than this limit are
         classified but excluded from the event generation pipeline.
@@ -517,6 +517,9 @@ class EventDiscovery:
             max_monthly_share=g.max_monthly_share if g else float("nan"),
             mean_tpm=g.mean_tpm if g else float("nan"),
             index_of_dispersion=g.index_of_dispersion if g else float("nan"),
+            n_episodes=g.n_episodes if g else 0,
+            episode_index_of_dispersion=g.episode_index_of_dispersion if g else float("nan"),
+            n_eff=g.n_eff if g else float("nan"),
         )
 
         # Attach DatetimeIndex so callers can call .resample() directly
