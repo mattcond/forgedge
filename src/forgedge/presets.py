@@ -121,12 +121,21 @@ class _TFClass:
 
 # ── Preset definitions (daily-calibrated) ─────────────────────────────────────
 
-# Ogni preset definisce:
-#   daily_min_tpm          — gate M1 (EventDiscovery) e M3 (RuleDiscovery), daily
-#   daily_rd_min_tpm       — gate M3, leggermente più largo di M1 per tollerare
-#                            la naturale variabilità tra attivazioni e trade eseguiti
-#   daily_max_dispersion   — gate M1
-#   parametri alpha        — gate M2 (AlphaDiscovery)
+# Ogni preset definisce due famiglie di parametri per min_tpm:
+#   daily_min_tpm         — modalità "bar": barre attive/mese (retrocompatibile)
+#   daily_min_tpm_episode — modalità "episode": episodi/mese ≈ trade/mese
+#                           (default da GateParams post-fix #134)
+#
+# I due valori NON sono intercambiabili: in modalità episode min_tpm misura
+# episodi (eventi distinti), non barre, quindi un RSI<30 con 3 barre per
+# episodio ha 0.57 episodi/mese ma 1.70 barre/mese.
+#
+# Altri campi:
+#   daily_rd_min_tpm(_episode) — gate M3 (stesso conteggio del gate M1)
+#   daily_max_dispersion        — gate M1 (uguale in entrambe le modalità;
+#                                 il Poisson-floor nel ConsistencyGate protegge
+#                                 già dalla dispersione artificiale in episode mode)
+#   parametri alpha             — gate M2 (AlphaDiscovery)
 _PRESET_SPECS: dict = {
     "sniper": {
         "description": (
@@ -135,7 +144,9 @@ _PRESET_SPECS: dict = {
             "Non abbinare a RotationCalibrator."
         ),
         "daily_min_tpm": 1.0,
+        "daily_min_tpm_episode": 0.3,   # ≈1 episodio ogni 3 mesi
         "daily_rd_min_tpm": 1.0,
+        "daily_rd_min_tpm_episode": 0.3,
         "daily_max_dispersion": 1.0,
         "min_lift": 0.10,
         "min_cohens_d": 0.15,
@@ -149,7 +160,9 @@ _PRESET_SPECS: dict = {
             "Default sensato per la maggior parte degli asset e timeframe."
         ),
         "daily_min_tpm": 3.0,
+        "daily_min_tpm_episode": 1.0,   # ≈1 episodio/mese (trade/mese minimo)
         "daily_rd_min_tpm": 2.5,
+        "daily_rd_min_tpm_episode": 0.8,
         "daily_max_dispersion": 2.0,
         "min_lift": 0.06,
         "min_cohens_d": 0.10,
@@ -165,7 +178,9 @@ _PRESET_SPECS: dict = {
             "promoted_contracts(min_lift=0.05)."
         ),
         "daily_min_tpm": 1.0,
+        "daily_min_tpm_episode": 0.3,   # molto permissivo: il filtro è il RotationCalibrator
         "daily_rd_min_tpm": 1.0,
+        "daily_rd_min_tpm_episode": 0.3,
         "daily_max_dispersion": 2.5,
         "min_lift": 0.05,
         "min_cohens_d": 0.05,
@@ -180,7 +195,9 @@ _PRESET_SPECS: dict = {
             "Ottimo su mercati con forte stagionalità o bull/bear run."
         ),
         "daily_min_tpm": 2.5,
+        "daily_min_tpm_episode": 1.5,   # episodi frequenti per natura del burst
         "daily_rd_min_tpm": 2.0,
+        "daily_rd_min_tpm_episode": 1.2,
         "daily_max_dispersion": 5.0,
         "min_lift": 0.08,
         "min_cohens_d": 0.12,
@@ -224,7 +241,7 @@ def forge_preset(
         Override any computed parameter by name.  Supported keys:
 
         M1: ``min_tpm``, ``max_dispersion``, ``max_and_components``,
-        ``timestamp_col``.
+        ``timestamp_col``, ``event_counting``.
 
         M2: ``min_lift``, ``min_cohens_d``, ``fdr_q``, ``oos_max_p``,
         ``horizon_grid``, ``bars_per_day``.
@@ -256,7 +273,15 @@ def forge_preset(
     tf = _TFClass(timeframe)
 
     # ── M1: EventDiscovery ───────────────────────────────────────────────
-    min_tpm = overrides.pop("min_tpm", tf.scale_tpm(spec["daily_min_tpm"]))
+    # event_counting selects which daily_min_tpm calibration to use:
+    # "episode" → daily_min_tpm_episode (episodi/mese ≈ trade/mese)
+    # "bar"     → daily_min_tpm (barre/mese, retrocompatibile)
+    event_counting = overrides.pop("event_counting", "episode")
+    if event_counting == "episode":
+        daily_tpm_key = "daily_min_tpm_episode"
+    else:
+        daily_tpm_key = "daily_min_tpm"
+    min_tpm = overrides.pop("min_tpm", tf.scale_tpm(spec[daily_tpm_key]))
     max_dispersion = overrides.pop(
         "max_dispersion", tf.scale_dispersion(spec["daily_max_dispersion"])
     )
@@ -264,7 +289,11 @@ def forge_preset(
     timestamp_col = overrides.pop("timestamp_col", "open_dt")
 
     disc_cfg = DiscoveryConfig(
-        gate_params=GateParams(min_tpm=min_tpm, max_dispersion=max_dispersion),
+        gate_params=GateParams(
+            min_tpm=min_tpm,
+            max_dispersion=max_dispersion,
+            event_counting=event_counting,
+        ),
         timestamp_col=timestamp_col,
         max_and_components=max_and,
         train_ratio=1.0,
@@ -297,9 +326,13 @@ def forge_preset(
     # rd_min_tpm è leggermente più largo di min_tpm M1: non tutti i segnali
     # prodotti da AlphaDiscovery si traducono in trade eseguiti (fill rate,
     # overlap delle regole), quindi il gate M3 può essere appena più permissivo
-    # senza creare incoerenza.
+    # senza creare incoerenza.  Usa la stessa unità (bar/episode) del gate M1.
+    if event_counting == "episode":
+        daily_rd_tpm_key = "daily_rd_min_tpm_episode"
+    else:
+        daily_rd_tpm_key = "daily_rd_min_tpm"
     rd_min_tpm = overrides.pop(
-        "rd_min_tpm", tf.scale_tpm(spec["daily_rd_min_tpm"])
+        "rd_min_tpm", tf.scale_tpm(spec[daily_rd_tpm_key])
     )
 
     if overrides:
@@ -322,10 +355,12 @@ def preset_info(preset: Optional[str] = None) -> None:
         print(f"\n{'─'*60}")
         print(f"  {name.upper()}")
         print(f"  {spec['description']}")
-        print(f"  M1 gate : min_tpm={spec['daily_min_tpm']}  "
+        print(f"  M1 gate : min_tpm(episode)={spec['daily_min_tpm_episode']}  "
+              f"min_tpm(bar)={spec['daily_min_tpm']}  "
               f"max_dispersion={spec['daily_max_dispersion']}  "
               f"max_and={spec['max_and_components']}")
         print(f"  M2 alpha: min_lift={spec['min_lift']}  "
               f"cohens_d={spec['min_cohens_d']}  "
               f"fdr_q={spec['fdr_q']}  oos_max_p={spec['oos_max_p']}")
-        print(f"  M3 gate : rd_min_tpm={spec['daily_rd_min_tpm']}")
+        print(f"  M3 gate : rd_min_tpm(episode)={spec['daily_rd_min_tpm_episode']}  "
+              f"rd_min_tpm(bar)={spec['daily_rd_min_tpm']}")
