@@ -1,6 +1,7 @@
 """Step 0 — Type classification and scale-free detection."""
 from __future__ import annotations
 
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -33,11 +34,15 @@ class TypeClassifier:
     skip_cols : set[str] or None
         Additional column names to skip, merged with the built-in ``_SKIP_COLS``
         set (datetime, OHLCV raw columns, regime labels).
-    scale_free_drift_threshold : float
-        Maximum allowed support-drift ratio for the scale-free heuristic.  A
-        column passes if the drift of its extreme quantiles (q10, q90) across
-        rolling windows, normalised by the global inter-quantile range, stays
-        ``<= threshold``.  Lower values are stricter; default 0.20.
+    support_overlap_threshold : float
+        Minimum support overlap for the scale-free heuristic.  A column passes
+        when the robust support (``[q05, q95]``) of its first half overlaps
+        with that of its second half by at least this fraction (intersection /
+        union).  Higher values are stricter; default 0.5.
+    scale_free_drift_threshold : float, optional
+        **Deprecated** and ignored.  The scale-free heuristic no longer uses a
+        windowed drift ratio (see issue #136).  Passing this argument emits a
+        ``DeprecationWarning`` and has no effect.
     """
 
     def __init__(
@@ -45,12 +50,21 @@ class TypeClassifier:
         max_categorical_classes: int = 20,
         scale_free_overrides: Optional[dict[str, bool]] = None,
         skip_cols: Optional[set[str]] = None,
-        scale_free_drift_threshold: float = 0.20,
+        support_overlap_threshold: float = 0.5,
+        scale_free_drift_threshold: Optional[float] = None,
     ):
+        if scale_free_drift_threshold is not None:
+            warnings.warn(
+                "scale_free_drift_threshold is deprecated and ignored; the "
+                "scale-free heuristic now uses a support-overlap test "
+                "(support_overlap_threshold). See issue #136.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self.max_categorical_classes = max_categorical_classes
         self.scale_free_overrides = scale_free_overrides or {}
         self.skip_cols = (skip_cols or set()) | _SKIP_COLS
-        self.scale_free_drift_threshold = scale_free_drift_threshold
+        self.support_overlap_threshold = support_overlap_threshold
 
     def fit(self, df: pd.DataFrame) -> dict[str, ColumnClassification]:
         """Classify every column in ``df`` and return the results dict.
@@ -128,31 +142,39 @@ class TypeClassifier:
         )
 
     def _is_scale_free(self, series: pd.Series) -> bool:
-        """Return True only if the series *support* is stable across rolling windows.
+        """Return True only if the series support is stationary (period-invariant).
 
-        The heuristic splits the series into four equal-length windows and
-        measures how much the extreme quantiles (q10 and q90) drift between
-        windows, normalised by the global inter-quantile range::
+        The heuristic splits the series into two halves and measures how much
+        their robust supports (``[q05, q95]``) overlap::
 
-            range_global = q90(series) - q10(series)
-            drift_lo = std(q10 per window) / range_global
-            drift_hi = std(q90 per window) / range_global
-            scale_free = max(drift_lo, drift_hi) <= threshold
+            lo1, hi1 = q05(first_half),  q95(first_half)
+            lo2, hi2 = q05(second_half), q95(second_half)
+            overlap = intersection([lo1,hi1], [lo2,hi2])
+                      / union([lo1,hi1], [lo2,hi2])
+            scale_free = overlap >= support_overlap_threshold
 
-        A series is considered scale-free when the worst of the two drifts is
-        within ``scale_free_drift_threshold`` (default 0.20).
+        A series is scale-free when the two halves revisit the same value
+        range (``overlap >= threshold``, default 0.5).
 
-        Why support-stability, not mean-drift
-        -------------------------------------
-        The previous heuristic measured the drift of the *window mean*
-        relative to the overall standard deviation.  On a trending market the
-        mean of a bounded oscillator (RSI, %B) moves with the regime — RSI is
-        higher on average in an uptrend — so the mean-drift test produced a
-        systematic false negative on RSI and %B even though their domain is
-        fixed (issue #133).  The extreme quantiles of a bounded oscillator are
-        regime-invariant (q10 of RSI stays around ~30, q90 around ~70), so the
-        support-stability test classifies them correctly as scale-free while
-        still rejecting trending price/EMA series whose quantiles drift.
+        Why support overlap, not windowed drift
+        ---------------------------------------
+        A bounded, stationary oscillator (RSI, Stochastic, %B) keeps visiting
+        the same support throughout the sample, so the two halves overlap
+        almost completely (overlap ≈ 0.94) regardless of the indicator period
+        — RSI14 and RSI25 score the same.  A trending or random-walk series
+        (price, EMA) makes new extremes in its second half that the first half
+        never reached, so the supports barely overlap (overlap ≈ 0.16).
+
+        This fixes two earlier defects:
+
+        * The original mean-drift test produced a false negative on RSI/%B
+          because their *mean* rises with an uptrend even though their domain
+          is fixed (issue #133).
+        * The four-window quantile-drift test (issue #133's fix) was not
+          period-invariant: a slower oscillator (RSI25) drags the regime
+          through its windows longer and drifted just over the threshold,
+          giving a false negative (issue #136).  Support overlap is computed
+          once over the whole series and is regime- and period-invariant.
 
         Design rationale
         ----------------
@@ -164,11 +186,10 @@ class TypeClassifier:
 
         Minimum data requirements
         -------------------------
-        * ``n >= 48`` total non-null observations.
-        * Each window must be at least 12 bars (``w = n // 4 >= 12``).
+        * ``n >= 48`` total non-null observations (each half ≥ 24 bars).
 
-        Columns with a degenerate support (``range_global == 0``) always return
-        False because they carry no level information.
+        Columns with a degenerate support (``union == 0``) always return False
+        because they carry no level information.
 
         Parameters
         ----------
@@ -178,31 +199,25 @@ class TypeClassifier:
         Returns
         -------
         bool
-            True if the worst support-drift is within the threshold; False
-            otherwise or when there is insufficient data.
+            True if the two halves' supports overlap by at least the
+            threshold; False otherwise or when there is insufficient data.
         """
         series = series.dropna()
         n = len(series)
         if n < 48:
             return False
 
-        n_windows = 4
-        w = n // n_windows
-        if w < 12:
+        h = n // 2
+        first = series.iloc[:h]
+        second = series.iloc[h:]
+
+        lo1, hi1 = float(first.quantile(0.05)), float(first.quantile(0.95))
+        lo2, hi2 = float(second.quantile(0.05)), float(second.quantile(0.95))
+
+        intersection = max(0.0, min(hi1, hi2) - max(lo1, lo2))
+        union = max(hi1, hi2) - min(lo1, lo2)
+        if union == 0:
             return False
 
-        range_global = float(series.quantile(0.90) - series.quantile(0.10))
-        if range_global == 0:
-            return False
-
-        q_lo = np.array(
-            [series.iloc[i * w: (i + 1) * w].quantile(0.10) for i in range(n_windows)],
-            dtype=float,
-        )
-        q_hi = np.array(
-            [series.iloc[i * w: (i + 1) * w].quantile(0.90) for i in range(n_windows)],
-            dtype=float,
-        )
-        drift_lo = float(np.std(q_lo, ddof=1)) / range_global
-        drift_hi = float(np.std(q_hi, ddof=1)) / range_global
-        return max(drift_lo, drift_hi) <= self.scale_free_drift_threshold
+        overlap = intersection / union
+        return overlap >= self.support_overlap_threshold
