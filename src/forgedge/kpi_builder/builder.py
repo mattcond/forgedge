@@ -50,6 +50,14 @@ INDICATORS = {
     "rsi":             ta.multiple_rsi,
     "bollinger_bands": ta.multiple_bollinger,
     "max_drawdown":    ta.multiple_max_drawdown,
+    "atr":             ta.multiple_atr,
+    "macd":            ta.multiple_macd,
+}
+# Indicators that read columns beyond `columns` (the per-column "on" loop) —
+# checked once per indicator before dispatch so missing OHLC data is skipped
+# with a warning instead of raising deep inside the indicator function.
+_EXTRA_REQUIRED_COLS = {
+    "atr": {"high", "low"},
 }
 _LAG_SUFFIX = "prev"
 
@@ -128,6 +136,13 @@ def build_features(
         fn = INDICATORS.get(name)
         if fn is None:
             logger.warning("indicatore '%s' non implementato, salto", name)
+            continue
+        extra_required = _EXTRA_REQUIRED_COLS.get(name)
+        if extra_required and not extra_required.issubset(df.columns):
+            logger.warning(
+                "indicatore '%s': colonne richieste assenti %s, salto",
+                name, sorted(extra_required - set(df.columns)),
+            )
             continue
         periods, columns = _params(conf)
         for col in columns:

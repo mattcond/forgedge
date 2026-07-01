@@ -357,6 +357,66 @@ class TestFeatureGenerator:
         assert pf is not None
         assert pf.family == "bollinger"
 
+    def test_parse_feature_volume_ma_not_shadowed_by_generic_pattern(self):
+        """Regression: the generic {base}_{indicator}_{param} pattern's base
+        alternation includes "volume", so it used to match volume_sma_N /
+        volume_ema_N first and shadow the dedicated volume-MA pattern —
+        which also resolved base/indicator incorrectly even when reached
+        (base="sma" instead of "volume"). Both are fixed: dedicated pattern
+        now runs first and captures "volume" as an explicit group."""
+        pf = parse_feature("volume_sma_25")
+        assert pf is not None
+        assert pf.base == "volume"
+        assert pf.indicator == "sma"
+        assert pf.family == "volume_ma"
+        assert pf.params == [25]
+
+        pf_ema = parse_feature("volume_ema_09")
+        assert pf_ema.base == "volume"
+        assert pf_ema.indicator == "ema"
+        assert pf_ema.family == "volume_ma"
+
+    def test_parse_feature_mdd_atr_natr(self):
+        """max_drawdown/ATR/NATR participate in same-family ratio pairing
+        (issue: previously unrecognised, so e.g. mdd_12/mdd_24 never paired)."""
+        for col, indicator in [
+            ("close_mdd_12", "mdd"),
+            ("close_atr_14", "atr"),
+            ("close_natr_14", "natr"),
+        ]:
+            pf = parse_feature(col)
+            assert pf is not None, col
+            assert pf.indicator == indicator
+            assert pf.family == indicator
+
+    def test_arity2_ratio_volume_vs_volume_ma_generated(self):
+        """Regression: 'volume vs its own MA' (ratio_volume_*) was dead code —
+        it keyed off family=='volume_ma', which no column ever reached because
+        the dedicated pattern was shadowed (see
+        test_parse_feature_volume_ma_not_shadowed_by_generic_pattern)."""
+        df = _make_kpi_table()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert any(k.startswith("ratio_volume_") for k in meta), (
+            f"no ratio_volume_* feature generated; arity2 keys: "
+            f"{[k for k, v in meta.items() if v.arity == 2]}"
+        )
+
+    def test_arity2_mdd_ratio_generated_with_two_periods(self):
+        """close_mdd_12 / close_mdd_24 should pair into a ratio, the same
+        mechanism EMA fast/slow pairs already use, now that mdd is parsed."""
+        df = _make_kpi_table()
+        df["close_mdd_12"] = (
+            (df["close"] / df["close"].cummax() - 1).abs().fillna(0)
+        )
+        df["close_mdd_24"] = df["close_mdd_12"]  # any second period is enough
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert any("mdd12" in k and "mdd24" in k for k in meta), (
+            f"no mdd ratio pair generated; arity2 keys: "
+            f"{[k for k, v in meta.items() if v.arity == 2]}"
+        )
+
     def test_derived_features_are_scale_free(self):
         df = _make_kpi_table()
         cls = TypeClassifier().fit(df)

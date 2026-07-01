@@ -62,3 +62,23 @@ max_drawdown:
   params:
     periods: [12, 24, 48, 120, 240]
     columns: [close]
+
+# ATR richiede high/low oltre a `columns` (di solito solo "close"): disabilitato
+# di default per non rompere consumatori OHLC-only senza high/low. Due periodi
+# (non uno) perché FeatureGenerator possa accoppiare atr14/atr28 (e
+# natr14/natr28) in un ratio scale-free — come EMA, ATR non è limitato e non è
+# affidabilmente scale-free da solo, vedi indicators.multiple_atr.
+atr:
+  enabled: false
+  params:
+    periods: [14, 28]
+    columns: [close]
+
+# MACD: `periods` è una lista piatta di triple (fast, slow, signal), non
+# finestre indipendenti — vedi indicators.multiple_macd. [12,26,9] = un MACD
+# standard; [12,26,9, 5,35,5] produrrebbe due configurazioni MACD.
+macd:
+  enabled: false
+  params:
+    periods: [12, 26, 9]
+    columns: [close]
