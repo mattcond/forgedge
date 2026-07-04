@@ -68,7 +68,25 @@ accetta `config` come `dict`, percorso a un file YAML, oppure `None` per il
 default pacchettizzato (`DEFAULT_CONFIG` / `default_enricher.yaml` — copialo e
 modificalo per cambiare periodi/colonne/indicatori abilitati). Gli indicatori
 che referenziano colonne assenti in `candles` vengono saltati con un warning,
-quindi input solo-OHLC è sicuro.
+quindi input solo-OHLC è sicuro. Due indicatori sono **disabilitati di
+default** (abilitali esplicitamente in `config`): `"atr"` (`periods=[14, 28]` →
+`close_atr_14`/`close_atr_28` più una versione normalizzata
+`close_natr_14`/`close_natr_28`, richiede `high`/`low`) e `"macd"`
+(`periods=[12, 26, 9]`, una tripla piatta `(fast, slow, signal)` → es.
+`close_macd_12_26`, `close_macd_12_26_signal_09`, `close_macd_12_26_hist_09`).
+
+**Convenzione di naming delle colonne.** Perché una colonna custom (tua o
+generata) sia riconosciuta da Event Discovery come parte di una coppia ratio
+same-family, il nome deve seguire `{base}_{indicatore}_{periodo}` con `base`
+in `{close, high, low, open, volume}` e `indicatore` in `{ema, sma, rsi, dema,
+tema, wma, hma, mdd, atr, natr}` (oppure i pattern dedicati
+`{base}_bb_{lower|upper|width|mid}_{periodo}` / `{base}_{vol|ret}_{periodo}`).
+Le colonne che non rispettano questo pattern funzionano comunque come feature
+standalone ma non vengono accoppiate in ratio; il supporto per `mdd`/`atr` è
+stato aggiunto dopo un bug che faceva scartare silenziosamente colonne custom
+con quei suffissi — se una feature che hai aggiunto non compare tra i
+candidati di `EventDiscovery`, controlla prima il nome contro questa
+convenzione.
 
 `candle_features(df, *, order_on="open_dt", add_gap=True, round_to=5)` aggiunge
 sei colonne di geometria scale-free (`body`, `upper_wick`, `lower_wick`,
@@ -374,6 +392,19 @@ già le feature derivate (ratio, spread) calcolate durante Event Discovery; se s
 passa la tabella originale, le feature vengono ricalcolate deterministicamente
 dai parametri salvati nei componenti — il risultato è identico ma leggermente
 più lento.
+
+**Il default di `horizon_grid` è scalato sul timeframe.** Quando
+`AlphaConfig.horizon_grid` non è impostato, `forge()` (non il default della
+classe `AlphaConfig` stessa) lo risolve da `timeframe`: i timeframe
+giornalieri-o-più-lenti (`"1D"`, `"3D"`, `"1W"`, …) ricevono
+`(1, 2, 3, 5, 7, 10)` barre; i timeframe intraday mantengono il default
+calibrato orario `(1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48)`. Costruendo
+`AlphaDiscovery` direttamente (bypassando `forge()`) si ottiene comunque il
+default calibrato intraday indipendentemente da `timeframe` — passa
+`horizon_grid` esplicitamente per dati giornalieri-o-più-lenti in quel caso. Se
+passi un `AlphaConfig` esplicito che porta ancora il default orario non
+modificato su un `timeframe` giornaliero-o-più-lento, `forge()` emette uno
+`UserWarning` (una grid custom impostata da te viene rispettata silenziosamente).
 
 ### Configurazione avanzata con grid custom
 
@@ -802,11 +833,18 @@ Switch utili:
   I contratti esclusi restano visibili in `result.contracts` / `result.promoted` per audit
   ma non ottengono una rule response e non raggiungono il Rule Registry.
   Il confronto è case-insensitive.  Se omesso, tutti i contratti promossi vengono backtestati.
-- `rotation_calibration=RotationConfig(k=100)` — esegue il rotation null a livello di ricerca
-  inline dopo Alpha Discovery (vedi *Calibrazione a livello di ricerca* più sotto). Ogni
-  contratto promosso porta poi `rotation_p` / `rotation_threshold`. Il default `None` lo salta
-  a costo zero; per K grandi preferisci il `RotationCalibrator` standalone per non rallentare
-  la run principale.
+- `rotation_calibration=RotationConfig(k=100)` — esegue il rotation null (più lento, campionato)
+  a livello di ricerca inline dopo Alpha Discovery invece del null esatto veloce di default
+  (vedi *Calibrazione a livello di ricerca* più sotto). Ogni contratto promosso porta poi
+  `rotation_p` / `rotation_threshold`. Sostituisce `fast_null` quando impostato.
+- `fast_null=False` — salta il rotation null esatto veloce a livello di ricerca eseguito di
+  default (`fast_null=True`; costo extra quasi nullo, vedi *Calibrazione a livello di ricerca*
+  più sotto).
+- `time_budget=TimeBudget.build(n_bars=len(kpi), horizon_bars=48, embargo_bars=5)` — condivide
+  un unico asse temporale IS/OOS purgato/embargato tra Event Discovery e Alpha Discovery invece
+  di far tagliare la timeline a ciascun modulo indipendentemente (vedi *Purging ed embargo* più
+  sotto). Il default `None` ne costruisce uno automaticamente da `train_ratio` e dalla grid di
+  orizzonti risolta.
 - `progress=True` — stampa lo stato di avanzamento per ogni stadio e una barra di progresso
   di Rule Discovery su `stderr` (utile per run lunghe). Indipendentemente dal flag, ogni
   milestone viene emessa a livello `INFO` sul logger `forgedge.forge`, quindi
@@ -950,18 +988,38 @@ for ticker, res in results.items():
 
 Passare gli oggetti di configurazione per modulo (`event_discovery_config`, `alpha_config`, …) come keyword argument — vengono inoltrati a ogni run per-ticker. Non passare `ticker` / `asset` (impostati automaticamente per ticker) né `run_registry` (il registry pooled sostituisce quelli per-ticker).
 
-### Calibrazione a livello di ricerca: `RotationCalibrator`
+### Calibrazione a livello di ricerca: `FastRotationNull` e `RotationCalibrator`
 
 Un contratto promosso può comunque essere un artefatto della superficie di
 multiple-testing di FORGE — con abbastanza candidati e orizzonti, *qualche* edge
-compare per caso. `RotationCalibrator` quantifica questo rischio senza
-ricostruire alcuna colonna di feature: ruota circolarmente **solo** la colonna
-`close` di un offset casuale `K` volte e riesegue Alpha Discovery a ogni
-estrazione, riusando il set di candidati reale. La rotazione preserva
-esattamente la distribuzione dei rendimenti e l'autocorrelazione ma scollega le
-attivazioni di ogni evento dall'esito forward, fornendo un vero null a livello di
-ricerca. Una combinazione di Tippett (min-p) sugli yardstick in-sample produce un
-unico p-value che già paga il costo FWER.
+compare per caso. **`forge()` esegue di default un rotation null a livello di
+ricerca** (`fast_null=True`): `FastRotationNull` calcola, con un singolo
+passaggio FFT per candidato, la distribuzione null *esatta* dell'eccesso
+standardizzato migliore della ricerca su ogni offset circolare della colonna
+`close` in un colpo solo — nessun campionamento, nessun seed, ~1-2 s anche su
+migliaia di candidati. Annota ogni contratto promosso con `rotation_p` /
+`rotation_threshold` e salva il report su `ForgeResult.calibration`:
+
+```python
+result = forge(kpi, ticker="BTCUSDC", timeframe="1H")
+
+print(result.calibration.tippett_p)          # p-value a livello di ricerca
+for c in result.promoted:
+    print(c.alpha_id, c.rotation_p, c.rotation_threshold)
+```
+
+Rule Discovery richiede poi `rotation_p <= criteria.max_rotation_p` (default
+`0.05`) per un verdetto `EDGE` pieno — un contratto che ha solo vinto la
+lotteria del multiple-testing della propria sessione di discovery viene
+declassato a `PARTIAL-EDGE` (ancora tradabile via `resp.is_edge`).
+`FastRotationNull` calcola solo lo yardstick `abs_z` (l'unica statistica che si
+riduce esattamente a una cross-correlazione); passa `fast_null=False` a
+`forge()` per saltarlo del tutto.
+
+Per la calibrazione multi-yardstick completa (`composite`, `is_lift`, …, via
+combinazione di Tippett min-p) o un controllo con K grande, usa invece il
+`RotationCalibrator` standalone e campionato — più pesante (~K × il costo di
+un passaggio di Alpha Discovery) ma non limitato a `abs_z`:
 
 ```python
 from forgedge import forge, RotationCalibrator, RotationConfig
@@ -987,10 +1045,80 @@ Il `CalibrationReport` restituito espone `tippett_p`, `tippett_best_stat`,
 `per_stat_p`, `null_q`, `real_stats`, `null_arrays` e `survivors` (i contratti
 promossi la cui statistica vincente supera la soglia del null). La stessa
 calibrazione può girare **inline** in `forge()` via
-`rotation_calibration=RotationConfig(...)` — quel percorso scrive `rotation_p` /
-`rotation_threshold` su ogni contratto promosso; usa il calibrator standalone qui
-sopra quando vuoi l'oggetto report completo o un K grande senza rallentare la
-pipeline principale.
+`rotation_calibration=RotationConfig(...)` — quel percorso sostituisce il
+passaggio `fast_null` di default e scrive gli stessi campi `rotation_p` /
+`rotation_threshold`; usa il calibrator standalone sopra quando vuoi l'oggetto
+report completo senza rallentare la run principale.
+
+### Verificare la superficie di ricerca: `HypothesisLedger`
+
+Ogni run di `forge()` restituisce anche `result.ledger` (un
+`HypothesisLedger`) — semplice contabilità di quante ipotesi la sessione ha
+effettivamente consumato, così la superficie dietro un verdetto pubblicato è
+verificabile, anche se è *prezzata* dal rotation null sopra, non da questo
+conteggio direttamente (le ipotesi a livello di evento sono fortemente
+correlate, quindi usare il conteggio grezzo in un haircut analitico
+sovrastimerebbe il selection bias):
+
+```python
+print(result.ledger.describe())
+# "hypothesis surface: 640 candidates × 6 horizons = 3840 return-tests;
+#  12 promoted; ~180 grid cells/rule (total ≲ 691200)"
+
+result.ledger.m1_candidates   # candidati passati ad Alpha Discovery
+result.ledger.m2_horizons     # orizzonti scansionati per candidato
+result.ledger.m2_promoted     # contratti promossi
+result.ledger.m3_grid_cells   # dimensione della grid operativa di Rule Discovery (0 finché non backtestato)
+result.ledger.m2_surface      # m1_candidates * m2_horizons
+result.ledger.total_surface   # limite superiore: m2_surface * max(m3_grid_cells, 1)
+```
+
+`RuleDiscoveryConfig.n_trials_upstream` resta disponibile per chi vuole che
+l'haircut analitico del Deflated Sharpe includa un fattore upstream esplicito
+invece di affidarsi al rotation null.
+
+### Purging ed embargo: `TimeBudget`
+
+Ogni modulo tagliava in passato la timeline IS/OOS in modo indipendente. Il
+confine del taglio era corretto, ma le quantità forward-looking lo
+attraversavano: il rendimento forward alla barra IS `t` legge le chiusure fino
+a `t + h`, quindi le ultime `h` barre IS sono parzialmente valutate su prezzi
+OOS, e un trade walk-forward aperto vicino alla fine di una finestra di train
+può chiudersi dentro la finestra di test. `TimeBudget` è l'asse unico condiviso
+che risolve questo problema — il **purging** rimuove le righe IS la cui
+finestra forward-looking si sovrappone al lato OOS; un **embargo** opzionale
+aggiunge un buffer di barre all'*inizio* della finestra OOS per quarantena
+dell'autocorrelazione seriale (`0` di default — il purging da solo rimuove già
+la sovrapposizione meccanica).
+
+```python
+from forgedge import forge, TimeBudget
+
+budget = TimeBudget.build(
+    n_bars=len(kpi),
+    train_ratio=0.70,
+    horizon_bars=48,     # orizzonte più ampio scansionato — imposta la larghezza di purge di default
+    embargo_bars=5,      # buffer extra opzionale all'inizio dell'OOS
+)
+result = forge(kpi, time_budget=budget)
+print(result.time_budget.describe())
+```
+
+`TimeBudget.build(n_bars, train_ratio=0.7, horizon_bars=0, purge_bars=None, embargo_bars=0)`
+imposta `purge_bars` uguale a `horizon_bars` di default quando omesso. Passato
+a `forge()` viene inoltrato sia a `EventDiscovery` sia a `AlphaDiscovery`, così
+condividono un unico split; `ForgeResult.time_budget` espone il budget
+effettivo. **Il purging è attivo di default** per Alpha Discovery (larghezza
+di purge = `max(horizon_grid)`) e per il walk-forward di Rule Discovery
+(via `WalkForwardConfig.purge_bars` / `embargo_bars`, `None`/`0` di default —
+`None` usa di default l'orizzonte testato) — questo è un cambiamento numerico
+reale, anche se di solito piccolo, rispetto ai risultati pre-`TimeBudget` (le
+righe di confine che prima lasciavano trapelare informazione OOS ora sono
+escluse). Per riprodurre esattamente i vecchi numeri non purgati, passa un
+`TimeBudget.build(n_bars=..., purge_bars=0)` esplicito e, per Rule Discovery,
+`WalkForwardConfig(purge_bars=0)`. `AlphaConfig.embargo_bars` (default `0`) e
+`WalkForwardConfig.embargo_bars` (default `0`) non cambiano nulla a meno che tu
+non li attivi esplicitamente — solo il purging è attivo di default.
 
 ---
 
