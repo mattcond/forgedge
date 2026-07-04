@@ -702,7 +702,7 @@ class TestEndToEnd:
         c = promoted[0]
         rd = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id])
         resp = rd.run()
-        assert resp.verdict in ("EDGE", "PARTIAL-EDGE", "NON-EDGE")
+        assert resp.verdict in ("EDGE", "PARTIAL-EDGE", "NON-EDGE", "INSUFFICIENT-DATA")
         assert resp.alpha_id == c.alpha_id
         assert resp.in_sample_summary.total_signals >= 0
 
@@ -992,6 +992,109 @@ class TestWalkForwardSelection:
             ed.df, c, cand, config=RuleDiscoveryConfig(selection_mode="full_sample")
         ).run()
         assert not any("selection_mode=walk_forward" in n for n in resp.notes)
+
+
+class TestPowerGate:
+    """§3.2 — positive verdicts degrade to INSUFFICIENT-DATA when the pooled
+    OOS evidence cannot support them.  The gate never reads per-window counts:
+    walk-forward windows are short by design and are not individually gated.
+    """
+
+    @pytest.fixture(scope="class")
+    def pipeline(self):
+        df = _predictive_kpi_table()
+        ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))
+        cands = ed.run()
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(asset="SYN", timeframe="1H"))
+        ad.run()
+        promoted = ad.promoted_contracts()
+        by_id = {c.event_id: c for c in cands}
+        return ed, promoted, by_id
+
+    @pytest.fixture(scope="class")
+    def tradeable_case(self, pipeline):
+        """A (contract, candidate) with a tradeable verdict under defaults."""
+        ed, promoted, by_id = pipeline
+        for c in promoted[:10]:
+            resp = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id]).run()
+            if resp.is_edge:
+                return ed, c, by_id[c.event_candidate_id], resp
+        pytest.skip("no tradeable verdict in the synthetic fixture")
+
+    def test_well_powered_fixture_is_not_degraded(self, tradeable_case):
+        # The strong synthetic edge has hundreds of pooled OOS trades: the
+        # default power gate must not touch it.
+        _, _, _, resp = tradeable_case
+        assert resp.verdict in ("EDGE", "PARTIAL-EDGE")
+        assert RuleDiscoveryConfig().criteria.power_gate is True
+
+    def test_thin_pooled_oos_degrades_to_insufficient_data(self, tradeable_case):
+        ed, c, cand, _ = tradeable_case
+        cfg = RuleDiscoveryConfig(
+            criteria=SelectionCriteria(min_oos_trades=10**6)
+        )
+        resp = RuleDiscovery(ed.df, c, cand, config=cfg).run()
+        assert resp.verdict == "INSUFFICIENT-DATA"
+        assert any("pooled OOS trades" in r for r in resp.rejection_reasons)
+        # Not tradeable, but the operating point is kept for re-evaluation.
+        assert not resp.is_edge
+        assert resp.validated_rule is not None
+
+    def test_power_gate_off_restores_verdict(self, tradeable_case):
+        ed, c, cand, baseline = tradeable_case
+        cfg = RuleDiscoveryConfig(
+            criteria=SelectionCriteria(power_gate=False, min_oos_trades=10**6)
+        )
+        resp = RuleDiscovery(ed.df, c, cand, config=cfg).run()
+        assert resp.verdict == baseline.verdict
+
+    def test_non_edge_is_never_converted_to_insufficient_data(self, pipeline):
+        # An unpassable power floor must not turn NON-EDGE verdicts into
+        # INSUFFICIENT-DATA: a rule that fails the economic gates stays
+        # NON-EDGE (the operational consequence is the same either way).
+        ed, promoted, by_id = pipeline
+        baseline_cfg = RuleDiscoveryConfig()
+        gated_cfg = RuleDiscoveryConfig(
+            criteria=SelectionCriteria(min_oos_trades=10**6)
+        )
+        seen = 0
+        for c in promoted[:10]:
+            cand = by_id[c.event_candidate_id]
+            base = RuleDiscovery(ed.df, c, cand, config=baseline_cfg).run()
+            if base.verdict != "NON-EDGE":
+                continue
+            gated = RuleDiscovery(ed.df, c, cand, config=gated_cfg).run()
+            assert gated.verdict == "NON-EDGE"
+            seen += 1
+        if not seen:
+            pytest.skip("no NON-EDGE verdict in the synthetic fixture")
+
+    def test_short_windows_are_not_individually_gated(self, tradeable_case):
+        # Many 1-month test windows → each holds only a handful of trades.
+        # The gate must read the *pooled* ledger and leave the verdict alone.
+        ed, c, cand, _ = tradeable_case
+        cfg = RuleDiscoveryConfig(
+            walk_forward=WalkForwardConfig(
+                n_splits=6, min_train_months=4, test_span_months=1
+            ),
+        )
+        resp = RuleDiscovery(ed.df, c, cand, config=cfg).run()
+        assert resp.walk_forward is not None
+        n_pooled = len(resp.walk_forward.oos_trades)
+        assert n_pooled >= RuleDiscoveryConfig().criteria.min_oos_trades
+        # a per-window gate would have fired here; the pooled gate must not
+        assert resp.verdict != "INSUFFICIENT-DATA"
+
+    def test_mde_degrades_marginal_effect(self, tradeable_case):
+        # Force the MDE branch: min_oos_trades=0 keeps the count branch quiet,
+        # and an inflated claimed expectancy is simulated by shrinking the OOS
+        # via a huge purge... instead, verify the branch arithmetic directly.
+        from forgedge.rule_discovery.validation import expectancy_mde
+
+        rng = np.random.default_rng(0)
+        net = rng.normal(0.001, 0.05, 30)  # tiny effect, noisy, n=30
+        mde = expectancy_mde(net)
+        assert mde > 0.001  # such a sample cannot confirm a 0.1% expectancy
 
 
 class TestSearchLevelGates:

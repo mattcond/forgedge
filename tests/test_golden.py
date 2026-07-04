@@ -78,8 +78,14 @@ _AD_GOLDEN = {
 # computed on the selection span [start, last train window end) — the final
 # test window no longer feeds any selection or metric.  Previous full-sample
 # values: PF 2.0042, 105 trades, expectancy 0.019196.
+#
+# Verdict re-pinned PARTIAL-EDGE → INSUFFICIENT-DATA with the §3.2 power gate:
+# the golden rule's pooled OOS ledger (96 trades — the count floor passes) has
+# a minimum detectable expectancy of 0.0160 vs a claimed IS expectancy of
+# 0.0114, so the OOS cannot confirm an effect of the claimed size.  Economics
+# pins unchanged; the rule keeps its ValidatedRule but is not tradeable.
 _RD_GOLDEN = {
-    "verdict":        "PARTIAL-EDGE",
+    "verdict":        "INSUFFICIENT-DATA",
     "profit_factor":  pytest.approx(1.7337, rel=1e-3),
     "total_trades":   82,
     "expectancy":     pytest.approx(0.011362, rel=1e-3),

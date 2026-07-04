@@ -21,7 +21,8 @@ Flow (RuleDiscovery spec, Steps 1–5):
 5. **Regime dependency** — per-regime performance and a concentration score.
 
 The output is a :class:`RuleDiscoveryResponse` carrying the verdict
-(``EDGE`` / ``PARTIAL-EDGE`` / ``NON-EDGE``) and the validated rule.
+(``EDGE`` / ``PARTIAL-EDGE`` / ``NON-EDGE`` / ``INSUFFICIENT-DATA``) and the
+validated rule.
 
 Usage
 -----
@@ -70,7 +71,7 @@ from .models import (
     RuleDiscoveryResponse,
     ValidatedRule,
 )
-from .validation import validate
+from .validation import expectancy_mde, validate
 from .walkforward import _fmt as _fmt_ts, selection_windows, walk_forward
 
 # RD-04 — the minimum executed-trade count is scaled to the in-sample length
@@ -779,7 +780,12 @@ class RuleDiscovery:
     # ------------------------------------------------------------------
 
     def _decide(self, s, stat_val, wf, regime):
-        """Map the evidence to EDGE / PARTIAL-EDGE / NON-EDGE (spec Section 8)."""
+        """Map the evidence to EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA.
+
+        Hard gates → NON-EDGE; full-EDGE requirements → PARTIAL-EDGE; a
+        would-be positive verdict whose pooled OOS evidence cannot support
+        it → INSUFFICIENT-DATA (§3.2, ``criteria.power_gate``).
+        """
         cr = self.config.criteria
         reasons: List[str] = []
 
@@ -856,9 +862,57 @@ class RuleDiscovery:
                 f"(rotation_p={rot_p:.4f} > {cr.max_rotation_p})"
             )
 
-        if edge_block:
-            return "PARTIAL-EDGE", edge_block
-        return "EDGE", []
+        verdict = "PARTIAL-EDGE" if edge_block else "EDGE"
+
+        # ── §3.2 — power-aware degradation of positive verdicts ──────────
+        # A positive verdict must be *confirmable*: when the out-of-sample
+        # evidence is too thin to support it, the honest verdict is
+        # INSUFFICIENT-DATA, not a confident (PARTIAL-)EDGE.  The assessment
+        # reads only the pooled OOS ledger — never per-window counts (the
+        # walk-forward windows are short by design and are not gated
+        # individually).  NON-EDGE verdicts are never rescued: underpowered
+        # or not, the operational consequence is the same.
+        if cr.power_gate:
+            power_reasons = self._power_assessment(s, wf)
+            if power_reasons:
+                return "INSUFFICIENT-DATA", power_reasons + edge_block
+        return verdict, edge_block
+
+    def _power_assessment(self, s, wf) -> List[str]:
+        """Reasons the pooled OOS evidence cannot support a positive verdict.
+
+        Empty list = adequately powered.  Criteria (aggregate only, per §3.2):
+
+        * no walk-forward at all — a positive verdict would rest on zero OOS;
+        * pooled test-window trades below ``criteria.min_oos_trades``;
+        * the pooled OOS sample's minimum detectable expectancy exceeds the
+          claimed (in-sample) expectancy — the OOS could not confirm an
+          effect of that size even if it were real.
+        """
+        cr = self.config.criteria
+        if wf is None:
+            return [
+                "no walk-forward OOS available — a positive verdict cannot "
+                "be confirmed on this span"
+            ]
+        oos = wf.oos_trades
+        n_oos = 0 if oos is None else int(len(oos))
+        if n_oos < cr.min_oos_trades:
+            return [
+                f"pooled OOS trades {n_oos} < {cr.min_oos_trades} — too few to "
+                "confirm the verdict (counted across all test windows; "
+                "individual windows are never gated)"
+            ]
+        net = oos["net_pct_gain"].to_numpy(dtype=float)
+        mde = expectancy_mde(net)
+        claimed = s.expectancy
+        if np.isfinite(mde) and np.isfinite(claimed) and mde > max(claimed, 0.0):
+            return [
+                f"OOS underpowered: minimum detectable expectancy {mde:.4f} > "
+                f"claimed IS expectancy {claimed:.4f} — the pooled OOS sample "
+                "cannot confirm an effect of the claimed size"
+            ]
+        return []
 
     # ------------------------------------------------------------------
     # Helpers

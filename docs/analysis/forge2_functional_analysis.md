@@ -86,6 +86,17 @@ quando MDE > effetto stimato o quando trades-per-finestra-WF scende sotto un
 floor. È un'estensione compatibile: chi consuma `is_edge` oggi continua a
 funzionare; chi vuole sapere *quanto fidarsi* finalmente può.
 
+**[IMPLEMENTATO]** Verdetto `INSUFFICIENT-DATA`
+(`SelectionCriteria.power_gate`, on di default): un verdetto che sarebbe
+EDGE/PARTIAL-EDGE viene degradato quando l'evidenza OOS non può sostenerlo —
+nessun walk-forward possibile, trade OOS **aggregati** sotto
+`min_oos_trades`, oppure MDE dell'expectancy sul campione OOS aggregato
+superiore all'expectancy IS dichiarata. La valutazione legge *solo* il ledger
+concatenato delle finestre test, mai i conteggi per-finestra (le finestre WF
+sono corte by design e non vengono mai gateate individualmente). NON-EDGE non
+viene mai riscattato; INSUFFICIENT-DATA conserva la `ValidatedRule` per
+ri-valutazione futura ma non è tradeable (`is_edge=False`, mai nel registry).
+
 ### 3.3 Un solo asse temporale, purged & embargoed
 
 **Osservato.** Tre split indipendenti e non coordinati: `train_ratio` di M1,

@@ -51,6 +51,32 @@ def deflated_sharpe(sr_selected: float, n_trials: int, n_obs: int) -> float:
     return float(sr_selected * math.sqrt(radicand))
 
 
+def expectancy_mde(net: np.ndarray, alpha: float = 0.05) -> float:
+    """Minimum detectable expectancy of a one-sided one-sample t-test.
+
+    Given the executed trades' net gains, returns the smallest true mean
+    return that the ``expectancy > 0`` t-test on this sample size and
+    dispersion would detect at significance ``alpha``:
+    ``t_crit(df) · sd / √n`` — the same detectability convention as
+    ``alpha_discovery.stats.min_detectable_effect``, specialised to the
+    one-sample case (no power term: this is the bar the *observed* mean must
+    clear, so comparing it to a claimed effect answers "could this sample even
+    confirm an effect of that size?").
+
+    Returns ``inf`` when the sample is smaller than 2 (t-test undefined).
+    """
+    n = int(net.size)
+    if n < 2:
+        return float("inf")
+    sd = float(np.std(net, ddof=1))
+    if not math.isfinite(sd) or sd <= 0:
+        return 0.0
+    t_crit = stats.t_ppf_onesided(alpha, float(n - 1))
+    if not math.isfinite(t_crit):
+        return float("inf")
+    return float(t_crit * sd / math.sqrt(n))
+
+
 def _profit_factor(net: np.ndarray) -> float:
     pos = float(net[net > 0].sum())
     neg = float(-net[net < 0].sum())

@@ -133,6 +133,15 @@ calcolata sullo span di selezione — l'ultima finestra test non è mai letta
 da alcuna selezione.  `selection_mode="full_sample"` ripristina il
 comportamento legacy full-table.
 
+I verdetti sono **power-aware**: un potenziale `EDGE`/`PARTIAL-EDGE` la cui
+evidenza out-of-sample aggregata non può sostenerlo (troppi pochi trade test
+aggregati, o una minimum detectable expectancy sopra l'effetto dichiarato)
+viene emesso come `INSUFFICIENT-DATA` — non tradeable, ma conserva la sua
+`ValidatedRule` per la ri-valutazione su più dati.  La valutazione legge solo
+il ledger concatenato delle finestre test, mai le singole finestre del
+walk-forward (corte by design).  Disattivabile con
+`SelectionCriteria(power_gate=False)`.
+
 Sessioni multi-ticker con `forge_multi`:
 
 ```python

@@ -129,6 +129,14 @@ consensus across windows), and every verdict-feeding metric is computed on
 the selection span — the final test window is never read by any selection.
 `selection_mode="full_sample"` restores the legacy whole-table behaviour.
 
+Verdicts are **power-aware**: a would-be `EDGE`/`PARTIAL-EDGE` whose pooled
+out-of-sample evidence cannot support it (too few pooled test trades, or a
+minimum detectable expectancy above the claimed effect) is emitted as
+`INSUFFICIENT-DATA` — not tradeable, but it keeps its `ValidatedRule` for
+re-evaluation on more data.  The assessment reads only the concatenated
+test-window ledger, never individual walk-forward windows (short by design).
+Disable with `SelectionCriteria(power_gate=False)`.
+
 Multi-ticker sessions with `forge_multi`:
 
 ```python
