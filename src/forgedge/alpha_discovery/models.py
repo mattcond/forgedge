@@ -375,6 +375,15 @@ class AlphaConfig:
         reserved for the out-of-sample confirmation of the derived target.
         ``1.0`` disables the internal OOS split (not recommended — the
         derived horizon is then never validated out-of-sample).
+        The split is **purged**: at horizon ``h`` the last ``h`` IS bars are
+        excluded from every measure, because their forward window crosses
+        into the OOS tail (see :mod:`forgedge.timebudget`; pass an explicit
+        ``TimeBudget`` to ``AlphaDiscovery`` to control or disable this).
+    embargo_bars : int
+        Extra quarantine after the IS/OOS split: the out-of-sample
+        confirmation starts ``embargo_bars`` bars after the split.  Default
+        ``0`` (the purge already removes the mechanical forward-window
+        overlap; the embargo additionally guards against serial correlation).
     thresholds : PromotionThresholds
         Admission / promotion gates.
     asset, exchange, timeframe : str
@@ -456,6 +465,7 @@ class AlphaConfig:
     mfe_quantile: float = 0.5
     mfe_floor: float = 0.005
     train_ratio: float = 0.7
+    embargo_bars: int = 0
     thresholds: PromotionThresholds = field(default_factory=PromotionThresholds)
     asset: str = "ASSET"
     exchange: str = ""

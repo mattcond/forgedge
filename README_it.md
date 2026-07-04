@@ -118,6 +118,13 @@ discovery viene declassata a `PARTIAL-EDGE`.  La superficie di ipotesi della
 sessione è registrata su `ForgeResult.ledger`; disattivabile con
 `fast_null=False`.
 
+Gli split temporali sono **purged**: le barre in-sample la cui finestra
+forward attraversa il confine IS/OOS sono escluse da ogni misura di Alpha
+Discovery, e le finestre train del walk-forward terminano un worst-case trade
+span prima della finestra test (vedi `forgedge.timebudget.TimeBudget` —
+passandone uno a `forge()` tutti i moduli condividono un unico asse, con
+embargo opzionale).
+
 Sessioni multi-ticker con `forge_multi`:
 
 ```python

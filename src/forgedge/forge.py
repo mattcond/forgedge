@@ -81,6 +81,7 @@ from .rule_discovery.discovery import RuleDiscovery
 from .rule_discovery.models import RuleDiscoveryConfig, RuleDiscoveryResponse
 from .rule_registry.models import RegistryConfig, RuleSubmission
 from .rule_registry.registry import RuleRegistry
+from .timebudget import TimeBudget
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +216,10 @@ class ForgeResult:
     ledger : HypothesisLedger or None
         The session's hypothesis ledger — how many candidates, horizons and
         grid cells the run consumed (see :mod:`forgedge.ledger`).
+    time_budget : TimeBudget or None
+        The effective temporal axis of Alpha Discovery — split, purge and
+        embargo (see :mod:`forgedge.timebudget`).  Built from the alpha config
+        unless an explicit budget was passed to :func:`forge`.
     """
 
     enriched: pd.DataFrame
@@ -230,6 +235,7 @@ class ForgeResult:
     alpha_discovery: Optional[AlphaDiscovery] = None
     calibration: Optional[CalibrationReport] = None
     ledger: Optional[HypothesisLedger] = None
+    time_budget: Optional[TimeBudget] = None
 
     # ------------------------------------------------------------------
     # Convenience accessors
@@ -302,6 +308,7 @@ def forge(
     alpha_config: Optional[AlphaConfig] = None,
     rotation_calibration: Optional[RotationConfig] = None,
     fast_null: bool = True,
+    time_budget: Optional[TimeBudget] = None,
     rule_discovery_config: Optional[RuleDiscoveryConfig] = None,
     registry_config: Optional[RegistryConfig] = None,
     manual_events: Optional[List[CustomEvent]] = None,
@@ -378,6 +385,17 @@ def forge(
         ``PARTIAL-EDGE``).  Set ``False`` to skip (pre-#116 behaviour);
         ignored when ``rotation_calibration`` is passed (the full calibrator
         supersedes it).
+    time_budget : TimeBudget, optional
+        A single temporal axis for the whole session (see
+        :mod:`forgedge.timebudget`): its ``split`` becomes the IS boundary of
+        Event Discovery *and* Alpha Discovery, and its purge / embargo widths
+        quarantine the boundary crossings.  ``None`` (default) keeps each
+        module's config-driven split; Alpha Discovery still builds its own
+        purged budget internally (purge = ``max(horizon_grid)`` — the removal
+        of a mechanical look-ahead, on by default), and the Rule Discovery
+        walk-forward purges its train windows from its own resolved grid.
+        The effective Alpha Discovery budget is exposed on
+        ``ForgeResult.time_budget``.
     rule_discovery_config : RuleDiscoveryConfig, optional
         Modulo 3 configuration.  Defaults to the standard grid and acceptance
         gates.
@@ -476,7 +494,9 @@ def forge(
         alpha_frame = enriched
     else:
         report.stage("M1 Event Discovery — mining event candidates…")
-        ed = EventDiscovery(enriched, config=event_discovery_config)
+        ed = EventDiscovery(
+            enriched, config=event_discovery_config, time_budget=time_budget
+        )
         candidates = ed.run()
         alpha_frame = ed.df
     report.stage(f"M1 Event Discovery — {len(candidates)} candidate(s)")
@@ -496,10 +516,13 @@ def forge(
 
     # ── Modulo 2 — Alpha Discovery ────────────────────────────────────────
     report.stage(f"M2 Alpha Discovery — evaluating {len(alpha_candidates)} candidate(s)…")
-    ad = AlphaDiscovery(alpha_frame, alpha_candidates, cfg)
+    ad = AlphaDiscovery(alpha_frame, alpha_candidates, cfg, time_budget=time_budget)
     contracts = ad.run()
     promoted = ad.promoted_contracts()
     report.stage(f"M2 Alpha Discovery — {len(promoted)}/{len(contracts)} promoted")
+    effective_budget = ad._budget
+    if effective_budget is not None:
+        report.stage(effective_budget.describe())
 
     # ── Hypothesis ledger — the session's multiple-testing surface ────────
     ledger = HypothesisLedger(
@@ -517,7 +540,9 @@ def forge(
             f"Rotation Calibrator — K={rotation_calibration.k} draws "
             f"(alpha={rotation_calibration.alpha})…"
         )
-        cal = RotationCalibrator(alpha_frame, alpha_candidates, cfg)
+        cal = RotationCalibrator(
+            alpha_frame, alpha_candidates, cfg, time_budget=time_budget
+        )
         cal_report = cal.run(promoted, rotation_calibration)
         report.stage(
             f"Rotation Calibrator — Tippett p={cal_report.tippett_p:.4f}, "
@@ -525,7 +550,9 @@ def forge(
         )
     elif fast_null and promoted:
         report.stage("Fast rotation null — exact search-level null (all offsets)…")
-        cal_report = FastRotationNull(alpha_frame, alpha_candidates, cfg).run(promoted)
+        cal_report = FastRotationNull(
+            alpha_frame, alpha_candidates, cfg, time_budget=time_budget
+        ).run(promoted)
         report.stage(
             f"Fast rotation null — search p={cal_report.tippett_p:.4f}, "
             f"{len(cal_report.survivors)}/{len(promoted)} above null bar"
@@ -572,6 +599,7 @@ def forge(
         alpha_discovery=ad,
         calibration=cal_report,
         ledger=ledger,
+        time_budget=effective_budget,
     )
     if run_rule_discovery:
         report.stage(f"M3 Rule Discovery — {len(result.edges())} tradeable rule(s)")

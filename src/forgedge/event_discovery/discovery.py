@@ -15,6 +15,7 @@ from typing import Optional
 
 import pandas as pd
 
+from ..timebudget import TimeBudget
 from .and_composer import ANDComposer
 from .classifier import TypeClassifier
 from .consistency_gate import ConsistencyGate, _build_month_index, _monthly_counts
@@ -116,15 +117,25 @@ class EventDiscovery:
         DatetimeIndex.
     config:
         Optional configuration object.  Defaults to sensible values.
+    time_budget:
+        Optional session :class:`~forgedge.timebudget.TimeBudget`.  When
+        given, its ``split`` overrides ``config.train_ratio`` as the IS
+        boundary, so threshold discovery reads the same in-sample window as
+        the downstream modules (one temporal axis for the whole session).
+        Event Discovery never sees returns, so no purge/embargo applies here
+        — only the boundary alignment.  ``None`` (default) keeps the
+        config-driven split.
     """
 
     def __init__(
         self,
         kpi_table: pd.DataFrame,
         config: Optional[DiscoveryConfig] = None,
+        time_budget: Optional["TimeBudget"] = None,
     ):
         self.df = kpi_table.copy()
         self.config = config or DiscoveryConfig()
+        self.time_budget = time_budget
         self._classifications: Optional[dict] = None
         self._candidates: Optional[list[EventCandidate]] = None
         self._timestamps: Optional[pd.Series] = None
@@ -178,8 +189,12 @@ class EventDiscovery:
         self._timestamps = timestamps
         n = len(self.df)
 
-        # Determine IS boundary — temporal split, never random
-        split_idx = max(1, int(n * cfg.train_ratio)) if cfg.train_ratio < 1.0 else n
+        # Determine IS boundary — temporal split, never random.  An explicit
+        # session TimeBudget wins over the config ratio (single time axis).
+        if self.time_budget is not None:
+            split_idx = min(max(int(self.time_budget.split), 1), n)
+        else:
+            split_idx = max(1, int(n * cfg.train_ratio)) if cfg.train_ratio < 1.0 else n
         self._split_idx = split_idx
 
         # Save the full native df (DatetimeIndex set, original feature columns)

@@ -57,6 +57,7 @@ import pandas as pd
 from ..alpha_discovery.discovery import AlphaDiscovery
 from ..alpha_discovery.models import AlphaConfig, AlphaContract
 from ..event_discovery.models import EventCandidate
+from ..timebudget import TimeBudget
 from .models import CalibrationReport, RotationConfig
 
 logger = logging.getLogger(__name__)
@@ -185,10 +186,15 @@ class RotationCalibrator:
         ed_df: pd.DataFrame,
         cands: List[EventCandidate],
         config: AlphaConfig,
+        time_budget: Optional["TimeBudget"] = None,
     ) -> None:
         self._ed_df = ed_df
         self._cands = list(cands)
         self._config = config
+        # Session TimeBudget, threaded into every null-draw AlphaDiscovery so
+        # the null shares the real run's split / purge / embargo.  ``None`` →
+        # each draw builds the same default budget from the config.
+        self._time_budget = time_budget
 
     # ------------------------------------------------------------------
     # Public API
@@ -238,7 +244,7 @@ class RotationCalibrator:
             rot = _rotate_close(self._ed_df, k, close_col=close_col)
             rot_cfg = copy.copy(self._config)
             rot_cfg.asset = f"ROT{j}"
-            ad = AlphaDiscovery(rot, self._cands, rot_cfg)
+            ad = AlphaDiscovery(rot, self._cands, rot_cfg, time_budget=self._time_budget)
             ad.run()
             st = _max_statistics(ad.promoted_contracts())
             for name, v in st.items():

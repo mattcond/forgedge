@@ -104,6 +104,15 @@ modulo taglia il tempo da solo. (È anche il punto 4 di
 dove metterlo, perché retrofittarlo su tre split indipendenti è più costoso
 che nascerci.)
 
+**[IMPLEMENTATO]** `forgedge.timebudget.TimeBudget`: asse unico opzionale
+(`forge(time_budget=...)` lo impone a M1+M2; ogni modulo lo accetta anche
+standalone). Il purge è **on di default** anche senza budget esplicito: in M2
+le ultime `h` barre IS per orizzonte sono escluse da ogni misura (la loro
+finestra forward attraversa lo split), in M3 le finestre train del
+walk-forward sono accorciate del worst-case trade span della griglia (le
+uscite leggevano prezzi della finestra test). Embargo opzionale
+(`AlphaConfig.embargo_bars`, `WalkForwardConfig.embargo_bars`), default 0.
+
 ### 3.4 La selezione operativa di M3 fuori dal full-sample
 
 **Osservato.** `RuleDiscovery._run_stage` esegue lo screening di griglia e il

@@ -116,6 +116,12 @@ multiple-testing lottery of its own discovery session is capped at
 `PARTIAL-EDGE`.  The session's hypothesis surface is recorded on
 `ForgeResult.ledger`; disable with `fast_null=False`.
 
+Temporal splits are **purged**: in-sample bars whose forward window crosses
+the IS/OOS boundary are excluded from every Alpha Discovery measure, and the
+walk-forward train windows end one worst-case trade span before their test
+window (see `forgedge.timebudget.TimeBudget` — pass one to `forge()` to put
+every module on a single shared axis, with an optional embargo).
+
 Multi-ticker sessions with `forge_multi`:
 
 ```python

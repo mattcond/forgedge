@@ -164,6 +164,17 @@ class WalkForwardConfig:
         ``True`` (default) — re-run the grid screening on every train window
         (true walk-forward optimisation).  ``False`` — keep the in-sample best
         parameters fixed and only replay them out-of-sample.
+    purge_bars : int or None
+        Purge width, in bars, at the end of every **train** window: entries
+        opened in the last ``purge_bars`` bars of a train window have their
+        fill/exit windows inside the adjacent test window, so the parameter
+        selection would be scored on test prices.  ``None`` (default) sizes
+        the purge automatically from the resolved grid — the largest
+        ``target_h`` plus the fill delay.  ``0`` disables purging (the
+        pre-TimeBudget behaviour).
+    embargo_bars : int
+        Extra quarantine at the start of every **test** window, in bars.
+        Default ``0`` (the purge already removes the mechanical overlap).
     """
 
     n_splits: int = 4
@@ -171,6 +182,8 @@ class WalkForwardConfig:
     test_span_months: Optional[int] = None
     min_train_months: int = 6
     reoptimise: bool = True
+    purge_bars: Optional[int] = None
+    embargo_bars: int = 0
 
 
 @dataclass

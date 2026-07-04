@@ -75,6 +75,7 @@ from .models import (
     RegimeAnalysis,
     RegimeStat,
 )
+from ..timebudget import TimeBudget
 from .target import (
     forward_log_returns,
     forward_returns,
@@ -113,6 +114,14 @@ class AlphaDiscovery:
     config : AlphaConfig, optional
         Horizon grid, IS/OOS split and gates.  Defaults derive the target
         over horizons 1–48 bars with a 70/30 temporal split.
+    time_budget : TimeBudget, optional
+        The session's temporal axis (see :mod:`forgedge.timebudget`).  When
+        given it overrides ``config.train_ratio`` for the IS/OOS split and
+        sets the purge / embargo widths.  When omitted (standalone use) a
+        budget is built from the config: split at ``train_ratio``, purge =
+        ``max(horizon_grid)`` (the rows whose forward window crosses the
+        split), embargo = ``config.embargo_bars``.  Pass
+        ``TimeBudget.build(..., purge_bars=0)`` to disable purging.
     """
 
     def __init__(
@@ -120,13 +129,16 @@ class AlphaDiscovery:
         kpi_table: pd.DataFrame,
         event_candidates: List[EventCandidate],
         config: Optional[AlphaConfig] = None,
+        time_budget: Optional["TimeBudget"] = None,
     ):
         self.config = config or AlphaConfig()
         self.event_candidates = list(event_candidates)
+        self.time_budget = time_budget
 
         self._frame = self._prepare_frame(kpi_table)
         self._contracts: Optional[List[AlphaContract]] = None
         self._mismatch_warned = False
+        self._budget: Optional["TimeBudget"] = None  # effective, set by run()
 
         # Populated by run().
         self.market_structure: Optional[MarketStructure] = None
@@ -154,17 +166,33 @@ class AlphaDiscovery:
 
         close = self._frame[cfg.close_col].astype(float)
         n = len(close)
-        split = int(round(n * cfg.train_ratio))
-        split = min(max(split, 0), n)
+        budget = self.time_budget or TimeBudget.build(
+            n_bars=n,
+            train_ratio=cfg.train_ratio,
+            horizon_bars=max(horizons),
+            embargo_bars=cfg.embargo_bars,
+        )
+        self._budget = budget
+        split = budget.split
         self.split_idx = split
 
         fwd = forward_returns(close, horizons)
-        F = fwd.to_numpy()  # n × k, simple, long convention (IC, MFE, binary)
-
         # Direction/horizon derivation runs in log-space: the excess log-return
         # Δ_h = μ_cond_h − μ_base_h is what carries the signal, robust to the
         # extreme outliers of crypto forward returns.
         logfwd = forward_log_returns(close, horizons)
+
+        # ── Purge: an IS bar whose h-bar forward window crosses the split is
+        # scored on OOS prices — a mechanical look-ahead.  NaN those rows per
+        # horizon so every downstream measure (Δ/z, IC, event stats, market
+        # structure) excludes them; OOS reads rows ≥ split and is untouched.
+        for j, h in enumerate(horizons):
+            lo, hi = budget.purge_slice(h)
+            if hi > lo:
+                fwd.iloc[lo:hi, j] = np.nan
+                logfwd.iloc[lo:hi, j] = np.nan
+
+        F = fwd.to_numpy()  # n × k, simple, long convention (IC, MFE, binary)
         L = logfwd.to_numpy()  # n × k, log, long convention
 
         # In-sample arrays for the vectorised horizon scan, in log-space.
@@ -241,7 +269,7 @@ class AlphaDiscovery:
                 regime_is, comp0.source_feature, h_star,
             )
             oos_res = self._validate_oos(
-                active, L[:, j_star], target_binary, derived, split, n
+                active, L[:, j_star], target_binary, derived, budget.oos_start, n
             )
             measured.append((cand, derived, ic_res, ev_stats, regime_res, oos_res))
 
@@ -693,6 +721,13 @@ class AlphaDiscovery:
                 hit = ext / close - 1.0 <= -derived.sell_pct
             target = hit.astype(float).where(ext.notna(), np.nan)
 
+        # Purge: like the forward returns, the binary target of an IS bar
+        # whose forward window crosses the split is read off OOS prices.
+        if self._budget is not None:
+            lo, hi = self._budget.purge_slice(h)
+            if hi > lo:
+                target.iloc[lo:hi] = np.nan
+
         base_rate_is = float(target.iloc[:split].mean())
         return target, base_rate_is
 
@@ -939,7 +974,7 @@ class AlphaDiscovery:
         fwd_h: np.ndarray,
         target_binary: Optional[pd.Series],
         derived: DerivedTarget,
-        split: int,
+        oos_start: int,
         n: int,
     ) -> Optional[OOSValidation]:
         """Replay the derived target on the held-out tail.
@@ -950,8 +985,10 @@ class AlphaDiscovery:
         is the forward **log**-return at ``h*`` (matching the log-space
         derivation); the active-vs-inactive t-test nets out the common drift,
         so the confirmation reads the event's edge, not the trend.
+        ``oos_start`` is the first OOS bar *after* the time budget's embargo
+        (equal to the split when the embargo is 0).
         """
-        n_oos = n - split
+        n_oos = n - oos_start
         if n_oos <= 0:
             return None
 
@@ -962,10 +999,10 @@ class AlphaDiscovery:
             return OOSValidation(n_oos, 0, nan, nan, nan, nan, nan, nan, False)
 
         orient = 1.0 if derived.direction == "long" else -1.0
-        r = orient * fwd_h[split:]
-        act = active[split:]
+        r = orient * fwd_h[oos_start:]
+        act = active[oos_start:]
 
-        tgt = target_binary.iloc[split:].to_numpy()
+        tgt = target_binary.iloc[oos_start:].to_numpy()
         tgt_valid = np.isfinite(tgt)
         n_act = int((act & tgt_valid).sum())
 
