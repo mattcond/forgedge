@@ -199,6 +199,28 @@ report HTML lo mostra come prima cosa, non come nota a piè di pagina.
 
 ---
 
+### 3.9 (addendum) — Griglia orizzonti arricchita dallo span degli indicatori
+
+**Osservato (analisi su ADA 1D, griglia diagnostica 1–40 barre).** La relazione
+tra la finestra dominante `w` dell'indicatore e l'orizzonte di picco `h*` esiste
+ma non è una legge unica: per w ≤ ~30 circa metà dei picchi cade in `[w/2, 2w]`
+(eventi "ciclici"); per w > 30 (pctrank_168, zscore_96 — eventi "di stato") il
+100% dei picchi sta sotto `w/2`: la finestra lunga definisce quanto raro è lo
+stato, non la scala della reazione. Una banda dura `[w, 2w]` avrebbe escluso
+l'orizzonte vero per la maggioranza degli eventi promossi.
+
+**[IMPLEMENTATO]** Arricchimento per **unione**, mai restrizione
+(`AlphaConfig.horizon_enrichment=(0.5, 1.0, 2.0)`, on di default): per ogni
+candidato gli orizzonti `round(m·w)` — con `w =
+EventCandidate.dominant_window()`, proprietà strutturale outcome-independent —
+vengono aggiunti alla griglia base, con cap statistico `h ≤
+split/horizon_enrichment_min_obs` (default 20 finestre forward non sovrapposte
+minime). Le ipotesi aggiunte sono contate esattamente dal ledger
+(`m2_return_tests`) e prezzate dal fast rotation null con la stessa griglia
+per-evento (fedeltà bit-for-bit preservata). Su ADA: 34/247 alpha promossi
+trovano h* su un orizzonte arricchito (6–24 giorni) che la griglia base non
+copriva.
+
 ## 4. Cosa NON farei (anti-goal espliciti)
 
 - **Niente ML/feature learning nella discovery.** Il valore differenziante è

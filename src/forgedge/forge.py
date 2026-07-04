@@ -529,6 +529,7 @@ def forge(
         m1_candidates=len(alpha_candidates),
         m2_horizons=len(cfg.horizon_grid),
         m2_promoted=len(promoted),
+        m2_return_tests=getattr(ad, "n_return_tests", 0),
     )
     report.stage(ledger.describe())
 

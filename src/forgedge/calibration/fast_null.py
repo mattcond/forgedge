@@ -57,7 +57,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from ..alpha_discovery.discovery import AlphaDiscovery
+from ..alpha_discovery.discovery import AlphaDiscovery, enriched_horizons
 from ..alpha_discovery.models import AlphaConfig, AlphaContract
 from ..alpha_discovery.target import forward_log_returns, forward_returns
 from ..event_discovery.models import EventCandidate
@@ -136,9 +136,18 @@ class FastRotationNull:
             minus offsets with no usable statistic).
         """
         cfg = self._ad.config
-        horizons = [int(h) for h in cfg.horizon_grid]
+        base = [int(h) for h in cfg.horizon_grid]
         close = self._ad._frame[cfg.close_col].astype(float)
         n = len(close)
+        # Mirror AlphaDiscovery.run exactly: split first (it does not depend
+        # on the horizon set), then the per-event enrichment, then the budget
+        # with the enriched maximum as the purge width.
+        split_prov = (
+            self._time_budget.split
+            if self._time_budget is not None
+            else min(max(int(round(n * cfg.train_ratio)), 0), n)
+        )
+        horizons, extras = enriched_horizons(self._cands, cfg, split_prov, base=base)
         budget = self._time_budget or TimeBudget.build(
             n_bars=n,
             train_ratio=cfg.train_ratio,
@@ -181,6 +190,7 @@ class FastRotationNull:
         FV = np.fft.rfft(valid_is.astype(float), axis=0)
 
         # Per-offset best statistic over all candidates; row 0 = the real run.
+        base_idx = [horizons.index(h) for h in base]
         best = np.full(split, -np.inf)
         n_used = 0
         for cand in self._cands:
@@ -188,6 +198,13 @@ class FastRotationNull:
             active = event.fillna(0).astype(bool).to_numpy()[:split]
             if not active.any():
                 continue
+            # This candidate's horizon set — base grid ∪ its enriched
+            # horizons, exactly as AlphaDiscovery scanned it.
+            cand_extra = extras.get(cand.event_id)
+            if cand_extra:
+                cols = sorted(base_idx + [horizons.index(h) for h in cand_extra])
+            else:
+                cols = base_idx
             fa_conj = np.conj(np.fft.rfft(active.astype(float)))
             num = np.fft.irfft(fa_conj[:, None] * FL, n=split, axis=0)
             den = np.fft.irfft(fa_conj[:, None] * FV, n=split, axis=0)
@@ -202,9 +219,10 @@ class FastRotationNull:
                 z = np.where(sd > 0, boot / sd, np.nan)
             # Mirror _derive_target's usable gate: ≥ 2 active∩valid bars.
             z = np.where(den >= 1.5, z, np.nan)
+            z_cand = z[:, cols]
             with np.errstate(invalid="ignore"):
                 score = np.nanmax(
-                    np.where(np.isfinite(z), np.abs(z), -np.inf), axis=1
+                    np.where(np.isfinite(z_cand), np.abs(z_cand), -np.inf), axis=1
                 )
             best = np.fmax(best, score)
             n_used += 1

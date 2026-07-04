@@ -107,6 +107,11 @@ automatically replaced by a daily-calibrated one (the stock grid is calibrated
 on ~hourly bars); passing your own `AlphaConfig` keeps full control.  For
 frequency-consistent per-module configuration use
 `forgedge.presets.forge_preset("balanced", timeframe="1D", asset=...)`.
+Each event's grid is additionally **enriched** with horizons at 0.5×/1×/2× its
+indicator's dominant window (`AlphaConfig.horizon_enrichment` — a union, never
+a restriction, statistically capped so slow conditioning windows cannot demand
+unmeasurable holding periods; the added hypotheses are counted by the ledger
+and priced by the rotation null).
 
 By default `forge()` also runs the **fast search-level rotation null** — the
 exact null distribution of the best standardised excess over every circular

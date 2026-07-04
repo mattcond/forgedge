@@ -92,6 +92,45 @@ logger = logging.getLogger(__name__)
 _MIN_STATS_CASES: int = 10
 
 
+def enriched_horizons(
+    cands, cfg, split: int, base: Optional[List[int]] = None
+) -> Tuple[List[int], Dict[str, List[int]]]:
+    """Per-event horizon enrichment from the events' structural timescale.
+
+    For every candidate whose :meth:`EventCandidate.dominant_window` is
+    positive, the horizons ``round(m · w)`` (one per multiplier in
+    ``cfg.horizon_enrichment``) are **added** to the base grid — a union,
+    never a restriction — capped at ``split // cfg.horizon_enrichment_min_obs``
+    so an added horizon always leaves enough non-overlapping forward windows
+    in the IS span to be measurable.
+
+    Returns ``(all_h, extras)``: the sorted union of every horizon any
+    candidate will scan, and a ``event_id -> sorted extra horizons`` map
+    (candidates absent from the map scan the base grid only).  Shared by
+    :class:`AlphaDiscovery` and the fast rotation null so the two can never
+    disagree on a candidate's search set.
+    """
+    base = sorted({int(h) for h in (base if base is not None else cfg.horizon_grid)})
+    base_set = set(base)
+    extras: Dict[str, List[int]] = {}
+    mults = tuple(getattr(cfg, "horizon_enrichment", None) or ())
+    if mults:
+        min_obs = max(int(getattr(cfg, "horizon_enrichment_min_obs", 20)), 1)
+        h_cap = max(max(base), int(split) // min_obs)
+        for cand in cands:
+            w = cand.dominant_window()
+            if w <= 0:
+                continue
+            hs = sorted(
+                h for h in {int(round(m * w)) for m in mults}
+                if 1 <= h <= h_cap and h not in base_set
+            )
+            if hs:
+                extras[cand.event_id] = hs
+    all_h = sorted(base_set | {h for hs in extras.values() for h in hs})
+    return all_h, extras
+
+
 class AlphaDiscovery:
     """FORGE Alpha Discovery module (Modulo 2).
 
@@ -143,6 +182,7 @@ class AlphaDiscovery:
         # Populated by run().
         self.market_structure: Optional[MarketStructure] = None
         self.split_idx: Optional[int] = None
+        self.n_return_tests: int = 0  # Σ per-candidate horizon-grid sizes
 
     # ------------------------------------------------------------------
     # Public interface
@@ -166,27 +206,43 @@ class AlphaDiscovery:
 
         close = self._frame[cfg.close_col].astype(float)
         n = len(close)
+        # The split does not depend on the horizon set (TimeBudget only uses
+        # horizons for the purge width), so it can seed the enrichment cap.
+        split_prov = (
+            self.time_budget.split
+            if self.time_budget is not None
+            else min(max(int(round(n * cfg.train_ratio)), 0), n)
+        )
+
+        # ── Per-event horizon enrichment (structural prior, union only) ───
+        all_h, extras = enriched_horizons(
+            self.event_candidates, cfg, split_prov, base=horizons
+        )
+        self.n_return_tests = len(self.event_candidates) * len(horizons) + sum(
+            len(v) for v in extras.values()
+        )
+
         budget = self.time_budget or TimeBudget.build(
             n_bars=n,
             train_ratio=cfg.train_ratio,
-            horizon_bars=max(horizons),
+            horizon_bars=max(all_h),
             embargo_bars=cfg.embargo_bars,
         )
         self._budget = budget
         split = budget.split
         self.split_idx = split
 
-        fwd = forward_returns(close, horizons)
+        fwd = forward_returns(close, all_h)
         # Direction/horizon derivation runs in log-space: the excess log-return
         # Δ_h = μ_cond_h − μ_base_h is what carries the signal, robust to the
         # extreme outliers of crypto forward returns.
-        logfwd = forward_log_returns(close, horizons)
+        logfwd = forward_log_returns(close, all_h)
 
         # ── Purge: an IS bar whose h-bar forward window crosses the split is
         # scored on OOS prices — a mechanical look-ahead.  NaN those rows per
         # horizon so every downstream measure (Δ/z, IC, event stats, market
         # structure) excludes them; OOS reads rows ≥ split and is untouched.
-        for j, h in enumerate(horizons):
+        for j, h in enumerate(all_h):
             lo, hi = budget.purge_slice(h)
             if hi > lo:
                 fwd.iloc[lo:hi, j] = np.nan
@@ -223,20 +279,36 @@ class AlphaDiscovery:
         fwd_ext_cache: Dict[Tuple[int, str], pd.Series] = {}
 
         # ── Per-candidate derivation + measurement ───────────────────────
+        base_idx = [all_h.index(h) for h in horizons]
         measured = []
         for cand in self.event_candidates:
             event = self._event_series(cand)
             active = event.fillna(0).astype(bool).to_numpy()
             comp0 = cand.components[0]
 
+            # This candidate's horizon set: the base grid plus its enriched
+            # horizons (union — the base grid is never restricted).
+            cand_extra = extras.get(cand.event_id)
+            if cand_extra:
+                cand_hs = sorted(set(horizons) | set(cand_extra))
+                idx = [all_h.index(h) for h in cand_hs]
+            else:
+                cand_hs = horizons
+                idx = base_idx
+            if len(all_h) == len(horizons):
+                v_c, l_c, cnt_c, sum_c = valid_is, L0, cnt_t, sum_t
+            else:
+                v_c, l_c = valid_is[:, idx], L0[:, idx]
+                cnt_c, sum_c = cnt_t[idx], sum_t[idx]
+
             if cfg.fixed_target is not None:
                 derived = self._fixed_target(
-                    cfg.fixed_target, active[:split], valid_is, L0, cnt_t, sum_t,
-                    horizons, close.iloc[:split].to_numpy(), cfg,
+                    cfg.fixed_target, active[:split], v_c, l_c, cnt_c, sum_c,
+                    cand_hs, close.iloc[:split].to_numpy(), cfg,
                 )
             else:
                 derived = self._derive_target(
-                    active[:split], valid_is, L0, cnt_t, sum_t, horizons,
+                    active[:split], v_c, l_c, cnt_c, sum_c, cand_hs,
                     close.iloc[:split].to_numpy(), cfg.mfe_quantile, cfg.mfe_floor,
                     fdr_q=cfg.thresholds.fdr_q,
                     min_direction_t=cfg.thresholds.min_direction_t,
@@ -245,7 +317,7 @@ class AlphaDiscovery:
                     trend_sma_mult=cfg.trend_sma_mult,
                 )
             h_star = derived.holding_period_h
-            j_star = horizons.index(h_star)
+            j_star = all_h.index(h_star)
 
             feature = self._feature_series(comp0).astype(float)
             ic_res = self._measure_ic_cached(
@@ -1217,6 +1289,7 @@ class AlphaDiscovery:
             promoted=promoted,
             rejection_reasons=diagnostics,
             fdr_promoted=bool(fdr_ok),
+            dominant_window=cand.dominant_window(),
         )
 
     # ------------------------------------------------------------------
