@@ -170,21 +170,91 @@ class TestForge:
 
     def test_explicit_alpha_config_is_respected(self, kpi):
         cfg = AlphaConfig(asset="EXPLICIT", timeframe="1D")
-        result = forge(
-            kpi,
-            asset="IGNORED",
-            alpha_config=cfg,
-            event_discovery_config=_FAST_ED_CONFIG,
-            run_rule_discovery=False,
-        )
+        # An explicit config keeping the hourly default horizon grid on a 1D
+        # timeframe is respected verbatim, but warns about the unscaled grid.
+        with pytest.warns(UserWarning, match="horizon_grid"):
+            result = forge(
+                kpi,
+                asset="IGNORED",
+                alpha_config=cfg,
+                event_discovery_config=_FAST_ED_CONFIG,
+                run_rule_discovery=False,
+            )
         assert result.alpha_discovery.config.asset == "EXPLICIT"
         assert result.alpha_discovery.config.timeframe == "1D"
+        assert result.alpha_discovery.config.horizon_grid == AlphaConfig().horizon_grid
 
     def test_edges_and_validated_rules_are_consistent(self, full_result):
         for contract, response in full_result.edges():
             assert response.is_edge
         for response in full_result.validated_rules():
             assert response.validated_rule is not None
+
+
+class TestForgeTimeframeScaledHorizons:
+    """forge()'s default AlphaConfig scales the horizon grid to the timeframe.
+
+    The AlphaConfig default grid is calibrated on ~hourly bars; using it
+    verbatim on daily data means holding periods of up to 48 days (the
+    "silent footgun" of docs/analysis/lowfreq_robustness.md).  When no
+    explicit alpha_config is passed, forge() substitutes the class-calibrated
+    daily grid for daily-or-slower timeframes and leaves intraday untouched.
+    """
+
+    @staticmethod
+    def _daily_kpi(n: int = 1000) -> pd.DataFrame:
+        df = _ohlc_kpi_table(n=n)
+        df["open_dt"] = pd.date_range("2022-01-01", periods=n, freq="D")
+        return df
+
+    def test_default_config_on_daily_uses_scaled_grid(self):
+        from forgedge.presets import default_horizon_grid
+
+        result = forge(
+            self._daily_kpi(),
+            ticker="DAILY",
+            timeframe="1D",
+            event_discovery_config=_FAST_ED_CONFIG,
+            run_rule_discovery=False,
+        )
+        grid = result.alpha_discovery.config.horizon_grid
+        assert grid == default_horizon_grid("1D")
+        assert max(grid) <= 10  # days, not the 48-bar hourly default
+
+    def test_default_config_on_intraday_keeps_default_grid(self):
+        result = forge(
+            _ohlc_kpi_table(),
+            ticker="INTRA",
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            run_rule_discovery=False,
+        )
+        assert result.alpha_discovery.config.horizon_grid == AlphaConfig().horizon_grid
+
+    def test_explicit_custom_grid_on_daily_does_not_warn(self):
+        import warnings as _warnings
+
+        cfg = AlphaConfig(asset="X", timeframe="1D", horizon_grid=(1, 2, 3, 5))
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            result = forge(
+                self._daily_kpi(),
+                alpha_config=cfg,
+                event_discovery_config=_FAST_ED_CONFIG,
+                run_rule_discovery=False,
+            )
+        assert not [w for w in caught if "horizon_grid" in str(w.message)]
+        assert result.alpha_discovery.config.horizon_grid == (1, 2, 3, 5)
+
+    def test_default_horizon_grid_helper(self):
+        from forgedge.presets import default_horizon_grid
+
+        assert default_horizon_grid("1D") == (1, 2, 3, 5, 7, 10)
+        assert default_horizon_grid("3D") == (1, 2, 3, 5, 7, 10)
+        assert default_horizon_grid("1W") == (1, 2, 3, 5, 7, 10)
+        assert default_horizon_grid("1H") is None
+        assert default_horizon_grid("15m") is None
+        assert default_horizon_grid("junk") is None
 
 
 class TestForgeGradeFilter:

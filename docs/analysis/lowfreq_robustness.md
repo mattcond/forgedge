@@ -50,6 +50,10 @@ multiple-testing exposure*, not arithmetic.
    timeframe="1D")` (`forge.py:396`) uses it verbatim → holding periods up to **48 days**.
    Unlike MarketContext / Hurst / rolling-IC / bars-per-year, which *do* auto-scale, the
    horizon grid is a silent footgun.
+   **[FIXED]** `forge()` with a default `alpha_config` now substitutes the
+   daily-calibrated grid (`presets.default_horizon_grid`) on daily-or-slower
+   timeframes, and warns when an explicit config keeps the hourly default grid
+   on such a timeframe.
 
 2. **No sample-size / multiple-testing guard.** Event Discovery mines ~2500 candidates
    from ~256 in-sample bars with no warning. BH-FDR controls expected false discoveries
