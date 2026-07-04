@@ -122,6 +122,13 @@ walk-forward train windows end one worst-case trade span before their test
 window (see `forgedge.timebudget.TimeBudget` — pass one to `forge()` to put
 every module on a single shared axis, with an optional embargo).
 
+Rule Discovery selects its operating point **inside the walk-forward train
+windows only** (`RuleDiscoveryConfig.selection_mode="walk_forward"`, the
+default): the published parameters come from the last train window (or the
+consensus across windows), and every verdict-feeding metric is computed on
+the selection span — the final test window is never read by any selection.
+`selection_mode="full_sample"` restores the legacy whole-table behaviour.
+
 Multi-ticker sessions with `forge_multi`:
 
 ```python

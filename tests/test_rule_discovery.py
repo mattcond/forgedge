@@ -917,6 +917,83 @@ class TestEndToEnd:
 # Config seeding
 # ---------------------------------------------------------------------------
 
+class TestWalkForwardSelection:
+    """§3.4 — the operating point is selected inside WF train windows only."""
+
+    @pytest.fixture(scope="class")
+    def pipeline(self):
+        df = _predictive_kpi_table()
+        ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))
+        cands = ed.run()
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(asset="SYN", timeframe="1H"))
+        ad.run()
+        promoted = ad.promoted_contracts()
+        by_id = {c.event_id: c for c in cands}
+        assert promoted
+        return ed, promoted[0], by_id[promoted[0].event_candidate_id]
+
+    def test_default_mode_is_walk_forward(self, pipeline):
+        ed, c, cand = pipeline
+        assert RuleDiscoveryConfig().selection_mode == "walk_forward"
+        resp = RuleDiscovery(ed.df, c, cand).run()
+        assert any("selection_mode=walk_forward" in n for n in resp.notes)
+
+    def test_published_params_come_from_last_train_window(self, pipeline):
+        ed, c, cand = pipeline
+        resp = RuleDiscovery(ed.df, c, cand).run()
+        if resp.validated_rule is None:
+            pytest.skip("no tradeable verdict on the fixture")
+        assert resp.walk_forward is not None
+        last = resp.walk_forward.splits[-1].params
+        pub = resp.validated_rule.params
+        assert (pub.sell_pct, pub.target_h, pub.buy_drop_pct) == (
+            last.sell_pct, last.target_h, last.buy_drop_pct
+        )
+
+    def test_is_metrics_exclude_the_final_test_window(self, pipeline):
+        ed, c, cand = pipeline
+        wf_resp = RuleDiscovery(ed.df, c, cand).run()
+        full_resp = RuleDiscovery(
+            ed.df, c, cand, config=RuleDiscoveryConfig(selection_mode="full_sample")
+        ).run()
+        # The selection span ends at the last train window: strictly fewer IS
+        # months than the whole table.
+        assert wf_resp.in_sample_summary.n_months < full_resp.in_sample_summary.n_months
+
+    def test_consensus_policy_picks_a_train_selection(self, pipeline):
+        ed, c, cand = pipeline
+        cfg = RuleDiscoveryConfig(wf_param_policy="consensus")
+        resp = RuleDiscovery(ed.df, c, cand, config=cfg).run()
+        if resp.validated_rule is None or resp.walk_forward is None:
+            pytest.skip("no tradeable verdict on the fixture")
+        pub = resp.validated_rule.params
+        keys = {
+            (s.params.sell_pct, s.params.target_h, s.params.buy_drop_pct)
+            for s in resp.walk_forward.splits
+        }
+        assert (pub.sell_pct, pub.target_h, pub.buy_drop_pct) in keys
+
+    def test_short_span_falls_back_to_full_sample(self, pipeline):
+        ed, c, cand = pipeline
+        short = ed.df.iloc[:800].copy()  # ~1 month of hourly bars — no split
+        with pytest.warns(UserWarning, match="differs from the"):
+            resp = RuleDiscovery(short, c, cand).run()
+        assert any("falling back to full-sample" in n for n in resp.notes)
+
+    def test_invalid_selection_mode_raises(self, pipeline):
+        ed, c, cand = pipeline
+        cfg = RuleDiscoveryConfig(selection_mode="bogus")
+        with pytest.raises(ValueError, match="selection_mode"):
+            RuleDiscovery(ed.df, c, cand, config=cfg).run()
+
+    def test_full_sample_mode_has_no_wf_note(self, pipeline):
+        ed, c, cand = pipeline
+        resp = RuleDiscovery(
+            ed.df, c, cand, config=RuleDiscoveryConfig(selection_mode="full_sample")
+        ).run()
+        assert not any("selection_mode=walk_forward" in n for n in resp.notes)
+
+
 class TestSearchLevelGates:
     """Level-0/1 verdict gates: rotation-null p and honest DSR degradation."""
 

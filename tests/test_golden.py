@@ -71,11 +71,18 @@ _AD_GOLDEN = {
 # not beat its own rotation null (search p ≈ 0.7 on the full ADA set), so the
 # golden rule is capped — economics unchanged (PF / trades / expectancy are
 # identical; only the verdict gate moved).
+#
+# Economics re-pinned again under walk-forward selection (§3.4,
+# selection_mode="walk_forward" default): the published operating point now
+# comes from the last walk-forward train window and the IS summary is
+# computed on the selection span [start, last train window end) — the final
+# test window no longer feeds any selection or metric.  Previous full-sample
+# values: PF 2.0042, 105 trades, expectancy 0.019196.
 _RD_GOLDEN = {
     "verdict":        "PARTIAL-EDGE",
-    "profit_factor":  pytest.approx(2.0042, rel=1e-3),
-    "total_trades":   105,
-    "expectancy":     pytest.approx(0.019196, rel=1e-3),
+    "profit_factor":  pytest.approx(1.7337, rel=1e-3),
+    "total_trades":   82,
+    "expectancy":     pytest.approx(0.011362, rel=1e-3),
 }
 
 # A deterministic *long* contract under the default PROJ_LOG target_mode (issue

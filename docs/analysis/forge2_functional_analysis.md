@@ -126,6 +126,17 @@ train del walk-forward; l'"in-sample summary" esposto è la concatenazione dei
 train, il parametro pubblicato è quello dell'ultima finestra (o il consenso).
 Stessa API di risposta, numeri più onesti.
 
+**[IMPLEMENTATO]** `RuleDiscoveryConfig.selection_mode="walk_forward"`
+(default): i parametri pubblicati vengono dalle sole finestre train del WF
+(`wf_param_policy`: ultima finestra o consenso), e IS summary,
+early-elimination, validazione statistica, envelope, MAE/MFE e regime sono
+tutti calcolati sullo *span di selezione* `[start, fine ultima finestra
+train)` — l'ultima finestra test non è mai letta da nulla che alimenti il
+verdetto o la `ValidatedRule`. Il pre-screen di eliminazione gira sulla prima
+finestra train (dati solo selection-side). `"full_sample"` resta come
+escape hatch legacy; fallback automatico (annotato) quando lo span non
+consente neppure uno split.
+
 ### 3.5 I default derivano tutti dal dato, o non sono default
 
 **Osservato.** Il fix della horizon grid (PR #145) è il sintomo di un problema
