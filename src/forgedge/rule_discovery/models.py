@@ -316,6 +316,30 @@ class RuleDiscoveryConfig:
         candle table.
     discovery_date : str or None
         ISO date stamped onto the response; ``None`` → today.
+    selection_mode : {"walk_forward", "full_sample"}
+        Where the published operating point is *selected* (§3.4 of the FORGE
+        2.0 functional analysis).
+
+        * ``"walk_forward"`` (default) — the operating point comes from the
+          walk-forward's train windows only (per ``wf_param_policy``); the
+          in-sample summary, the early-elimination screen, the statistical
+          validation and every diagnostic are computed on the **selection
+          span** ``[start, last train window end)``, so no metric that feeds
+          the verdict or the published ``ValidatedRule`` ever reads the final
+          test window.  The early-elimination pre-screen runs on the *first*
+          train window (selection-side data only).  Falls back to
+          ``"full_sample"`` (with a note) when the data span is too short for
+          a single walk-forward split.
+        * ``"full_sample"`` — the legacy behaviour: grid screening, selection
+          and IS metrics on the whole table.  The walk-forward still gates the
+          verdict, but the published parameters were exposed to its test
+          windows.
+    wf_param_policy : {"last", "consensus"}
+        How ``selection_mode="walk_forward"`` picks the published operating
+        point from the per-split train selections: ``"last"`` (default) — the
+        most recent train window's winner (what you would trade next);
+        ``"consensus"`` — the most frequent parameter set across splits,
+        ties broken toward the most recent.
     n_trials_upstream : int
         Multiplier folded into the Deflated-Sharpe ``n_trials`` on top of the
         grid-cell count, for callers who want the analytic haircut to include
@@ -338,6 +362,8 @@ class RuleDiscoveryConfig:
     timestamp_col: str = "open_dt"
     signal_col: str = "__rule_signal__"
     discovery_date: Optional[str] = None
+    selection_mode: str = "walk_forward"
+    wf_param_policy: str = "last"
     n_trials_upstream: int = 1
 
 
@@ -538,6 +564,10 @@ class WalkForwardResult:
     oos_excursion: Optional["ExcursionStats"] = None
     oos_validation: Optional["StatisticalValidation"] = None
     oos_trades: Optional["pd.DataFrame"] = field(default=None, repr=False)
+    # Grid screening of the *last* train window (populated when
+    # ``reoptimise=True``).  Walk-forward selection mode reads the published
+    # operating point's selection surface from here instead of re-running it.
+    last_train_grid: Optional[List["GridResult"]] = field(default=None, repr=False)
 
 
 @dataclass

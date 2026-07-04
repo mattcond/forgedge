@@ -117,26 +117,9 @@ def walk_forward(
     scoring = scoring or ScoringParams()
     criteria = criteria or SelectionCriteria()
 
-    start, end = _month_bounds(candle, timestamp_col)
-    bounds = _build_splits(start, end, cfg)
-    if not bounds:
+    windows = selection_windows(candle, spec, base, cfg, timestamp_col)
+    if not windows:
         return None
-
-    # ── Purge / embargo widths (in bars → wall-clock via the bar duration) ──
-    # A trade entered in the last bars of a train window fills and exits
-    # *inside* the adjacent test window (run_backtest deliberately lets the
-    # fill/exit scans reach past timerange_to), so the parameter selection
-    # would be scored on test prices.  Purge the train tail by the worst-case
-    # trade span of the resolved grid; optionally embargo the test head.
-    resolved = build_grid(spec, base)
-    if cfg.purge_bars is not None:
-        purge_bars = max(int(cfg.purge_bars), 0)
-    else:
-        purge_bars = (
-            max(resolved.target_h) + max(resolved.buy_delay_bar) + 1
-        )  # +1: the entry acts on the bar after the signal
-    embargo_bars = max(int(getattr(cfg, "embargo_bars", 0)), 0)
-    delta = _bar_delta(candle, timestamp_col)
 
     # Extract the per-bar candle arrays once for the whole walk-forward — every
     # train grid screening and test-window backtest below reuses them.
@@ -145,10 +128,9 @@ def walk_forward(
     splits: List[WalkForwardSplit] = []
     close_trades: List[pd.DataFrame] = []
     high_trades: List[pd.DataFrame] = []
+    last_train_grid = None
 
-    for idx, (tr_from, tr_to, te_from, te_to) in enumerate(bounds):
-        tr_to_eff = max(pd.Timestamp(tr_from), pd.Timestamp(tr_to) - purge_bars * delta)
-        te_from_eff = min(pd.Timestamp(te_to), pd.Timestamp(te_from) + embargo_bars * delta)
+    for idx, (tr_from, tr_to_eff, te_from_eff, te_to) in enumerate(windows):
         tr_from_s, tr_to_s = _fmt(tr_from), _fmt(tr_to_eff)
         te_from_s, te_to_s = _fmt(te_from_eff), _fmt(te_to)
 
@@ -159,6 +141,7 @@ def walk_forward(
                 timerange_from=tr_from_s, timerange_to=tr_to_s,
                 timestamp_col=timestamp_col, _prepared=prep,
             )
+            last_train_grid = grid_res
             best = select_best(grid_res, criteria)
             params = best.params if best else base
             train_summary = best.summary if best else run_backtest(
@@ -229,7 +212,54 @@ def walk_forward(
         oos_excursion=oos_excursion,
         oos_validation=oos_validation,
         oos_trades=oos_concat,
+        last_train_grid=last_train_grid,
     )
+
+
+def selection_windows(
+    candle: pd.DataFrame,
+    spec: GridSpec,
+    base: BacktestParams,
+    cfg: WalkForwardConfig,
+    timestamp_col: str = "open_dt",
+) -> List[tuple]:
+    """Purged/embargoed walk-forward windows as Timestamp tuples.
+
+    Returns one ``(train_from, train_to, test_from, test_to)`` tuple per
+    split — ``train_to`` already pulled back by the purge and ``test_from``
+    pushed forward by the embargo — or ``[]`` when the data span is too short
+    for a single split.  This is the single source of the walk-forward's
+    temporal geometry, shared by :func:`walk_forward` and by Rule Discovery's
+    walk-forward selection mode (§3.4), so the two can never disagree on
+    where selection is allowed to look.
+    """
+    start, end = _month_bounds(candle, timestamp_col)
+    bounds = _build_splits(start, end, cfg)
+    if not bounds:
+        return []
+
+    # Purge / embargo widths (in bars → wall-clock via the bar duration).
+    # A trade entered in the last bars of a train window fills and exits
+    # *inside* the adjacent test window (run_backtest deliberately lets the
+    # fill/exit scans reach past timerange_to), so the parameter selection
+    # would be scored on test prices.  Purge the train tail by the worst-case
+    # trade span of the resolved grid; optionally embargo the test head.
+    resolved = build_grid(spec, base)
+    if cfg.purge_bars is not None:
+        purge_bars = max(int(cfg.purge_bars), 0)
+    else:
+        purge_bars = (
+            max(resolved.target_h) + max(resolved.buy_delay_bar) + 1
+        )  # +1: the entry acts on the bar after the signal
+    embargo_bars = max(int(getattr(cfg, "embargo_bars", 0)), 0)
+    delta = _bar_delta(candle, timestamp_col)
+
+    windows = []
+    for tr_from, tr_to, te_from, te_to in bounds:
+        tr_to_eff = max(pd.Timestamp(tr_from), pd.Timestamp(tr_to) - purge_bars * delta)
+        te_from_eff = min(pd.Timestamp(te_to), pd.Timestamp(te_from) + embargo_bars * delta)
+        windows.append((pd.Timestamp(tr_from), tr_to_eff, te_from_eff, pd.Timestamp(te_to)))
+    return windows
 
 
 def _oos_months(splits) -> pd.PeriodIndex:

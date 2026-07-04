@@ -125,6 +125,14 @@ span prima della finestra test (vedi `forgedge.timebudget.TimeBudget` —
 passandone uno a `forge()` tutti i moduli condividono un unico asse, con
 embargo opzionale).
 
+Rule Discovery seleziona il punto operativo **solo dentro le finestre train
+del walk-forward** (`RuleDiscoveryConfig.selection_mode="walk_forward"`, il
+default): i parametri pubblicati vengono dall'ultima finestra train (o dal
+consenso tra le finestre), e ogni metrica che alimenta il verdetto è
+calcolata sullo span di selezione — l'ultima finestra test non è mai letta
+da alcuna selezione.  `selection_mode="full_sample"` ripristina il
+comportamento legacy full-table.
+
 Sessioni multi-ticker con `forge_multi`:
 
 ```python

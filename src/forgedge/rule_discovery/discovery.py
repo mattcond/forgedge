@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from collections import Counter
 from datetime import date
 from typing import List, Optional
 
@@ -70,7 +71,7 @@ from .models import (
     ValidatedRule,
 )
 from .validation import validate
-from .walkforward import walk_forward
+from .walkforward import _fmt as _fmt_ts, selection_windows, walk_forward
 
 # RD-04 — the minimum executed-trade count is scaled to the in-sample length
 # rather than a fixed absolute.  A hardcoded ``min_trades=30`` was architecturally
@@ -86,6 +87,26 @@ _MIN_TRADES_ABS = 10
 def _dynamic_min_trades(n_months: float, min_tpm: float) -> int:
     """Minimum executed trades scaled to the IS period (spec RD-04)."""
     return max(_MIN_TRADES_ABS, int(n_months * min_tpm))
+
+
+def _pick_wf_params(splits, policy: str) -> BacktestParams:
+    """Pick the published operating point from the walk-forward train selections.
+
+    ``"last"`` — the most recent train window's winner (what you would trade
+    next).  ``"consensus"`` — the most frequent parameter set across the
+    splits, ties broken toward the most recent occurrence.
+    """
+    if policy == "consensus":
+        def key(p: BacktestParams):
+            return (p.buy_type, p.buy_drop_pct, p.buy_delay_bar, p.sell_pct, p.target_h)
+
+        counts = Counter(key(s.params) for s in splits)
+        top = max(counts.values())
+        winners = {k for k, v in counts.items() if v == top}
+        for s in reversed(splits):
+            if key(s.params) in winners:
+                return s.params
+    return splits[-1].params
 
 
 class RuleDiscovery:
@@ -129,6 +150,9 @@ class RuleDiscovery:
         self._frame = self._prepare_frame(kpi_table)
         self._mismatch_warned = False
         self.response: Optional[RuleDiscoveryResponse] = None
+        # End of the selection span (walk-forward selection mode); the limit
+        # entry optimiser restricts its sweep to this bound when set.
+        self._selection_to: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -173,7 +197,173 @@ class RuleDiscovery:
     def _run_stage(
         self, base: BacktestParams, grid_spec: GridSpec, notes: List[str]
     ) -> RuleDiscoveryResponse:
-        """Single-entry-mode evaluation: grid screen → verdict → response.
+        """Single-entry-mode evaluation, dispatched on ``config.selection_mode``.
+
+        ``"walk_forward"`` (default) confines the parameter selection and every
+        verdict-feeding metric to the walk-forward's train windows (§3.4);
+        ``"full_sample"`` is the legacy whole-table path.  The walk-forward mode
+        falls back to the legacy path (with a note) when the data span is too
+        short for a single split.
+        """
+        mode = str(getattr(self.config, "selection_mode", "full_sample")).lower().strip()
+        if mode not in ("walk_forward", "full_sample"):
+            raise ValueError(
+                f"selection_mode must be 'walk_forward' or 'full_sample', got {mode!r}"
+            )
+        if mode == "walk_forward":
+            resp = self._run_stage_wf(base, grid_spec, notes)
+            if resp is not None:
+                return resp
+            notes.append(
+                "selection_mode=walk_forward — data span too short for a single "
+                "split; falling back to full-sample selection"
+            )
+        return self._run_stage_full(base, grid_spec, notes)
+
+    def _run_stage_wf(
+        self, base: BacktestParams, grid_spec: GridSpec, notes: List[str]
+    ) -> Optional[RuleDiscoveryResponse]:
+        """§3.4 — parameters are selected *only* inside walk-forward train windows.
+
+        The published operating point comes from the per-split train selections
+        (``config.wf_param_policy``: the last window's winner, or the consensus
+        across windows).  The in-sample summary, the early-elimination screen,
+        the statistical validation, the execution envelope, the MAE/MFE stats
+        and the regime breakdown are all computed on the **selection span**
+        ``[start, last train window end)`` — no metric that feeds the verdict
+        or the ``ValidatedRule`` ever reads the final test window.  The
+        early-elimination pre-screen runs on the *first* train window
+        (selection-side data only, so hopeless rules stay cheap to reject).
+
+        Returns ``None`` when the span cannot form a single walk-forward split
+        (the caller falls back to full-sample selection).
+        """
+        cfg = self.config
+        policy = str(getattr(cfg, "wf_param_policy", "last")).lower().strip()
+        if policy not in ("last", "consensus"):
+            raise ValueError(
+                f"wf_param_policy must be 'last' or 'consensus', got {policy!r}"
+            )
+
+        windows = selection_windows(
+            self._frame, grid_spec, base, cfg.walk_forward, cfg.timestamp_col
+        )
+        if not windows:
+            return None
+        first_from_s, first_to_s = _fmt_ts(windows[0][0]), _fmt_ts(windows[0][1])
+        selection_to = _fmt_ts(windows[-1][1])
+
+        # ── Step 2.3 — pre-screen on the first train window ──────────────
+        if cfg.criteria.early_elimination:
+            pre_grid = run_grid(
+                self._frame, cfg.signal_col, base, grid_spec,
+                scoring=cfg.scoring, timerange_from=first_from_s,
+                timerange_to=first_to_s, timestamp_col=cfg.timestamp_col,
+            )
+            pre_best = select_best(pre_grid, cfg.criteria)
+            if pre_best is None:
+                return self._reject(
+                    ["grid produced no evaluable configuration"], base, notes
+                )
+            elim = self._early_elimination(pre_best.summary)
+            if elim:
+                notes.append(
+                    "selection_mode=walk_forward — early elimination on the first "
+                    f"train window [{first_from_s}, {first_to_s})"
+                )
+                return self._reject(elim, pre_best.params, notes, pre_grid, pre_best.summary)
+
+        # ── Step 4 — walk-forward: the only place parameters are selected ─
+        wf = walk_forward(
+            self._frame, cfg.signal_col, base, grid_spec, cfg.walk_forward,
+            scoring=cfg.scoring, criteria=cfg.criteria, timestamp_col=cfg.timestamp_col,
+            base_rate=float(self.contract.base_rate or 0.0),
+        )
+        if wf is None:
+            return None
+        best_params = _pick_wf_params(wf.splits, policy)
+        self._selection_to = selection_to
+        notes.append(
+            "selection_mode=walk_forward — operating point from the "
+            + ("consensus of the train windows" if policy == "consensus"
+               else "last train window")
+            + f"; IS metrics on [start, {selection_to})"
+        )
+
+        # Selection surface behind the published params (for the DSR trials).
+        grid_results = list(wf.last_train_grid or [])
+        if not grid_results:
+            # reoptimise=False — no selection happened; a single evaluation of
+            # the fixed params on the last train window stands in for the grid.
+            fixed_summary = run_backtest(
+                self._frame, cfg.signal_col, best_params,
+                timerange_from=_fmt_ts(windows[-1][0]), timerange_to=selection_to,
+                scoring=cfg.scoring, timestamp_col=cfg.timestamp_col,
+            )
+            grid_results = [GridResult(params=best_params, summary=fixed_summary)]
+        n_trials = len(grid_results) * max(1, int(getattr(cfg, "n_trials_upstream", 1)))
+
+        # ── IS summary of the published params on the selection span ─────
+        is_summary, is_trades = run_backtest(
+            self._frame, cfg.signal_col, best_params,
+            timerange_to=selection_to,
+            scoring=cfg.scoring, timestamp_col=cfg.timestamp_col, return_trades=True,
+        )
+        elim = self._early_elimination(is_summary)
+
+        # ── statistical validation + diagnostics, all on the selection span ─
+        avg_hold = self._avg_holding_bars(is_trades)
+        bpy = self._bars_per_year()
+        stat_val = validate(
+            is_trades, base_rate=float(self.contract.base_rate or 0.0),
+            n_trials=n_trials, bars_per_year=bpy, avg_holding_bars=avg_hold,
+        )
+        envelope = execution_envelope(
+            self._frame, cfg.signal_col, best_params,
+            scoring=cfg.scoring, timestamp_col=cfg.timestamp_col,
+            timerange_to=selection_to,
+        )
+        excursion = excursion_stats(self._frame, is_trades)
+        regime = self._regime_breakdown(is_trades)
+
+        # ── Step 8 — verdict ─────────────────────────────────────────────
+        verdict, reasons = self._decide(is_summary, stat_val, wf, regime)
+        if elim:
+            verdict = "NON-EDGE"
+            reasons = elim + [r for r in reasons if r not in elim]
+        validated = (
+            ValidatedRule(
+                expression=self.contract.event_expression,
+                event_candidate_id=self.candidate.event_id,
+                params=best_params,
+            )
+            if verdict != "NON-EDGE"
+            else None
+        )
+
+        self.response = RuleDiscoveryResponse(
+            date=self._discovery_date(),
+            verdict=verdict,
+            alpha_id=self.contract.alpha_id,
+            asset=self.contract.asset,
+            timeframe=self.contract.timeframe,
+            validated_rule=validated,
+            in_sample_summary=is_summary,
+            walk_forward=wf,
+            statistical_validation=stat_val,
+            regime_analysis=regime,
+            execution_envelope=envelope,
+            excursion=excursion,
+            grid_results=grid_results,
+            rejection_reasons=reasons,
+            notes=notes,
+        )
+        return self.response
+
+    def _run_stage_full(
+        self, base: BacktestParams, grid_spec: GridSpec, notes: List[str]
+    ) -> RuleDiscoveryResponse:
+        """Legacy full-sample evaluation: grid screen → verdict → response.
 
         Parameterised by ``base`` (carrying the entry ``buy_type``) and the grid
         ``grid_spec`` so the same core serves the limit, market and auto stages.
@@ -181,6 +371,7 @@ class RuleDiscovery:
         pre-RD-130 ``run`` body.
         """
         cfg = self.config
+        self._selection_to = None
 
         # ── Step 2/3 — in-sample grid screening and selection ────────────
         grid_results = run_grid(
@@ -358,9 +549,13 @@ class RuleDiscovery:
             target_h=[winner.target_h],
             buy_delay_bar=[base.buy_delay_bar],
         )
+        # In walk-forward selection mode the optimiser sweeps the same
+        # selection span the verdict metrics were computed on — the final
+        # test window stays untouched by any selection.
         results = run_grid(
             self._frame, cfg.signal_col, limit_base, limit_grid,
             scoring=cfg.scoring, timestamp_col=cfg.timestamp_col,
+            timerange_to=self._selection_to,
         )
 
         market_score = market.pf_score_tpm
