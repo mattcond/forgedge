@@ -215,9 +215,21 @@ class SelectionCriteria:
     max_regime_dependency : float
         Maximum regime-dependency score for a full ``EDGE``.
     min_dsr : float
-        Minimum Deflated Sharpe Ratio for a full ``EDGE``.
+        Minimum Deflated Sharpe Ratio for a full ``EDGE``.  A DSR that is
+        *undefined* because the selection haircut's radicand went negative
+        (``n_trials`` too large for ``n_obs`` — "selection bias so severe the
+        Sharpe is not credible") also blocks a full ``EDGE``.
     max_ttest_p : float
         Maximum p-value for the win-rate / expectancy significance tests.
+    max_rotation_p : float
+        Maximum search-level rotation-null p-value (``AlphaContract.rotation_p``,
+        annotated by ``FastRotationNull`` / ``RotationCalibrator``) for a full
+        ``EDGE``.  The rotation p prices the *whole* discovery surface — the
+        probability that a search over the same candidates on rotation-decoupled
+        returns produces a statistic at least as good — so requiring it caps
+        rules that merely won the multiple-testing lottery at ``PARTIAL-EDGE``.
+        Inert when the contract carries no annotation (standalone Rule
+        Discovery, or ``forge(fast_null=False)``).
     early_elimination : bool
         When ``True`` (default), a rule that fails the fast in-sample screen
         (Step 2.3 — too few trades, losing in-sample, or unfillable) is rejected
@@ -240,6 +252,7 @@ class SelectionCriteria:
     max_regime_dependency: float = 0.30
     min_dsr: float = 1.0
     max_ttest_p: float = 0.05
+    max_rotation_p: float = 0.05
     early_elimination: bool = True
 
 
@@ -290,6 +303,16 @@ class RuleDiscoveryConfig:
         candle table.
     discovery_date : str or None
         ISO date stamped onto the response; ``None`` → today.
+    n_trials_upstream : int
+        Multiplier folded into the Deflated-Sharpe ``n_trials`` on top of the
+        grid-cell count, for callers who want the analytic haircut to include
+        an explicit upstream search factor (e.g. the number of sibling
+        contracts receiving a verdict).  Default ``1`` — grid cells only, the
+        historical behaviour.  Note the stock haircut becomes undefined
+        (blocking a full ``EDGE``) roughly beyond ``n_trials > n_obs^1.73``;
+        the correlation-aware correction for the full discovery surface is the
+        rotation-null gate (``SelectionCriteria.max_rotation_p``), not this
+        knob — see ``forgedge.ledger``.
     """
 
     base_params: BacktestParams = field(default_factory=BacktestParams)
@@ -302,6 +325,7 @@ class RuleDiscoveryConfig:
     timestamp_col: str = "open_dt"
     signal_col: str = "__rule_signal__"
     discovery_date: Optional[str] = None
+    n_trials_upstream: int = 1
 
 
 # ---------------------------------------------------------------------------

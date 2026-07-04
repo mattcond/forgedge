@@ -63,8 +63,13 @@ _AD_GOLDEN = {
     "status":       "HYPOTHESIS",
 }
 
+# verdict re-pinned EDGE → PARTIAL-EDGE with the default search-level rotation
+# null (FastRotationNull): on this 1D fixture the whole discovery session does
+# not beat its own rotation null (search p ≈ 0.7 on the full ADA set), so the
+# golden rule is capped — economics unchanged (PF / trades / expectancy are
+# identical; only the verdict gate moved).
 _RD_GOLDEN = {
-    "verdict":        "EDGE",
+    "verdict":        "PARTIAL-EDGE",
     "profit_factor":  pytest.approx(2.0042, rel=1e-3),
     "total_trades":   105,
     "expectancy":     pytest.approx(0.019196, rel=1e-3),

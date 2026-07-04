@@ -65,6 +65,14 @@ il default della promozione: si promuove l'*eccesso sopra il null*, non il
 superamento di soglie assolute. Il contratto non cambia: stesso input, stessi
 verdetti — ma EDGE torna a significare EDGE.
 
+**[IMPLEMENTATO]** `forgedge.ledger.HypothesisLedger` registra la superficie
+della sessione su `ForgeResult.ledger`; `calibration.FastRotationNull` calcola
+il null search-level *esatto* su tutti gli offset circolari (via FFT, ~1 s —
+niente K, niente seed), gira di default dentro `forge()` e il verdetto EDGE
+pieno di Rule Discovery ora richiede di batterlo
+(`SelectionCriteria.max_rotation_p`); un DSR indefinito (haircut con radicando
+negativo) blocca anch'esso l'EDGE pieno invece di saltare il gate.
+
 ### 3.2 Verdetti con potenza dichiarata — degradazione onesta, non fiducia di default
 
 **Osservato.** Su 2 anni di daily i gate OOS di M2 lavorano su n_act < 10; il

@@ -917,6 +917,77 @@ class TestEndToEnd:
 # Config seeding
 # ---------------------------------------------------------------------------
 
+class TestSearchLevelGates:
+    """Level-0/1 verdict gates: rotation-null p and honest DSR degradation."""
+
+    @pytest.fixture(scope="class")
+    def pipeline(self):
+        df = _predictive_kpi_table()
+        ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))
+        cands = ed.run()
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(asset="SYN", timeframe="1H"))
+        ad.run()
+        promoted = ad.promoted_contracts()
+        by_id = {c.event_id: c for c in cands}
+        return ed, promoted, by_id
+
+    @pytest.fixture(scope="class")
+    def edge_case(self, pipeline):
+        """A (contract, candidate) whose baseline verdict is a full EDGE."""
+        ed, promoted, by_id = pipeline
+        for c in promoted[:10]:
+            resp = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id]).run()
+            if resp.verdict == "EDGE":
+                return ed, c, by_id[c.event_candidate_id]
+        pytest.skip("no baseline EDGE in the synthetic fixture")
+
+    def test_high_rotation_p_caps_edge_to_partial(self, edge_case):
+        ed, c, cand = edge_case
+        old = c.rotation_p
+        try:
+            c.rotation_p = 0.90
+            resp = RuleDiscovery(ed.df, c, cand).run()
+            assert resp.verdict == "PARTIAL-EDGE"
+            assert any("rotation null" in r for r in resp.rejection_reasons)
+        finally:
+            c.rotation_p = old
+
+    def test_low_rotation_p_keeps_edge(self, edge_case):
+        ed, c, cand = edge_case
+        old = c.rotation_p
+        try:
+            c.rotation_p = 0.001
+            resp = RuleDiscovery(ed.df, c, cand).run()
+            assert resp.verdict == "EDGE"
+        finally:
+            c.rotation_p = old
+
+    def test_missing_rotation_p_is_inert(self, edge_case):
+        ed, c, cand = edge_case
+        assert c.rotation_p is None  # standalone pipeline never annotated it
+        resp = RuleDiscovery(ed.df, c, cand).run()
+        assert resp.verdict == "EDGE"
+        assert not any("rotation" in r for r in resp.rejection_reasons)
+
+    def test_n_trials_upstream_multiplies_dsr_trials(self, edge_case):
+        ed, c, cand = edge_case
+        cfg = RuleDiscoveryConfig(n_trials_upstream=7)
+        resp = RuleDiscovery(ed.df, c, cand, config=cfg).run()
+        assert resp.statistical_validation.n_trials_tested == 7 * len(resp.grid_results)
+
+    def test_undefined_dsr_blocks_full_edge(self, edge_case):
+        # A huge upstream factor sends the DSR haircut's radicand negative:
+        # the deflated Sharpe is undefined and must block a full EDGE instead
+        # of silently skipping the gate.
+        ed, c, cand = edge_case
+        cfg = RuleDiscoveryConfig(n_trials_upstream=10**9)
+        resp = RuleDiscovery(ed.df, c, cand, config=cfg).run()
+        assert np.isfinite(resp.statistical_validation.sharpe_ratio)
+        assert not np.isfinite(resp.statistical_validation.deflated_sharpe)
+        assert resp.verdict == "PARTIAL-EDGE"
+        assert any("DSR undefined" in r for r in resp.rejection_reasons)
+
+
 class TestConfig:
     def test_contract_target_seeds_params(self):
         df = _predictive_kpi_table(n=6000)

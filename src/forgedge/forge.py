@@ -64,8 +64,9 @@ import pandas as pd
 
 from .alpha_discovery.discovery import AlphaDiscovery
 from .alpha_discovery.models import AlphaConfig, AlphaContract
-from .calibration import RotationCalibrator
-from .calibration.models import RotationConfig
+from .calibration import FastRotationNull, RotationCalibrator
+from .calibration.models import CalibrationReport, RotationConfig
+from .ledger import HypothesisLedger
 from .event_discovery.discovery import DiscoveryConfig, EventDiscovery
 from .event_discovery.models import (
     ActivationStats,
@@ -207,6 +208,13 @@ class ForgeResult:
         ``market_context.distribution()``, ``event_discovery.summary()``,
         ``alpha_discovery.summary()``.  ``market_context`` is ``None`` when the
         stage was skipped.
+    calibration : CalibrationReport or None
+        The search-level rotation-null report — from :class:`FastRotationNull`
+        (default) or the full :class:`RotationCalibrator` when
+        ``rotation_calibration`` was passed.  ``None`` when both were skipped.
+    ledger : HypothesisLedger or None
+        The session's hypothesis ledger — how many candidates, horizons and
+        grid cells the run consumed (see :mod:`forgedge.ledger`).
     """
 
     enriched: pd.DataFrame
@@ -220,6 +228,8 @@ class ForgeResult:
     market_context: Optional[MarketContext] = None
     event_discovery: Optional[EventDiscovery] = None
     alpha_discovery: Optional[AlphaDiscovery] = None
+    calibration: Optional[CalibrationReport] = None
+    ledger: Optional[HypothesisLedger] = None
 
     # ------------------------------------------------------------------
     # Convenience accessors
@@ -291,6 +301,7 @@ def forge(
     event_discovery_config: Optional[DiscoveryConfig] = None,
     alpha_config: Optional[AlphaConfig] = None,
     rotation_calibration: Optional[RotationConfig] = None,
+    fast_null: bool = True,
     rule_discovery_config: Optional[RuleDiscoveryConfig] = None,
     registry_config: Optional[RegistryConfig] = None,
     manual_events: Optional[List[CustomEvent]] = None,
@@ -354,6 +365,19 @@ def forge(
         instead: run ``forge()`` without this parameter, then call
         ``RotationCalibrator(result.event_frame, result.candidates, alpha_config)``
         separately — same results, no impact on the main pipeline runtime.
+        When set, it supersedes the default ``fast_null`` pass.
+    fast_null : bool, default True
+        Run the :class:`FastRotationNull` after Alpha Discovery — the exact
+        search-level rotation null over every circular offset, computed via FFT
+        cross-correlation in roughly the cost of one Alpha Discovery pass (no
+        K, no seed).  Annotates each promoted contract with ``rotation_p`` /
+        ``rotation_threshold`` and stores the report on
+        ``ForgeResult.calibration``.  Rule Discovery then requires
+        ``rotation_p <= criteria.max_rotation_p`` for a full ``EDGE`` verdict
+        (rules that only won the multiple-testing lottery are capped at
+        ``PARTIAL-EDGE``).  Set ``False`` to skip (pre-#116 behaviour);
+        ignored when ``rotation_calibration`` is passed (the full calibrator
+        supersedes it).
     rule_discovery_config : RuleDiscoveryConfig, optional
         Modulo 3 configuration.  Defaults to the standard grid and acceptance
         gates.
@@ -477,7 +501,17 @@ def forge(
     promoted = ad.promoted_contracts()
     report.stage(f"M2 Alpha Discovery — {len(promoted)}/{len(contracts)} promoted")
 
-    # ── Rotation null calibration (inline, optional) ──────────────────────
+    # ── Hypothesis ledger — the session's multiple-testing surface ────────
+    ledger = HypothesisLedger(
+        m1_candidates=len(alpha_candidates),
+        m2_horizons=len(cfg.horizon_grid),
+        m2_promoted=len(promoted),
+    )
+    report.stage(ledger.describe())
+
+    # ── Search-level rotation null ─────────────────────────────────────────
+    # The full calibrator (explicit K draws) supersedes the fast exact null.
+    cal_report: Optional[CalibrationReport] = None
     if rotation_calibration is not None and promoted:
         report.stage(
             f"Rotation Calibrator — K={rotation_calibration.k} draws "
@@ -487,6 +521,13 @@ def forge(
         cal_report = cal.run(promoted, rotation_calibration)
         report.stage(
             f"Rotation Calibrator — Tippett p={cal_report.tippett_p:.4f}, "
+            f"{len(cal_report.survivors)}/{len(promoted)} above null bar"
+        )
+    elif fast_null and promoted:
+        report.stage("Fast rotation null — exact search-level null (all offsets)…")
+        cal_report = FastRotationNull(alpha_frame, alpha_candidates, cfg).run(promoted)
+        report.stage(
+            f"Fast rotation null — search p={cal_report.tippett_p:.4f}, "
             f"{len(cal_report.survivors)}/{len(promoted)} above null bar"
         )
 
@@ -515,6 +556,8 @@ def forge(
         rd = RuleDiscovery(alpha_frame, contract, cand, config=rule_discovery_config)
         response = rd.run()
         rule_responses.append((contract, response))
+        if not ledger.m3_grid_cells and response.grid_results:
+            ledger.m3_grid_cells = len(response.grid_results)
 
     result = ForgeResult(
         enriched=enriched,
@@ -527,6 +570,8 @@ def forge(
         market_context=mc,
         event_discovery=ed,
         alpha_discovery=ad,
+        calibration=cal_report,
+        ledger=ledger,
     )
     if run_rule_discovery:
         report.stage(f"M3 Rule Discovery — {len(result.edges())} tradeable rule(s)")
