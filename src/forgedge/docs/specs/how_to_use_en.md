@@ -67,6 +67,22 @@ accepts `config` as a `dict`, a path to a YAML file, or `None` for the packaged
 default (`DEFAULT_CONFIG` / `default_enricher.yaml` — copy and edit it to
 change periods/columns/enabled indicators). Indicators referencing columns
 absent from `candles` are skipped with a warning, so OHLC-only input is safe.
+Two indicators ship **disabled by default** (enable them explicitly in
+`config`): `"atr"` (`periods=[14, 28]` → `close_atr_14`/`close_atr_28` plus a
+normalised `close_natr_14`/`close_natr_28` companion, needs `high`/`low`) and
+`"macd"` (`periods=[12, 26, 9]`, a flat `(fast, slow, signal)` triple → e.g.
+`close_macd_12_26`, `close_macd_12_26_signal_09`, `close_macd_12_26_hist_09`).
+
+**Column naming convention.** For a custom column (yours or a built one) to be
+recognised as part of a same-family ratio pair by Event Discovery, its name
+must match `{base}_{indicator}_{period}` with `base` in `{close, high, low,
+open, volume}` and `indicator` in `{ema, sma, rsi, dema, tema, wma, hma, mdd,
+atr, natr}` (or the dedicated `{base}_bb_{lower|upper|width|mid}_{period}` /
+`{base}_{vol|ret}_{period}` patterns). Columns that don't match this pattern
+still work as standalone features but are not paired into ratios; `mdd`/`atr`
+support was added after an early bug silently dropped custom columns using
+those suffixes — if a feature you added doesn't show up in `EventDiscovery`
+candidates, check its name against this convention first.
 
 `candle_features(df, *, order_on="open_dt", add_gap=True, round_to=5)` adds six
 scale-free geometry columns (`body`, `upper_wick`, `lower_wick`, `close_pos`,
@@ -369,6 +385,17 @@ promoted = ad.promoted_contracts(min_lift=0.05)   # keep only lift >= 0.05
 contains the derived features (ratio, spread) computed during Event Discovery;
 passing the original table works but is slightly slower as features are
 recomputed deterministically from the stored component parameters.
+
+**Default `horizon_grid` is timeframe-scaled.** When `AlphaConfig.horizon_grid`
+is left unset, `forge()` (not the `AlphaConfig` class default itself) resolves
+it from `timeframe`: daily-or-slower timeframes (`"1D"`, `"3D"`, `"1W"`, …) get
+`(1, 2, 3, 5, 7, 10)` bars; intraday timeframes keep the hourly-calibrated
+`(1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48)`. Building `AlphaDiscovery` directly
+(bypassing `forge()`) still gets the intraday-calibrated class default
+regardless of `timeframe` — pass `horizon_grid` explicitly for daily-or-slower
+data in that case. If you pass an explicit `AlphaConfig` that still carries the
+untouched hourly default on a daily-or-slower `timeframe`, `forge()` emits a
+`UserWarning` (any custom grid you set is respected silently).
 
 ### Advanced configuration with custom grid
 
@@ -797,10 +824,16 @@ Useful switches:
   Contracts filtered out still appear in `result.contracts` / `result.promoted` for audit
   but receive no rule response and never reach the Rule Registry.  Comparison is
   case-insensitive.  When omitted, every promoted contract is backtested.
-- `rotation_calibration=RotationConfig(k=100)` — run the search-level rotation null inline
-  after Alpha Discovery (see *Search-level calibration* below). Each promoted contract then
-  carries `rotation_p` / `rotation_threshold`. Default `None` skips it at zero extra cost;
-  for large K prefer the standalone `RotationCalibrator` to keep the main run fast.
+- `rotation_calibration=RotationConfig(k=100)` — run the (slower, sampled) search-level
+  rotation null inline after Alpha Discovery instead of the default fast exact null (see
+  *Search-level calibration* below). Each promoted contract then carries `rotation_p` /
+  `rotation_threshold`. Supersedes `fast_null` when set.
+- `fast_null=False` — skip the default fast, exact search-level rotation null (`fast_null=True`
+  by default; near-zero extra cost, see *Search-level calibration* below).
+- `time_budget=TimeBudget.build(n_bars=len(kpi), horizon_bars=48, embargo_bars=5)` — share one
+  purged/embargoed IS/OOS time axis across Event Discovery and Alpha Discovery instead of each
+  module cutting the timeline independently (see *Purging and embargo* below). Default `None`
+  builds one automatically from `train_ratio` and the resolved horizon grid.
 - `progress=True` — print per-stage status and a Rule Discovery progress bar to `stderr`
   (useful for long runs). Independently of the flag, every milestone is logged at `INFO`
   on the `forgedge.forge` logger, so `logging.basicConfig(level=logging.INFO)` surfaces the
@@ -842,17 +875,37 @@ as keyword arguments — they are forwarded to every per-ticker run. Do **not**
 pass `ticker` / `asset` (set automatically per ticker) or `run_registry` (the
 pooled registry supersedes the per-ticker ones).
 
-### Search-level calibration: `RotationCalibrator`
+### Search-level calibration: `FastRotationNull` and `RotationCalibrator`
 
 A promoted contract can still be an artefact of FORGE's multiple-testing
 surface — with enough candidates and horizons, *some* edge appears by chance.
-`RotationCalibrator` quantifies that risk without rebuilding any feature column:
-it circularly rotates **only** the `close` column by a random offset `K` times
-and re-runs Alpha Discovery on each draw, reusing the real candidate set. The
-rotation preserves the exact return distribution and autocorrelation but
-decouples each event's activations from the forward outcome, giving a true
-search-level null. A Tippett (min-p) combination over the in-sample yardsticks
-yields a single p-value that already pays the FWER cost.
+**`forge()` runs a search-level rotation null by default** (`fast_null=True`):
+`FastRotationNull` computes, via one FFT pass per candidate, the *exact* null
+distribution of the search's best standardised excess over every circular
+offset of the `close` column at once — no sampling, no seed, ~1–2 s even on
+thousands of candidates. It annotates each promoted contract with
+`rotation_p` / `rotation_threshold` and stores the report on
+`ForgeResult.calibration`:
+
+```python
+result = forge(kpi, ticker="BTCUSDC", timeframe="1H")
+
+print(result.calibration.tippett_p)          # search-level p-value
+for c in result.promoted:
+    print(c.alpha_id, c.rotation_p, c.rotation_threshold)
+```
+
+Rule Discovery then requires `rotation_p <= criteria.max_rotation_p` (default
+`0.05`) for a full `EDGE` verdict — a contract that only won the
+multiple-testing lottery of its own discovery session is capped at
+`PARTIAL-EDGE` (still tradeable via `resp.is_edge`). `FastRotationNull` only
+computes the `abs_z` yardstick (the one statistic that reduces exactly to a
+cross-correlation); pass `fast_null=False` to `forge()` to skip it entirely.
+
+For the full multi-yardstick calibration (`composite`, `is_lift`, …, via a
+Tippett min-p combination) or a large K sanity check, use the standalone,
+sampled `RotationCalibrator` instead — heavier (~K × the cost of one Alpha
+Discovery pass) but not limited to `abs_z`:
 
 ```python
 from forgedge import forge, RotationCalibrator, RotationConfig
@@ -877,10 +930,76 @@ Type-I target and the yardsticks fed to the Tippett combination. The returned
 `CalibrationReport` exposes `tippett_p`, `tippett_best_stat`, `per_stat_p`,
 `null_q`, `real_stats`, `null_arrays` and `survivors` (the promoted contracts
 whose winning statistic clears the null bar). The same calibration can run
-**inline** during `forge()` via `rotation_calibration=RotationConfig(...)` — that
-path writes `rotation_p` / `rotation_threshold` onto each promoted contract; use
-the standalone calibrator above when you want the full report object or a large
-K without slowing the main pipeline.
+**inline** during `forge()` via `rotation_calibration=RotationConfig(...)` —
+that path supersedes the default `fast_null` pass and writes the same
+`rotation_p` / `rotation_threshold` fields; use the standalone calibrator above
+when you want the full report object without slowing down the main run.
+
+### Auditing the search surface: `HypothesisLedger`
+
+Every `forge()` run also returns `result.ledger` (a `HypothesisLedger`) — plain
+bookkeeping of how many hypotheses the session actually consumed, so the
+surface behind a published verdict is auditable even though it is *priced* by
+the rotation null above, not by this count directly (event-level hypotheses
+are heavily correlated, so plugging their raw count into an analytic haircut
+would overstate the selection bias):
+
+```python
+print(result.ledger.describe())
+# "hypothesis surface: 640 candidates × 6 horizons = 3840 return-tests;
+#  12 promoted; ~180 grid cells/rule (total ≲ 691200)"
+
+result.ledger.m1_candidates   # candidates handed to Alpha Discovery
+result.ledger.m2_horizons     # horizons scanned per candidate
+result.ledger.m2_promoted     # contracts promoted
+result.ledger.m3_grid_cells   # Rule Discovery operational-grid size (0 until backtested)
+result.ledger.m2_surface      # m1_candidates * m2_horizons
+result.ledger.total_surface   # upper bound: m2_surface * max(m3_grid_cells, 1)
+```
+
+`RuleDiscoveryConfig.n_trials_upstream` remains available for callers who want
+the analytic Deflated-Sharpe haircut to include an explicit upstream factor
+instead of relying on the rotation null.
+
+### Purging and embargo: `TimeBudget`
+
+Each module used to cut the IS/OOS timeline independently. The split boundary
+itself was honest, but forward-looking quantities crossed it: the forward
+return at IS bar `t` reads closes up to `t + h`, so the last `h` IS bars are
+partially scored on OOS prices, and a walk-forward trade entered near the end
+of a train window can exit inside the test window. `TimeBudget` is the single
+shared axis that fixes this — **purging** removes the IS rows whose
+forward-looking window overlaps the OOS side; an optional **embargo** adds a
+buffer of bars at the *start* of the OOS window for serial-correlation
+quarantine (`0` by default — purging alone removes the mechanical overlap).
+
+```python
+from forgedge import forge, TimeBudget
+
+budget = TimeBudget.build(
+    n_bars=len(kpi),
+    train_ratio=0.70,
+    horizon_bars=48,     # widest horizon scanned — sets the default purge width
+    embargo_bars=5,      # optional extra buffer at the start of OOS
+)
+result = forge(kpi, time_budget=budget)
+print(result.time_budget.describe())
+```
+
+`TimeBudget.build(n_bars, train_ratio=0.7, horizon_bars=0, purge_bars=None, embargo_bars=0)`
+defaults `purge_bars` to `horizon_bars` when omitted. Passed to `forge()` it is
+threaded into both `EventDiscovery` and `AlphaDiscovery` so they share one
+split; `ForgeResult.time_budget` exposes the effective budget. **Purging is on
+by default** for Alpha Discovery (purge width = `max(horizon_grid)`) and for
+Rule Discovery's walk-forward (via `WalkForwardConfig.purge_bars` /
+`embargo_bars`, `None`/`0` by default — `None` also defaults to the horizon
+being tested) — this is a real, if usually small, numeric change from
+pre-`TimeBudget` results (boundary rows that used to leak OOS information are
+now excluded). To reproduce old, unpurged numbers exactly, pass an explicit
+`TimeBudget.build(n_bars=..., purge_bars=0)` and, for Rule Discovery,
+`WalkForwardConfig(purge_bars=0)`. `AlphaConfig.embargo_bars` (default `0`) and
+`WalkForwardConfig.embargo_bars` (default `0`) change nothing unless you opt
+in — only purging is on by default.
 
 ### Building it by hand
 
