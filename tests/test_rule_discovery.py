@@ -231,6 +231,58 @@ def _candle_with_short_signal(n=4000, seed=21, signal_every=40,
     })
 
 
+class TestMonthIndex:
+    """The monthly-stats index must count every month entries can open in."""
+
+    @staticmethod
+    def _daily_candle():
+        """Three full months of flat daily bars with one signal per month."""
+        dts = pd.date_range("2025-01-01", "2025-03-31", freq="D")
+        n = len(dts)
+        close = np.full(n, 100.0)
+        df = pd.DataFrame(
+            {
+                "open_dt": dts,
+                "open": close,
+                "high": close * 1.2,
+                "low": close * 0.8,
+                "close": close,
+                "__sig__": 0,
+            }
+        )
+        for d in ("2025-01-10", "2025-02-10", "2025-03-10"):
+            df.loc[df.open_dt == d, "__sig__"] = 1
+        return df
+
+    def test_whole_table_counts_final_month(self):
+        df = self._daily_candle()
+        params = BacktestParams(
+            buy_type="market", direction="long", sell_pct=0.05, target_h=3, fee=0.0
+        )
+        s = run_backtest(df, "__sig__", params)
+        assert s.total_trades == 3
+        assert s.n_months == 3
+        assert s.active_months == 3
+        assert s.zero_months == 0
+        assert s.tpm_mu == pytest.approx(1.0)
+
+    def test_month_aligned_exclusive_bound_unchanged(self):
+        # A walk-forward-style [from, to) window with a month-aligned exclusive
+        # bound must not count the month the bound names.
+        from forgedge.rule_discovery.backtest import _as_datetime64, _month_index
+
+        dt = _as_datetime64(self._daily_candle()["open_dt"])
+        months = _month_index("2025-01-01", "2025-03-01", dt)
+        assert [str(m) for m in months] == ["2025-01", "2025-02"]
+
+    def test_mid_month_bound_counts_partial_month(self):
+        from forgedge.rule_discovery.backtest import _as_datetime64, _month_index
+
+        dt = _as_datetime64(self._daily_candle()["open_dt"])
+        months = _month_index("2025-01-01", "2025-03-15", dt)
+        assert [str(m) for m in months] == ["2025-01", "2025-02", "2025-03"]
+
+
 class TestShortDirection:
     def test_default_is_long(self):
         assert BacktestParams().direction == "long"

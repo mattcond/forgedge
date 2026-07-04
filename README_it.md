@@ -70,7 +70,7 @@ KPI Table (OHLCV + indicatori tecnici)
 | Modulo 1 non vede mai il forward return | Look-ahead bias nella selezione degli eventi |
 | Le soglie sono immutabili dopo la scoperta | Ottimizzazione delle soglie sul campione di valutazione |
 | Orizzonte, direzione e take-profit sono derivati dai dati per ogni evento | Assunzioni economiche che pre-cuociono il risultato |
-| La validazione OOS è un gate formale, non un check opzionale | Conferma a posteriori di una conclusione già decisa |
+| Il verdetto operativo è vincolato al walk-forward OOS (Modulo 3); la conferma OOS di Alpha è registrata su ogni contratto | Conferma a posteriori di una conclusione già decisa |
 
 ---
 
@@ -101,6 +101,13 @@ for contract, response in result.edges():       # solo EDGE / PARTIAL-EDGE
     print(contract.alpha_id, response.verdict)
 print(result.registry.summary())                # Modulo 4 — regole catalogate
 ```
+
+Su un `timeframe` daily o più lento la griglia di holding period di default
+viene sostituita automaticamente da una calibrata sul daily (la griglia
+standard è calibrata su barre ~orarie); passando un proprio `AlphaConfig` si
+mantiene il pieno controllo.  Per una configurazione per-modulo coerente in
+frequenza usare `forgedge.presets.forge_preset("balanced", timeframe="1D",
+asset=...)`.
 
 Sessioni multi-ticker con `forge_multi`:
 

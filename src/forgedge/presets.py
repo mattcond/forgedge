@@ -47,7 +47,7 @@ from .event_discovery.discovery import DiscoveryConfig
 from .event_discovery.models import GateParams
 from .rule_discovery.models import RuleDiscoveryConfig, SelectionCriteria
 
-__all__ = ["forge_preset", "preset_info", "PRESETS"]
+__all__ = ["forge_preset", "preset_info", "default_horizon_grid", "PRESETS"]
 
 
 # ── Timeframe parsing ─────────────────────────────────────────────────────────
@@ -117,6 +117,24 @@ class _TFClass:
         if self.cls == self.INTRADAY:
             return round(daily_dispersion * 0.45, 2)
         return round(daily_dispersion * 0.20, 2)
+
+
+def default_horizon_grid(timeframe: str) -> Optional[Tuple[int, ...]]:
+    """Timeframe-calibrated horizon grid for ``forge()``'s default AlphaConfig.
+
+    ``AlphaConfig.horizon_grid`` defaults to a grid calibrated on ~hourly bars
+    (up to 48 bars ≈ 48 hours).  On a daily-or-slower timeframe the same grid
+    silently means holding periods of up to 48 *days* — the "silent footgun"
+    documented in ``docs/analysis/lowfreq_robustness.md``.  This helper returns
+    the presets' class-calibrated grid when the bar duration is one day or
+    longer, and ``None`` otherwise (including unparseable timeframes), meaning
+    "keep the AlphaConfig default".
+    """
+    try:
+        tf = _TFClass(timeframe)
+    except ValueError:
+        return None
+    return tf.horizon_grid if tf.cls == _TFClass.DAILY else None
 
 
 # ── Preset definitions (daily-calibrated) ─────────────────────────────────────

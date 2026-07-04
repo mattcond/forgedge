@@ -31,6 +31,15 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "ADA_1D_TRAIN.parquet"
 # Golden values re-pinned after fix #134 (episode counting as default, PR #138).
 # Event IDs changed because episode-mode gate reorders candidate numbering;
 # the underlying expressions, signals, and RD metrics are unchanged.
+#
+# AD/RD golden values re-pinned again after the timeframe-scaled default
+# horizon grid: forge(timeframe="1D") now scans the daily-calibrated grid
+# (1, 2, 3, 5, 7, 10) instead of the hourly default (1..48), so every derived
+# target on this 1D fixture changed (the previous golden contracts selected
+# h*=16, which no longer exists in the grid).  The whole-table monthly stats
+# fix in rule_discovery.backtest._month_index (final month no longer dropped)
+# also shifts the RD in-sample summary.  Event Discovery goldens are
+# untouched — Modulo 1 never sees the horizon grid.
 _ED_GOLDEN_ID = "EVT-close_ret_03-ID-0000"
 _ED_GOLDEN = {
     "expression":           "close_ret_03 < -0.138425",
@@ -42,36 +51,36 @@ _ED_GOLDEN = {
     "n_components":         1,
 }
 
-_AD_GOLDEN_CANDIDATE_ID = "EVT-close_vol_05-DL-0281"
+_AD_GOLDEN_CANDIDATE_ID = "EVT-ratio_close_ret03_re-PR-0527"
 _AD_GOLDEN = {
-    "expression":   "delta_close_vol_05_12 < -0.0257995",
+    "expression":   "pr_ratio_close_ret03_ret96_96 < 0.166667",
     "direction":    "short",
-    "h_star":       16,
-    "sell_pct":     pytest.approx(0.1403, rel=1e-4),
-    "lift":         pytest.approx(0.139807, rel=1e-3),
-    "n_activations": 92,
+    "h_star":       5,
+    "sell_pct":     pytest.approx(0.059684, rel=1e-4),
+    "lift":         pytest.approx(0.072515, rel=1e-3),
+    "n_activations": 93,
     "promoted":     True,
     "status":       "HYPOTHESIS",
 }
 
 _RD_GOLDEN = {
     "verdict":        "EDGE",
-    "profit_factor":  pytest.approx(2.7587, rel=1e-3),
-    "total_trades":   109,
-    "expectancy":     pytest.approx(0.057913, rel=1e-3),
+    "profit_factor":  pytest.approx(2.0042, rel=1e-3),
+    "total_trades":   105,
+    "expectancy":     pytest.approx(0.019196, rel=1e-3),
 }
 
 # A deterministic *long* contract under the default PROJ_LOG target_mode (issue
 # #109).  The golden short contract above reverts to ABS (short → ABS), so this
 # pins the PROJ_LOG long path.
-_AD_GOLDEN_LONG_CANDIDATE_ID = "EVT-ratio_close_vol05_vo-ZS-1160"
+_AD_GOLDEN_LONG_CANDIDATE_ID = "EVT-close_ret_03-DL-0062"
 _AD_GOLDEN_LONG = {
-    "expression":    "zs_ratio_close_vol05_vol24_96 > 1",
+    "expression":    "delta_close_ret_03_1 > 0.07038",
     "direction":     "long",
-    "h_star":        16,
-    "sell_pct":      pytest.approx(0.198542, rel=1e-4),
-    "lift":          pytest.approx(0.144720, rel=1e-3),
-    "n_activations": 106,
+    "h_star":        3,
+    "sell_pct":      pytest.approx(0.056136, rel=1e-4),
+    "lift":          pytest.approx(0.160894, rel=1e-3),
+    "n_activations": 64,
     "promoted":      True,
     "status":        "HYPOTHESIS",
 }

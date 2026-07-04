@@ -70,7 +70,7 @@ KPI Table (OHLCV + technical indicators)
 | Module 1 never sees the forward return | Look-ahead bias in event selection |
 | Thresholds are immutable after discovery | Threshold optimisation on the evaluation sample |
 | Target horizon, direction, and take-profit are derived from data per event | Economic assumptions pre-baking the result |
-| OOS validation is a formal gate, not an optional check | Post-hoc confirmation of a foregone conclusion |
+| The tradeable verdict is gated by walk-forward OOS (Module 3); Alpha's OOS confirmation is recorded on every contract | Post-hoc confirmation of a foregone conclusion |
 
 ---
 
@@ -101,6 +101,12 @@ for contract, response in result.edges():       # EDGE / PARTIAL-EDGE only
     print(contract.alpha_id, response.verdict)
 print(result.registry.summary())                # Module 4 — catalogued rules
 ```
+
+On a daily-or-slower `timeframe` the default holding-period grid is
+automatically replaced by a daily-calibrated one (the stock grid is calibrated
+on ~hourly bars); passing your own `AlphaConfig` keeps full control.  For
+frequency-consistent per-module configuration use
+`forgedge.presets.forge_preset("balanced", timeframe="1D", asset=...)`.
 
 Multi-ticker sessions with `forge_multi`:
 

@@ -477,14 +477,25 @@ def _summarise_arrays(
 
 
 def _month_index(ts_from, ts_to, dt: np.ndarray) -> pd.PeriodIndex:
-    """Months spanned by the entry window (defaults to the candle span)."""
-    if ts_from is None:
-        ts_from = pd.Timestamp(dt.min())
-    if ts_to is None:
-        ts_to = pd.Timestamp(dt.max())
-    start = pd.Timestamp(ts_from).to_period("M")
-    end = pd.Timestamp(ts_to).to_period("M")
-    n = max((end.year - start.year) * 12 + (end.month - start.month), 1)
+    """Months spanned by the entry window (defaults to the candle span).
+
+    The entry window is ``[from, to)``: when ``ts_to`` is given, the last
+    countable month is the one containing ``ts_to - 1ns`` — so a month-aligned
+    exclusive bound (e.g. ``"2025-04-01"``) does not add the month it names,
+    while a mid-month bound still counts its (partial) final month.  When
+    ``ts_to`` is ``None`` the window closes at the last candle, whose month is
+    a real, countable month.  Dropping that final month (the previous
+    behaviour) silently excluded its trades from every monthly statistic
+    (``tpm_mu``, ``zero_months``, ``c_norm``) on whole-table backtests.
+    """
+    start = (
+        pd.Timestamp(ts_from) if ts_from is not None else pd.Timestamp(dt.min())
+    ).to_period("M")
+    if ts_to is not None:
+        end = (pd.Timestamp(ts_to) - pd.Timedelta(1, "ns")).to_period("M")
+    else:
+        end = pd.Timestamp(dt.max()).to_period("M")
+    n = max((end.year - start.year) * 12 + (end.month - start.month) + 1, 1)
     return pd.period_range(start, periods=n, freq="M")
 
 
