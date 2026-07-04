@@ -108,6 +108,12 @@ standard è calibrata su barre ~orarie); passando un proprio `AlphaConfig` si
 mantiene il pieno controllo.  Per una configurazione per-modulo coerente in
 frequenza usare `forgedge.presets.forge_preset("balanced", timeframe="1D",
 asset=...)`.
+La griglia di ogni evento viene inoltre **arricchita** con orizzonti a
+0.5×/1×/2× la finestra dominante del suo indicatore
+(`AlphaConfig.horizon_enrichment` — un'unione, mai una restrizione, con cap
+statistico perché le finestre di condizionamento lente non possano chiedere
+holding period non misurabili; le ipotesi aggiunte sono contate dal ledger e
+prezzate dal rotation null).
 
 Di default `forge()` esegue anche il **fast rotation null a livello di
 ricerca** — la distribuzione nulla esatta del miglior eccesso standardizzato

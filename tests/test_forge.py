@@ -298,7 +298,10 @@ class TestForgeFastNullAndLedger:
         assert led.m2_promoted == len(result.promoted)
         if result.rule_responses:
             assert led.m3_grid_cells == len(result.rule_responses[0][1].grid_results)
-        assert led.m2_surface == led.m1_candidates * led.m2_horizons
+        # With the per-event horizon enrichment the exact return-test count is
+        # recorded and is at least the uniform candidates × base-grid product.
+        assert led.m2_return_tests == result.alpha_discovery.n_return_tests
+        assert led.m2_surface >= led.m1_candidates * led.m2_horizons
         assert str(led.m1_candidates) in led.describe()
 
     def test_full_edge_requires_clearing_the_null(self, result):

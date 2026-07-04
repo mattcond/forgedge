@@ -366,13 +366,16 @@ class TestAlphaDiscoveryEndToEnd:
                 assert dt.sell_pct > 0          # MFE-based, always positive
 
     def test_target_profile_covers_grid(self, fitted):
+        # The per-horizon profile covers at least the base grid; the horizon
+        # enrichment may add structure-derived horizons per event (union).
         _, _, ad, contracts = fitted
         grid = set(ad.config.horizon_grid)
         for c in contracts[:10]:
-            assert set(c.derived_target.advantage_by_h) == grid
-            assert set(c.derived_target.t_stat_by_h) == grid
-            assert set(c.derived_target.score_by_h) == grid
-            assert c.derived_target.holding_period_h in grid
+            profile = set(c.derived_target.advantage_by_h)
+            assert profile >= grid
+            assert set(c.derived_target.t_stat_by_h) == profile
+            assert set(c.derived_target.score_by_h) == profile
+            assert c.derived_target.holding_period_h in profile
 
     def test_promoted_alpha_has_lift_and_oos_confirmation(self, fitted):
         _, _, ad, _ = fitted

@@ -55,10 +55,19 @@ class HypothesisLedger:
     m2_horizons: int = 0
     m2_promoted: int = 0
     m3_grid_cells: int = 0
+    # Exact count of (candidate, horizon) tests when the per-event horizon
+    # enrichment makes the grid non-uniform; 0 = fall back to the product.
+    m2_return_tests: int = 0
 
     @property
     def m2_surface(self) -> int:
-        """Return-hypotheses tested by Alpha Discovery (candidates × horizons)."""
+        """Return-hypotheses tested by Alpha Discovery.
+
+        The exact per-event count when recorded (horizon enrichment makes
+        grids non-uniform), else ``candidates × base horizons``.
+        """
+        if self.m2_return_tests:
+            return self.m2_return_tests
         return self.m1_candidates * self.m2_horizons
 
     @property
@@ -73,9 +82,15 @@ class HypothesisLedger:
 
     def describe(self) -> str:
         """One-line human-readable summary of the surface."""
+        grid = (
+            f"{self.m2_horizons}(+enriched) horizons"
+            if self.m2_return_tests
+            and self.m2_return_tests != self.m1_candidates * self.m2_horizons
+            else f"{self.m2_horizons} horizons"
+        )
         return (
             f"hypothesis surface: {self.m1_candidates} candidates × "
-            f"{self.m2_horizons} horizons = {self.m2_surface} return-tests; "
+            f"{grid} = {self.m2_surface} return-tests; "
             f"{self.m2_promoted} promoted; ~{max(self.m3_grid_cells, 0)} grid "
             f"cells/rule (total ≲ {self.total_surface})"
         )

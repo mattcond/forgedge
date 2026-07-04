@@ -384,6 +384,28 @@ class AlphaConfig:
         confirmation starts ``embargo_bars`` bars after the split.  Default
         ``0`` (the purge already removes the mechanical forward-window
         overlap; the embargo additionally guards against serial correlation).
+    horizon_enrichment : tuple of float or None
+        Per-event horizon-grid enrichment from the event's structural
+        timescale.  For every candidate, the horizons
+        ``round(m · w)`` for each multiplier ``m`` — where ``w`` is
+        ``EventCandidate.dominant_window()``, the slowest indicator/transform
+        window in the event's conditioning info — are **added** to the base
+        ``horizon_grid`` (union, never a restriction), so an ``ema_9`` event
+        also scans h ≈ 5/9/18 even when the base grid skips them.  The
+        default multipliers ``(0.5, 1.0, 2.0)`` cover the empirically
+        supported band (reaction-type events resolve in about half the
+        window; cycle-type in one to two windows).  Enriched horizons are
+        capped at ``split // horizon_enrichment_min_obs`` so a slow
+        conditioning window (e.g. a 168-bar percentile rank) cannot demand
+        holding periods the in-sample data cannot statistically support.
+        The added hypotheses are counted by the session ledger and priced by
+        the search-level rotation null like any other.  ``None`` or ``()``
+        disables enrichment (base grid only).
+    horizon_enrichment_min_obs : int
+        Statistical cap for enriched horizons: an added ``h`` must leave at
+        least this many non-overlapping forward windows in the IS span
+        (``h <= split // min_obs``).  Default ``20``.  Never restricts the
+        base ``horizon_grid``.
     thresholds : PromotionThresholds
         Admission / promotion gates.
     asset, exchange, timeframe : str
@@ -466,6 +488,8 @@ class AlphaConfig:
     mfe_floor: float = 0.005
     train_ratio: float = 0.7
     embargo_bars: int = 0
+    horizon_enrichment: Optional[Tuple[float, ...]] = (0.5, 1.0, 2.0)
+    horizon_enrichment_min_obs: int = 20
     thresholds: PromotionThresholds = field(default_factory=PromotionThresholds)
     asset: str = "ASSET"
     exchange: str = ""
@@ -658,6 +682,11 @@ class AlphaContract:
     # rotation_threshold : q(1-alpha) null bar used for this run's best statistic.
     rotation_p: Optional[float] = None
     rotation_threshold: Optional[float] = None
+    # Structural timescale of the event (EventCandidate.dominant_window):
+    # the slowest indicator/transform window in the conditioning info, in
+    # bars.  Recorded for audit (e.g. h* vs window analyses) and used by the
+    # horizon-grid enrichment.  0 = no window inferable.
+    dominant_window: int = 0
 
     handoff_status: str = "PENDING_RULE_DISCOVERY"
     rule_discovery_response: Optional[dict] = None

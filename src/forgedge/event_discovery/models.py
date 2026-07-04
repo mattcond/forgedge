@@ -593,6 +593,33 @@ class EventCandidate:
             return pd.Series(float("nan"), index=df.index)
         return result
 
+    def dominant_window(self) -> int:
+        """Slowest timescale (in bars) embedded in the event's conditioning info.
+
+        The maximum across every component of (a) the transform window
+        (``transform_params["window"]`` — pctrank/zscore/delta lookbacks) and
+        (b) any integer embedded in the source-feature name per the KPI-builder
+        naming convention (``close_ema_12`` → 12, ``close_ret_03`` → 3,
+        ``close_bb_width_20`` → 20).  For AND compositions the slowest
+        component wins — the composed pattern is defined at that scale.
+
+        A structural, outcome-independent property: it reads only how the
+        event is *built*, never what follows it, so it is safe to use as a
+        prior (e.g. to enrich the Alpha Discovery horizon grid).  Returns
+        ``0`` when no window can be inferred (e.g. plain binary columns).
+        """
+        import re
+
+        w = 0
+        for comp in self.components:
+            params = comp.transform_params or {}
+            tw = params.get("window")
+            if tw:
+                w = max(w, int(tw))
+            for tok in re.findall(r"(\d+)", comp.source_feature or ""):
+                w = max(w, int(tok))
+        return w
+
     def to_dict(self) -> dict:
         """Serialise the candidate to a flat dictionary for DataFrame construction.
 

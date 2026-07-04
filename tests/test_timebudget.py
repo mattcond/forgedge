@@ -265,7 +265,13 @@ class TestForgeWiring:
         tb = res.time_budget
         assert tb is not None
         assert tb.split == res.alpha_discovery.split_idx
-        assert tb.purge_bars == max(res.alpha_discovery.config.horizon_grid)
+        # The purge width covers the largest scanned horizon — at least the
+        # base grid's max, possibly more when the enrichment added horizons.
+        assert tb.purge_bars >= max(res.alpha_discovery.config.horizon_grid)
+        scanned = {
+            h for c in res.contracts for h in c.derived_target.t_stat_by_h
+        }
+        assert tb.purge_bars == max(scanned)
 
     def test_explicit_budget_drives_m1_and_m2(self):
         kpi = _forge_kpi()
