@@ -25,7 +25,7 @@ import pandas as pd
 
 from .analysis import excursion_stats
 from .backtest import _as_datetime64, _PreparedCandles, optimistic_hit_col, run_backtest
-from .grid import run_grid, select_best
+from .grid import build_grid, run_grid, select_best
 from .models import (
     BacktestParams,
     ExecutionEnvelope,
@@ -122,6 +122,22 @@ def walk_forward(
     if not bounds:
         return None
 
+    # ── Purge / embargo widths (in bars → wall-clock via the bar duration) ──
+    # A trade entered in the last bars of a train window fills and exits
+    # *inside* the adjacent test window (run_backtest deliberately lets the
+    # fill/exit scans reach past timerange_to), so the parameter selection
+    # would be scored on test prices.  Purge the train tail by the worst-case
+    # trade span of the resolved grid; optionally embargo the test head.
+    resolved = build_grid(spec, base)
+    if cfg.purge_bars is not None:
+        purge_bars = max(int(cfg.purge_bars), 0)
+    else:
+        purge_bars = (
+            max(resolved.target_h) + max(resolved.buy_delay_bar) + 1
+        )  # +1: the entry acts on the bar after the signal
+    embargo_bars = max(int(getattr(cfg, "embargo_bars", 0)), 0)
+    delta = _bar_delta(candle, timestamp_col)
+
     # Extract the per-bar candle arrays once for the whole walk-forward — every
     # train grid screening and test-window backtest below reuses them.
     prep = _PreparedCandles(candle, signal_col, timestamp_col)
@@ -131,8 +147,10 @@ def walk_forward(
     high_trades: List[pd.DataFrame] = []
 
     for idx, (tr_from, tr_to, te_from, te_to) in enumerate(bounds):
-        tr_from_s, tr_to_s = _fmt(tr_from), _fmt(tr_to)
-        te_from_s, te_to_s = _fmt(te_from), _fmt(te_to)
+        tr_to_eff = max(pd.Timestamp(tr_from), pd.Timestamp(tr_to) - purge_bars * delta)
+        te_from_eff = min(pd.Timestamp(te_to), pd.Timestamp(te_from) + embargo_bars * delta)
+        tr_from_s, tr_to_s = _fmt(tr_from), _fmt(tr_to_eff)
+        te_from_s, te_to_s = _fmt(te_from_eff), _fmt(te_to)
 
         # ── select parameters on the train window ──
         if cfg.reoptimise:
@@ -255,5 +273,17 @@ def _avg_holding(trades: Optional[pd.DataFrame]) -> Optional[float]:
     return float(hold.mean()) if hold.size else None
 
 
+def _bar_delta(candle: pd.DataFrame, timestamp_col: str) -> pd.Timedelta:
+    """Median bar duration, for converting bar counts to wall-clock spans."""
+    dt = pd.Series(_as_datetime64(candle[timestamp_col]))
+    if len(dt) > 1:
+        med = dt.diff().median()
+        if pd.notna(med) and med > pd.Timedelta(0):
+            return med
+    return pd.Timedelta(hours=1)
+
+
 def _fmt(ts: pd.Timestamp) -> str:
-    return pd.Timestamp(ts).strftime("%Y-%m-%d")
+    # Full resolution: purge/embargo boundaries are generally not
+    # midnight-aligned (they are bar-count offsets from a month boundary).
+    return pd.Timestamp(ts).strftime("%Y-%m-%d %H:%M:%S")

@@ -95,6 +95,12 @@ multiple-testing exposure*, not arithmetic.
 
 4. **Purged + embargoed splits** for Alpha confirmation and the walk-forward, so adjacent
    windows don't leak through overlapping forward-return horizons. *(higher effort)*
+   **[IMPLEMENTED]** `forgedge.timebudget.TimeBudget` — Alpha Discovery purges
+   the last `h` IS bars per horizon (forward window crosses the split) and
+   supports an OOS embargo (`AlphaConfig.embargo_bars`); the Rule Discovery
+   walk-forward purges each train window by the resolved grid's worst-case
+   trade span (`WalkForwardConfig.purge_bars`/`embargo_bars`).  Purge is on by
+   default; `forge(time_budget=...)` imposes one shared axis on M1+M2.
 
 ## Caveats
 

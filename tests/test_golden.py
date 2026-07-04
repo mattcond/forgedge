@@ -57,7 +57,10 @@ _AD_GOLDEN = {
     "direction":    "short",
     "h_star":       5,
     "sell_pct":     pytest.approx(0.059684, rel=1e-4),
-    "lift":         pytest.approx(0.072515, rel=1e-3),
+    # lift re-pinned 0.072515 → 0.069682 with the TimeBudget purge: the last
+    # h* IS bars are excluded from the win-rate/base-rate (their forward
+    # window crosses into the OOS tail).  Every other pin is unchanged.
+    "lift":         pytest.approx(0.069682, rel=1e-3),
     "n_activations": 93,
     "promoted":     True,
     "status":       "HYPOTHESIS",

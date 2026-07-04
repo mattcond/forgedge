@@ -61,6 +61,7 @@ from ..alpha_discovery.discovery import AlphaDiscovery
 from ..alpha_discovery.models import AlphaConfig, AlphaContract
 from ..alpha_discovery.target import forward_log_returns, forward_returns
 from ..event_discovery.models import EventCandidate
+from ..timebudget import TimeBudget
 from .models import CalibrationReport
 
 logger = logging.getLogger(__name__)
@@ -101,11 +102,13 @@ class FastRotationNull:
         ed_df: "pd.DataFrame",
         cands: List[EventCandidate],
         config: AlphaConfig,
+        time_budget: Optional[TimeBudget] = None,
     ) -> None:
         # Reuse AlphaDiscovery's frame preparation and event-series replay so
         # activations and the close series are bit-for-bit the real run's.
-        self._ad = AlphaDiscovery(ed_df, cands, config)
+        self._ad = AlphaDiscovery(ed_df, cands, config, time_budget=time_budget)
         self._cands = list(cands)
+        self._time_budget = time_budget
 
     # ------------------------------------------------------------------
 
@@ -136,7 +139,13 @@ class FastRotationNull:
         horizons = [int(h) for h in cfg.horizon_grid]
         close = self._ad._frame[cfg.close_col].astype(float)
         n = len(close)
-        split = min(max(int(round(n * cfg.train_ratio)), 0), n)
+        budget = self._time_budget or TimeBudget.build(
+            n_bars=n,
+            train_ratio=cfg.train_ratio,
+            horizon_bars=max(horizons),
+            embargo_bars=cfg.embargo_bars,
+        )
+        split = budget.split
 
         report_nan = CalibrationReport(
             k=0, alpha=alpha, real_stats={"abs_z": float("nan")},
@@ -149,8 +158,17 @@ class FastRotationNull:
             return report_nan
 
         # ── In-sample forward log-returns, exactly as AlphaDiscovery.run ──
-        F_is = forward_returns(close, horizons).to_numpy()[:split]
-        L_is = forward_log_returns(close, horizons).to_numpy()[:split]
+        # (including the time budget's boundary purge, so row 0 keeps
+        # reproducing the contracts' t_stat_by_h bit-for-bit).
+        fwd = forward_returns(close, horizons)
+        logfwd = forward_log_returns(close, horizons)
+        for j, h in enumerate(horizons):
+            lo, hi = budget.purge_slice(h)
+            if hi > lo:
+                fwd.iloc[lo:hi, j] = np.nan
+                logfwd.iloc[lo:hi, j] = np.nan
+        F_is = fwd.to_numpy()[:split]
+        L_is = logfwd.to_numpy()[:split]
         valid_is = np.isfinite(F_is) & np.isfinite(L_is)
         L0 = np.where(valid_is, L_is, 0.0)
         cnt_t = valid_is.sum(axis=0).astype(float)
