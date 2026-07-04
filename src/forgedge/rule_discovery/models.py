@@ -243,6 +243,25 @@ class SelectionCriteria:
         rules that merely won the multiple-testing lottery at ``PARTIAL-EDGE``.
         Inert when the contract carries no annotation (standalone Rule
         Discovery, or ``forge(fast_null=False)``).
+    power_gate : bool
+        §3.2 — power-aware verdicts.  When ``True`` (default) a verdict that
+        would be ``EDGE`` / ``PARTIAL-EDGE`` is degraded to
+        ``INSUFFICIENT-DATA`` when the out-of-sample evidence cannot support
+        it: no walk-forward was possible, the **pooled** OOS trade count is
+        below ``min_oos_trades``, or the pooled OOS sample's minimum
+        detectable expectancy exceeds the in-sample expectancy being claimed
+        (the OOS could not confirm an effect of that size even if it were
+        real).  The assessment reads only the *concatenated* test-window
+        ledger — never per-window counts: walk-forward windows are short by
+        design and are not individually gated.  ``NON-EDGE`` verdicts are
+        never rescued (the operational consequence — do not trade — is the
+        same either way).  ``INSUFFICIENT-DATA`` keeps its ``ValidatedRule``
+        for future re-evaluation but is not tradeable (``is_edge`` is
+        ``False``) and never reaches the Rule Registry.
+    min_oos_trades : int
+        Minimum pooled walk-forward test trades (across **all** test windows)
+        for a confident positive verdict.  Below it the verdict is
+        ``INSUFFICIENT-DATA``.  Never applied per window.
     early_elimination : bool
         When ``True`` (default), a rule that fails the fast in-sample screen
         (Step 2.3 — too few trades, losing in-sample, or unfillable) is rejected
@@ -266,6 +285,8 @@ class SelectionCriteria:
     min_dsr: float = 1.0
     max_ttest_p: float = 0.05
     max_rotation_p: float = 0.05
+    power_gate: bool = True
+    min_oos_trades: int = 10
     early_elimination: bool = True
 
 
@@ -652,12 +673,16 @@ class RuleDiscoveryResponse:
     """Verdict and full evidence produced by Rule Discovery (Section 8).
 
     This is the artifact handed to Rule Registry.  ``verdict`` is one of
-    ``EDGE`` / ``PARTIAL-EDGE`` / ``NON-EDGE``; ``validated_rule`` is populated
-    only for the first two.
+    ``EDGE`` / ``PARTIAL-EDGE`` / ``NON-EDGE`` / ``INSUFFICIENT-DATA``.
+    ``INSUFFICIENT-DATA`` (§3.2) is a would-be positive verdict whose pooled
+    out-of-sample evidence is too thin to confirm it: the rule is **not
+    tradeable** (``is_edge`` is ``False``, it never reaches the Rule
+    Registry) but keeps its ``validated_rule`` so it can be re-evaluated when
+    more data exists.  ``validated_rule`` is ``None`` only for ``NON-EDGE``.
     """
 
     date: str
-    verdict: str  # "EDGE" | "PARTIAL-EDGE" | "NON-EDGE"
+    verdict: str  # "EDGE" | "PARTIAL-EDGE" | "NON-EDGE" | "INSUFFICIENT-DATA"
     alpha_id: str
     asset: str
     timeframe: str
@@ -676,6 +701,8 @@ class RuleDiscoveryResponse:
     # ------------------------------------------------------------------
     @property
     def is_edge(self) -> bool:
+        """Tradeable verdict — ``INSUFFICIENT-DATA`` is deliberately *not*
+        tradeable (unconfirmed ≠ confirmed)."""
         return self.verdict in ("EDGE", "PARTIAL-EDGE")
 
     def to_dict(self) -> dict:

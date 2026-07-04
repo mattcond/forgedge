@@ -124,7 +124,8 @@ def text_report(resp: RuleDiscoveryResponse) -> str:
 def html_report(resp: RuleDiscoveryResponse) -> str:
     """Self-contained HTML verdict report (inline CSS, no external assets)."""
     s = resp.in_sample_summary
-    badge = {"EDGE": "#27ae60", "PARTIAL-EDGE": "#f39c12", "NON-EDGE": "#c0392b"}.get(
+    badge = {"EDGE": "#27ae60", "PARTIAL-EDGE": "#f39c12", "NON-EDGE": "#c0392b",
+             "INSUFFICIENT-DATA": "#5d6d7e"}.get(
         resp.verdict, "#7f8c8d"
     )
     parts: List[str] = []
