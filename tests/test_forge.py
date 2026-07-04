@@ -257,6 +257,60 @@ class TestForgeTimeframeScaledHorizons:
         assert default_horizon_grid("junk") is None
 
 
+class TestForgeFastNullAndLedger:
+    """Default fast rotation null + hypothesis ledger wiring."""
+
+    @pytest.fixture(scope="class")
+    def result(self):
+        return forge(
+            _ohlc_kpi_table(),
+            ticker="SYN",
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            progress=False,
+        )
+
+    def test_fast_null_runs_by_default(self, result):
+        assert result.calibration is not None
+        assert result.calibration.tippett_best_stat == "abs_z"
+        for c in result.promoted:
+            assert c.rotation_p is not None
+            assert c.rotation_threshold is not None
+
+    def test_fast_null_off_skips_annotation(self):
+        res = forge(
+            _ohlc_kpi_table(),
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            run_rule_discovery=False,
+            fast_null=False,
+            progress=False,
+        )
+        assert res.calibration is None
+        assert all(c.rotation_p is None for c in res.promoted)
+
+    def test_ledger_records_surface(self, result):
+        led = result.ledger
+        assert led is not None
+        assert led.m1_candidates == len(result.candidates)
+        assert led.m2_horizons == len(result.alpha_discovery.config.horizon_grid)
+        assert led.m2_promoted == len(result.promoted)
+        if result.rule_responses:
+            assert led.m3_grid_cells == len(result.rule_responses[0][1].grid_results)
+        assert led.m2_surface == led.m1_candidates * led.m2_horizons
+        assert str(led.m1_candidates) in led.describe()
+
+    def test_full_edge_requires_clearing_the_null(self, result):
+        # Any full-EDGE verdict must come from a contract that cleared the
+        # search-level null bar; capped rules carry the reason.
+        for contract, resp in result.rule_responses:
+            if resp.verdict == "EDGE":
+                assert contract.rotation_p <= 0.05
+            elif any("rotation null" in r for r in resp.rejection_reasons):
+                assert contract.rotation_p > 0.05
+
+
 class TestForgeGradeFilter:
     """rule_discovery_grades restricts which alphas reach Rule Discovery."""
 

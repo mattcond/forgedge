@@ -109,6 +109,15 @@ mantiene il pieno controllo.  Per una configurazione per-modulo coerente in
 frequenza usare `forgedge.presets.forge_preset("balanced", timeframe="1D",
 asset=...)`.
 
+Di default `forge()` esegue anche il **fast rotation null a livello di
+ricerca** — la distribuzione nulla esatta del miglior eccesso standardizzato
+su ogni offset circolare, calcolata via FFT in ~secondi — e un verdetto `EDGE`
+pieno richiede in aggiunta di batterla (`rotation_p <= 0.05`): una regola che
+ha solo vinto la lotteria del multiple testing della propria sessione di
+discovery viene declassata a `PARTIAL-EDGE`.  La superficie di ipotesi della
+sessione è registrata su `ForgeResult.ledger`; disattivabile con
+`fast_null=False`.
+
 Sessioni multi-ticker con `forge_multi`:
 
 ```python

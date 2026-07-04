@@ -193,7 +193,7 @@ class RuleDiscovery:
 
         best_params = best.params
         is_summary = best.summary
-        n_trials = len(grid_results)
+        n_trials = len(grid_results) * max(1, int(getattr(cfg, "n_trials_upstream", 1)))
 
         # Re-run to obtain the trade ledger for the winning configuration.
         is_summary, is_trades = run_backtest(
@@ -631,6 +631,16 @@ class RuleDiscovery:
         if stat_val is not None and np.isfinite(stat_val.deflated_sharpe) \
                 and stat_val.deflated_sharpe < cr.min_dsr:
             edge_block.append(f"DSR {stat_val.deflated_sharpe:.2f} < {cr.min_dsr}")
+        # A finite Sharpe whose deflation is undefined means the selection
+        # haircut's radicand went negative — n_trials too large for n_obs, the
+        # Sharpe is "not credible" per the spec.  Previously this silently
+        # skipped the DSR gate; degrade honestly instead.
+        if stat_val is not None and np.isfinite(stat_val.sharpe_ratio) \
+                and not np.isfinite(stat_val.deflated_sharpe):
+            edge_block.append(
+                f"DSR undefined — selection bias too severe "
+                f"(n_trials={stat_val.n_trials_tested} vs n_obs={s.total_trades})"
+            )
         if stat_val is not None and stat_val.temporal_stability == "FAIL":
             edge_block.append("temporal stability FAIL")
         if regime is not None and np.isfinite(regime.dependency_score) \
@@ -640,6 +650,16 @@ class RuleDiscovery:
             )
         if wf is not None and wf.consistency < 0.5:
             edge_block.append(f"OOS consistency {wf.consistency:.2f} < 0.5")
+        # Search-level rotation null (annotated on the contract by
+        # FastRotationNull / RotationCalibrator): a full EDGE must beat the
+        # multiple-testing surface of its own discovery session.  Inert when
+        # the contract carries no annotation.
+        rot_p = getattr(self.contract, "rotation_p", None)
+        if rot_p is not None and np.isfinite(rot_p) and rot_p > cr.max_rotation_p:
+            edge_block.append(
+                f"search-level rotation null not cleared "
+                f"(rotation_p={rot_p:.4f} > {cr.max_rotation_p})"
+            )
 
         if edge_block:
             return "PARTIAL-EDGE", edge_block

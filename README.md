@@ -108,6 +108,14 @@ on ~hourly bars); passing your own `AlphaConfig` keeps full control.  For
 frequency-consistent per-module configuration use
 `forgedge.presets.forge_preset("balanced", timeframe="1D", asset=...)`.
 
+By default `forge()` also runs the **fast search-level rotation null** — the
+exact null distribution of the best standardised excess over every circular
+offset, computed via FFT in ~seconds — and a full `EDGE` verdict additionally
+requires beating it (`rotation_p <= 0.05`): a rule that only won the
+multiple-testing lottery of its own discovery session is capped at
+`PARTIAL-EDGE`.  The session's hypothesis surface is recorded on
+`ForgeResult.ledger`; disable with `fast_null=False`.
+
 Multi-ticker sessions with `forge_multi`:
 
 ```python

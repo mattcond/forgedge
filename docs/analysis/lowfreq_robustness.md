@@ -80,6 +80,14 @@ multiple-testing exposure*, not arithmetic.
    through Alpha Discovery and promote only the excess over the surrogate count
    distribution. This auto-adapts to frequency and directly fixes result (1). The harness
    in `examples/lowfreq_null_diagnostic.py` is a working prototype. *(medium)*
+   **[IMPLEMENTED]** `calibration.FastRotationNull` computes the exact
+   search-level rotation null over every circular offset (FFT
+   cross-correlation, ~1 s on this dataset — no K, no seed), runs by default
+   inside `forge()`, and Rule Discovery now requires clearing it
+   (`SelectionCriteria.max_rotation_p`) for a full EDGE verdict.  On this ADA
+   dataset the search p is ≈ 0.70: every former EDGE is honestly capped at
+   PARTIAL-EDGE.  The session's multiple-testing surface is recorded on
+   `ForgeResult.ledger` (`forgedge.ledger.HypothesisLedger`).
 
 3. **Minimum-sample guards with honest degradation.** Refuse/flag when IS bars per
    candidate, Alpha confirmation months, or trades-per-walk-forward-window fall below a
