@@ -23,12 +23,11 @@ Per rule the report contains:
 * monthly activation trend — in-sample months in gray, out-of-sample in blue,
   light bar = signals, dark part = executed trades;
 * gain/loss distribution with win/loss statistics;
-* return distributions — the forward return over the holding horizon,
-  oriented by direction (base vs event: this **is** the tradeable edge, the
-  quantity Alpha Discovery derives the target from), plus the same-bar
-  return of low/close/high (a different, non-predictive diagnostic — the
-  event's own intrabar signature); all Gaussian KDEs (pure numpy, Silverman
-  bandwidth);
+* return distributions — low/close/high, each the **forward** return over
+  the rule's own holding horizon (``target_h`` bars ahead of the signal bar,
+  anchored on that bar's close, oriented by direction — the same quantity
+  Alpha Discovery derives the target from and Rule Discovery trades), base
+  vs event, as Gaussian KDEs (pure numpy, Silverman bandwidth);
 * MAE → final net scatter (intra-trade risk of stop-less rules);
 * rolling expectancy (wall-clock window, edge-decay detector);
 * per-regime performance (when a ``regime`` column is present or computable);
@@ -229,16 +228,9 @@ def rule_performance_report(
     dates = [str(d.date()) for d in dts]
     n = len(frame)
     close = frame["close"].to_numpy(float)
+    low = frame["low"].to_numpy(float)
+    high = frame["high"].to_numpy(float)
     bh = (close / close[0] - 1.0) * 100.0
-
-    # Bar-over-bar % return of each price series, computed once and shared by
-    # every rule's return-distribution section (base vs event only differs by
-    # which bars are selected, not by how the return itself is defined).
-    bar_returns = {
-        "low": frame["low"].pct_change().to_numpy(float) * 100.0,
-        "close": frame["close"].pct_change().to_numpy(float) * 100.0,
-        "high": frame["high"].pct_change().to_numpy(float) * 100.0,
-    }
 
     regime_arr = _regime_series(frame, compute_regime, timestamp_col)
 
@@ -252,7 +244,7 @@ def rule_performance_report(
     sections = [_overview(computed, failed, dates, n, title)]
     for R in computed:
         sections.append(_rule_section(
-            R, bh, dates, dts, regime_arr, bar_returns, close,
+            R, bh, dates, dts, regime_arr, close, low, high,
             rolling_window, rolling_min_trades, recent_trades,
         ))
     sections.append(_footer_note(computed, dates))
@@ -634,47 +626,44 @@ def _return_dist_svg(base_ret: np.ndarray, event_ret: np.ndarray, fill_cls: str,
     )
 
 
-def _forward_oriented_return(close: np.ndarray, direction: str, h: int) -> np.ndarray:
+def _forward_oriented_return(anchor: np.ndarray, future: np.ndarray, direction: str, h: int) -> np.ndarray:
     """Forward return over ``h`` bars, oriented so "favourable" is positive.
 
-    ``(close[t+h] / close[t] - 1)``, sign-flipped for ``direction="short"`` —
-    the same convention Alpha Discovery uses to derive the target, and the
-    quantity whose base-vs-event shift is the actual tradeable edge (as
-    opposed to the bar-of-signal's own, same-bar return — see
-    :func:`_return_distribution_section`). The last ``h`` bars have no
-    complete forward window and are ``nan``.
+    ``(future[t+h] / anchor[t] - 1)``, sign-flipped for ``direction="short"``
+    — the same convention Alpha Discovery uses to derive the target. ``anchor``
+    is the entry-referenced price (``close``, the level the backtest's limit
+    offset and exit economics are anchored to); ``future`` is whichever price
+    is read at ``t+h`` — passing ``close`` for both reproduces the contract's
+    own derived-target return, while ``low``/``high`` as ``future`` read the
+    boundary price at the *same* forward horizon, not a same-bar return. The
+    last ``h`` bars have no complete forward window and are ``nan``.
     """
-    n = close.size
+    n = anchor.size
     fwd = np.full(n, np.nan)
     if h > 0 and h < n:
-        fwd[: n - h] = close[h:] / close[: n - h] - 1.0
+        fwd[: n - h] = future[h:] / anchor[: n - h] - 1.0
     return (-1.0 if direction == "short" else 1.0) * fwd * 100.0
 
 
-def _return_distribution_section(R, bar_returns, close) -> str:
-    """Return distributions, base vs event: the forward edge, then the
-    same-bar intrabar signature of low/close/high."""
+def _return_distribution_section(R, close, low, high) -> str:
+    """Low/close/high return distributions, base vs event — all measured as
+    the **forward** return over the rule's own holding horizon (``target_h``
+    bars ahead of the signal bar, anchored on that bar's close, oriented by
+    direction), never the signal bar's own same-bar return: the tradeable
+    edge lives in what happens *after* the event, and every series here must
+    share that one horizon to be comparable to the verdict."""
     active = R["active"]
     p = R["spec"].params
     h = int(p.target_h)
 
-    fwd = _forward_oriented_return(close, p.direction, h)
-    fwd_base_mask = np.isfinite(fwd)
-    fwd_event_mask = fwd_base_mask & active
-    fwd_base, fwd_event = fwd[fwd_base_mask], fwd[fwd_event_mask]
-    fwd_mean_b = float(np.mean(fwd_base)) if fwd_base.size else float("nan")
-    fwd_mean_e = float(np.mean(fwd_event)) if fwd_event.size else float("nan")
-    fwd_delta = fwd_mean_e - fwd_mean_b if np.isfinite(fwd_mean_e) and np.isfinite(fwd_mean_b) else float("nan")
-    fwd_delta_cls = "" if not np.isfinite(fwd_delta) else ("pos" if fwd_delta > 0 else "neg")
-    fwd_chart = _return_dist_svg(fwd_base, fwd_event, "distedge", "meanedge")
-
     series = [
-        ("Low", bar_returns["low"], "distlow", "meanlow"),
-        ("Close", bar_returns["close"], "distclose", "meanclose"),
-        ("High", bar_returns["high"], "disthigh", "meanhigh"),
+        ("Low", low, "distlow", "meanlow"),
+        ("Close", close, "distclose", "meanclose"),
+        ("High", high, "disthigh", "meanhigh"),
     ]
     charts, stat_rows = "", ""
-    for label, ret, fill_cls, mean_cls in series:
+    for label, future, fill_cls, mean_cls in series:
+        ret = _forward_oriented_return(close, future, p.direction, h)
         base_mask = np.isfinite(ret)
         event_mask = base_mask & active
         base_ret, event_ret = ret[base_mask], ret[event_mask]
@@ -692,29 +681,17 @@ def _return_distribution_section(R, bar_returns, close) -> str:
             f'<td>{_pctval(std_b)}</td><td>{_pctval(std_e)}</td></tr>'
         )
     return f"""
-<h2>Return distributions — base vs event</h2>
-
-<h3>Forward return over the holding horizon — the actual edge</h3>
-<p class="sub">The {h}-bar forward return, oriented so favourable is positive ({p.direction} flips the sign) —
-shown as a Gaussian KDE: unconditional (gray, "base") vs restricted to bars where the event is active (blue).
-This is the quantity Alpha Discovery derives the target from and Rule Discovery trades; a rightward shift of
-the event curve <b>is</b> the tradeable edge. It measures what happens <i>after</i> the event, not on the
-event's own bar — a real edge can (and often does) leave the event bar itself looking statistically ordinary,
-which is exactly what the same-bar charts below tend to show.</p>
-{fwd_chart}
-<div class="legend"><span><i style="background:var(--distbase)"></i>Base (all bars)</span>
-<span><i style="background:var(--blue)"></i>Event, oriented forward return</span></div>
-<table><tr><th>series</th><th>n base</th><th>n event</th><th>mean base</th><th>mean event</th><th>Δ mean</th></tr>
-<tr><td class="rl">Forward @ {h} bars</td><td>{fwd_base.size}</td><td>{fwd_event.size}</td>
-<td>{_pctval(fwd_mean_b)}</td><td>{_pctval(fwd_mean_e)}</td>
-<td class="{fwd_delta_cls}">{_pctval(fwd_delta)}</td></tr></table>
-
-<h3>Same-bar signature of low / close / high — not the edge</h3>
-<p class="sub">Bar-over-bar % return of low / close / high <b>on the bar the event fires on</b> — a same-bar,
-non-predictive diagnostic (does the event's own bar have an unusual shape, e.g. a wick or a gap?), shown as a
-Gaussian KDE. It is a different statistical object from the forward return above and is not expected to shift
-merely because the rule has a verdict: many events (this one included) are built from indicator conditions —
-e.g. a volatility ratio — with no particular reason to also perturb their own bar's price action.</p>
+<h2>Return distributions — base vs event, forward @ {h} bars</h2>
+<p class="sub">Low / close / high, each read <b>{h} bars ahead of the signal bar</b> and expressed as a return
+off that bar's close, oriented so favourable is positive ({p.direction} flips the sign) — shown as a Gaussian
+KDE: unconditional (gray, "base") vs restricted to bars where the event is active (colored). This is the same
+forward window Alpha Discovery derives the target from and Rule Discovery trades: a rightward shift of the
+event curve — in any of the three — is part of the tradeable edge. Close is the level the target/exit economics
+are anchored to; low and high show how the boundary prices behaved over that same horizon (e.g. an edge that
+shows up on close but not on high can indicate the move stalls before a deeper favourable excursion is
+reached). None of the three measures the signal bar's own same-bar return — that is a different, non-predictive
+diagnostic (does the event's own bar merely have an unusual shape?) that a real forward edge is not expected
+to leave any trace in.</p>
 {charts}
 <div class="legend"><span><i style="background:var(--distbase)"></i>Base (all bars)</span>
 <span><i style="background:var(--red)"></i>Low @ event</span>
@@ -841,7 +818,7 @@ ValidatedRule parameters · net returns (per-side fee included)</p>
 {rows}</table>"""
 
 
-def _rule_section(R, bh, dates, dts, regime_arr, bar_returns, close, window, min_trades, recent) -> str:
+def _rule_section(R, bh, dates, dts, regime_arr, close, low, high, window, min_trades, recent) -> str:
     spec, s, t, net = R["spec"], R["summary"], R["trades"], R["net"]
     p = spec.params
     wins, losses = net[net > 0], net[net < 0]
@@ -926,7 +903,7 @@ first sign of structural stability; the light/dark gap diagnoses the limit fill 
 <h2>Gain / loss distribution per trade</h2>
 {_hist_svg(R)}
 {stats_row}
-{_return_distribution_section(R, bar_returns, close)}
+{_return_distribution_section(R, close, low, high)}
 
 <h2>MAE → final net (intra-trade risk; no stop-loss)</h2>
 <p class="sub">One dot per trade: how far it went against the position (max adverse excursion from fill, x)
@@ -1023,12 +1000,10 @@ svg{width:100%;height:auto;display:block}
 .msig{fill:var(--blue-l)}.mtrd{fill:var(--mtrd)}.gsig{fill:var(--gsig)}.gtrd{fill:var(--gtrd)}
 .hpos{fill:var(--mtrd)}.hneg{fill:var(--red)}.hzero{fill:var(--gray)}
 .distbasearea{fill:var(--distbase);opacity:.35}.distbaseline{fill:none;stroke:var(--ink3);stroke-width:1.6}
-.distedgearea{fill:var(--blue);opacity:.3}.distedgeline{fill:none;stroke:var(--blue);stroke-width:2}
 .distlowarea{fill:var(--red);opacity:.3}.distlowline{fill:none;stroke:var(--red);stroke-width:2}
 .distclosearea{fill:var(--ochre);opacity:.3}.distcloseline{fill:none;stroke:var(--ochre);stroke-width:2}
 .disthigharea{fill:var(--green);opacity:.3}.disthighline{fill:none;stroke:var(--green);stroke-width:2}
 .meanbase{stroke:var(--ink3);stroke-width:1.5;stroke-dasharray:3 3}
-.meanedge{stroke:var(--blue);stroke-width:2}
 .meanlow{stroke:var(--red);stroke-width:2}.meanclose{stroke:var(--ochre);stroke-width:2}.meanhigh{stroke:var(--green);stroke-width:2}
 .dw{fill:var(--blue);opacity:.75}.dl{fill:var(--red);opacity:.8}
 .dw:hover,.dl:hover{opacity:1;stroke:var(--ink);stroke-width:1.5}

@@ -167,19 +167,21 @@ class TestReturnDistributions:
         spec = _spec(candles, "RULE_T1", "feat < 0.15")
         out = rule_performance_report([spec], candles, compute_regime=False)
         assert "Return distributions" in out
-        for cls in ("distbase", "distedge", "distlow", "distclose", "disthigh"):
+        for cls in ("distbase", "distlow", "distclose", "disthigh"):
             assert cls in out
-        assert "the actual edge" in out
-        assert "not the edge" in out
         assert "n event" in out
         assert "Δ mean" in out
+        h = spec.params.target_h
+        assert f"forward @ {h} bars" in out
 
-    def test_forward_edge_separates_from_same_bar_signature(self):
+    def test_forward_return_separates_from_same_bar_signature(self):
         # This mirrors a real diagnosis: an event built on a feature
         # unrelated to price (so its own bar looks statistically ordinary)
         # that genuinely predicts a move over the *next* h bars. The
         # same-bar (close) delta must stay small while the forward-return
-        # delta at the rule's target_h must show the injected shift.
+        # delta at the rule's target_h must show the injected shift — and
+        # that shift must show up on low/high too, not just close, since
+        # the report now measures all three the same way.
         n = 1500
         h = 20
         rng = np.random.default_rng(21)
@@ -205,21 +207,23 @@ class TestReturnDistributions:
         frame = _prepare_candles(df, "open_dt")
         active = _signal_series(spec, frame).to_numpy() > 0
         close_arr = frame["close"].to_numpy(float)
+        low_arr = frame["low"].to_numpy(float)
+        high_arr = frame["high"].to_numpy(float)
 
         ret_close = frame["close"].pct_change().to_numpy(float) * 100.0
         cb = np.isfinite(ret_close)
         same_bar_delta = ret_close[cb & active].mean() - ret_close[cb].mean()
+        assert abs(same_bar_delta) < 0.5  # event bar itself looks ordinary
 
-        fwd = _forward_oriented_return(close_arr, "long", h)
-        fb = np.isfinite(fwd)
-        forward_delta = fwd[fb & active].mean() - fwd[fb].mean()
-
-        assert abs(same_bar_delta) < 0.5          # event bar looks ordinary
-        assert forward_delta > 4.0                # the real, forward edge
+        for future in (low_arr, close_arr, high_arr):
+            fwd = _forward_oriented_return(close_arr, future, "long", h)
+            fb = np.isfinite(fwd)
+            forward_delta = fwd[fb & active].mean() - fwd[fb].mean()
+            assert forward_delta > 3.0  # the real, forward edge on every series
 
         out = rule_performance_report([spec], df, compute_regime=False)
         assert "RULE_FWD_EDGE" in out
-        assert f"Forward @ {h} bars" in out
+        assert f"forward @ {h} bars" in out
 
     def test_no_active_bars_degrades_gracefully(self):
         candles = _candles(n=300)
@@ -228,49 +232,65 @@ class TestReturnDistributions:
         assert "Return distributions" in out
         assert "RULE_NEVER" in out
 
-    def test_injected_close_shift_is_recovered(self):
+    def test_injected_forward_shift_is_recovered(self):
         # Deterministic check of the underlying computation (base vs event
-        # bar return), independent of HTML rendering: force a known positive
-        # close return specifically on event bars and verify the module's own
-        # base/event split recovers a mean shift close to the injected size.
-        from forgedge.rule_report import _prepare_candles, _signal_series
+        # forward return), independent of HTML rendering: force a known
+        # positive forward move specifically after event bars and verify the
+        # module's own base/event split recovers a mean shift close to the
+        # injected size, for low/close/high alike.
+        from forgedge.rule_report import (
+            _forward_oriented_return, _prepare_candles, _signal_series,
+        )
 
         n = 1200
+        h = 5
         rng = np.random.default_rng(11)
         feat = rng.uniform(0.0, 1.0, n)
         base_ret = rng.normal(0.0, 0.01, n)
         event = feat < 0.08
-        shifted_ret = base_ret.copy()
-        shifted_ret[event] += 0.05  # +5% extra close return at event bars
-        close = 100.0 * np.cumprod(1.0 + shifted_ret)
+        extra = np.zeros(n)
+        for i in np.where(event)[0]:
+            extra[i + 1: i + 1 + h] += 0.05 / h  # +5% extra move over the next h bars
+        close = 100.0 * np.cumprod(1.0 + base_ret + extra)
         df = pd.DataFrame({
             "open_dt": pd.date_range("2024-01-01", periods=n, freq="D"),
             "open": np.r_[close[0], close[:-1]],
             "high": close * 1.005, "low": close * 0.995, "close": close, "feat": feat,
         })
-        spec = _spec(df, "RULE_SHIFT", "feat < 0.08")
+        spec = _spec(df, "RULE_SHIFT", "feat < 0.08", target_h=h)
 
         out = rule_performance_report([spec], df, compute_regime=False)
         assert "Return distributions" in out
 
         frame = _prepare_candles(df, "open_dt")
-        sig_active = _signal_series(spec, frame).to_numpy() > 0
-        ret_close = frame["close"].pct_change().to_numpy(float) * 100.0
-        valid = np.isfinite(ret_close)
-        mean_base = ret_close[valid].mean()
-        mean_event = ret_close[valid & sig_active].mean()
-        assert mean_event - mean_base > 3.0  # ~5% injected, allow for noise
+        active = _signal_series(spec, frame).to_numpy() > 0
+        close_arr = frame["close"].to_numpy(float)
+        low_arr = frame["low"].to_numpy(float)
+        high_arr = frame["high"].to_numpy(float)
+
+        for future in (low_arr, close_arr, high_arr):
+            fwd = _forward_oriented_return(close_arr, future, "long", h)
+            valid = np.isfinite(fwd)
+            mean_base = fwd[valid].mean()
+            mean_event = fwd[valid & active].mean()
+            assert mean_event - mean_base > 3.0  # ~5% injected, allow for noise
 
     def test_stats_row_matches_computation(self):
-        # The n base / n event counts rendered must match the mask sizes.
-        from forgedge.rule_report import _prepare_candles, _signal_series
+        # The n base / n event counts rendered must match the forward-return
+        # mask sizes (last target_h bars have no complete forward window).
+        from forgedge.rule_report import (
+            _forward_oriented_return, _prepare_candles, _signal_series,
+        )
 
         candles = _candles(n=500, seed=9)
         spec = _spec(candles, "RULE_T9", "feat < 0.2")
+        h = spec.params.target_h
         frame = _prepare_candles(candles, "open_dt")
         active = _signal_series(spec, frame).to_numpy() > 0
-        n_base = int(np.isfinite(frame["close"].pct_change().to_numpy(float)).sum())
-        n_event = int((active & np.isfinite(frame["close"].pct_change().to_numpy(float))).sum())
+        close_arr = frame["close"].to_numpy(float)
+        fwd = _forward_oriented_return(close_arr, close_arr, spec.params.direction, h)
+        n_base = int(np.isfinite(fwd).sum())
+        n_event = int((active & np.isfinite(fwd)).sum())
 
         out = rule_performance_report([spec], candles, compute_regime=False)
         assert f"<td>{n_base}</td><td>{n_event}</td>" in out
