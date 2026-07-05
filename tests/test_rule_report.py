@@ -38,10 +38,12 @@ def _candles(n=700, seed=3, with_regime=False):
 
 def _spec(df, name="RULE_T1", formula="feat < 0.15", direction="long", **pk):
     cand = CustomEvent(name=name, formula=formula).to_event_candidate(df)
-    params = BacktestParams(
+    defaults = dict(
         buy_type="limit", direction=direction, buy_drop_pct=0.005,
-        sell_pct=0.03, target_h=5, fee=0.001, **pk,
+        sell_pct=0.03, target_h=5, fee=0.001,
     )
+    defaults.update(pk)
+    params = BacktestParams(**defaults)
     return RuleSpec(name=name, candidate=cand, params=params)
 
 
@@ -165,10 +167,59 @@ class TestReturnDistributions:
         spec = _spec(candles, "RULE_T1", "feat < 0.15")
         out = rule_performance_report([spec], candles, compute_regime=False)
         assert "Return distributions" in out
-        for cls in ("distbase", "distlow", "distclose", "disthigh"):
+        for cls in ("distbase", "distedge", "distlow", "distclose", "disthigh"):
             assert cls in out
+        assert "the actual edge" in out
+        assert "not the edge" in out
         assert "n event" in out
         assert "Δ mean" in out
+
+    def test_forward_edge_separates_from_same_bar_signature(self):
+        # This mirrors a real diagnosis: an event built on a feature
+        # unrelated to price (so its own bar looks statistically ordinary)
+        # that genuinely predicts a move over the *next* h bars. The
+        # same-bar (close) delta must stay small while the forward-return
+        # delta at the rule's target_h must show the injected shift.
+        n = 1500
+        h = 20
+        rng = np.random.default_rng(21)
+        feat = rng.uniform(0.0, 1.0, n)
+        noise_ret = rng.normal(0.0, 0.01, n)
+        event = feat < 0.1
+        # Spread a +8% cumulative move over the h bars *following* each
+        # event bar (not on the event bar itself).
+        extra = np.zeros(n)
+        for i in np.where(event)[0]:
+            extra[i + 1: i + 1 + h] += 0.08 / h
+        close = 100.0 * np.cumprod(1.0 + noise_ret + extra)
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2024-01-01", periods=n, freq="D"),
+            "open": np.r_[close[0], close[:-1]],
+            "high": close * 1.005, "low": close * 0.995, "close": close, "feat": feat,
+        })
+        spec = _spec(df, "RULE_FWD_EDGE", "feat < 0.1", direction="long", target_h=h)
+
+        from forgedge.rule_report import (
+            _forward_oriented_return, _prepare_candles, _signal_series,
+        )
+        frame = _prepare_candles(df, "open_dt")
+        active = _signal_series(spec, frame).to_numpy() > 0
+        close_arr = frame["close"].to_numpy(float)
+
+        ret_close = frame["close"].pct_change().to_numpy(float) * 100.0
+        cb = np.isfinite(ret_close)
+        same_bar_delta = ret_close[cb & active].mean() - ret_close[cb].mean()
+
+        fwd = _forward_oriented_return(close_arr, "long", h)
+        fb = np.isfinite(fwd)
+        forward_delta = fwd[fb & active].mean() - fwd[fb].mean()
+
+        assert abs(same_bar_delta) < 0.5          # event bar looks ordinary
+        assert forward_delta > 4.0                # the real, forward edge
+
+        out = rule_performance_report([spec], df, compute_regime=False)
+        assert "RULE_FWD_EDGE" in out
+        assert f"Forward @ {h} bars" in out
 
     def test_no_active_bars_degrades_gracefully(self):
         candles = _candles(n=300)
