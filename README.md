@@ -181,7 +181,7 @@ not be the discovery table, so this is the natural way to monitor published
 rules on data collected after discovery. The report shows, per rule: equity
 vs buy & hold on a dual axis (independent scales — compares shapes, not
 magnitudes), a monthly activation trend split into in-sample/out-of-sample,
-the gain/loss distribution, low/close/high bar-return distributions —
+the gain/loss distribution, low/close/high bar-return KDEs —
 unconditional vs restricted to bars where the event is active, the event's
 own intrabar signature — a MAE→net scatter (intra-trade risk for these
 stop-less rules), rolling expectancy (edge-decay detector), per-regime

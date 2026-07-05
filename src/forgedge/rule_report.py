@@ -25,7 +25,8 @@ Per rule the report contains:
 * gain/loss distribution with win/loss statistics;
 * return distributions — the bar-over-bar return of low/close/high, base
   (unconditional, gray) vs restricted to bars where the event is active
-  (colored): the event's own intrabar signature;
+  (colored), each a Gaussian KDE (pure numpy, Silverman bandwidth): the
+  event's own intrabar signature;
 * MAE → final net scatter (intra-trade risk of stop-less rules);
 * rolling expectancy (wall-clock window, edge-decay detector);
 * per-regime performance (when a ``regime`` column is present or computable);
@@ -541,62 +542,93 @@ def _hist_svg(R) -> str:
     )
 
 
-def _return_dist_svg(base_ret: np.ndarray, event_ret: np.ndarray, fill_cls: str, mean_cls: str) -> str:
-    """Base (gray) vs event (colored) distribution overlay of one bar return series.
+def _silverman_bandwidth(x: np.ndarray) -> float:
+    """Silverman's rule-of-thumb bandwidth for a 1-D Gaussian KDE.
 
-    Both distributions are drawn as **density** (share of each group's own
-    bar count) on shared bins, so the overlay is comparable regardless of how
-    many event bars exist relative to the base sample. Bins are bounded by
-    the base distribution's 1st/99th percentile — the base sample is always
-    the larger, more representative one — with values outside clipped into
-    the edge bins so no bar is silently dropped from the picture.
+    ``h = 0.9 * min(std, IQR/1.34) * n^(-1/5)`` — the standard first-pass
+    bandwidth, robust to outliers (uses the smaller of the standard
+    deviation and the IQR-based scale estimate, so a few extreme returns
+    cannot blow up the smoothing width).
     """
-    HT = 170
+    n = x.size
+    if n < 2:
+        return 1.0
+    std = float(np.std(x, ddof=1))
+    q75, q25 = np.percentile(x, [75, 25])
+    iqr = float(q75 - q25)
+    scale = min(std, iqr / 1.34) if iqr > 0 else std
+    if not np.isfinite(scale) or scale <= 0:
+        scale = std if std > 0 else 1.0
+    h = 0.9 * scale * n ** (-1.0 / 5.0)
+    return h if np.isfinite(h) and h > 0 else 1e-6
+
+
+def _gaussian_kde(x: np.ndarray, grid: np.ndarray) -> np.ndarray:
+    """Gaussian KDE of ``x`` evaluated on ``grid`` — pure numpy, no scipy.
+
+    ``f(g) = (1/(n·h)) Σᵢ φ((g − xᵢ)/h)`` with ``φ`` the standard normal
+    density and ``h`` from :func:`_silverman_bandwidth`.  Each group (base or
+    event) gets its own bandwidth, so both curves are honestly smoothed for
+    their own sample size; both integrate to 1, so the overlay compares
+    shapes regardless of how different the two sample sizes are.
+    """
+    if x.size == 0:
+        return np.zeros_like(grid)
+    h = _silverman_bandwidth(x)
+    u = (grid[:, None] - x[None, :]) / h
+    k = np.exp(-0.5 * u * u) / np.sqrt(2.0 * np.pi)
+    return k.sum(axis=1) / (x.size * h)
+
+
+def _return_dist_svg(base_ret: np.ndarray, event_ret: np.ndarray, fill_cls: str, mean_cls: str) -> str:
+    """Base (gray) vs event (colored) KDE overlay of one bar return series.
+
+    Both curves are proper Gaussian kernel density estimates (each on its own
+    Silverman bandwidth), so the overlay is comparable in shape regardless of
+    how many event bars exist relative to the base sample. The grid spans the
+    base distribution's 1st/99th percentile — the base sample is always the
+    larger, more representative one — with a margin so the tails read cleanly.
+    """
+    HT = 190
     if base_ret.size == 0:
         return '<p class="sub">No data.</p>'
     p1, p99 = np.nanpercentile(base_ret, [1, 99])
-    span = max(abs(p1), abs(p99), 0.5) * 1.05
-    edges = np.linspace(-span, span, 21)
-    nb = len(edges) - 1
-    hist_b, _ = np.histogram(np.clip(base_ret, -span, span), bins=edges)
-    dens_b = hist_b / base_ret.size
-    if event_ret.size:
-        hist_e, _ = np.histogram(np.clip(event_ret, -span, span), bins=edges)
-        dens_e = hist_e / event_ret.size
-    else:
-        hist_e, dens_e = np.zeros(nb, dtype=int), np.zeros(nb)
-    dmax = max(float(dens_b.max()), float(dens_e.max()), 1e-9)
-    BW = (_W - _PL - _PR) / nb
-    hy = lambda v: _PT + (HT - _PT - _PB) * (1 - v / dmax)
-    bars = ""
-    for k in range(nb):
-        x = _PL + k * BW
-        lo, hi = edges[k], edges[k + 1]
-        if dens_b[k] > 0:
-            bars += (
-                f'<rect x="{x+1:.1f}" y="{hy(dens_b[k]):.1f}" width="{max(BW-2,1):.1f}" '
-                f'height="{hy(0)-hy(dens_b[k]):.1f}" class="distbase">'
-                f'<title>{lo:.2f}% … {hi:.2f}%: {dens_b[k]*100:.1f}% of base bars ({hist_b[k]})</title></rect>'
-            )
-        if dens_e[k] > 0:
-            bars += (
-                f'<rect x="{x+1:.1f}" y="{hy(dens_e[k]):.1f}" width="{max(BW-2,1):.1f}" '
-                f'height="{hy(0)-hy(dens_e[k]):.1f}" class="{fill_cls}">'
-                f'<title>{lo:.2f}% … {hi:.2f}%: {dens_e[k]*100:.1f}% of event bars ({hist_e[k]})</title></rect>'
-            )
-    xt = "".join(
-        f'<text x="{_PL+k*BW+BW/2:.0f}" y="{HT-6}" class="tick" text-anchor="middle">{edges[k]:.1f}</text>'
-        for k in range(0, nb + 1, 4)
+    span = max(abs(p1), abs(p99), 0.5) * 1.15
+    grid = np.linspace(-span, span, 240)
+    dens_b = _gaussian_kde(base_ret, grid)
+    dens_e = _gaussian_kde(event_ret, grid)
+    dmax = max(float(dens_b.max()), float(dens_e.max()), 1e-9) * 1.08
+    xs = lambda v: _PL + (v - grid[0]) / (grid[-1] - grid[0]) * (_W - _PL - _PR)
+    ys = lambda v: _PT + (HT - _PT - _PB) * (1 - v / dmax)
+
+    base_line = " ".join(f"{xs(g):.1f},{ys(d):.1f}" for g, d in zip(grid, dens_b))
+    base_area = f"{xs(grid[0]):.1f},{ys(0):.1f} {base_line} {xs(grid[-1]):.1f},{ys(0):.1f}"
+    curves = (
+        f'<polygon points="{base_area}" class="distbasearea"/>'
+        f'<polyline points="{base_line}" class="distbaseline"/>'
     )
-    zx = _PL + (0 - edges[0]) / (edges[-1] - edges[0]) * (_W - _PL - _PR)
-    xm = lambda v: _PL + (v - edges[0]) / (edges[-1] - edges[0]) * (_W - _PL - _PR)
-    marks = f'<line x1="{xm(float(np.mean(base_ret))):.1f}" x2="{xm(float(np.mean(base_ret))):.1f}" y1="{_PT}" y2="{HT-_PB}" class="meanbase"/>'
+    if event_ret.size:
+        ev_line = " ".join(f"{xs(g):.1f},{ys(d):.1f}" for g, d in zip(grid, dens_e))
+        ev_area = f"{xs(grid[0]):.1f},{ys(0):.1f} {ev_line} {xs(grid[-1]):.1f},{ys(0):.1f}"
+        curves += (
+            f'<polygon points="{ev_area}" class="{fill_cls}area"/>'
+            f'<polyline points="{ev_line}" class="{fill_cls}line"/>'
+        )
+
+    xt = "".join(
+        f'<text x="{xs(v):.0f}" y="{HT-6}" class="tick" text-anchor="middle">{v:.1f}</text>'
+        for v in np.linspace(-span, span, 7)
+    )
+    zx = xs(0.0)
+    marks = f'<line x1="{xs(float(np.mean(base_ret))):.1f}" x2="{xs(float(np.mean(base_ret))):.1f}" y1="{_PT}" y2="{HT-_PB}" class="meanbase"/>'
     if event_ret.size:
         me = float(np.mean(event_ret))
-        marks += f'<line x1="{xm(me):.1f}" x2="{xm(me):.1f}" y1="{_PT}" y2="{HT-_PB}" class="{mean_cls}"/>'
+        marks += f'<line x1="{xs(me):.1f}" x2="{xs(me):.1f}" y1="{_PT}" y2="{HT-_PB}" class="{mean_cls}"/>'
     return (
-        f'<svg viewBox="0 0 {_W} {HT}"><line x1="{_PL}" x2="{_W-_PR}" y1="{hy(0):.0f}" y2="{hy(0):.0f}" class="zero"/>'
-        f'<line x1="{zx:.0f}" x2="{zx:.0f}" y1="{_PT}" y2="{HT-_PB}" class="grid"/>{bars}{marks}{xt}</svg>'
+        f'<svg viewBox="0 0 {_W} {HT}">'
+        f'<line x1="{_PL}" x2="{_W-_PR}" y1="{ys(0):.0f}" y2="{ys(0):.0f}" class="zero"/>'
+        f'<line x1="{zx:.0f}" x2="{zx:.0f}" y1="{_PT}" y2="{HT-_PB}" class="grid"/>'
+        f"{curves}{marks}{xt}</svg>"
     )
 
 
@@ -628,9 +660,10 @@ def _return_distribution_section(R, bar_returns) -> str:
         )
     return f"""
 <h2>Return distributions — base vs event</h2>
-<p class="sub">Bar-over-bar % return of low / close / high: unconditional across all bars (gray, "base") vs the
-same return restricted to bars where the event is active (colored). A shift in the mean or a change in shape
-is the event's own intrabar signature — independent of whether the trade later filled or how it exited.</p>
+<p class="sub">Bar-over-bar % return of low / close / high, shown as a Gaussian kernel density estimate (KDE):
+unconditional across all bars (gray, "base") vs the same return restricted to bars where the event is active
+(colored). A shift in the mean or a change in shape is the event's own intrabar signature — independent of
+whether the trade later filled or how it exited.</p>
 {charts}
 <div class="legend"><span><i style="background:var(--distbase)"></i>Base (all bars)</span>
 <span><i style="background:var(--red)"></i>Low @ event</span>
@@ -938,8 +971,10 @@ svg{width:100%;height:auto;display:block}
 .splitl{stroke:var(--ink2);stroke-width:1.4;stroke-dasharray:6 4}.splitt{fill:var(--ink2);font-weight:600}
 .msig{fill:var(--blue-l)}.mtrd{fill:var(--mtrd)}.gsig{fill:var(--gsig)}.gtrd{fill:var(--gtrd)}
 .hpos{fill:var(--mtrd)}.hneg{fill:var(--red)}.hzero{fill:var(--gray)}
-.distbase{fill:var(--distbase);opacity:.9}
-.distlow{fill:var(--red);opacity:.6}.distclose{fill:var(--ochre);opacity:.6}.disthigh{fill:var(--green);opacity:.6}
+.distbasearea{fill:var(--distbase);opacity:.35}.distbaseline{fill:none;stroke:var(--ink3);stroke-width:1.6}
+.distlowarea{fill:var(--red);opacity:.3}.distlowline{fill:none;stroke:var(--red);stroke-width:2}
+.distclosearea{fill:var(--ochre);opacity:.3}.distcloseline{fill:none;stroke:var(--ochre);stroke-width:2}
+.disthigharea{fill:var(--green);opacity:.3}.disthighline{fill:none;stroke:var(--green);stroke-width:2}
 .meanbase{stroke:var(--ink3);stroke-width:1.5;stroke-dasharray:3 3}
 .meanlow{stroke:var(--red);stroke-width:2}.meanclose{stroke:var(--ochre);stroke-width:2}.meanhigh{stroke:var(--green);stroke-width:2}
 .dw{fill:var(--blue);opacity:.75}.dl{fill:var(--red);opacity:.8}
