@@ -160,6 +160,31 @@ with open("report.html", "w") as f:
     f.write(html)
 ```
 
+Monitoring published rules on fresh candles:
+
+```python
+from forgedge import RuleSpec, rule_performance_report
+
+# One spec per tradeable rule of a forge() run — is_end / verdict / OOS
+# expectancy are filled in automatically from the session's artefacts.
+specs = RuleSpec.from_forge_result(result)
+
+# Or hand it the ForgeResult directly — same effect.
+html = rule_performance_report(result, fresh_candles)
+with open("rules_report.html", "w") as f:
+    f.write(html)
+```
+
+Each rule is replayed **deterministically** on the given candles (the same
+`EventCandidate.apply()` path Rule Discovery itself uses) — the candles need
+not be the discovery table, so this is the natural way to monitor published
+rules on data collected after discovery. The report shows, per rule: equity
+vs buy & hold on a dual axis (independent scales — compares shapes, not
+magnitudes), a monthly activation trend split into in-sample/out-of-sample,
+the gain/loss distribution, a MAE→net scatter (intra-trade risk for these
+stop-less rules), rolling expectancy (edge-decay detector), per-regime
+performance, the most recent trades, and a "signal active now" badge.
+
 ---
 
 ## The three concepts

@@ -166,6 +166,32 @@ with open("report.html", "w") as f:
     f.write(html)
 ```
 
+Monitoraggio delle regole pubblicate su candele fresche:
+
+```python
+from forgedge import RuleSpec, rule_performance_report
+
+# Una spec per ogni regola tradeable di un run forge() — is_end / verdict /
+# expectancy OOS vengono compilati automaticamente dagli artefatti di sessione.
+specs = RuleSpec.from_forge_result(result)
+
+# Oppure passa direttamente il ForgeResult — stesso effetto.
+html = rule_performance_report(result, candele_fresche)
+with open("rules_report.html", "w") as f:
+    f.write(html)
+```
+
+Ogni regola viene rieseguita in modo **deterministico** sulle candele fornite
+(lo stesso percorso `EventCandidate.apply()` usato da Rule Discovery) — le
+candele non devono essere la tabella di discovery, quindi è il modo naturale
+per monitorare le regole pubblicate su dati raccolti dopo la discovery. Il
+report mostra, per regola: equity vs buy & hold su doppio asse (scale
+indipendenti — confronta le forme, non le grandezze), un trend di
+attivazione mensile diviso in in-sample/out-of-sample, la distribuzione
+gain/loss, uno scatter MAE→net (rischio intra-trade per queste regole senza
+stop), l'expectancy rolling (rilevatore di decadimento dell'edge), la
+performance per regime, gli ultimi trade e un badge "segnale attivo ora".
+
 ---
 
 ## I tre concetti
