@@ -181,13 +181,12 @@ not be the discovery table, so this is the natural way to monitor published
 rules on data collected after discovery. The report shows, per rule: equity
 vs buy & hold on a dual axis (independent scales — compares shapes, not
 magnitudes), a monthly activation trend split into in-sample/out-of-sample,
-the gain/loss distribution, return-distribution KDEs — the forward return
-over the holding horizon, oriented by direction (base vs event: this **is**
-the tradeable edge), plus the same-bar return of low/close/high (a
-different, non-predictive diagnostic — the event's own intrabar signature,
-which can look statistically ordinary even when the forward edge is real) —
-a MAE→net scatter (intra-trade risk for these stop-less rules), rolling
-expectancy (edge-decay detector), per-regime
+the gain/loss distribution, return-distribution KDEs — low/close/high, each
+the forward return over the holding horizon (target_h bars ahead of the
+signal bar, anchored on that bar's close, oriented by direction: the same
+quantity Alpha Discovery derives the target from and Rule Discovery trades),
+base vs event — a MAE→net scatter (intra-trade risk for these stop-less
+rules), rolling expectancy (edge-decay detector), per-regime
 performance, the most recent trades, and a "signal active now" badge.
 
 ---

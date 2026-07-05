@@ -188,14 +188,14 @@ per monitorare le regole pubblicate su dati raccolti dopo la discovery. Il
 report mostra, per regola: equity vs buy & hold su doppio asse (scale
 indipendenti — confronta le forme, non le grandezze), un trend di
 attivazione mensile diviso in in-sample/out-of-sample, la distribuzione
-gain/loss, le KDE delle distribuzioni dei rendimenti — il rendimento forward
-sull'orizzonte di holding, orientato per direzione (base vs evento: questo
-**è** l'edge tradeable), più il rendimento sulla stessa barra di low/close/high
-(un diagnostico diverso, non predittivo — la firma intrabar propria
-dell'evento, che può apparire statisticamente ordinaria anche quando l'edge
-forward è reale) — uno scatter MAE→net (rischio intra-trade per queste
-regole senza stop), l'expectancy rolling (rilevatore di decadimento
-dell'edge), la performance per regime, gli ultimi trade e un badge "segnale
+gain/loss, le KDE delle distribuzioni dei rendimenti — low/close/high, ognuno
+il rendimento forward sull'orizzonte di holding (target_h barre dopo la
+barra del segnale, ancorato al close di quella barra, orientato per
+direzione: la stessa grandezza da cui Alpha Discovery deriva il target e su
+cui Rule Discovery fa trading), base vs evento — uno scatter MAE→net
+(rischio intra-trade per queste regole senza stop), l'expectancy rolling
+(rilevatore di decadimento dell'edge), la performance per regime, gli ultimi
+trade e un badge "segnale
 attivo ora".
 
 ---
