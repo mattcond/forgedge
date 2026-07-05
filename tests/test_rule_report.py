@@ -121,6 +121,44 @@ class TestRulePerformanceReport:
         assert "RULE_NEVER" in out and "no signals" in out
 
 
+class TestGaussianKDE:
+    """Pure-numpy Gaussian KDE primitives behind the return-distribution charts."""
+
+    def test_integrates_to_one(self):
+        from forgedge.rule_report import _gaussian_kde
+
+        rng = np.random.default_rng(1)
+        x = rng.normal(0.0, 2.0, 2000)
+        grid = np.linspace(-20.0, 20.0, 4000)
+        dens = _gaussian_kde(x, grid)
+        trapz = getattr(np, "trapezoid", None) or np.trapz
+        integral = trapz(dens, grid)
+        assert integral == pytest.approx(1.0, abs=0.01)
+
+    def test_peak_near_the_mean(self):
+        from forgedge.rule_report import _gaussian_kde
+
+        rng = np.random.default_rng(2)
+        x = rng.normal(5.0, 1.0, 3000)
+        grid = np.linspace(-10.0, 20.0, 3000)
+        dens = _gaussian_kde(x, grid)
+        assert abs(grid[np.argmax(dens)] - 5.0) < 0.5
+
+    def test_empty_sample_is_zero_everywhere(self):
+        from forgedge.rule_report import _gaussian_kde
+
+        grid = np.linspace(-5.0, 5.0, 50)
+        dens = _gaussian_kde(np.array([]), grid)
+        assert np.all(dens == 0.0)
+
+    def test_bandwidth_positive_and_finite_on_degenerate_input(self):
+        from forgedge.rule_report import _silverman_bandwidth
+
+        assert _silverman_bandwidth(np.array([1.0])) > 0
+        assert np.isfinite(_silverman_bandwidth(np.array([1.0])))
+        assert _silverman_bandwidth(np.full(50, 3.0)) > 0  # zero variance
+
+
 class TestReturnDistributions:
     def test_section_and_legend_present(self):
         candles = _candles(with_regime=True)

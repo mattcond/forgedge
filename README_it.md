@@ -188,7 +188,7 @@ per monitorare le regole pubblicate su dati raccolti dopo la discovery. Il
 report mostra, per regola: equity vs buy & hold su doppio asse (scale
 indipendenti — confronta le forme, non le grandezze), un trend di
 attivazione mensile diviso in in-sample/out-of-sample, la distribuzione
-gain/loss, le distribuzioni dei rendimenti di low/close/high — non
+gain/loss, le KDE dei rendimenti di low/close/high — non
 condizionate vs ristrette alle barre in cui l'evento è attivo, la firma
 intrabar propria dell'evento — uno scatter MAE→net (rischio intra-trade per
 queste regole senza stop), l'expectancy rolling (rilevatore di decadimento
