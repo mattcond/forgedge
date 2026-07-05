@@ -20,6 +20,7 @@ from .calibration import (
 from .event_discovery import CustomEvent, DiscoveryConfig, EventDiscovery
 from .forge import ForgeResult, forge, forge_multi
 from .ledger import HypothesisLedger
+from .rule_report import RuleSpec, rule_performance_report
 from .timebudget import TimeBudget
 from .market_context import (
     EMAProxyClassifier,
@@ -58,6 +59,8 @@ __all__ = [
     "CalibrationReport",
     "FastRotationNull",
     "HypothesisLedger",
+    "RuleSpec",
+    "rule_performance_report",
     "TimeBudget",
     "EventDiscovery",
     "DiscoveryConfig",
