@@ -23,6 +23,9 @@ Per rule the report contains:
 * monthly activation trend — in-sample months in gray, out-of-sample in blue,
   light bar = signals, dark part = executed trades;
 * gain/loss distribution with win/loss statistics;
+* return distributions — the bar-over-bar return of low/close/high, base
+  (unconditional, gray) vs restricted to bars where the event is active
+  (colored): the event's own intrabar signature;
 * MAE → final net scatter (intra-trade risk of stop-less rules);
 * rolling expectancy (wall-clock window, edge-decay detector);
 * per-regime performance (when a ``regime`` column is present or computable);
@@ -225,6 +228,15 @@ def rule_performance_report(
     close = frame["close"].to_numpy(float)
     bh = (close / close[0] - 1.0) * 100.0
 
+    # Bar-over-bar % return of each price series, computed once and shared by
+    # every rule's return-distribution section (base vs event only differs by
+    # which bars are selected, not by how the return itself is defined).
+    bar_returns = {
+        "low": frame["low"].pct_change().to_numpy(float) * 100.0,
+        "close": frame["close"].pct_change().to_numpy(float) * 100.0,
+        "high": frame["high"].pct_change().to_numpy(float) * 100.0,
+    }
+
     regime_arr = _regime_series(frame, compute_regime, timestamp_col)
 
     computed, failed = [], []
@@ -237,7 +249,7 @@ def rule_performance_report(
     sections = [_overview(computed, failed, dates, n, title)]
     for R in computed:
         sections.append(_rule_section(
-            R, bh, dates, dts, regime_arr,
+            R, bh, dates, dts, regime_arr, bar_returns,
             rolling_window, rolling_min_trades, recent_trades,
         ))
     sections.append(_footer_note(computed, dates))
@@ -364,6 +376,9 @@ def _compute_rule(spec: RuleSpec, frame, dts, timestamp_col) -> dict:
         months=months, split=split, last_sig=last_sig,
         active_now=last_sig == n - 1 if last_sig is not None else False,
         exposure=exposure,
+        # Boolean activation mask (the event condition, not fill/execution) —
+        # feeds the return-distribution section's "event" selection.
+        active=sig.to_numpy(dtype=bool),
     )
 
 
@@ -381,6 +396,11 @@ def _pct(x, digits=2) -> str:
 
 def _num(x, fmt="{:.2f}") -> str:
     return "–" if x is None or not np.isfinite(x) else fmt.format(x)
+
+
+def _pctval(x, digits=3) -> str:
+    """Format a value already expressed in percent (not a fraction)."""
+    return "–" if x is None or not np.isfinite(x) else f"{x:+.{digits}f}%"
 
 
 def _sx(i: int, n: int) -> float:
@@ -521,6 +541,105 @@ def _hist_svg(R) -> str:
     )
 
 
+def _return_dist_svg(base_ret: np.ndarray, event_ret: np.ndarray, fill_cls: str, mean_cls: str) -> str:
+    """Base (gray) vs event (colored) distribution overlay of one bar return series.
+
+    Both distributions are drawn as **density** (share of each group's own
+    bar count) on shared bins, so the overlay is comparable regardless of how
+    many event bars exist relative to the base sample. Bins are bounded by
+    the base distribution's 1st/99th percentile — the base sample is always
+    the larger, more representative one — with values outside clipped into
+    the edge bins so no bar is silently dropped from the picture.
+    """
+    HT = 170
+    if base_ret.size == 0:
+        return '<p class="sub">No data.</p>'
+    p1, p99 = np.nanpercentile(base_ret, [1, 99])
+    span = max(abs(p1), abs(p99), 0.5) * 1.05
+    edges = np.linspace(-span, span, 21)
+    nb = len(edges) - 1
+    hist_b, _ = np.histogram(np.clip(base_ret, -span, span), bins=edges)
+    dens_b = hist_b / base_ret.size
+    if event_ret.size:
+        hist_e, _ = np.histogram(np.clip(event_ret, -span, span), bins=edges)
+        dens_e = hist_e / event_ret.size
+    else:
+        hist_e, dens_e = np.zeros(nb, dtype=int), np.zeros(nb)
+    dmax = max(float(dens_b.max()), float(dens_e.max()), 1e-9)
+    BW = (_W - _PL - _PR) / nb
+    hy = lambda v: _PT + (HT - _PT - _PB) * (1 - v / dmax)
+    bars = ""
+    for k in range(nb):
+        x = _PL + k * BW
+        lo, hi = edges[k], edges[k + 1]
+        if dens_b[k] > 0:
+            bars += (
+                f'<rect x="{x+1:.1f}" y="{hy(dens_b[k]):.1f}" width="{max(BW-2,1):.1f}" '
+                f'height="{hy(0)-hy(dens_b[k]):.1f}" class="distbase">'
+                f'<title>{lo:.2f}% … {hi:.2f}%: {dens_b[k]*100:.1f}% of base bars ({hist_b[k]})</title></rect>'
+            )
+        if dens_e[k] > 0:
+            bars += (
+                f'<rect x="{x+1:.1f}" y="{hy(dens_e[k]):.1f}" width="{max(BW-2,1):.1f}" '
+                f'height="{hy(0)-hy(dens_e[k]):.1f}" class="{fill_cls}">'
+                f'<title>{lo:.2f}% … {hi:.2f}%: {dens_e[k]*100:.1f}% of event bars ({hist_e[k]})</title></rect>'
+            )
+    xt = "".join(
+        f'<text x="{_PL+k*BW+BW/2:.0f}" y="{HT-6}" class="tick" text-anchor="middle">{edges[k]:.1f}</text>'
+        for k in range(0, nb + 1, 4)
+    )
+    zx = _PL + (0 - edges[0]) / (edges[-1] - edges[0]) * (_W - _PL - _PR)
+    xm = lambda v: _PL + (v - edges[0]) / (edges[-1] - edges[0]) * (_W - _PL - _PR)
+    marks = f'<line x1="{xm(float(np.mean(base_ret))):.1f}" x2="{xm(float(np.mean(base_ret))):.1f}" y1="{_PT}" y2="{HT-_PB}" class="meanbase"/>'
+    if event_ret.size:
+        me = float(np.mean(event_ret))
+        marks += f'<line x1="{xm(me):.1f}" x2="{xm(me):.1f}" y1="{_PT}" y2="{HT-_PB}" class="{mean_cls}"/>'
+    return (
+        f'<svg viewBox="0 0 {_W} {HT}"><line x1="{_PL}" x2="{_W-_PR}" y1="{hy(0):.0f}" y2="{hy(0):.0f}" class="zero"/>'
+        f'<line x1="{zx:.0f}" x2="{zx:.0f}" y1="{_PT}" y2="{HT-_PB}" class="grid"/>{bars}{marks}{xt}</svg>'
+    )
+
+
+def _return_distribution_section(R, bar_returns) -> str:
+    """Low/close/high return distributions, base vs event."""
+    active = R["active"]
+    series = [
+        ("Low", bar_returns["low"], "distlow", "meanlow"),
+        ("Close", bar_returns["close"], "distclose", "meanclose"),
+        ("High", bar_returns["high"], "disthigh", "meanhigh"),
+    ]
+    charts, stat_rows = "", ""
+    for label, ret, fill_cls, mean_cls in series:
+        base_mask = np.isfinite(ret)
+        event_mask = base_mask & active
+        base_ret, event_ret = ret[base_mask], ret[event_mask]
+        charts += f'<h3>{label}</h3>{_return_dist_svg(base_ret, event_ret, fill_cls, mean_cls)}'
+        mean_b = float(np.mean(base_ret)) if base_ret.size else float("nan")
+        mean_e = float(np.mean(event_ret)) if event_ret.size else float("nan")
+        std_b = float(np.std(base_ret)) if base_ret.size else float("nan")
+        std_e = float(np.std(event_ret)) if event_ret.size else float("nan")
+        delta = mean_e - mean_b if np.isfinite(mean_e) and np.isfinite(mean_b) else float("nan")
+        delta_cls = "" if not np.isfinite(delta) else ("pos" if delta > 0 else "neg")
+        stat_rows += (
+            f'<tr><td class="rl">{label}</td><td>{base_ret.size}</td><td>{event_ret.size}</td>'
+            f'<td>{_pctval(mean_b)}</td><td>{_pctval(mean_e)}</td>'
+            f'<td class="{delta_cls}">{_pctval(delta)}</td>'
+            f'<td>{_pctval(std_b)}</td><td>{_pctval(std_e)}</td></tr>'
+        )
+    return f"""
+<h2>Return distributions — base vs event</h2>
+<p class="sub">Bar-over-bar % return of low / close / high: unconditional across all bars (gray, "base") vs the
+same return restricted to bars where the event is active (colored). A shift in the mean or a change in shape
+is the event's own intrabar signature — independent of whether the trade later filled or how it exited.</p>
+{charts}
+<div class="legend"><span><i style="background:var(--distbase)"></i>Base (all bars)</span>
+<span><i style="background:var(--red)"></i>Low @ event</span>
+<span><i style="background:var(--ochre)"></i>Close @ event</span>
+<span><i style="background:var(--green)"></i>High @ event</span></div>
+<table><tr><th>series</th><th>n base</th><th>n event</th><th>mean base</th><th>mean event</th><th>Δ mean</th><th>std base</th><th>std event</th></tr>
+{stat_rows}</table>"""
+
+
 def _mae_svg(R, dates) -> str:
     t, net = R["trades"], R["net"]
     if net.size == 0:
@@ -638,7 +757,7 @@ ValidatedRule parameters · net returns (per-side fee included)</p>
 {rows}</table>"""
 
 
-def _rule_section(R, bh, dates, dts, regime_arr, window, min_trades, recent) -> str:
+def _rule_section(R, bh, dates, dts, regime_arr, bar_returns, window, min_trades, recent) -> str:
     spec, s, t, net = R["spec"], R["summary"], R["trades"], R["net"]
     p = spec.params
     wins, losses = net[net > 0], net[net < 0]
@@ -723,6 +842,7 @@ first sign of structural stability; the light/dark gap diagnoses the limit fill 
 <h2>Gain / loss distribution per trade</h2>
 {_hist_svg(R)}
 {stats_row}
+{_return_distribution_section(R, bar_returns)}
 
 <h2>MAE → final net (intra-trade risk; no stop-loss)</h2>
 <p class="sub">One dot per trade: how far it went against the position (max adverse excursion from fill, x)
@@ -787,14 +907,17 @@ document.querySelectorAll('.eqhover').forEach(hov=>{{
 _CSS = """
 :root{--surface:#fcfcfb;--panel:#f4f3f1;--border:#e2e1dd;--ink:#0b0b0b;--ink2:#52514e;--ink3:#8a8984;
 --blue:#2a78d6;--blue-l:#9ec5f4;--red:#e34948;--red-l:#efb4b2;--gray:#8a8984;
---gsig:#dddcd8;--gtrd:#a3a29c;--good:#0ca30c;--tipbg:#0b0b0b;--tipink:#fcfcfb;--mtrd:#2a78d6}
+--gsig:#dddcd8;--gtrd:#a3a29c;--good:#0ca30c;--tipbg:#0b0b0b;--tipink:#fcfcfb;--mtrd:#2a78d6;
+--distbase:#c9c8c3;--ochre:#eda100;--green:#008300}
 @media (prefers-color-scheme:dark){:root{--surface:#1a1a19;--panel:#242422;--border:#3a3a37;--ink:#fff;
 --ink2:#c3c2b7;--ink3:#8a8984;--blue:#3987e5;--blue-l:#1c4573;--red:#e66767;--red-l:#6e3230;
---gsig:#33332f;--gtrd:#5c5b56;--tipbg:#fcfcfb;--tipink:#0b0b0b;--mtrd:#3987e5}}
+--gsig:#33332f;--gtrd:#5c5b56;--tipbg:#fcfcfb;--tipink:#0b0b0b;--mtrd:#3987e5;
+--distbase:#46453f;--ochre:#c98500;--green:#008300}}
 *{box-sizing:border-box}body{margin:0;background:var(--surface);color:var(--ink);
 font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:32px 40px 60px;max-width:1200px}
 h1{font-size:21px;margin:0 0 2px}.hsub{font-weight:400;color:var(--ink2)}
 h2{font-size:15px;margin:28px 0 4px}
+h3{font-size:12.5px;margin:18px 0 4px;color:var(--ink2);font-weight:600;text-transform:uppercase;letter-spacing:.03em}
 section{border-top:2px solid var(--border);margin-top:42px;padding-top:18px}
 .sub{color:var(--ink2);margin:0 0 10px;font-size:13px}
 code{font-family:ui-monospace,Menlo,monospace;font-size:12px;background:var(--panel);padding:1px 6px;border-radius:4px}
@@ -815,6 +938,10 @@ svg{width:100%;height:auto;display:block}
 .splitl{stroke:var(--ink2);stroke-width:1.4;stroke-dasharray:6 4}.splitt{fill:var(--ink2);font-weight:600}
 .msig{fill:var(--blue-l)}.mtrd{fill:var(--mtrd)}.gsig{fill:var(--gsig)}.gtrd{fill:var(--gtrd)}
 .hpos{fill:var(--mtrd)}.hneg{fill:var(--red)}.hzero{fill:var(--gray)}
+.distbase{fill:var(--distbase);opacity:.9}
+.distlow{fill:var(--red);opacity:.6}.distclose{fill:var(--ochre);opacity:.6}.disthigh{fill:var(--green);opacity:.6}
+.meanbase{stroke:var(--ink3);stroke-width:1.5;stroke-dasharray:3 3}
+.meanlow{stroke:var(--red);stroke-width:2}.meanclose{stroke:var(--ochre);stroke-width:2}.meanhigh{stroke:var(--green);stroke-width:2}
 .dw{fill:var(--blue);opacity:.75}.dl{fill:var(--red);opacity:.8}
 .dw:hover,.dl:hover{opacity:1;stroke:var(--ink);stroke-width:1.5}
 .cross{stroke:var(--ink);stroke-width:1;stroke-dasharray:2 3}
