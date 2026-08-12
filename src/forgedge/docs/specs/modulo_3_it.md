@@ -124,6 +124,15 @@ sensata centrata sui valori derivati dal contratto.
    - al primo bar che chiude a ≥ `sell_price = fill_price * (1 + sell_pct)`, oppure
    - al close della barra `target_h` (stop a orizzonte)
 
+> **`target_h` conta le barre *dopo* il fill, non l'intero intervallo
+> segnale→uscita.** Lo scarto segnale→fill è sempre di 1 barra (correttezza
+> point-in-time — non si può agire su un close prima che sia avvenuto), quindi
+> l'intervallo totale segnale→uscita è `1 + target_h`. "Tieni la posizione per
+> N barre dall'entrata" corrisponde quindi a `target_h = N - 1`. `target_h = 0`
+> è un valore legale e significativo — esce al close della stessa barra di
+> fill (round-trip nella stessa sessione) — non un placeholder per "nessun
+> orizzonte".
+
 La configurazione viene valutata tramite il composite score `pf_score_tpm` che
 bilancia Profit Factor, frequenza di trading e consistenza mensile.
 
@@ -413,7 +422,7 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `buy_delay_bar` | `6` | Barre di vita dell'ordine limite |
 | `buy_price_anchor` | `"close"` | Colonna usata come anchor del limite |
 | `sell_pct` | `0.040` | Take-profit come frazione del prezzo di fill |
-| `target_h` | `24` | Orizzonte massimo in barre (close-at-horizon) |
+| `target_h` | `24` | Barre tenute *dopo* la barra di fill prima dell'uscita a orizzonte (l'intervallo segnale→uscita è sempre `1 + target_h`). `0` = round-trip nella stessa sessione (close della barra di fill) |
 | `target_col` | `"close"` | Colonna per l'uscita a orizzonte |
 | `target_hit_col` | `"close"` | Colonna per rilevare il take-profit. Conservative = `"close"` per entrambe le direzioni; ottimistico = `"high"` per long, `"low"` per short (usare `optimistic_hit_col(direction)`) |
 | `fee` | `0.002` | Fee per lato |

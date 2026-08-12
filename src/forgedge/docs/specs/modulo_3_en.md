@@ -125,6 +125,14 @@ centred on the values derived from the contract.
    - at the first bar that closes at ≥ `sell_price = fill_price * (1 + sell_pct)`, or
    - at the close of bar `target_h` (horizon stop)
 
+> **`target_h` counts bars *after* the fill bar, not the total signal→exit span.**
+> The signal→fill gap is always 1 bar (point-in-time correctness — you cannot
+> act on a bar's own close before it happens), so the total span from signal to
+> exit is `1 + target_h`. "Hold for N bars from entry" therefore maps to
+> `target_h = N - 1`. `target_h = 0` is a legal, meaningful value — it exits at
+> the fill bar's own close (a same-session round-trip) — not a placeholder for
+> "no horizon".
+
 Each configuration is evaluated via the composite score `pf_score_tpm`, which
 balances Profit Factor, trading frequency and monthly consistency.
 
@@ -416,7 +424,7 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `buy_delay_bar` | `6` | Lifetime of the limit order in bars |
 | `buy_price_anchor` | `"close"` | Column used as the limit anchor |
 | `sell_pct` | `0.040` | Take-profit as a fraction of fill price |
-| `target_h` | `24` | Maximum horizon in bars (close-at-horizon) |
+| `target_h` | `24` | Bars held *after* the fill bar before the close-at-horizon exit (signal→exit span is always `1 + target_h`). `0` = same-session round-trip (fill bar's own close) |
 | `target_col` | `"close"` | Column used for the horizon exit |
 | `target_hit_col` | `"close"` | Column used to detect the take-profit. Conservative = `"close"` for both directions; optimistic = `"high"` for long, `"low"` for short (use `optimistic_hit_col(direction)`) |
 | `fee` | `0.002` | Fee per side |

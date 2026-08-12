@@ -36,6 +36,23 @@ from forgedge.rule_discovery import excursion_stats, execution_envelope
 from forgedge.rule_discovery.validation import _ttest_1samp_greater
 
 
+def _nan_safe_eq(a, b) -> bool:
+    """Deep equality treating NaN == NaN, unlike plain ``==`` on ``dict``/``float``.
+
+    ``RuleDiscoveryResponse.to_dict()`` legitimately carries ``nan`` (e.g. MAE/MFE
+    on a same-session ``target_h=0`` trade, whose realised holding window is
+    empty by construction) — comparing two independently produced dicts with
+    plain ``==`` fails on those keys even when the dicts are otherwise identical.
+    """
+    if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
+        return True
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_nan_safe_eq(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_nan_safe_eq(x, y) for x, y in zip(a, b))
+    return a == b
+
+
 # ---------------------------------------------------------------------------
 # Synthetic candle helpers
 # ---------------------------------------------------------------------------
@@ -199,6 +216,35 @@ class TestBacktestEngine:
         )
         assert len(trades) == s.total_trades
         assert {"net_pct_gain", "fill_dt", "exit_dt", "target_hit"} <= set(trades.columns)
+
+    def test_target_h_zero_is_same_session_round_trip(self):
+        """target_h=0 exits at the fill bar's own close (issue #158).
+
+        signal→fill is always 1 bar (act on the bar after the signal); with
+        target_h=0 the exit window collapses onto the fill bar itself, so
+        fill_rn == exit_rn and the net gain is the fill bar's own open→close.
+        """
+        dates = pd.date_range("2023-01-01", periods=4, freq="1h")
+        df = pd.DataFrame({
+            "open_dt": dates,
+            "open":  [100.0, 98.0, 105.0, 105.0],
+            "high":  [100.0, 99.0, 106.0, 106.0],
+            "low":   [100.0, 97.0, 104.0, 104.0],
+            "close": [100.0, 98.5, 105.0, 105.0],
+            "__sig__": [1, 0, 0, 0],
+        })
+        params = BacktestParams(
+            buy_type="limit", buy_drop_pct=0.02, buy_delay_bar=4,
+            sell_pct=0.5, target_h=0, fee=0.0, early_stopping=True,
+        )
+        s, trades = run_backtest(df, "__sig__", params, return_trades=True)
+        assert s.total_trades == 1
+        row = trades.iloc[0]
+        assert row["fill_rn"] == row["exit_rn"]
+        assert row["fill_dt"] == row["exit_dt"]
+        assert row["exit_price"] == pytest.approx(98.5)  # fill bar's own close
+        expected_net = (row["exit_price"] - row["buy_price"]) / row["buy_price"]
+        assert row["net_pct_gain"] == pytest.approx(expected_net)
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +558,12 @@ class TestGrid:
         assert spec.buy_drop_pct and spec.sell_pct and spec.target_h and spec.buy_delay_bar
         assert 0.01 in spec.buy_drop_pct
 
+    def test_build_grid_target_h_reaches_zero_for_short_seed(self):
+        """A short seed horizon can explore a same-session hold (issue #158):
+        the auto-built fan floors at 0, not 1."""
+        spec = build_grid(GridSpec(), BacktestParams(target_h=1))
+        assert 0 in spec.target_h
+
     def test_run_grid_sorted_by_score(self):
         df = _candle_with_signal(n=4000, signal_every=40, drift_after_signal=0.06)
         spec = GridSpec(buy_drop_pct=[0.003, 0.005], sell_pct=[0.02, 0.03], target_h=[24])
@@ -806,7 +858,7 @@ class TestEndToEnd:
         assert isinstance(reloaded, RuleDiscoveryResponse)
         assert reloaded.verdict == resp.verdict
         assert reloaded.alpha_id == resp.alpha_id
-        assert reloaded.to_dict() == resp.to_dict()
+        assert _nan_safe_eq(reloaded.to_dict(), resp.to_dict())
 
     # ── RD-130 — entry mode (limit / market / auto) ──────────────────────
 
@@ -829,7 +881,7 @@ class TestEndToEnd:
         explicit = RuleDiscovery(
             ed.df, c, cand, RuleDiscoveryConfig(entry_mode="limit")
         ).run()
-        assert explicit.to_dict() == default.to_dict()
+        assert _nan_safe_eq(explicit.to_dict(), default.to_dict())
 
     def test_entry_mode_market_fills_and_no_buydrop_reject(self, pipeline):
         """Market baseline: ~100% fill, never rejected for 'buy_drop too deep'."""
