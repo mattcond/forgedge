@@ -54,8 +54,15 @@ class BacktestParams:
         Take-profit target as a fraction of the fill price (e.g. ``0.04`` = 4%):
         above the entry for a long, below it for a short.
     target_h : int
-        Maximum holding horizon in bars; the position is closed at the target
-        bar's close if the take-profit was never reached.
+        Number of bars held *after* the fill bar before the horizon exit; the
+        position is closed at the target bar's close if the take-profit was
+        never reached. The total signal→exit span is always
+        ``1 (signal→fill, unavoidable — you cannot act on a bar's own close
+        before it happens) + target_h (fill→exit)``, so "hold for N bars from
+        entry" maps to ``target_h = N - 1``. ``target_h=0`` is a legal,
+        meaningful value: it exits at the fill bar's own close (a same-session
+        round-trip, ``fill_rn == exit_rn``) — it is not a "no horizon"
+        placeholder.
     target_col : str
         Price column used for the close-at-horizon exit (default ``"close"``).
     target_hit_col : str
@@ -122,7 +129,10 @@ class GridSpec:
     Each attribute is a list of candidate values; the screening evaluates the
     full cartesian product.  ``None`` means "do not vary — use the value from
     :class:`BacktestParams`".  When the grid is left empty Rule Discovery
-    builds a sensible default centred on the Alpha Contract's derived target.
+    builds a sensible default centred on the Alpha Contract's derived target
+    — including ``target_h``, whose auto-built fan now reaches down to ``0``
+    (a same-session hold) instead of floored at ``1``.  See
+    :attr:`BacktestParams.target_h` for what the value counts.
     """
 
     buy_drop_pct: Optional[List[float]] = None

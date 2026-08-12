@@ -42,7 +42,7 @@ def build_grid(spec: GridSpec, base: BacktestParams) -> GridSpec:
         sell = [round(max(0.005, s + k), 4) for k in (-0.02, -0.01, 0.0, 0.01, 0.02)]
     if th is None:
         h = base.target_h
-        th = sorted({max(1, int(round(h * f))) for f in (0.5, 1.0, 2.0)})
+        th = sorted({max(0, int(round(h * f))) for f in (0.5, 1.0, 2.0)})
     if delay is None:
         delay = [base.buy_delay_bar]
 
