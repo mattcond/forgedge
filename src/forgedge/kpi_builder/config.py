@@ -55,6 +55,13 @@ DEFAULT_CONFIG: Mapping = {
 }
 # NB: il lag non è nel config. Si applica dopo build_features() con lag_features(),
 # così si ritardano colonne reali (anche derivate) senza conoscerne i nomi a priori.
+#
+# NB2: "indicator_lag_cross" (Event Discovery, non KPI Builder) non è qui né
+# in default_enricher.yaml. FeatureGenerator genera automaticamente confronti
+# indicatore-vs-base-OHLC sfasata nel tempo (es. close_sma_12[t] > low[t-3]),
+# limitati alle famiglie price-scale (SMA/EMA/WMA/HMA); default lag = (1, 3),
+# sovrascrivibile con DiscoveryConfig(indicator_lag_cross_lags=(...)) —
+# see event_discovery.feature_generator._generate_indicator_lag_cross.
 
 
 def load_kpi_config(path: "str | Path") -> dict:
