@@ -89,14 +89,35 @@ _PATTERNS: list[tuple[str, str, str]] = [
     # explicitly so they resolve to "volume"/"sma" instead of the generic
     # rule's "volume"/"sma" reusing the same group positions incorrectly).
     (r'^(volume)_(sma|ema)_(\d+)$', "{1}", "volume_ma"),
+    # MACD signal / histogram lines — must precede the plain MACD-line pattern
+    # below, whose trailing "$" would otherwise never match these anyway
+    # (more numeric groups), but ordering them first keeps the more specific
+    # pattern visually adjacent to what it refines (issue #162).
+    (r'^(close|high|low|open)_macd_(\d+)_(\d+)_signal_(\d+)$', "macd_signal", "macd_signal"),
+    (r'^(close|high|low|open)_macd_(\d+)_(\d+)_hist_(\d+)$', "macd_hist", "macd_hist"),
+    # MACD line itself (issue #162): two numeric params (fast, slow), distinct
+    # from every other indicator here which has exactly one.
+    (r'^(close|high|low|open)_macd_(\d+)_(\d+)$', "macd", "macd_line"),
     # Standard MA / oscillator (also scale-free ratio-style indicators that
     # benefit from same-family multi-period pairing: max_drawdown, ATR, NATR)
     (r'^(close|high|low|open|volume)_(ema|sma|rsi|dema|tema|wma|hma|mdd|atr|natr)_(\d+)$', "{1}", "{1}"),
     # Rolling min/max on a price column
     (r'^(close|high|low)_(min|max)_(\d+)$', "{1}", "rolling_{1}"),
-    # Volatility / return series
+    # Volatility / return series. "volume" is a valid base here (issue #162):
+    # kpi_builder.returns()/multiple_returns() are generic over `on`, and a
+    # volume-vs-price divergence combo needs a volume_ret_N to pair against
+    # close_ret_N — not part of the default config (return is close-only by
+    # default), so this only activates once a caller adds "volume" to the
+    # return indicator's `columns`.
     (r'^(close|high|low)_vol_(\d+)$', "vol", "volatility"),
-    (r'^(close|high|low)_ret_(\d+)$', "ret", "return"),
+    (r'^(close|high|low|volume)_ret_(\d+)$', "ret", "return"),
+    # candle_features() geometry columns (issue #162) — plain names, no
+    # base/period suffix, so each needs its own literal alternative rather
+    # than the generic {base}_{indicator}_{param} shape.  "color" (+1/-1/0)
+    # is deliberately excluded: it's closer to categorical than a continuous
+    # geometry measure, and the issue flags it for discussion rather than
+    # prescribing inclusion.
+    (r'^(body|upper_wick|lower_wick|close_pos|range_pct|gap)$', "{0}", "candle_geometry"),
     # Raw OHLCV
     (r'^(close|high|low|open)$', "raw", "price"),
     (r'^volume$', "raw", "volume"),
@@ -301,6 +322,11 @@ class FeatureGenerator:
 
         # Arity 2 — cross-column, cross-time OHLC pairs (issue #161)
         self._generate_lag_cross(df, extended, meta)
+
+        # Arity 2 — same-time pairings that never got wired up (issue #162)
+        self._generate_macd_pairs(df, parsed, extended, meta)
+        self._generate_price_volume_pairs(df, parsed, extended, meta)
+        self._generate_candle_geometry_pairs(df, parsed, extended, meta)
 
         # Arity 3 — Bollinger & rolling-range triples
         self._generate_arity3(df, parsed, extended, meta)
@@ -546,6 +572,283 @@ class FeatureGenerator:
                             params={"cross_lag": lag},
                             transforms=_LAG_CROSS_TRANSFORMS,
                         )
+
+    # ------------------------------------------------------------------
+    # Arity 2 — same-timestamp pairings that never got wired up (issue #162)
+    # ------------------------------------------------------------------
+
+    def _generate_macd_pairs(
+        self,
+        df: pd.DataFrame,
+        parsed: dict[str, ParsedFeature],
+        extended: pd.DataFrame,
+        meta: dict[str, DerivedFeature],
+    ) -> None:
+        """Pair each MACD line against its own signal line (issue #162).
+
+        MACD/signal is arguably the single most textbook MACD signal, but its
+        column names (``close_macd_12_26``, ``close_macd_12_26_signal_09``)
+        carry two or three numeric parameters, one more than every other
+        pattern in ``_PATTERNS`` handles — before this method, ``parse_feature``
+        returned None for both, so neither ever reached ``_generate_arity2``'s
+        per-family grouping.
+
+        Unlike the fast/slow same-family loop above (single-parameter,
+        assumes any two columns in a family may be paired), a MACD line must
+        be paired with *its own* signal line specifically — matched by the
+        shared ``(base, fast, slow)`` key, not by sorting on one parameter.
+        That mismatch is why this is a dedicated method rather than an
+        extension of the generic grouping.
+
+        MACD is the first *signed* same-family pairing in the generator (RSI,
+        EMA, ATR, … are all non-negative), so the ratio can swing wildly or
+        flip sign near a line's zero-crossing. ``_safe_ratio`` already
+        degrades that to NaN (never inf/crash); ``diffnorm`` — which
+        normalises by the std of the difference rather than dividing by an
+        operand — is unaffected and is arguably the more robust of the two
+        for this family, but both are emitted for consistency with every
+        other same-family pairing.
+
+        Column names: ``ratio_{base}_macd{fast:02d}_{slow:02d}_signal``,
+        ``diffnorm_{base}_macd{fast:02d}_{slow:02d}_signal``.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Original KPI table (read-only).
+        parsed : dict[str, ParsedFeature]
+            Pre-parsed feature metadata for continuous columns.
+        extended : pd.DataFrame
+            Target DataFrame — new columns are appended here.
+        meta : dict[str, DerivedFeature]
+            Target metadata dict — new entries are added here.
+        """
+        macd_line: dict[tuple, str] = {}
+        macd_signal: dict[tuple, str] = {}
+        for col, pf in parsed.items():
+            if len(pf.params) < 2:
+                continue
+            key = (pf.base, pf.params[0], pf.params[1])
+            if pf.family == "macd_line":
+                macd_line[key] = col
+            elif pf.family == "macd_signal":
+                macd_signal[key] = col
+
+        for key in set(macd_line) & set(macd_signal):
+            base, fast, slow = key
+            line_col = macd_line[key]
+            sig_col = macd_signal[key]
+            tag = f"{base}_macd{fast:02d}_{slow:02d}_signal"
+
+            ratio_col = f"ratio_{tag}"
+            if ratio_col not in extended.columns:
+                series = _safe_ratio(df[line_col], df[sig_col])
+                extended[ratio_col] = series
+                meta[ratio_col] = DerivedFeature(
+                    col=ratio_col,
+                    series=series,
+                    is_scale_free=True,
+                    arity=2,
+                    operation="ratio",
+                    source_cols=[line_col, sig_col],
+                )
+
+            dn_col = f"diffnorm_{tag}"
+            if dn_col not in extended.columns:
+                dn_series, dn_std = _safe_diff_norm(df[line_col], df[sig_col])
+                extended[dn_col] = dn_series
+                meta[dn_col] = DerivedFeature(
+                    col=dn_col,
+                    series=dn_series,
+                    is_scale_free=True,
+                    arity=2,
+                    operation="diff_norm",
+                    source_cols=[line_col, sig_col],
+                    params={"diffnorm_std": dn_std},
+                )
+
+    def _generate_price_volume_pairs(
+        self,
+        df: pd.DataFrame,
+        parsed: dict[str, ParsedFeature],
+        extended: pd.DataFrame,
+        meta: dict[str, DerivedFeature],
+    ) -> None:
+        """Pair price % change against volume % change, same period (issue #162).
+
+        Neither existing arity-2 branch pairs a price-family column against a
+        volume-family one: "price vs its own MA" only pairs ``close`` against
+        its own MA columns, and "volume vs volume MA" only pairs ``volume``
+        against its own MA columns — there was no branch anywhere combining
+        the two, so divergence signals (e.g. "new price high on falling
+        volume") could never be constructed.
+
+        A *raw* price-vs-volume combination isn't dimensionally sound as a
+        ratio/spread: ``volume`` is an absolute, drifting level (not
+        scale-free — same reason raw ``close`` isn't), and dividing it by a
+        small, sign-crossing return fraction is numerically unstable near
+        the return's zero-crossings. Pairing two already-comparable %-change
+        quantities — ``close_ret_N`` against ``volume_ret_N`` at the *same*
+        lookback ``N`` — is the dimensionally sound version of the same idea
+        and is what this method builds.
+
+        Requires the KPI table to carry a volume return column, which is
+        **not** part of the default ``kpi_builder`` config (the ``return``
+        indicator is close-only by default) — this method is a no-op until a
+        caller adds ``"volume"`` to that indicator's ``columns``.
+
+        Column names: ``ratio_close_retNN_volume_retNN``,
+        ``diffnorm_close_retNN_volume_retNN``.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Original KPI table (read-only).
+        parsed : dict[str, ParsedFeature]
+            Pre-parsed feature metadata for continuous columns.
+        extended : pd.DataFrame
+            Target DataFrame — new columns are appended here.
+        meta : dict[str, DerivedFeature]
+            Target metadata dict — new entries are added here.
+        """
+        price_ret: dict[int, str] = {}
+        vol_ret: dict[int, str] = {}
+        for col, pf in parsed.items():
+            if pf.family != "return" or not pf.params:
+                continue
+            period = pf.params[0]
+            if pf.base == "volume":
+                vol_ret[period] = col
+            elif pf.base == "close":
+                price_ret[period] = col
+
+        for period in set(price_ret) & set(vol_ret):
+            p_col = price_ret[period]
+            v_col = vol_ret[period]
+            tag = f"close_ret{period:02d}_volume_ret{period:02d}"
+
+            ratio_col = f"ratio_{tag}"
+            if ratio_col not in extended.columns:
+                series = _safe_ratio(df[p_col], df[v_col])
+                extended[ratio_col] = series
+                meta[ratio_col] = DerivedFeature(
+                    col=ratio_col,
+                    series=series,
+                    is_scale_free=True,
+                    arity=2,
+                    operation="ratio",
+                    source_cols=[p_col, v_col],
+                )
+
+            dn_col = f"diffnorm_{tag}"
+            if dn_col not in extended.columns:
+                dn_series, dn_std = _safe_diff_norm(df[p_col], df[v_col])
+                extended[dn_col] = dn_series
+                meta[dn_col] = DerivedFeature(
+                    col=dn_col,
+                    series=dn_series,
+                    is_scale_free=True,
+                    arity=2,
+                    operation="diff_norm",
+                    source_cols=[p_col, v_col],
+                    params={"diffnorm_std": dn_std},
+                )
+
+    def _generate_candle_geometry_pairs(
+        self,
+        df: pd.DataFrame,
+        parsed: dict[str, ParsedFeature],
+        extended: pd.DataFrame,
+        meta: dict[str, DerivedFeature],
+    ) -> None:
+        """Pair candle_features() geometry columns among themselves and vs NATR.
+
+        ``kpi_builder.candle_features()`` produces ``body``/``upper_wick``/
+        ``lower_wick``/``close_pos``/``range_pct``/``gap`` — all scale-free by
+        construction, but bare-named (no ``{base}_{indicator}_{param}`` period
+        suffix), so ``parse_feature`` never recognised them and they could
+        only be used individually (arity-1 pass-through), never combined —
+        e.g. "wick asymmetry vs body" or "gap size relative to the bar's own
+        range" couldn't be constructed automatically.
+
+        Every pair among the (up to 6) geometry columns present is generated
+        — dedicated rather than routed through the generic same-family loop,
+        because that loop's naming template assumes one shared, *numeric*
+        ``base``/period across a group (``ratio_{base}_{ind}{param}_...``);
+        these columns have neither, and forcing them through it would print a
+        meaningless zero-padded period (``ratio_body_raw00_...``).
+
+        Also paired against each ``close_natr_{N}`` present ("ATR-style
+        volatility columns", per the issue) — **not** raw ``close_atr_{N}``,
+        which is in absolute price units and would silently reintroduce a
+        price-level dependency into an otherwise scale-free ratio; NATR
+        (``atr / close``, a dimensionless fraction — see
+        ``kpi_builder.indicators.multiple_atr``) is the dimensionally
+        comparable volatility measure. ATR/NATR are disabled by default in
+        ``kpi_builder``, so this half is a no-op unless a caller enables them.
+
+        ``body`` and ``gap`` are signed (unlike ``upper_wick``/``lower_wick``/
+        ``close_pos``/``range_pct``), so — as with the MACD pairing above —
+        some ratios can be numerically unstable near a zero-crossing;
+        ``_safe_ratio`` degrades that to NaN rather than inf/crash, same as
+        every other pairing in this class.
+
+        ``color`` (+1/-1/0) is deliberately excluded — the issue flags it as
+        closer to categorical than a continuous geometry measure and asks for
+        that to be a separate discussion, not decided here.
+
+        Column names: ``ratio_{a}_{b}``, ``diffnorm_{a}_{b}`` (geometry pairs);
+        ``ratio_{a}_close_natrNN``, ``diffnorm_{a}_close_natrNN`` (vs NATR).
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Original KPI table (read-only).
+        parsed : dict[str, ParsedFeature]
+            Pre-parsed feature metadata for continuous columns.
+        extended : pd.DataFrame
+            Target DataFrame — new columns are appended here.
+        meta : dict[str, DerivedFeature]
+            Target metadata dict — new entries are added here.
+        """
+        geometry = [
+            col for col, pf in parsed.items() if pf.family == "candle_geometry"
+        ]
+        geometry.sort()  # deterministic pairing order regardless of df.columns order
+        natr_cols = [col for col, pf in parsed.items() if pf.family == "natr"]
+
+        def _emit(col_a: str, col_b: str, tag: str) -> None:
+            ratio_col = f"ratio_{tag}"
+            if ratio_col not in extended.columns:
+                series = _safe_ratio(df[col_a], df[col_b])
+                extended[ratio_col] = series
+                meta[ratio_col] = DerivedFeature(
+                    col=ratio_col,
+                    series=series,
+                    is_scale_free=True,
+                    arity=2,
+                    operation="ratio",
+                    source_cols=[col_a, col_b],
+                )
+            dn_col = f"diffnorm_{tag}"
+            if dn_col not in extended.columns:
+                dn_series, dn_std = _safe_diff_norm(df[col_a], df[col_b])
+                extended[dn_col] = dn_series
+                meta[dn_col] = DerivedFeature(
+                    col=dn_col,
+                    series=dn_series,
+                    is_scale_free=True,
+                    arity=2,
+                    operation="diff_norm",
+                    source_cols=[col_a, col_b],
+                    params={"diffnorm_std": dn_std},
+                )
+
+        for i, col_a in enumerate(geometry):
+            for col_b in geometry[i + 1:]:
+                _emit(col_a, col_b, f"{col_a}_{col_b}")
+            for natr_col in natr_cols:
+                _emit(col_a, natr_col, f"{col_a}_{natr_col}")
 
     # ------------------------------------------------------------------
     # Arity 3

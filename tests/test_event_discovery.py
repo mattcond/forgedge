@@ -528,6 +528,231 @@ class TestFeatureGenerator:
             replayed.dropna(), ext["ratio_high_low_lag6"].dropna(), check_names=False,
         )
 
+    # ── Issue #162: MACD/signal, price-vs-volume, candle-geometry pairing ──
+
+    def test_parse_feature_macd(self):
+        """MACD line/signal/hist column names are now recognised (previously
+        None for both: two-or-three numeric groups matched no pattern)."""
+        line = parse_feature("close_macd_12_26")
+        assert line is not None
+        assert line.base == "close" and line.params == [12, 26] and line.family == "macd_line"
+
+        signal = parse_feature("close_macd_12_26_signal_09")
+        assert signal is not None
+        assert signal.params == [12, 26, 9] and signal.family == "macd_signal"
+
+        hist = parse_feature("close_macd_12_26_hist_09")
+        assert hist is not None
+        assert hist.params == [12, 26, 9] and hist.family == "macd_hist"
+
+    def _macd_df(self, n: int = 500, seed: int = 0) -> pd.DataFrame:
+        rng = np.random.default_rng(seed)
+        return pd.DataFrame({
+            "open_dt": pd.date_range("2024-01-01", periods=n, freq="1h"),
+            "close": 100 + np.cumsum(rng.normal(0, 1, n)),
+            "close_macd_12_26": rng.normal(0, 0.01, n),
+            "close_macd_12_26_signal_09": rng.normal(0, 0.01, n),
+            "close_macd_12_26_hist_09": rng.normal(0, 0.005, n),
+        })
+
+    def test_macd_line_paired_with_its_own_signal(self):
+        """The textbook MACD/signal crossover: ratio_ and diffnorm_ of the
+        MACD line against its own signal line, matched by shared
+        (base, fast, slow) — not against an unrelated MACD config."""
+        df = self._macd_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert "ratio_close_macd12_26_signal" in meta
+        assert "diffnorm_close_macd12_26_signal" in meta
+        m = meta["ratio_close_macd12_26_signal"]
+        assert m.source_cols == ["close_macd_12_26", "close_macd_12_26_signal_09"]
+
+    def test_macd_pairing_numeric_correctness(self):
+        df = self._macd_df()
+        cls = TypeClassifier().fit(df)
+        ext, _ = FeatureGenerator().generate(df, cls)
+        expected = df["close_macd_12_26"] / df["close_macd_12_26_signal_09"]
+        expected = expected.replace([float("inf"), float("-inf")], float("nan"))
+        pd.testing.assert_series_equal(
+            ext["ratio_close_macd12_26_signal"].dropna(), expected.dropna(), check_names=False,
+        )
+
+    def test_macd_pairing_does_not_cross_configs(self):
+        """A second, unrelated MACD triple (5,35,5) must not be paired with
+        the (12,26,9) triple's line or signal."""
+        df = self._macd_df()
+        df["close_macd_05_35"] = df["close_macd_12_26"] * 0.5
+        df["close_macd_05_35_signal_05"] = df["close_macd_12_26_signal_09"] * 0.5
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert "ratio_close_macd12_26_signal" in meta
+        assert "ratio_close_macd05_35_signal" in meta
+        # no cross-config pairing exists
+        assert not any(
+            "macd12_26" in k and "macd05_35" in k for k in meta
+        )
+
+    def test_macd_replay_matches_generation(self):
+        from forgedge.event_discovery.models import build_feature_series
+
+        df = self._macd_df()
+        cls = TypeClassifier().fit(df)
+        ext, meta = FeatureGenerator().generate(df, cls)
+        m = meta["diffnorm_close_macd12_26_signal"]
+        comp = EventComponent(
+            source_feature="diffnorm_close_macd12_26_signal", transform="identity",
+            transform_params=dict(m.params), transformed_col="", threshold=0.0,
+            threshold_type="", direction="above", event_type="threshold",
+            expression="", source_cols=m.source_cols,
+        )
+        replayed = build_feature_series(comp, df)
+        pd.testing.assert_series_equal(
+            replayed.dropna(), ext["diffnorm_close_macd12_26_signal"].dropna(), check_names=False,
+        )
+
+    def test_price_volume_pairing_requires_volume_return(self):
+        """No-op until a volume return column exists — 'return' is close-only
+        in the default kpi_builder config."""
+        df = _make_kpi_table()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert not any("volume_ret" in k and "close_ret" in k for k in meta)
+
+    def test_price_volume_pairing_generated_and_correct(self):
+        rng = np.random.default_rng(1)
+        n = 500
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2024-01-01", periods=n, freq="1h"),
+            "close": 100 + np.cumsum(rng.normal(0, 1, n)),
+            "close_ret_05": rng.normal(0, 0.01, n),
+            "volume_ret_05": rng.normal(0, 0.1, n),
+        })
+        cls = TypeClassifier().fit(df)
+        ext, meta = FeatureGenerator().generate(df, cls)
+        assert "ratio_close_ret05_volume_ret05" in meta
+        assert "diffnorm_close_ret05_volume_ret05" in meta
+        expected = (df["close_ret_05"] / df["volume_ret_05"]).replace(
+            [float("inf"), float("-inf")], float("nan")
+        )
+        pd.testing.assert_series_equal(
+            ext["ratio_close_ret05_volume_ret05"].dropna(), expected.dropna(), check_names=False,
+        )
+
+    def test_price_volume_pairing_matches_same_period_only(self):
+        """close_ret_05 pairs with volume_ret_05, not volume_ret_12."""
+        rng = np.random.default_rng(1)
+        n = 500
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2024-01-01", periods=n, freq="1h"),
+            "close": 100 + np.cumsum(rng.normal(0, 1, n)),
+            "close_ret_05": rng.normal(0, 0.01, n),
+            "volume_ret_12": rng.normal(0, 0.1, n),
+        })
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert not any("close_ret05" in k and "volume_ret" in k for k in meta)
+
+    def _candle_df(self, n: int = 500, seed: int = 3) -> pd.DataFrame:
+        from forgedge.kpi_builder.candle import candle_features
+        rng = np.random.default_rng(seed)
+        close = 100 + np.cumsum(rng.normal(0, 1, n))
+        high = close + np.abs(rng.normal(0, 0.5, n))
+        low = close - np.abs(rng.normal(0, 0.5, n))
+        open_ = close + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({
+            "open_dt": pd.date_range("2024-01-01", periods=n, freq="1h"),
+            "open": open_, "high": high, "low": low, "close": close,
+        })
+        return candle_features(df)
+
+    def test_parse_feature_candle_geometry(self):
+        for col in ("body", "upper_wick", "lower_wick", "close_pos", "range_pct", "gap"):
+            pf = parse_feature(col)
+            assert pf is not None, col
+            assert pf.family == "candle_geometry"
+
+    def test_parse_feature_color_excluded(self):
+        """color is deliberately not recognised (issue #162 non-goal)."""
+        assert parse_feature("color") is None
+
+    def test_candle_geometry_pairs_among_themselves(self):
+        df = self._candle_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert "ratio_body_upper_wick" in meta
+        assert "diffnorm_body_range_pct" in meta
+        assert "ratio_gap_range_pct" in meta
+
+    def test_candle_geometry_bounded_pair_count(self):
+        """6 geometry columns -> C(6,2)=15 pairs * 2 ops = 30, no NATR present
+        (ATR is disabled by default) -> exactly 30."""
+        df = self._candle_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        cg_pairs = [
+            k for k, v in meta.items()
+            if v.arity == 2 and v.operation in ("ratio", "diff_norm")
+            and all(
+                parse_feature(c) is not None and parse_feature(c).family == "candle_geometry"
+                for c in v.source_cols
+            )
+        ]
+        assert len(cg_pairs) == 30
+
+    def test_candle_geometry_paired_with_natr_not_raw_atr(self):
+        """Paired against close_natr_N (dimensionless), never close_atr_N
+        (absolute price units — would reintroduce a price-level dependency)."""
+        df = self._candle_df()
+        rng = np.random.default_rng(9)
+        df["close_natr_14"] = np.abs(rng.normal(0.02, 0.005, len(df)))
+        df["close_atr_14"] = df["close_natr_14"] * df["close"]
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert "ratio_body_close_natr_14" in meta
+        assert not any(
+            "atr_14" in k and "natr" not in k and k.startswith(("ratio_body", "diffnorm_body"))
+            for k in meta
+        )
+
+    def test_candle_geometry_numeric_correctness(self):
+        df = self._candle_df()
+        cls = TypeClassifier().fit(df)
+        ext, _ = FeatureGenerator().generate(df, cls)
+        expected = (df["body"] / df["upper_wick"]).replace(
+            [float("inf"), float("-inf")], float("nan")
+        )
+        pd.testing.assert_series_equal(
+            ext["ratio_body_upper_wick"].dropna(), expected.dropna(), check_names=False,
+        )
+
+    def test_candle_geometry_absent_without_candle_features(self):
+        """No candle-geometry pairs when candle_features() was never called."""
+        df = _make_kpi_table()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert not any(
+            k.startswith(("ratio_body", "diffnorm_body", "ratio_gap", "diffnorm_gap"))
+            for k in meta
+        )
+
+    def test_candle_geometry_replay_matches_generation(self):
+        from forgedge.event_discovery.models import build_feature_series
+
+        df = self._candle_df()
+        cls = TypeClassifier().fit(df)
+        ext, meta = FeatureGenerator().generate(df, cls)
+        m = meta["ratio_gap_range_pct"]
+        comp = EventComponent(
+            source_feature="ratio_gap_range_pct", transform="identity",
+            transform_params=dict(m.params), transformed_col="", threshold=0.0,
+            threshold_type="", direction="above", event_type="threshold",
+            expression="", source_cols=m.source_cols,
+        )
+        replayed = build_feature_series(comp, df)
+        pd.testing.assert_series_equal(
+            replayed.dropna(), ext["ratio_gap_range_pct"].dropna(), check_names=False,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Step 2 — TransformLayer
