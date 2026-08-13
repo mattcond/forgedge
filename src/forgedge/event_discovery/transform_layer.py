@@ -97,6 +97,7 @@ class TransformLayer:
                 series, col, meta.is_scale_free,
                 feature_params=meta.params,
                 source_cols=meta.source_cols,
+                allowed_transforms=getattr(meta, "transforms", None),
             ))
         return results
 
@@ -107,6 +108,7 @@ class TransformLayer:
         is_scale_free: bool,
         feature_params: dict | None = None,
         source_cols: list | None = None,
+        allowed_transforms: frozenset[str] | None = None,
     ) -> list[TransformedSeries]:
         """Apply all four transforms to a single feature series.
 
@@ -141,19 +143,30 @@ class TransformLayer:
             Name of the source feature (used to construct output column names).
         is_scale_free : bool
             Whether to include the identity transform.
+        allowed_transforms : frozenset[str] or None
+            Restricts which of the four transforms are emitted (from
+            ``{"identity", "rolling_pctrank", "rolling_zscore", "delta"}``).
+            ``None`` (default) emits all four, exactly as before this
+            parameter existed.  Set by ``DerivedFeature.transforms`` for
+            features that opt out of further temporal transforms (e.g. the
+            lag-cross family, issue #161 — already a fixed-lag comparison by
+            construction, so stacking another rolling/delta transform on top
+            multiplies cost for combinations that mostly restate the same
+            comparison in a more contrived form).
 
         Returns
         -------
         list[TransformedSeries]
-            Between 10 (non-scale-free) and 11 (scale-free) TransformedSeries
-            objects per feature.
+            Between 0 and 11 TransformedSeries objects per feature, depending
+            on ``is_scale_free`` and ``allowed_transforms``.
         """
         fp = feature_params or {}
         sc = source_cols or []
+        allowed = allowed_transforms
         out: list[TransformedSeries] = []
 
         # Identity — only for scale-free series
-        if is_scale_free:
+        if is_scale_free and (allowed is None or "identity" in allowed):
             out.append(TransformedSeries(
                 col=col,
                 series=series,
@@ -166,49 +179,52 @@ class TransformLayer:
             ))
 
         # Pctrank
-        for w in PCTRANK_WINDOWS:
-            t_col = f"pr_{col}_{w}"
-            t_series = _rolling_pctrank(series, w)
-            out.append(TransformedSeries(
-                col=t_col,
-                series=t_series,
-                transform="rolling_pctrank",
-                transform_params={"window": w},
-                source_feature=col,
-                is_zscore=False,
-                feature_params=fp,
-                source_cols=sc,
-            ))
+        if allowed is None or "rolling_pctrank" in allowed:
+            for w in PCTRANK_WINDOWS:
+                t_col = f"pr_{col}_{w}"
+                t_series = _rolling_pctrank(series, w)
+                out.append(TransformedSeries(
+                    col=t_col,
+                    series=t_series,
+                    transform="rolling_pctrank",
+                    transform_params={"window": w},
+                    source_feature=col,
+                    is_zscore=False,
+                    feature_params=fp,
+                    source_cols=sc,
+                ))
 
         # Z-score
-        for w in ZSCORE_WINDOWS:
-            t_col = f"zs_{col}_{w}"
-            t_series = _rolling_zscore(series, w)
-            out.append(TransformedSeries(
-                col=t_col,
-                series=t_series,
-                transform="rolling_zscore",
-                transform_params={"window": w},
-                source_feature=col,
-                is_zscore=True,
-                feature_params=fp,
-                source_cols=sc,
-            ))
+        if allowed is None or "rolling_zscore" in allowed:
+            for w in ZSCORE_WINDOWS:
+                t_col = f"zs_{col}_{w}"
+                t_series = _rolling_zscore(series, w)
+                out.append(TransformedSeries(
+                    col=t_col,
+                    series=t_series,
+                    transform="rolling_zscore",
+                    transform_params={"window": w},
+                    source_feature=col,
+                    is_zscore=True,
+                    feature_params=fp,
+                    source_cols=sc,
+                ))
 
         # Delta
-        for lag in DELTA_LAGS:
-            t_col = f"delta_{col}_{lag}"
-            t_series = series.diff(lag)
-            out.append(TransformedSeries(
-                col=t_col,
-                series=t_series,
-                transform="delta",
-                transform_params={"lag": lag},
-                source_feature=col,
-                is_zscore=False,
-                feature_params=fp,
-                source_cols=sc,
-            ))
+        if allowed is None or "delta" in allowed:
+            for lag in DELTA_LAGS:
+                t_col = f"delta_{col}_{lag}"
+                t_series = series.diff(lag)
+                out.append(TransformedSeries(
+                    col=t_col,
+                    series=t_series,
+                    transform="delta",
+                    transform_params={"lag": lag},
+                    source_feature=col,
+                    is_zscore=False,
+                    feature_params=fp,
+                    source_cols=sc,
+                ))
 
         return out
 

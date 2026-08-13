@@ -71,15 +71,27 @@ class TestEnrichmentIntegration:
     def pipeline(self):
         return _pipeline()
 
+    @staticmethod
+    def _from_feat_ema_24(source_feature: str) -> bool:
+        """True for candidates that trace back to the fixture's feat_ema_24
+        column (embeds window=24), as opposed to a cross-column, cross-time
+        OHLC candidate (issue #161) — those are built purely from raw
+        open/high/low/close and legitimately embed no such window."""
+        return "ema" in source_feature
+
     def test_dominant_window_reads_name_and_transform(self, pipeline):
         _, cands = pipeline
+        checked_ema = 0
         for c in cands:
             w = c.dominant_window()
-            assert w >= 24  # every feature embeds ema_24
+            if any(self._from_feat_ema_24(comp.source_feature) for comp in c.components):
+                assert w >= 24  # every feat_ema_24-derived candidate embeds it
+                checked_ema += 1
             for comp in c.components:
                 tw = (comp.transform_params or {}).get("window")
                 if tw:
                     assert w >= int(tw)
+        assert checked_ema > 0, "no feat_ema_24-derived candidate to check"
 
     def test_contracts_scan_enriched_grids(self, pipeline):
         ed, cands = pipeline
@@ -92,10 +104,14 @@ class TestEnrichmentIntegration:
             if set(c.derived_target.t_stat_by_h) > base
         ]
         assert enriched, "no contract scanned an enriched grid"
+        checked_ema = 0
         for c in contracts:
             grid = set(c.derived_target.t_stat_by_h)
             assert grid >= base                      # union, never restriction
-            assert c.dominant_window >= 24           # metadata recorded
+            if self._from_feat_ema_24(c.event_expression):
+                assert c.dominant_window >= 24        # metadata recorded
+                checked_ema += 1
+        assert checked_ema > 0, "no feat_ema_24-derived contract to check"
         assert ad.n_return_tests > len(contracts) * len(base)
 
     def test_off_switch_restores_base_grid(self, pipeline):

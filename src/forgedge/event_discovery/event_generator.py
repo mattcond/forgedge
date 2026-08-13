@@ -465,15 +465,77 @@ def _build_sql_expression(
         when used against a table with the same schema as
         ``EventDiscovery.df``.
     """
-    feat_sql = _sql_feature(source_feature, source_cols, transform_params)
-    t_sql = _sql_transform(feat_sql, transform, transform_params, ts_col)
-    return _sql_condition(t_sql, threshold, direction, event_type, ts_col)
+    feat_sql = _sql_feature(source_feature, source_cols, transform_params, ts_col)
+    t_sql = _sql_transform(
+        feat_sql, transform, transform_params, ts_col,
+        source_feature=source_feature, source_cols=source_cols,
+    )
+
+    prev_t_sql = None
+    cross_lag = transform_params.get("cross_lag")
+    if cross_lag and transform == "identity" and event_type == "crossing":
+        # feat_sql already contains a window function (the LAG powering the
+        # lag-cross operand); _sql_condition's generic "LAG(t_sql) OVER (...)"
+        # would nest a window function inside another one, which is invalid
+        # SQL. Re-derive the previous-bar value directly from the (shifted)
+        # base columns instead — see _lag_cross_shift_sql.
+        prev_t_sql = _lag_cross_shift_sql(source_feature, source_cols, cross_lag, 1, ts_col)
+
+    return _sql_condition(t_sql, threshold, direction, event_type, ts_col, prev_t_sql=prev_t_sql)
 
 
-def _sql_feature(source_feature: str, source_cols: list, transform_params: dict) -> str:
+def _lag_cross_shift_sql(
+    source_feature: str, source_cols: list, cross_lag: int, extra_shift: int, ts_col: str
+) -> Optional[str]:
+    """SQL for a lag-cross ratio/spread feature's value ``extra_shift`` bars earlier.
+
+    A lag-cross feature (issue #161) is ``a[t] OP b[t-cross_lag]``.  Its value
+    ``extra_shift`` bars in the past is ``a[t-extra_shift] OP
+    b[t-cross_lag-extra_shift]`` — both operands shifted by ``extra_shift``,
+    the second keeping its own ``cross_lag`` on top.  Re-deriving from the
+    base columns this way avoids wrapping ``feat_sql`` (which already
+    contains a ``LAG(...) OVER (...)`` for the second operand) in *another*
+    window function, which SQL disallows (window function calls cannot be
+    nested).  Used by crossing-event conditions and the Delta transform, the
+    two places that need "this feature's value N bars ago" as SQL.
+
+    Returns
+    -------
+    str or None
+        None if ``source_feature``/``source_cols`` don't describe a 2-column
+        ``ratio_``/``spread_`` combo — callers fall back to their generic
+        same-time-safe wrapping in that case.
+    """
+    sc = source_cols
+    if len(sc) != 2:
+        return None
+    a_shift = (
+        f'LAG("{sc[0]}", {extra_shift}) OVER (ORDER BY {ts_col})'
+        if extra_shift else f'"{sc[0]}"'
+    )
+    b_shift = f'LAG("{sc[1]}", {cross_lag + extra_shift}) OVER (ORDER BY {ts_col})'
+    if source_feature.startswith("ratio_"):
+        return f'{a_shift} / NULLIF({b_shift}, 0)'
+    if source_feature.startswith("spread_"):
+        return f'({a_shift} - {b_shift}) / NULLIF({b_shift}, 0)'
+    return None
+
+
+def _sql_feature(
+    source_feature: str, source_cols: list, transform_params: dict, ts_col: str = "open_dt"
+) -> str:
     """Return SQL expression for the raw (pre-transform) feature value."""
     sf = source_feature
     sc = source_cols
+    # "cross_lag" (issue #161) marks a lag-cross combo: the second operand is
+    # a LAG() of a different column rather than the same-time column.
+    cross_lag = transform_params.get("cross_lag")
+    if cross_lag and sf.startswith("ratio_") and len(sc) == 2:
+        rhs = f'LAG("{sc[1]}", {cross_lag}) OVER (ORDER BY {ts_col})'
+        return f'"{sc[0]}" / NULLIF({rhs}, 0)'
+    if cross_lag and sf.startswith("spread_") and len(sc) == 2:
+        rhs = f'LAG("{sc[1]}", {cross_lag}) OVER (ORDER BY {ts_col})'
+        return f'("{sc[0]}" - {rhs}) / NULLIF({rhs}, 0)'
     if sf.startswith("ratio_") and len(sc) == 2:
         return f'"{sc[0]}" / NULLIF("{sc[1]}", 0)'
     if sf.startswith("spread_") and len(sc) == 2:
@@ -490,12 +552,32 @@ def _sql_feature(source_feature: str, source_cols: list, transform_params: dict)
     return f'"{sf}"'
 
 
-def _sql_transform(feat_sql: str, transform: str, transform_params: dict, ts_col: str) -> str:
+def _sql_transform(
+    feat_sql: str,
+    transform: str,
+    transform_params: dict,
+    ts_col: str,
+    source_feature: str = "",
+    source_cols: Optional[list] = None,
+) -> str:
     """Wrap a feature SQL expression with the temporal transform.
 
     The rolling transforms reproduce ``min_periods = max(2, window // 2)``
     from :func:`TransformLayer` via a ``CASE WHEN COUNT(*) OVER win >= min_p``
     guard, so warmup bars evaluate to NULL exactly as they do in pandas.
+
+    ``source_feature``/``source_cols`` are only used for the ``delta``
+    transform on a lag-cross feature (issue #161, ``transform_params``
+    carries ``cross_lag``): see ``_lag_cross_shift_sql`` for why the
+    "N bars ago" value must be re-derived from the base columns there
+    instead of the generic ``LAG(feat_sql, lag)`` wrapping.  Rolling
+    pctrank/zscore are not corrected the same way — re-deriving a full
+    rolling window of shifted values isn't reducible to a single extra LAG,
+    so the emitted SQL for those two transforms on a lag-cross feature is a
+    documented best-effort approximation containing a nested window function
+    that some engines (including DuckDB) will reject; the Python-level
+    replay (``EventCandidate.apply``), which is what forgedge itself
+    actually executes, is unaffected and correct for every combination.
     """
     if transform == "identity":
         return feat_sql
@@ -524,6 +606,11 @@ def _sql_transform(feat_sql: str, transform: str, transform_params: dict, ts_col
         return f"CASE WHEN {cnt} >= {min_p} THEN {z} END"
     if transform == "delta":
         lag = transform_params["lag"]
+        cross_lag = transform_params.get("cross_lag")
+        if cross_lag and source_feature:
+            prev = _lag_cross_shift_sql(source_feature, source_cols or [], cross_lag, lag, ts_col)
+            if prev is not None:
+                return f"{feat_sql} - {prev}"
         return f"{feat_sql} - LAG({feat_sql}, {lag}) OVER (ORDER BY {ts_col})"
     return feat_sql
 
@@ -553,18 +640,28 @@ def _sql_condition(
     direction: str,
     event_type: str,
     ts_col: str,
+    prev_t_sql: Optional[str] = None,
 ) -> str:
-    """Apply threshold/crossing condition to a transformed SQL expression."""
+    """Apply threshold/crossing condition to a transformed SQL expression.
+
+    Parameters
+    ----------
+    prev_t_sql : str or None
+        Pre-derived SQL for "this feature's value one bar earlier", used
+        instead of the generic ``LAG(t_sql) OVER (...)`` wrapping.  Needed
+        when ``t_sql`` already contains its own window function (a lag-cross
+        feature, issue #161) — SQL disallows nesting window function calls,
+        so callers that know this precompute the correct expression via
+        ``_lag_cross_shift_sql`` and pass it here.  When None (the common
+        case — t_sql is a plain scalar expression), the generic wrapping is
+        safe and used as before.
+    """
     op = "<" if direction == "below" else ">"
     opp = ">=" if direction == "below" else "<="
     thr = _sql_threshold_literal(threshold)
     if event_type == "crossing":
-        # Crossing events are only generated for identity transform, so t_sql
-        # contains no nested window functions — LAG(t_sql) is valid DuckDB SQL.
-        return (
-            f"(({t_sql}) {op} {thr}"
-            f" AND LAG(({t_sql})) OVER (ORDER BY {ts_col}) {opp} {thr})"
-        )
+        prev = prev_t_sql if prev_t_sql is not None else f"LAG(({t_sql})) OVER (ORDER BY {ts_col})"
+        return f"(({t_sql}) {op} {thr} AND {prev} {opp} {thr})"
     return f"({t_sql}) {op} {thr}"
 
 
@@ -591,6 +688,13 @@ def _build_event_formula(
 def _formula_feature(source_feature: str, source_cols: list, transform_params: dict) -> str:
     sf = source_feature
     sc = source_cols
+    # "cross_lag" (issue #161) marks a lag-cross combo: the second operand is
+    # evaluated N bars earlier than the first.
+    cross_lag = transform_params.get("cross_lag")
+    if cross_lag and sf.startswith("ratio_") and len(sc) == 2:
+        return f"{sc[0]} / {sc[1]}[t-{cross_lag}]"
+    if cross_lag and sf.startswith("spread_") and len(sc) == 2:
+        return f"({sc[0]} - {sc[1]}[t-{cross_lag}]) / {sc[1]}[t-{cross_lag}]"
     if sf.startswith("ratio_") and len(sc) == 2:
         return f"{sc[0]} / {sc[1]}"
     if sf.startswith("spread_") and len(sc) == 2:
