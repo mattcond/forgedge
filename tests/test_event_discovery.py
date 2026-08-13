@@ -494,13 +494,24 @@ class TestFeatureGenerator:
         assert len(lag_cross) == 48
 
     def test_lag_cross_absent_without_second_ohlc_base(self):
-        """Only 'close' present (no high/low/open) -> no lag-cross features,
-        and no crash."""
+        """Only 'close' present (no high/low/open) -> the OHLC x OHLC
+        lag-cross family (#161, needs 2+ distinct OHLC bases) generates
+        nothing, and no crash. #165's indicator-vs-OHLC-base family is a
+        separate, unrelated shape that only needs one base (e.g. an
+        indicator vs its own base, lagged) and legitimately fires here — see
+        test_indicator_lag_cross_* — so this checks specifically for the
+        OHLC x OHLC shape (both source_cols must themselves be raw OHLC
+        bases), not just any "ratio_lag"/"spread_pct_lag" operation."""
         df = _make_kpi_table()
         assert "high" not in df.columns and "low" not in df.columns
         cls = TypeClassifier().fit(df)
         _, meta = FeatureGenerator().generate(df, cls)
-        assert not any(v.operation in ("ratio_lag", "spread_pct_lag") for v in meta.values())
+        ohlc_bases = {"open", "high", "low", "close"}
+        assert not any(
+            v.operation in ("ratio_lag", "spread_pct_lag")
+            and set(v.source_cols) <= ohlc_bases
+            for v in meta.values()
+        )
 
     def test_lag_cross_replay_matches_generation(self):
         """build_feature_series (the OOS replay path used by
@@ -752,6 +763,122 @@ class TestFeatureGenerator:
         pd.testing.assert_series_equal(
             replayed.dropna(), ext["ratio_gap_range_pct"].dropna(), check_names=False,
         )
+
+    # ── Issue #165: indicator vs lagged OHLC-base cross-time pairing ────────
+
+    def _indicator_lag_cross_df(self, n: int = 500, seed: int = 4) -> pd.DataFrame:
+        rng = np.random.default_rng(seed)
+        close = 100 + np.cumsum(rng.normal(0, 1, n))
+        high = close + np.abs(rng.normal(0, 0.5, n))
+        low = close - np.abs(rng.normal(0, 0.5, n))
+        return pd.DataFrame({
+            "open_dt": pd.date_range("2024-01-01", periods=n, freq="1h"),
+            "close": close, "high": high, "low": low,
+            "close_sma_12": pd.Series(close).rolling(12, min_periods=1).mean(),
+            "close_rsi_14": np.clip(50 + rng.normal(0, 15, n), 0, 100),
+        })
+
+    def test_indicator_lag_cross_generates_ma_vs_low_lag3(self):
+        """The exact gap reported in #165: 'ma_12[t] > low[t-3]'."""
+        df = self._indicator_lag_cross_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert "ratio_close_sma_12_low_lag3" in meta
+        m = meta["ratio_close_sma_12_low_lag3"]
+        assert m.source_cols == ["close_sma_12", "low"]
+        assert m.params == {"cross_lag": 3}
+        assert m.transforms == frozenset({"identity"})
+
+    def test_indicator_lag_cross_numeric_correctness(self):
+        df = self._indicator_lag_cross_df()
+        cls = TypeClassifier().fit(df)
+        ext, _ = FeatureGenerator().generate(df, cls)
+        expected = (df["close_sma_12"] / df["low"].shift(3)).replace(
+            [float("inf"), float("-inf")], float("nan")
+        )
+        pd.testing.assert_series_equal(
+            ext["ratio_close_sma_12_low_lag3"].dropna(), expected.dropna(), check_names=False,
+        )
+
+    def test_indicator_lag_cross_excludes_bounded_indicators(self):
+        """RSI (bounded, not price-scale) must not be paired against a raw
+        OHLC base — the ATR-vs-NATR dimensional-soundness reasoning from
+        #162 applies here too."""
+        df = self._indicator_lag_cross_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert not any("rsi" in k and "_lag" in k for k in meta)
+
+    def test_indicator_lag_cross_ratio_only_no_spread(self):
+        df = self._indicator_lag_cross_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert not any(
+            k.startswith("spread_close_sma_12_") or k.startswith("diffnorm_close_sma_12_")
+            for k in meta
+        )
+
+    def test_indicator_lag_cross_default_lags_are_1_and_3(self):
+        df = self._indicator_lag_cross_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        lags_seen = {
+            v.params["cross_lag"] for k, v in meta.items()
+            if v.operation == "ratio_lag" and "sma_12" in k
+        }
+        assert lags_seen == {1, 3}
+
+    def test_indicator_lag_cross_custom_lags_override(self):
+        df = self._indicator_lag_cross_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls, indicator_lag_cross_lags=(2, 5))
+        lags_seen = {
+            v.params["cross_lag"] for k, v in meta.items()
+            if v.operation == "ratio_lag" and "sma_12" in k
+        }
+        assert lags_seen == {2, 5}
+        assert "ratio_close_sma_12_low_lag1" not in meta
+
+    def test_indicator_lag_cross_disabled_with_empty_tuple(self):
+        df = self._indicator_lag_cross_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls, indicator_lag_cross_lags=())
+        assert not any("sma_12" in k and "_lag" in k for k in meta)
+        # #161's OHLC x OHLC lag-cross is independent and stays active
+        assert any(
+            v.operation in ("ratio_lag", "spread_pct_lag") and "sma" not in k
+            for k, v in meta.items()
+        )
+
+    def test_indicator_lag_cross_replay_matches_generation(self):
+        from forgedge.event_discovery.models import build_feature_series
+
+        df = self._indicator_lag_cross_df()
+        cls = TypeClassifier().fit(df)
+        ext, meta = FeatureGenerator().generate(df, cls)
+        m = meta["ratio_close_sma_12_low_lag3"]
+        comp = EventComponent(
+            source_feature="ratio_close_sma_12_low_lag3", transform="identity",
+            transform_params=dict(m.params), transformed_col="", threshold=0.0,
+            threshold_type="", direction="above", event_type="threshold",
+            expression="", source_cols=m.source_cols,
+        )
+        replayed = build_feature_series(comp, df)
+        pd.testing.assert_series_equal(
+            replayed.dropna(), ext["ratio_close_sma_12_low_lag3"].dropna(), check_names=False,
+        )
+
+    def test_discovery_config_indicator_lag_cross_lags_threaded_through(self):
+        """DiscoveryConfig.indicator_lag_cross_lags reaches FeatureGenerator
+        via EventDiscovery, end to end."""
+        df = self._indicator_lag_cross_df()
+        ed = EventDiscovery(
+            df, DiscoveryConfig(train_ratio=1.0, indicator_lag_cross_lags=(2,))
+        )
+        ed.run()
+        assert "ratio_close_sma_12_low_lag2" in ed.df.columns
+        assert "ratio_close_sma_12_low_lag1" not in ed.df.columns
+        assert "ratio_close_sma_12_low_lag3" not in ed.df.columns
 
 
 # ---------------------------------------------------------------------------

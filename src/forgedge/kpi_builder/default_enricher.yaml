@@ -82,3 +82,13 @@ macd:
   params:
     periods: [12, 26, 9]
     columns: [close]
+
+# NB: indicator_lag_cross (Event Discovery, non KPI Builder) — NON va qui.
+# FeatureGenerator genera automaticamente confronti indicatore-vs-base-OHLC
+# sfasata nel tempo (es. close_sma_12[t] > low[t-3]), limitati alle famiglie
+# price-scale (SMA/EMA/WMA/HMA), lag di default (1, 3). Non è un indicatore
+# KPI Builder e non viene letto da questo file a runtime — cambiare il lag
+# richiede DiscoveryConfig(indicator_lag_cross_lags=(...)) in Python, non un
+# blocco qui (che verrebbe solo ignorato con un warning "non implementato").
+# Documentato qui unicamente come riferimento incrociato per chi legge prima
+# questo file. Vedi FeatureGenerator._generate_indicator_lag_cross.

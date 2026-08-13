@@ -93,6 +93,21 @@ class DiscoveryConfig:
         viable AND pairs.  Empirical distribution on 12 months H1 data:
         p75=0.095, p95=0.285, p99=0.469 — values above 0.70 represent
         genuine near-duplicates.
+    indicator_lag_cross_lags : tuple[int, ...]
+        Lag set for the indicator × OHLC-base cross-time feature family
+        (issue #165, e.g. ``close_sma_12[t] > low[t-3]``), restricted to
+        price-scale indicators (SMA/EMA/WMA/HMA) vs a raw OHLC base, ratio
+        only, identity transform only — see
+        ``FeatureGenerator._generate_indicator_lag_cross``. Default ``(1,
+        3)``, deliberately smaller than the global ``DELTA_LAGS = (1, 3, 6,
+        12)`` used elsewhere, to keep this always-on family's growth small.
+        The same default is documented in ``kpi_builder``'s
+        ``default_enricher.yaml`` for cross-reference; it is not read from
+        there at runtime (this field is the actual source of truth — reading
+        it from kpi_builder's config would need a new runtime dependency on
+        PyYAML and a coupling to a specific config file path that doesn't
+        otherwise exist between the two modules). Pass ``()`` to disable
+        this family entirely.
     """
 
     gate_params: GateParams = field(default_factory=GateParams)
@@ -104,6 +119,7 @@ class DiscoveryConfig:
     walk_forward: Optional[WalkForwardConfig] = None
     diversity_gate_enabled: bool = False
     diversity_threshold: float = 0.85
+    indicator_lag_cross_lags: tuple[int, ...] = (1, 3)
 
 
 class EventDiscovery:
@@ -232,7 +248,10 @@ class EventDiscovery:
 
         # Step 1 — generate derived features for continuous columns (IS)
         fg = FeatureGenerator()
-        extended_df, derived_meta = fg.generate(self.df, classifications)
+        extended_df, derived_meta = fg.generate(
+            self.df, classifications,
+            indicator_lag_cross_lags=cfg.indicator_lag_cross_lags,
+        )
         extended_df.index = self.df.index
         self.df = extended_df
 

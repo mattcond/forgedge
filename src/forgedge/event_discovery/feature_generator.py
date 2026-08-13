@@ -35,6 +35,30 @@ _OHLC_BASES: tuple[str, ...] = ("open", "high", "low", "close")
 # "close[t] > low[t-1]", the shape this issue is about.
 _LAG_CROSS_TRANSFORMS: frozenset[str] = frozenset({"identity"})
 
+# Indicator × OHLC-base cross-time comparisons (issue #165) — e.g.
+# "ma_12[t] > low[t-3]", completing #161 (OHLC×OHLC cross-time) and #162
+# (same-time indicator pairing). Deliberately narrower than #161's own
+# constant:
+#
+# * Default lags are (1, 3), not the global DELTA_LAGS = (1, 3, 6, 12) used
+#   everywhere else in this module — a dedicated, smaller default so this
+#   family's growth stays proportionate even though (unlike #161's lag-cross,
+#   which is opt-out-only by being unconditional) it's on by default. See
+#   DiscoveryConfig.indicator_lag_cross_lags for how a caller overrides it;
+#   the same default is documented in kpi_builder's default_enricher.yaml as
+#   a cross-referenced default value, not read from there at runtime (that
+#   would require a new kpi_builder -> event_discovery coupling and a PyYAML
+#   runtime dependency, neither of which exist anywhere else in the
+#   pipeline — FeatureGenerator only ever sees the resulting DataFrame, never
+#   the config that produced it).
+# * Indicator side restricted to price-scale families (SMA/EMA/WMA/HMA) —
+#   the units match a raw OHLC base, so a ratio against one is dimensionally
+#   sound. RSI/vol/ret/mdd/BB are excluded (already bounded/normalised;
+#   comparing e.g. RSI directly to a raw price is exactly the ATR-vs-NATR
+#   mistake #162 avoided).
+_INDICATOR_LAG_CROSS_DEFAULT_LAGS: tuple[int, ...] = (1, 3)
+_PRICE_SCALE_FAMILIES: frozenset[str] = frozenset({"ema", "sma", "wma", "hma"})
+
 
 # ---------------------------------------------------------------------------
 # Feature name parsing
@@ -264,6 +288,7 @@ class FeatureGenerator:
         self,
         df: pd.DataFrame,
         classifications: dict[str, ColumnClassification],
+        indicator_lag_cross_lags: Optional[tuple[int, ...]] = None,
     ) -> tuple[pd.DataFrame, dict[str, DerivedFeature]]:
         """Build the extended feature catalog and return it alongside metadata.
 
@@ -284,6 +309,12 @@ class FeatureGenerator:
             Original KPI table (must not be modified in place).
         classifications : dict[str, ColumnClassification]
             Output of ``TypeClassifier.fit(df)``.
+        indicator_lag_cross_lags : tuple[int, ...] or None
+            Lag set for the indicator × OHLC-base cross-time family (issue
+            #165, e.g. ``close_sma_12[t] > low[t-3]``).  ``None`` (default)
+            uses ``_INDICATOR_LAG_CROSS_DEFAULT_LAGS`` (``(1, 3)``); pass an
+            empty tuple to disable this family entirely.  See
+            ``DiscoveryConfig.indicator_lag_cross_lags``.
 
         Returns
         -------
@@ -327,6 +358,14 @@ class FeatureGenerator:
         self._generate_macd_pairs(df, parsed, extended, meta)
         self._generate_price_volume_pairs(df, parsed, extended, meta)
         self._generate_candle_geometry_pairs(df, parsed, extended, meta)
+
+        # Arity 2 — indicator vs lagged OHLC-base cross-time pairs (issue #165)
+        lags = (
+            _INDICATOR_LAG_CROSS_DEFAULT_LAGS
+            if indicator_lag_cross_lags is None
+            else indicator_lag_cross_lags
+        )
+        self._generate_indicator_lag_cross(df, parsed, extended, meta, lags)
 
         # Arity 3 — Bollinger & rolling-range triples
         self._generate_arity3(df, parsed, extended, meta)
@@ -572,6 +611,113 @@ class FeatureGenerator:
                             params={"cross_lag": lag},
                             transforms=_LAG_CROSS_TRANSFORMS,
                         )
+
+    # ------------------------------------------------------------------
+    # Arity 2 — indicator vs lagged OHLC-base cross-time pairs (issue #165)
+    # ------------------------------------------------------------------
+
+    def _generate_indicator_lag_cross(
+        self,
+        df: pd.DataFrame,
+        parsed: dict[str, ParsedFeature],
+        extended: pd.DataFrame,
+        meta: dict[str, DerivedFeature],
+        lags: tuple[int, ...],
+    ) -> None:
+        """Pair a price-scale indicator against a lagged OHLC base (issue #165).
+
+        Completes the investigation started in #161 (OHLC-base cross-time,
+        e.g. ``close[t] > low[t-1]``) and #162 (same-time indicator pairing):
+        neither reaches a condition like ``close_sma_12[t] > low[t-3]`` — an
+        indicator compared against a *different* OHLC base *N bars earlier* —
+        because both were deliberately scoped to avoid it (see each's own
+        "restricted to raw OHLC bases" / "not indicator vs OHLC-base"
+        docstring note) to keep their own growth bounded.
+
+        Column name: ``ratio_{indicator_col}_{ohlc_base}_lag{lag}`` =
+        ``indicator[t] / ohlc_base[t-lag]``. Reuses #161's exact
+        ``cross_lag`` mechanism (``params={"cross_lag": lag}``, source_cols
+        ``[indicator_col, ohlc_base]``) — the replay/SQL/formula dispatch in
+        ``models.py``/``event_generator.py`` already handles this shape
+        generically (a ``ratio_`` of two source columns with a ``cross_lag``
+        param), so no changes were needed outside this module.
+
+        Deliberately narrower than #161's own OHLC×OHLC lag-cross, matching
+        the scope this issue was filed to pin down precisely (a generic
+        "every indicator × every OHLC base × every lag" cross would run to
+        ~1,000 new features before any transform fan-out — see the issue):
+
+        * **Indicator side restricted to price-scale families**
+          (``_PRICE_SCALE_FAMILIES`` — SMA/EMA/WMA/HMA): the only families
+          whose units match a raw OHLC base, so a ratio against one is
+          dimensionally sound. RSI/vol/ret/mdd/BB stay excluded — already
+          bounded/normalised, so comparing them to a raw price the way #162
+          avoided pairing raw ATR with anything but NATR for the same reason.
+        * **``ratio_`` only** — no ``spread_``/``diffnorm_`` variant.
+        * **Identity transform only** (``_LAG_CROSS_TRANSFORMS``) — mirrors
+          #161's own restriction: the comparison is already fixed by
+          construction, so stacking pctrank/zscore/delta on top mostly
+          restates it at a much higher combinatorial cost.
+        * **Lag set is a dedicated, smaller default** — see
+          ``_INDICATOR_LAG_CROSS_DEFAULT_LAGS`` and
+          ``DiscoveryConfig.indicator_lag_cross_lags`` for why this doesn't
+          reuse the global ``DELTA_LAGS``.
+
+        On by default (not opt-in): with the above restrictions applied, the
+        growth is small enough that gating this behind a flag would quietly
+        exclude the pattern class from exploratory search — a user would
+        need to already suspect this shape of rule exists to go looking for
+        it (this is the issue's own explicit reasoning for shipping it
+        unconditionally, echoing why #161's lag-cross is unconditional too).
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Original KPI table (read-only) — OHLC bases are read directly
+            from here (see ``_OHLC_BASES``), same as ``_generate_lag_cross``.
+        parsed : dict[str, ParsedFeature]
+            Pre-parsed feature metadata for continuous columns.
+        extended : pd.DataFrame
+            Target DataFrame — new columns are appended here.
+        meta : dict[str, DerivedFeature]
+            Target metadata dict — new entries are added here.
+        lags : tuple[int, ...]
+            Lag set to pair against, e.g. ``(1, 3)``. Empty disables this
+            family entirely.
+        """
+        if not lags:
+            return
+
+        indicator_cols = [
+            col for col, pf in parsed.items() if pf.family in _PRICE_SCALE_FAMILIES
+        ]
+        if not indicator_cols:
+            return
+        ohlc_bases = [b for b in _OHLC_BASES if b in df.columns]
+        if not ohlc_bases:
+            return
+        indicator_cols.sort()  # deterministic regardless of df.columns order
+
+        for ind_col in indicator_cols:
+            series_ind = df[ind_col]
+            for base in ohlc_bases:
+                for lag in lags:
+                    ratio_col = f"ratio_{ind_col}_{base}_lag{lag}"
+                    if ratio_col in extended.columns:
+                        continue
+                    lagged_base = df[base].shift(lag)
+                    series = _safe_ratio(series_ind, lagged_base)
+                    extended[ratio_col] = series
+                    meta[ratio_col] = DerivedFeature(
+                        col=ratio_col,
+                        series=series,
+                        is_scale_free=True,
+                        arity=2,
+                        operation="ratio_lag",
+                        source_cols=[ind_col, base],
+                        params={"cross_lag": lag},
+                        transforms=_LAG_CROSS_TRANSFORMS,
+                    )
 
     # ------------------------------------------------------------------
     # Arity 2 — same-timestamp pairings that never got wired up (issue #162)
