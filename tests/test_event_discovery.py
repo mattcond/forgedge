@@ -424,6 +424,110 @@ class TestFeatureGenerator:
         derived = {k: v for k, v in meta.items() if v.arity >= 2}
         assert all(v.is_scale_free for v in derived.values())
 
+    # ── Issue #161: cross-column, cross-time ("lag-cross") pairing ──────────
+
+    def _ohlc_df(self, n: int = 500, seed: int = 0) -> pd.DataFrame:
+        rng = np.random.default_rng(seed)
+        close = 100 + np.cumsum(rng.normal(0, 1, n))
+        high = close + np.abs(rng.normal(0, 0.5, n))
+        low = close - np.abs(rng.normal(0, 0.5, n))
+        return pd.DataFrame({
+            "open_dt": pd.date_range("2024-01-01", periods=n, freq="1h"),
+            "close": close, "high": high, "low": low,
+        })
+
+    def test_lag_cross_generates_close_vs_low_lag1(self):
+        """The exact gap reported in #161: 'close[t] > low[t-1]' must now be
+        constructible as a scale-free arity-2 feature."""
+        df = self._ohlc_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert "ratio_close_low_lag1" in meta
+        assert "spread_close_low_lag1" in meta
+        assert meta["ratio_close_low_lag1"].is_scale_free
+        assert meta["ratio_close_low_lag1"].source_cols == ["close", "low"]
+        assert meta["ratio_close_low_lag1"].params == {"cross_lag": 1}
+
+    def test_lag_cross_numeric_correctness(self):
+        """ratio_a_b_lagN == a[t] / b[t-N]; spread_a_b_lagN == (a-b_lag)/b_lag."""
+        df = self._ohlc_df()
+        cls = TypeClassifier().fit(df)
+        ext, _ = FeatureGenerator().generate(df, cls)
+        expected_ratio = df["close"] / df["low"].shift(3)
+        expected_spread = (df["close"] - df["low"].shift(3)) / df["low"].shift(3)
+        pd.testing.assert_series_equal(
+            ext["ratio_close_low_lag3"].dropna(), expected_ratio.dropna(),
+            check_names=False,
+        )
+        pd.testing.assert_series_equal(
+            ext["spread_close_low_lag3"].dropna(), expected_spread.dropna(),
+            check_names=False,
+        )
+
+    def test_lag_cross_uses_delta_lags(self):
+        df = self._ohlc_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        from forgedge.event_discovery.transform_layer import DELTA_LAGS
+        for lag in DELTA_LAGS:
+            assert f"ratio_close_low_lag{lag}" in meta
+
+    def test_lag_cross_excludes_same_base_pairs(self):
+        """No a[t] vs a[t-lag] lag-cross combo — that shape already exists
+        natively as the 'return' family (close_ret_N)."""
+        df = self._ohlc_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert not any(
+            k.startswith(("ratio_close_close_", "spread_close_close_"))
+            for k in meta
+        )
+
+    def test_lag_cross_bounded_feature_count(self):
+        """3 present OHLC bases (close/high/low) -> 3*2 ordered pairs * 4 lags
+        * 2 ops = 48 new columns — the surface stays predictable/bounded even
+        though every ordered (base_a, base_b) pair is generated."""
+        df = self._ohlc_df()
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        lag_cross = [k for k, v in meta.items() if v.operation in ("ratio_lag", "spread_pct_lag")]
+        assert len(lag_cross) == 48
+
+    def test_lag_cross_absent_without_second_ohlc_base(self):
+        """Only 'close' present (no high/low/open) -> no lag-cross features,
+        and no crash."""
+        df = _make_kpi_table()
+        assert "high" not in df.columns and "low" not in df.columns
+        cls = TypeClassifier().fit(df)
+        _, meta = FeatureGenerator().generate(df, cls)
+        assert not any(v.operation in ("ratio_lag", "spread_pct_lag") for v in meta.values())
+
+    def test_lag_cross_replay_matches_generation(self):
+        """build_feature_series (the OOS replay path used by
+        EventCandidate.apply) must reproduce the lag-cross feature exactly."""
+        from forgedge.event_discovery.models import build_feature_series
+
+        df = self._ohlc_df()
+        cls = TypeClassifier().fit(df)
+        ext, meta = FeatureGenerator().generate(df, cls)
+        m = meta["ratio_high_low_lag6"]
+        comp = EventComponent(
+            source_feature="ratio_high_low_lag6",
+            transform="identity",
+            transform_params=dict(m.params),
+            transformed_col="ratio_high_low_lag6",
+            threshold=0.0,
+            threshold_type="",
+            direction="above",
+            event_type="threshold",
+            expression="",
+            source_cols=m.source_cols,
+        )
+        replayed = build_feature_series(comp, df)
+        pd.testing.assert_series_equal(
+            replayed.dropna(), ext["ratio_high_low_lag6"].dropna(), check_names=False,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Step 2 — TransformLayer
@@ -1267,6 +1371,132 @@ class TestBugRegressions:
         # Must not raise — result can pass or fail, but no exception
         result = gate.filter([raw], timestamps)
         assert isinstance(result, list)
+
+
+# ---------------------------------------------------------------------------
+# Issue #161: cross-column, cross-time ("lag-cross") events
+# ---------------------------------------------------------------------------
+
+class TestLagCrossEvents:
+    """close[t] > low[t-1]-shaped events: end-to-end discovery, SQL/formula
+    export, and OOS replay for identity/crossing/delta transforms."""
+
+    def _ohlc_df(self, n: int = 1500, seed: int = 7) -> pd.DataFrame:
+        rng = np.random.default_rng(seed)
+        close = 100 + np.cumsum(rng.normal(0, 1, n))
+        high = close + np.abs(rng.normal(0, 0.5, n))
+        low = close - np.abs(rng.normal(0, 0.5, n))
+        return pd.DataFrame({
+            "open_dt": pd.date_range("2019-01-01", periods=n, freq="1D"),
+            "close": close, "high": high, "low": low,
+        })
+
+    def test_exploratory_discovery_finds_lag_cross_candidates(self):
+        """Regression for #161: unassisted (non-manual-events) discovery must
+        be able to produce close/high/low cross-column, cross-time atoms —
+        previously exactly zero such atoms were ever generated."""
+        df = self._ohlc_df()
+        ed = EventDiscovery(
+            df,
+            DiscoveryConfig(
+                train_ratio=1.0,
+                gate_params=GateParams(min_tpm=0.1, max_dispersion=5.0, min_episodes=1),
+            ),
+        )
+        cands = ed.run()
+        lag_cross = [
+            c for c in cands
+            if any("_lag" in comp.source_feature for comp in c.components)
+        ]
+        assert lag_cross, "no cross-column, cross-time candidate was discovered"
+
+    def test_replay_matches_stored_series_across_transforms(self):
+        """EventCandidate.apply() on the pipeline's own frame (ed.df) must
+        reproduce the stored activation series exactly, for identity,
+        crossing, and delta lag-cross components alike."""
+        df = self._ohlc_df()
+        ed = EventDiscovery(
+            df,
+            DiscoveryConfig(
+                train_ratio=1.0,
+                gate_params=GateParams(min_tpm=0.1, max_dispersion=5.0, min_episodes=1),
+            ),
+        )
+        cands = ed.run()
+        by_transform: dict[str, EventCandidate] = {}
+        for c in cands:
+            comp = c.components[0]
+            if "_lag" not in comp.source_feature:
+                continue
+            key = f"{comp.event_type}:{comp.transform}"
+            by_transform.setdefault(key, c)
+        assert by_transform, "no lag-cross candidate to check"
+
+        for key, cand in by_transform.items():
+            replayed = cand.apply(ed.df).reindex(cand.event_series.index).fillna(0)
+            stored = cand.event_series.fillna(0)
+            assert (replayed == stored).all(), f"replay mismatch for {key}"
+
+    def test_sql_expression_has_no_nested_window_function(self):
+        """Nested window function calls (e.g. LAG(LAG(...) OVER (...), N)
+        OVER (...)) are invalid SQL. A lag-cross feature's identity/threshold
+        and identity/crossing SQL, and its delta-transform SQL, must not
+        contain that pattern (issue #161's SQL export follow-on fix)."""
+        df = self._ohlc_df()
+        ed = EventDiscovery(
+            df,
+            DiscoveryConfig(
+                train_ratio=1.0,
+                gate_params=GateParams(min_tpm=0.1, max_dispersion=5.0, min_episodes=1),
+            ),
+        )
+        cands = ed.run()
+        checked = 0
+        for c in cands:
+            comp = c.components[0]
+            if "_lag" not in comp.source_feature:
+                continue
+            if comp.transform not in ("identity", "delta"):
+                continue
+            sql = comp.sql_expression.replace(" ", "").replace("\n", "")
+            assert "LAG(LAG" not in sql, f"nested LAG in: {comp.sql_expression}"
+            checked += 1
+        assert checked > 0, "no identity/delta lag-cross component to check"
+
+    def test_event_formula_shows_lag_annotation(self):
+        """The human-readable formula must show which operand is time-shifted
+        and by how much, e.g. 'close / low[t-1]'."""
+        m_params = {"cross_lag": 1}
+        comp = _make_component(
+            "ratio_close_low_lag1", "identity", m_params, ["close", "low"],
+            threshold=1.0, direction="above",
+        )
+        from forgedge.event_discovery.event_generator import _build_event_formula
+        formula = _build_event_formula(
+            comp.source_feature, comp.source_cols, comp.transform,
+            comp.transform_params, comp.threshold, comp.direction, comp.event_type,
+        )
+        assert "low[t-1]" in formula
+        assert formula.startswith("close / low[t-1]")
+
+    def test_crossing_sql_uses_shifted_base_columns_not_lag_of_feature(self):
+        """The crossing condition's 'previous bar' term must be re-derived
+        from LAG on the base columns (a[t-1]/b[t-1-cross_lag]), not
+        LAG(feat_sql) — which would nest window functions."""
+        from forgedge.event_discovery.event_generator import _build_sql_expression
+        sql = _build_sql_expression(
+            source_feature="ratio_close_low_lag1",
+            source_cols=["close", "low"],
+            transform="identity",
+            transform_params={"cross_lag": 1},
+            threshold=1.0,
+            direction="below",
+            event_type="crossing",
+            ts_col="open_dt",
+        )
+        assert 'LAG("close", 1)' in sql
+        assert 'LAG("low", 2)' in sql  # cross_lag(1) + extra_shift(1)
+        assert "LAG(LAG" not in sql.replace(" ", "")
 
 
 # ---------------------------------------------------------------------------

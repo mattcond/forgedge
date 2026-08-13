@@ -951,10 +951,16 @@ def build_feature_series(comp: "EventComponent", df: pd.DataFrame) -> pd.Series:
         return (raw == comp.threshold).astype(float).where(raw.notna(), float("nan"))
 
     sc = comp.source_cols
+    # "cross_lag" (issue #161) marks a lag-cross combo — the second operand
+    # is shifted before the ratio/spread is computed.  Distinct key from the
+    # Delta transform's own transform_params["lag"] so the two never collide.
+    cross_lag = comp.transform_params.get("cross_lag")
     if sf.startswith("ratio_") and len(sc) == 2:
-        return (df[sc[0]] / df[sc[1]]).replace([float("inf"), float("-inf")], float("nan"))
+        rhs = df[sc[1]].shift(cross_lag) if cross_lag else df[sc[1]]
+        return (df[sc[0]] / rhs).replace([float("inf"), float("-inf")], float("nan"))
     if sf.startswith("spread_") and len(sc) == 2:
-        return ((df[sc[0]] - df[sc[1]]) / df[sc[1]]).replace([float("inf"), float("-inf")], float("nan"))
+        rhs = df[sc[1]].shift(cross_lag) if cross_lag else df[sc[1]]
+        return ((df[sc[0]] - rhs) / rhs).replace([float("inf"), float("-inf")], float("nan"))
     if sf.startswith("diffnorm_") and len(sc) == 2:
         std = comp.transform_params.get("diffnorm_std")
         if std is None:

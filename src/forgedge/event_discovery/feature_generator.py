@@ -12,6 +12,28 @@ from typing import Optional
 import pandas as pd
 
 from .models import ColumnClassification, ColumnType
+from .transform_layer import DELTA_LAGS
+
+# Raw OHLC bases eligible for cross-column, cross-time ("lag-cross") pairing
+# (issue #161) — e.g. "close[t] > low[t-1]".  Deliberately excludes volume
+# (different units/semantics) and same-base cross-time comparisons (already
+# covered by the native "return" family, ``close_ret_N`` = close[t] vs
+# close[t-N]).  Restricted to columns actually present in the frame at
+# generation time, and read straight from ``df`` rather than the classifier's
+# ``parsed`` dict — like the "volume vs its own MA" block below, raw OHLC
+# columns other than "close" never reach ``parsed`` (``TypeClassifier``
+# skips them; see ``classifier._SKIP_COLS``), so a ``parsed``-only lookup
+# would silently generate nothing for high/low/open.
+_OHLC_BASES: tuple[str, ...] = ("open", "high", "low", "close")
+
+# Lag-cross features are restricted to the identity transform (see
+# DerivedFeature.transforms): they are already a fixed-lag comparison by
+# construction, so TransformLayer stacking pctrank/zscore/delta on top would
+# multiply feature_count x transform_count x threshold_count for combinations
+# that mostly restate the same comparison in a more contrived form.  Identity
+# alone still yields threshold *and* crossing events — enough to express
+# "close[t] > low[t-1]", the shape this issue is about.
+_LAG_CROSS_TRANSFORMS: frozenset[str] = frozenset({"identity"})
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +205,25 @@ class DerivedFeature:
 
     For ``diff_norm`` features this contains ``{"diffnorm_std": float}`` —
     the in-sample standard deviation used to normalise the difference series.
-    Empty for all other operations (ratio, spread_pct, position are
+    For ``ratio_lag``/``spread_pct_lag`` features this contains
+    ``{"cross_lag": int}`` — the lag applied to the second operand (issue
+    #161).  Empty for all other operations (ratio, spread_pct, position are
     parameter-free formulas).
+    """
+    transforms: Optional[frozenset[str]] = None
+    """Restricts which TransformLayer transforms apply to this feature.
+
+    ``None`` (default) means "all four" (identity/pctrank/zscore/delta), the
+    behaviour every feature had before this field existed.  Set to a subset
+    (e.g. ``frozenset({"identity"})``) to opt a feature out of further
+    temporal transforms — used by the lag-cross family (issue #161): those
+    features are already a fixed-lag comparison by construction, so stacking
+    another rolling/delta transform on top multiplies TransformLayer's
+    output combinatorially (feature_count × transform_count × threshold_count)
+    for signal that mostly restates the same, already-lagged comparison in a
+    more contrived form.  Restricting to identity keeps the direct threshold
+    and crossing events — which is what expresses "close[t] > low[t-1]" —
+    without that multiplication.
     """
 
 
@@ -259,6 +298,9 @@ class FeatureGenerator:
 
         # Arity 2 — same-family pairs
         self._generate_arity2(df, parsed, extended, meta)
+
+        # Arity 2 — cross-column, cross-time OHLC pairs (issue #161)
+        self._generate_lag_cross(df, extended, meta)
 
         # Arity 3 — Bollinger & rolling-range triples
         self._generate_arity3(df, parsed, extended, meta)
@@ -406,6 +448,104 @@ class FeatureGenerator:
                     operation="ratio",
                     source_cols=["volume", vm_col],
                 )
+
+    # ------------------------------------------------------------------
+    # Arity 2 — cross-column, cross-time ("lag-cross") pairs
+    # ------------------------------------------------------------------
+
+    def _generate_lag_cross(
+        self,
+        df: pd.DataFrame,
+        extended: pd.DataFrame,
+        meta: dict[str, DerivedFeature],
+    ) -> None:
+        """Generate cross-column, cross-time OHLC comparisons (issue #161).
+
+        Neither the same-family arity-2 pairing above (cross-column,
+        same-time only) nor the Delta transform (same-column, cross-time
+        only) can express a condition like *"today's close above yesterday's
+        low"* — it is simultaneously cross-column and cross-time.  This
+        method fills that specific gap by pairing every ordered combination
+        of the raw OHLC bases actually present in ``df``
+        (``open``/``high``/``low``/``close``) against a lagged copy of a
+        different base, for each lag in ``DELTA_LAGS``.
+
+        For bases ``a != b`` and each ``lag`` in ``DELTA_LAGS``, two scale-free
+        combos are produced, mirroring the existing same-time ``ratio``/
+        ``spread`` operations:
+
+        * ``ratio_{a}_{b}_lag{lag}`` = ``a[t] / b[t-lag]``
+        * ``spread_{a}_{b}_lag{lag}`` = ``(a[t] - b[t-lag]) / b[t-lag]``
+
+        The lag is recorded as ``params={"cross_lag": lag}`` — a distinct key
+        from the Delta transform's own ``transform_params["lag"]``, so the two
+        don't collide when ``EventGenerator`` merges feature- and
+        transform-level params onto ``EventComponent.transform_params``.
+
+        Scope (deliberately bounded, see issue #161's "suggested scope")
+        ------------------------------------------------------------------
+        Restricted to the four raw OHLC bases — not indicator columns (e.g.
+        moving averages) crossed against a lagged OHLC base.  A same-column
+        cross-time ratio (``close[t]`` vs ``close[t-lag]``) is not generated
+        either — that shape already exists natively as the ``return`` family
+        (``close_ret_N``).  Widening beyond raw OHLC bases would multiply
+        combinatorially with the number of indicator periods present (a
+        default KPI config alone has ~24 MA-family columns), which is exactly
+        the unbounded "feature surface" growth the issue explicitly warns
+        against; it is left as a possible, separately-scoped follow-up.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Original KPI table (read-only) — raw OHLC columns are read
+            directly from here (see ``_OHLC_BASES``), not from the
+            classifier's ``parsed`` dict, which never contains them.
+        extended : pd.DataFrame
+            Target DataFrame — new columns are appended here.
+        meta : dict[str, DerivedFeature]
+            Target metadata dict — new entries are added here.
+        """
+        bases = [b for b in _OHLC_BASES if b in df.columns]
+        if len(bases) < 2:
+            return
+
+        for base_a in bases:
+            series_a = df[base_a]
+            for base_b in bases:
+                if base_a == base_b:
+                    continue
+                for lag in DELTA_LAGS:
+                    lagged_b = df[base_b].shift(lag)
+
+                    ratio_col = f"ratio_{base_a}_{base_b}_lag{lag}"
+                    if ratio_col not in extended.columns:
+                        series = _safe_ratio(series_a, lagged_b)
+                        extended[ratio_col] = series
+                        meta[ratio_col] = DerivedFeature(
+                            col=ratio_col,
+                            series=series,
+                            is_scale_free=True,
+                            arity=2,
+                            operation="ratio_lag",
+                            source_cols=[base_a, base_b],
+                            params={"cross_lag": lag},
+                            transforms=_LAG_CROSS_TRANSFORMS,
+                        )
+
+                    spread_col = f"spread_{base_a}_{base_b}_lag{lag}"
+                    if spread_col not in extended.columns:
+                        series = _safe_spread_pct(series_a, lagged_b)
+                        extended[spread_col] = series
+                        meta[spread_col] = DerivedFeature(
+                            col=spread_col,
+                            series=series,
+                            is_scale_free=True,
+                            arity=2,
+                            operation="spread_pct_lag",
+                            source_cols=[base_a, base_b],
+                            params={"cross_lag": lag},
+                            transforms=_LAG_CROSS_TRANSFORMS,
+                        )
 
     # ------------------------------------------------------------------
     # Arity 3
