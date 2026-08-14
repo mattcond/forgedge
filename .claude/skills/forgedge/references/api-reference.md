@@ -9,6 +9,12 @@ signatures and defaults when writing code.
 All snippets assume `from forgedge import ...` unless a submodule path is
 shown explicitly.
 
+For narrative treatment — design rationale, worked examples with verified
+output, error handling, troubleshooting, best practices/anti-patterns, an
+FAQ and a glossary — see `docs/manual-en.md` (`docs/manuale-it.md` for
+Italian). This file only replicates the exact lookup surface: signatures,
+dataclass fields and their defaults.
+
 ## Table of contents
 
 - [Orchestrator](#orchestrator)
@@ -25,6 +31,7 @@ shown explicitly.
 - [Hypothesis ledger](#hypothesis-ledger)
 - [Target-first workflow: TargetOptimizer](#target-first-workflow-targetoptimizer)
 - [Rule monitoring / performance reports](#rule-monitoring--performance-reports)
+- [Errors and warnings](#errors-and-warnings)
 
 ---
 
@@ -147,7 +154,9 @@ ed.summary()    # pd.DataFrame, one row per candidate
 `scale_free_overrides: dict[str, bool] | None = None`, `timestamp_col: str =
 "open_dt"`, `max_and_components: int = 2`, `train_ratio: float = 1.0`,
 `walk_forward: WalkForwardConfig | None = None`, `diversity_gate_enabled:
-bool = False`, `diversity_threshold: float = 0.85`.
+bool = False`, `diversity_threshold: float = 0.85`, `indicator_lag_cross_lags:
+tuple[int, ...] = (1, 3)` (lag set for the price-scale-indicator-vs-lagged-
+OHLC-base feature family below; pass `()` to disable that family entirely).
 
 `GateParams` (Consistency Gate, Step 4) — `min_tpm: float = 0.5`,
 `max_dispersion: float = 1.5`, `event_counting: "episode"|"bar" = "episode"`,
@@ -156,6 +165,27 @@ runs of consecutive activations (bridged by gaps ≤ `episode_gap`) rather than
 raw bars — the default because a persistent multi-bar state otherwise
 inflates monthly-count variance and gets wrongly rejected. `"bar"` reproduces
 the pre-#134 behaviour exactly.
+
+**Arity-2 feature pairings beyond same-family ratios.** `FeatureGenerator`
+pairs same-family columns (two EMAs, two RSIs, …) by default, plus five
+dedicated, narrowly-scoped pairings added to close specific gaps that rule
+couldn't reach: (1) cross-column, cross-time OHLC pairs (e.g. "close above
+yesterday's low") — always on; (2) a MACD line against its own signal line,
+matched by shared `(base, fast, slow)` — only fires when `"macd"` is enabled
+in `build_features()` (disabled by default there); (3) price-%-change vs
+volume-%-change at the same lookback — only fires if the KPI Table carries a
+volume-return column (not part of the default `kpi_builder` config); (4)
+`candle_features()`'s six geometry columns against each other and against
+`close_natr_N` (never the raw `atr`) — these bare-named columns don't match
+the `{base}_{indicator}_{period}` convention, so without this pairing they'd
+only ever be standalone; (5) a price-scale indicator (SMA/EMA/WMA/HMA only)
+against a lagged raw OHLC base (e.g. `close_sma_12[t] > low[t-3]`) — always
+on, governed by `DiscoveryConfig.indicator_lag_cross_lags` above, and the one
+with a measured, non-trivial runtime cost (+24% `EventDiscovery.run()` time /
++21% candidate count on a 36-indicator-column fixture). A column that opts
+out of the generic same-family grouping (naming-convention mismatch) can
+still be reached by one of these five. See `docs/manual-en.md` §8/§17 for the
+full narrative and the measured cost breakdown.
 
 `WalkForwardConfig` (event-level, in `event_discovery.models`) — `n_splits:
 int = 3`, `min_pass_rate: float = 0.6`, `oos_gate_params: GateParams | None =
@@ -169,8 +199,15 @@ list[EventComponent]`, `activation_stats: ActivationStats`
 (`n_activations`, `n_active_months`, `zero_months`, `max_monthly_share`,
 `mean_tpm`), `consistency_gate: GateResult`, `validation: ValidationResult |
 None`. Method `.apply(df) -> pd.Series[bool]` — deterministic, no look-ahead,
-re-evaluates the stored thresholds on any new frame. `.persist(path)` — full
-pickle round-trip (components, thresholds, activation stats, validation).
+re-evaluates the stored thresholds on any new frame; this is the path
+`forgedge` itself always uses and is correct for every candidate, including
+the arity-2 pairings above. `.persist(path)` — full pickle round-trip
+(components, thresholds, activation stats, validation). Caveat:
+`sql_expression` for a lag-cross feature (pairings 1/5 above) combined with a
+rolling pctrank/zscore transform emits a best-effort SQL translation
+containing a nested window function some engines (including DuckDB) reject —
+treat it as a convenience export, not a guaranteed-portable one, for that
+specific combination; use `.apply()` if you need certainty.
 
 `CustomEvent(formula: str, name: str = "")` — manual event injection, either
 standalone (`.apply(df)`, `.to_event_candidate(df, gate_params=...)`) or via
@@ -475,3 +512,47 @@ axes), monthly activation trend split IS/OOS, gain/loss distribution, return
 KDEs (low/close/high forward returns at `target_h`), base-vs-event MAE→net
 scatter, rolling expectancy (edge-decay detector), per-regime performance,
 most recent trades, and a "signal active now" badge.
+
+## Errors and warnings
+
+No custom exception hierarchy — every raised error is a plain Python
+built-in. There is no up-front schema validation of the KPI Table either:
+each module validates only the columns/timestamp source it needs, exactly
+when it needs them (the one exception is `build_features()`, which silently
+*skips*, with `logger.warning`, any indicator whose required input columns
+are absent — OHLC-only candles are always safe to pass). `summary_report()`
+is the opt-in way to validate eagerly; it never raises on its own.
+
+| Exception | Typical trigger |
+|---|---|
+| `ValueError` | invalid enum-like string (`direction`, `target_mode`, `buy_type`, `entry_mode`, `selection_mode`, `threshold_mode`, `timeframe`, `preset`, …), out-of-range numeric config field, mutually-exclusive `forge()` arguments (`manual_events` + `event_discovery_config`), a candidate/contract pair passed to `RuleDiscovery` that don't reference each other |
+| `KeyError` | a required column is missing — OHLC columns, `timestamp_col`, `source_col`, an unknown candlestick pattern name |
+| `RuntimeError` | an accessor called before `.run()` — consistently, across `MarketContext.distribution()`, `EventDiscovery.summary()`, `AlphaDiscovery.summary()`/`.promoted_contracts()`, `RuleDiscovery.grid_summary()`, `TargetOptimizer.validate_oos()`/`.discover_alpha()` |
+| `TypeError` | wrong input type to `build_features`/`lag_features`, an unrecognized `forge_preset(**overrides)` key, or a `GateParams` call using the old field names (`min_act`/`min_months`/`max_conc`, still present in several stale `examples/*.py` scripts) |
+| `ImportError` | `load_kpi_config()` given a YAML path but PyYAML isn't installed |
+| `FileNotFoundError` | `load_kpi_config()` given a path that doesn't exist |
+
+Warnings raised via `warnings.warn` (not exceptions), worth not silencing:
+
+- **`UserWarning` — stale hourly `horizon_grid` on daily-or-slower data** —
+  `forge()` fires this when an explicit `AlphaConfig` still carries the
+  untouched hourly default grid on a `timeframe` of a day or longer.
+- **`UserWarning` — observed-candle index mismatch** — `AlphaDiscovery`,
+  `RuleDiscovery`, and Rule Registry ingestion fire this when the frame they
+  receive has a different index than an event's cached training activation
+  series (the event falls back to `.apply()` re-evaluation). A stronger
+  variant fires when the re-evaluated activation count collapses under ~10%
+  of the training count — a strong signal of an imminent spurious
+  `direction="undetermined"` (extend training data with
+  `pd.concat([train_df, new_bars])`, not `new_bars` alone).
+- **`DeprecationWarning`** — the legacy `TargetConfig.min_lift` field
+  (superseded by `min_lift_atoms`/`min_lift_result`) and a legacy
+  `TypeClassifier` constructor argument (`scale_free_drift_threshold`).
+
+Degraded-but-non-fatal behaviour (neither raises nor warns, only logs at
+INFO/DEBUG or shows up as a diagnostic string): a `CustomEvent` that fails
+the Consistency Gate is kept, not dropped; `target_mode="proj"` reverts to
+`"abs"` when there's not enough history for the trend-SMA warmup;
+`RuleDiscoveryConfig(selection_mode="walk_forward")` silently falls back to
+full-sample selection when the data span is too short for even one
+walk-forward split.

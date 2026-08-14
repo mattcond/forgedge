@@ -17,8 +17,11 @@ Read this file fully before writing code against `forgedge` or editing its
 source — the pipeline's value comes entirely from architectural boundaries
 that are easy to violate by accident (see *Invariants* below). For anything
 beyond what fits here, jump to `references/api-reference.md` (full public API,
-config dataclass fields and defaults) or the repo docs indexed in
-*Where to go deeper*.
+config dataclass fields and defaults) or `docs/manual-en.md`
+(`docs/manuale-it.md` for Italian) — a comprehensive, example-verified manual
+covering installation through production architecture, troubleshooting, best
+practices/anti-patterns, an FAQ and a glossary. This file is a condensed
+operating summary distilled from that manual, not a replacement for it.
 
 ## The pipeline: five modules, one direction
 
@@ -176,6 +179,17 @@ if rep.has_critical:
     raise ValueError(rep.one_line())
 ```
 
+Event Discovery also pairs columns beyond that generic same-family grouping,
+via five dedicated, narrower arity-2 feature families: cross-column/cross-time
+OHLC pairs and price-scale-indicator-vs-lagged-OHLC-base (both always on —
+the latter tunable/disableable via `DiscoveryConfig.indicator_lag_cross_lags`,
+default `(1, 3)`) fire on any KPI Table; MACD-vs-signal, price-vs-volume
+return, and `candle_features()` geometry-vs-`natr` only fire when their
+prerequisite columns exist (e.g. `"macd"` enabled in `build_features()`). A
+column that opts out of the generic naming convention can still be reached by
+one of these — see `docs/manual-en.md` §8 for exactly which columns trigger
+which, and §17 for the measured cost of the always-on ones.
+
 ### 5. Monitoring a discovered edge on fresh data
 
 Use **Rule Discovery**, not Alpha Discovery, to check whether a published
@@ -227,6 +241,49 @@ html = rule_performance_report(result, fresh_candles)
    calibrate against); `"sweep"` is permissive by design and is meant to be
    paired with `rotation_calibration=RotationConfig(k>=100)` plus a
    `min_lift` filter on the promoted contracts.
+7. **Copying `GateParams(...)` from this repo's own `examples/*.py` scripts.**
+   Several scripts (`alpha_discovery_usage.py`, `extended_usage.py`,
+   `kpi_table_1d.py`, `search_rotation_calibration.py`,
+   `lowfreq_null_diagnostic.py`, `lowfreq_endpoint_diagnostic.py`) predate a
+   `GateParams` API change and still pass `min_act`/`min_months`/`max_conc`,
+   which now raise `TypeError`. Translate to the current fields (`min_tpm`,
+   `max_dispersion`, `event_counting`, `min_episodes`, `episode_gap`) —
+   `event_counting="bar"` reproduces the old counting semantics most closely.
+   `examples/kpi_builder_usage.py` is unaffected.
+8. **Calling an accessor before `.run()`.** `MarketContext.distribution()`,
+   `EventDiscovery.summary()`, `AlphaDiscovery.summary()`/
+   `.promoted_contracts()`, `RuleDiscovery.grid_summary()`, and
+   `TargetOptimizer.validate_oos()`/`.discover_alpha()` all raise
+   `RuntimeError: Call run() before ...` until the corresponding `.run()` has
+   executed — a deliberate guard, not a bug to route around.
+9. **Extending a discovery window with only the new bars.** Re-evaluating an
+   `EventCandidate` on a frame whose index differs from its cached training
+   activation series triggers a `UserWarning` and a fallback to `.apply()`;
+   if the re-evaluated activation count collapses under ~10% of the training
+   count, that's usually why direction reads `"undetermined"` — rolling
+   baselines (pctrank, z-score) lost the history they need, not because the
+   edge disappeared. Fix: `pd.concat([train_df, new_bars])`, never `new_bars`
+   alone.
+
+## Best practices
+
+- Run `summary_report()` before every discovery session and decide
+  explicitly what to do with `has_critical`/`has_warnings` — the library
+  never validates or blocks on its own (see pattern 4).
+- Prefer `forge_preset()` over hand-assembling `DiscoveryConfig`/
+  `AlphaConfig`/`RuleDiscoveryConfig` — the presets keep M1/M2/M3 frequency
+  criteria mutually consistent, which is easy to get subtly wrong by hand.
+- Treat a run that comes back mostly or entirely `PARTIAL-EDGE` as
+  informative, not broken. Check `rejection_reasons` (often
+  `"search-level rotation null not cleared"`) before assuming
+  misconfiguration — an earlier, more permissive version of this pipeline
+  promoted noise almost as often as real signal on low-frequency data
+  (`docs/analysis/lowfreq_robustness.md`), which is exactly what the default
+  rotation null (see pattern 1) now guards against.
+- Log `result.ledger.describe()` and `result.calibration.summary()` (or
+  `.tippett_p`) alongside every run you persist — cheap, already computed,
+  and exactly what you'll want later to explain why a verdict landed where
+  it did.
 
 ## Contributing to forgedge itself
 
@@ -261,13 +318,23 @@ Every public name lives in `src/forgedge/__init__.py`'s `__all__` — add new
 public API there, and keep dataclass field docstrings in numpydoc style
 (`Attributes` sections), matching the existing modules.
 
-**Tests**: `tests/`, run with `pytest` (`testpaths = ["tests"]` in
-`pyproject.toml`, dev extra `pytest>=7.0`). One `test_<module>.py` per module
-plus `tests/test_golden.py` (end-to-end regression) and
-`tests/test_forge.py` (orchestrator). Fixtures — including real market data —
-live in `tests/fixtures/*.parquet`; `tests/conftest.py` has the shared
-fixtures. Run the whole suite with `pytest` from the repo root, or a single
-module with `pytest tests/test_event_discovery.py`.
+**Tests**: `tests/` — 586 test functions across 15 files, run with `pytest`
+(`testpaths = ["tests"]` in `pyproject.toml`, dev extra `pytest>=7.0`). One
+`test_<module>.py` per module plus `tests/test_golden.py` (end-to-end
+regression, pinned via a session-scoped `forge()` fixture over
+`tests/fixtures/ADA_1D_TRAIN.parquet`) and `tests/test_forge.py`
+(orchestrator wiring). House style worth matching: no mocking except two
+`monkeypatch` "must-not-be-called" tripwires in `test_alpha_discovery.py` —
+everything else runs the real pipeline against seeded synthetic data
+(`np.random.default_rng(seed)`) built by local `_make_kpi_table()`-style
+helpers, each documented with *why* that signal shape was chosen;
+`pytest.approx(..., rel=...)` for every float assertion, never bare
+equality; `pytest.raises(..., match=...)` / `pytest.warns(...)` to pin exact
+messages, not just exception types. A golden value breaking is expected when
+a legitimate pipeline change lands — re-pin it with a comment explaining why,
+don't assume the test (or the change) is wrong. Run the whole suite with
+`pytest` from the repo root, or a single module with
+`pytest tests/test_event_discovery.py`.
 
 The library depends on `numpy>=1.23` and `pandas>=1.5` only — don't add a new
 runtime dependency without a strong reason; `scipy`/`statsmodels`-equivalent
@@ -281,6 +348,7 @@ current with the code:
 
 | Topic | File |
 |---|---|
+| Comprehensive practical manual — installation through production architecture, troubleshooting, best practices/anti-patterns, FAQ, glossary; every example verified against this repo | `docs/manual-en.md` (`docs/manuale-it.md` for Italian) |
 | Project overview, pipeline diagram, quick start | `README.md` (`README_it.md` for Italian) |
 | Deep architectural guide — artefact YAML formats, principles, roadmap | `src/forgedge/docs/README.md` (Italian) |
 | Concepts — event / alpha / rule, from first principles | `src/forgedge/docs/specs/concepts_en.md` (`_it.md`) |
@@ -288,6 +356,6 @@ current with the code:
 | Global configuration reference | `src/forgedge/docs/specs/configuration_en.md` (`_it.md`) |
 | Per-module spec | `src/forgedge/docs/specs/modulo_{0..4}_en.md` (`_it.md`) |
 | Technical analyses (low-freq robustness, rotation-null calibration) | `docs/analysis/*.md` |
-| Runnable examples per module | `examples/*.py` |
+| Runnable examples per module (several predate a `GateParams` API change — see pitfall #7 before copying `GateParams(...)` from one) | `examples/*.py` |
 | Interactive walkthroughs | `notebooks/0{1..6}_*.ipynb`, `notebooks/hurst.ipynb` |
 | Full public API + config dataclass fields/defaults | `references/api-reference.md` (in this skill) |
