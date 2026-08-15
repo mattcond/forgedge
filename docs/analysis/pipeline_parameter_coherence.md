@@ -45,8 +45,13 @@ class default — scattered across M0…M4. Three consequences follow mechanical
    from "the signal is bad", which is exactly what the user was trying to measure.
 
 Issue #173 is case (2)+(3) for the pair *(arrival rate, evaluation-window length)*.
-The audit found **fifteen** instances across seven latent parameters, four of them with
+The audit found **sixteen** instances across seven latent parameters, four of them with
 the same severity as #173.
+
+> **Revision note.** F16 was added, and F9 revised down from MEDIUM to LOW, during the
+> design review that turned this audit into a work plan
+> ([#184](https://github.com/mattcond/forgedge/issues/184)). Both changes are marked in
+> place in §3.
 
 `forge_preset()` is the only thing in the codebase that acts as a centraliser today, and
 its module docstring states the intent explicitly:
@@ -67,7 +72,7 @@ contradicts.
 | Latent parameter | Materialised as | Owned/scaled by `forge_preset`? |
 |---|---|---|
 | **Arrival rate** (events or trades per month) | `GateParams.min_tpm` (M1) · `SelectionCriteria.min_tpm` (M3) · `ScoringParams.pf_min_tpm` (M3) · `ScoringParams.pf_tpm_target` (M3) | first two only |
-| **Minimum credible sample** (absolute count) | `GateParams.min_episodes` · `_MIN_STATS_CASES` (M2, module constant) · `_MIN_TRADES_ABS` (M3, module constant) · `ScoringParams.pf_min_trades` · `SelectionCriteria.min_oos_trades` · `AlphaConfig.horizon_enrichment_min_obs` · `AlphaConfig.min_regime_obs` · `RegistryConfig.cross_min_active` | **none** |
+| **Minimum credible sample** (absolute count) | `GateParams.min_episodes` · `_MIN_STATS_CASES` (M2, module constant) · `_MIN_TRADES_ABS` (M3, module constant) · `ScoringParams.pf_min_trades` · `SelectionCriteria.min_oos_trades` · `AlphaConfig.horizon_enrichment_min_obs` · `AlphaConfig.min_regime_obs` · `RegistryConfig.cross_min_active` — all **nominal**; only M1 has an *effective* count (`ActivationStats.n_eff`), see F16 | **none** |
 | **Evaluation window** the floors apply to | `DiscoveryConfig.train_ratio` · M1 `WalkForwardConfig.n_splits` · `AlphaConfig.train_ratio` · `AlphaConfig.embargo_bars` · M3 `WalkForwardConfig.{min_train_months, n_splits, train_span_months, test_span_months, purge_bars, embargo_bars}` · `TimeBudget.split` | `AlphaConfig.train_ratio` only |
 | **Bar duration / timeframe** | `forge(timeframe=)` · `AlphaConfig.timeframe` (declared *metadata-only*) · `AlphaConfig.bars_per_day` · `EMAProxyConfig.bar_hours` (else inferred) · `MarketContextConfig.stable_window` · `BacktestParams.{target_h, buy_delay_bar}` · M3 `WalkForwardConfig.*_months` | M2 fields only |
 | **Economic constants** | `AlphaConfig.fee_per_side` vs `BacktestParams.fee` · `AlphaConfig.mfe_floor` vs hardcoded `0.01` in `_seed_base_params` · `SelectionCriteria.{min_profit_factor, partial_min_profit_factor}` vs `RegistryConfig.cross_pf_threshold` | none |
@@ -249,14 +254,47 @@ promoted between PF 1.5 and 2.0 is structurally incapable of scoring a cross-tic
 PF bar silently tightens M4's relative bar. `RegistryConfig.cross_min_active=10` is a
 further un-scaled absolute count (F1's shape, in M4).
 
-### F9 — Significance is spelled seven ways; the presets scale two · MEDIUM
+### F9 — Significance is spelled seven ways with no stated relationship · LOW
 
-`PromotionThresholds` alone carries `max_p_value=0.05`, `ic_max_p=0.05`, `oos_max_p=0.10`
-and `fdr_q=0.10`; M3 adds `max_ttest_p=0.05` and `max_rotation_p=0.05`; the calibrator
-adds `RotationConfig.alpha=0.05`. `forge_preset` scales `fdr_q` and `oos_max_p` per
-preset — so `"sweep"` (`fdr_q=0.25`, deliberately permissive) still applies `ic_max_p=0.05`
-in M2 and `max_ttest_p=0.05` in M3. A preset's permissiveness dilutes as it travels
-downstream, in a way no user can see from the preset table.
+> **Revised down from MEDIUM.** The first draft of this finding claimed that "a preset's
+> permissiveness dilutes as it travels downstream". Checking what each threshold actually
+> gates, that claim holds for **one** of the seven, and the headline example was wrong.
+> The corrected analysis is below.
+
+Seven numbers, and they are not the same quantity:
+
+| threshold | module | what it gates | kind |
+|---|---|---|---|
+| `max_p_value` 0.05 | M2 | p of the excess-return t-test | per-hypothesis α |
+| `ic_max_p` 0.05 | M2 | p of the feature's IC (Spearman) | per-hypothesis α |
+| `max_ttest_p` 0.05 | M3 | p of expectancy on the trade ledger | per-hypothesis α |
+| `max_rotation_p` 0.05 | M3 | p of the whole **search surface** | per-hypothesis α, different null |
+| `RotationConfig.alpha` 0.05 | calibration | survivor bar | per-hypothesis α |
+| `fdr_q` 0.10 | M2 | **false-discovery rate** over the horizon family | **q — not an α** |
+| `min_pass_rate` 0.6 | M1 | fraction of folds that must pass | **a vote, not a probability** |
+
+Tying `fdr_q` to α would be a category error: `q=0.10` means "10 % of my promotions may be
+false", `α=0.05` means "this single test has a 5 % false-positive rate". `min_pass_rate`
+is not a probability at all.
+
+**Where the original claim fails.** The example given was `"sweep"` (`fdr_q=0.25`,
+deliberately permissive) still facing `max_rotation_p=0.05`. That is the **intended
+design**, not drift: `presets.py` documents that `"sweep"` must be paired with
+`RotationConfig(k>=100)` — its upstream permissiveness is *predicated* on the rotation
+null filtering downstream. A strict `max_rotation_p` is the filter `"sweep"` relies on.
+
+Checking the rest:
+
+* `max_p_value` is reachable only when `use_fdr=False`, and every preset (and the class
+  default) sets `use_fdr=True` — **it is inert under every preset**, a public field that
+  does nothing;
+* `ic_max_p` feeds a non-blocking diagnostic that only weights the grade;
+* `oos_max_p` and `fdr_q` are already scaled per preset.
+
+**What remains** is one real observation: `max_ttest_p` is the pipeline's only *hard*
+per-hypothesis gate — it produces `NON-EDGE` in `_decide` — and no preset ever touches it.
+Plus the general hazard of seven numbers with no declared relationship, which is a trap
+for whoever edits them next rather than a measured defect.
 
 ### F10 — `timestamp_col` exists in four configs; `forge_preset` sets one · MEDIUM
 
@@ -309,12 +347,66 @@ already encoded in `p`). The defect is therefore *reporting*: the field named
 `_scale_gate_params()` (F1) — never called, and its docstring is the canonical statement
 of the invariant F1 disproves.
 
+### F16 — The floors count nominal trades; the statistics need effective ones · HIGH
+
+Same latent parameter as F1/F2/F4 (*minimum credible sample*), different defect: not
+floor-versus-window, but **nominal count versus effective count**.
+
+`run_backtest` is fully vectorised — `entry_rn = np.where(active)[0]` — with no
+position-state machine, so every active bar opens a trade and **positions overlap
+freely**. Issue [#168](https://github.com/mattcond/forgedge/issues/168) measured it: on
+EURJPY 1D with `target_h=36`, 118 trades from 120 signal bars / 76 episodes, **3.71
+concurrently open positions on average, 12 at peak**.
+
+That entry policy is *correct* and must not change: given enough capital, those 118 trades
+are exactly reproducible in production. #168 says so explicitly in its non-goals, and it
+also explicitly defers "the separate statistical-independence concern … a distinct, deeper
+problem noted separately in discussion". **F16 is that deferred problem.**
+
+The defect is that the inference machinery consumes the nominal count as if the
+observations were independent:
+
+| quantity | reads | should read |
+|---|---|---|
+| `total_trades`, PF, expectancy, net gain | nominal | **nominal — this is the economics, leave it** |
+| t-test df (`max_ttest_p` gate) | nominal | effective |
+| `n_obs` of `deflated_sharpe` | nominal | effective |
+| `expectancy_mde` / power gate | nominal | effective |
+
+With #168's own numbers, nominal 118 against an effective ≈ 32 (118 / 3.71):
+
+```
+t-test:  t scales as sqrt(n) → overstated by sqrt(118/32) = 1.93×
+         a t of 2.6 (p≈0.005) is really t=1.35 (p≈0.09) — significance evaporates
+DSR:     n_obs 118 → 32 at n_trials=15: correction 0.820 → 0.741, ~11 % overstated
+```
+
+The t-test channel is the serious one: `max_ttest_p` is one of the three hard `NON-EDGE`
+gates, so the pipeline is currently *admitting* rules on overstated significance.
+
+**M1 already has the concept.** `ConsistencyGate` computes
+`n_eff = n_episodes / episode_index_of_dispersion` and carries it on `ActivationStats`.
+M2 and M3 have no equivalent — the canonical audit shape: a notion that exists in one
+module and is missing in the two downstream modules that need it.
+
+Note that episode grouping and concurrency are **different** measures: episodes capture
+"same signal cluster", concurrency captures "same price path", and trades from *different*
+episodes still overlap when `target_h` exceeds the inter-episode gap. Inference needs the
+second. #168's proposed `episode_id` on the trade ledger is the prerequisite machinery.
+
 ---
 
 ## 4. Proposal — three layers
 
 The layers are independently shippable and ordered by cost. **Layer 2 alone closes
 #173 and F1–F4**, which is the recommended first step.
+
+> **This section states the proposal as originally drafted.** The design review in
+> [#184](https://github.com/mattcond/forgedge/issues/184) settled sixteen open decisions
+> and refined it — Layer 1 became a *directed-constraint resolver* with a resolution
+> trace rather than a defaulting mechanism, and the constraint table below is shared by
+> the resolver (derive mode) and `config_report()` (check mode). The issues are the
+> authority on the final design; §5 carries the resulting order of work.
 
 ### Layer 1 — `PipelineContext`: name the latent parameters
 
@@ -444,15 +536,31 @@ pipeline change and should be re-pinned with a comment, not worked around.
 
 ---
 
-## 5. Suggested breakdown
+## 5. Order of work
 
-| # | Scope | Closes |
-|---|---|---|
-| 1 | `PipelineContext` + `UNSET` sentinel + `resolve()` on the five configs | F5, F6, F7, F10, F12 |
-| 2 | `config_report()` + `Finding` reuse + `forge(strict=)` + `ForgeResult.coherence` | **#173**, F1–F4, F8, F9, F11 |
-| 3 | `forge_preset` owns `ScoringParams`, `min_train_months`, `min_oos_trades`, M3 bar-counts | F2, F3, F5 |
-| 4 | Window-aware floors: `INSUFFICIENT-DATA` instead of `NON-EDGE`; Poisson-bound fold gates | F1, F2, F4 |
-| 5 | Housekeeping: dead code, false docstrings, `WalkForwardConfig` collision, `diagnostics` split | F13, F14, F15 |
+Settled in [#184](https://github.com/mattcond/forgedge/issues/184), which is the live
+tracking issue. The classification in §3 is by severity; this is by execution order, and
+the two deliberately differ — the cheap, enabling, zero-golden-delta work comes first, and
+the most invasive change comes last so its diff stays isolated.
 
-Issue #173 is closed by (2) alone; (3) and (4) prevent the same configuration from being
-built again.
+| step | issue | scope | closes |
+|---|---|---|---|
+| 1 | [#183](https://github.com/mattcond/forgedge/issues/183) *(part)* | rename the two `WalkForwardConfig`; split `diagnostics` out of `rejection_reasons` | F13, F14 |
+| 2 | [#175](https://github.com/mattcond/forgedge/issues/175) | directed-constraint resolver: `UNSET`, `PipelineContext`, resolution trace | enabling |
+| 3 | [#176](https://github.com/mattcond/forgedge/issues/176) | `config_report()` — resolved config + coherence findings, `strict=True` | **#173** *(as diagnostic)* |
+| 4 | [#181](https://github.com/mattcond/forgedge/issues/181) | duplicated constants: fee, columns, M3↔M4 PF bar | F7, F8, F10 |
+| 5 | [#185](https://github.com/mattcond/forgedge/issues/185) | `entry_mode` default → `"auto"`, both operating points published | — |
+| 6 | [#168](https://github.com/mattcond/forgedge/issues/168) | expose episode / overlap info on the trade ledger | prerequisite of F16 |
+| 7 | [#177](https://github.com/mattcond/forgedge/issues/177) | window-aware floors, Poisson-bound fold gates, effective sample size | F1, **F2 = #173**, F4, F11, F12, F15, F16 |
+| 8 | [#178](https://github.com/mattcond/forgedge/issues/178) | `ScoringParams` owned and rebuilt on a dispersion-based `c_norm` | F3 |
+| 9 | [#179](https://github.com/mattcond/forgedge/issues/179) | one source of truth for bar duration | F5 |
+| 10 | [#180](https://github.com/mattcond/forgedge/issues/180) | one IS/OOS axis, `TimeBudget` threaded to M3 | F6 |
+| 11 | [#182](https://github.com/mattcond/forgedge/issues/182) | significance thresholds derived from one `alpha` | F9 |
+
+Steps 1–3 close #173 *diagnostically* — a warning at start-up carrying the value to set —
+without changing a single verdict. Step 7 removes the cause. Steps 4–11 prevent the same
+configuration from being built again.
+
+**Governing principle:** one PR per issue, and every golden-value re-pin attributable to a
+single cause. Steps 5 and 7–11 each move `tests/test_golden.py`; batching them would make
+it impossible to write *why* in the re-pin comment, which is the repo's convention.
