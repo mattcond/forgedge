@@ -561,6 +561,54 @@ kpi = lag_features(kpi, *cols, periods=(1,2,3), like=None, order_on="open_dt") -
 
 **Convenzione di naming delle colonne, importante:** perché una colonna sia riconosciuta come parte di una *coppia ratio same-family* dal feature generator di Event Discovery, il nome deve seguire `{base}_{indicatore}_{periodo}` con `base ∈ {close, high, low, open, volume}` e `indicatore ∈ {ema, sma, rsi, dema, tema, wma, hma, mdd, atr, natr}` (o i pattern di naming dedicati per Bollinger/volatilità/rendimento/MACD). Una colonna che non rispetta questa convenzione funziona comunque come feature standalone e può comunque essere raggiunta da uno degli *altri* pairing di arità 2 a scope più ristretto descritti in §8 (coppie OHLC cross-tempo, MACD-vs-signal, rendimento prezzo-vs-volume, coppie di geometria di `candle_features()`, indicatore-vs-OHLC-base-laggata) — è specificamente dal raggruppamento generico same-family che resta esclusa. Se un indicatore custom che hai aggiunto non compare mai composto con nulla nei candidati di Event Discovery, controlla prima il nome contro questa convenzione.
 
+### Coerenza della configurazione — `config_report`
+
+```python
+config_report(event_discovery=None, alpha=None, rule_discovery=None,
+              registry=None, market_context=None, *, ctx=None, kpi=None,
+              timeframe="1H") -> ConfigReport
+```
+
+`summary_report` valida i **dati**; `config_report` valida la
+**configurazione**, con lo stesso vocabolario `Finding`. Risponde a due domande
+in un solo output, perché hanno senso solo insieme: *con che configurazione sto
+per girare* e *quella configurazione è internamente soddisfacibile*.
+
+Sia lui sia `forge()` passano per lo **stesso resolver**, quindi ciò che il
+report mostra è per costruzione ciò che la pipeline eseguirà — `rep.configs`
+sono gli oggetti veri, non una ricostruzione. Non solleva mai, non avvisa mai e
+non muta mai ciò che riceve.
+
+```python
+rep = config_report(disc, alpha, rd, kpi=kpi, timeframe="1D")
+print(rep.to_text())          # la resolution trace, poi la diagnostica
+if rep.has_critical:
+    raise ValueError(rep.one_line())
+```
+
+Tredici vincoli, ciascuno una relazione fra materializzazioni di un parametro
+latente. Tre sono `FAIL` — riservati a una configurazione che rende uno stage
+**strutturalmente incapace** di produrre un verdetto: `wf_bucket_too_short`
+(issue #173), `m1_oos_fold_too_short`, `oos_span_too_short`. Gli altri dieci
+sono `WARN`. Ogni messaggio porta il valore da impostare, non solo il
+fallimento.
+
+> **`forge(strict=True)` è il default, ed è un cambiamento di comportamento.**
+> Un `FAIL` ora solleva `ValueError` invece di girare. Un run del genere non può
+> dirti nulla: ogni candidato viene eliminato per ragioni di configurazione, e il
+> muro di rejection che ne esce è indistinguibile da "il segnale è brutto", che è
+> proprio ciò che stavi cercando di misurare. Passa `strict=False` per degradare
+> tutto a `UserWarning` e girare comunque. Le incoerenze non critiche sono sempre
+> avvisi, mai errori. **Nessun verdetto cambia** — cambia che alcuni run non
+> partono più.
+
+> **Noto: `forge_preset("balanced", "1D")` è attualmente segnalato.** Ai valori
+> standard del preset `min_train_months=6 × criteria.min_tpm=0.80 = 4.8` contro
+> un floor di 10 — la F2 dell'audit, e il motivo per cui su dati giornalieri si
+> vede l'early-elimination di massa. Viene risolto derivando `min_train_months`
+> dal tasso (issue #177); fino ad allora i run col preset su daily richiedono
+> `strict=False`.
+
 ### Qualità dei dati — `summary_report`
 
 ```python

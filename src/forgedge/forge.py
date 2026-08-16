@@ -77,7 +77,8 @@ from .event_discovery.models import (
 from .market_context.context import MarketContext
 from .market_context.models import REGIME_COL, MarketContextConfig
 from .presets import default_horizon_grid
-from .resolver import PipelineContext, ResolutionTrace, Violation, collect_context, resolve
+from .config_report import ConfigReport, config_report
+from .resolver import PipelineContext, ResolutionTrace, collect_context
 from .rule_discovery.discovery import RuleDiscovery
 from .rule_discovery.models import RuleDiscoveryConfig, RuleDiscoveryResponse
 from .rule_registry.models import RegistryConfig, RuleSubmission
@@ -229,10 +230,11 @@ class ForgeResult:
         produced it and the inputs it read.  Log it alongside
         ``ledger.describe()``: together they say what was searched and with
         what configuration.
-    coherence : list[Violation]
-        Constraint violations found in *check* mode — configuration copies that
-        are set but mutually inconsistent.  Advisory here; ``config_report()``
-        renders them (#176).
+    coherence : ConfigReport or None
+        The configuration report — the resolved configs plus every constraint
+        violation found in *check* mode.  Produced by the **same** resolver call
+        the pipeline ran with, so ``coherence.configs`` is literally what
+        executed, not a reconstruction.
     """
 
     enriched: pd.DataFrame
@@ -251,7 +253,7 @@ class ForgeResult:
     time_budget: Optional[TimeBudget] = None
     context: Optional[PipelineContext] = None
     resolution: Optional[ResolutionTrace] = None
-    coherence: List[Violation] = field(default_factory=list)
+    coherence: Optional[ConfigReport] = None
 
     # ------------------------------------------------------------------
     # Convenience accessors
@@ -332,6 +334,7 @@ def forge(
     run_rule_discovery: bool = True,
     run_registry: bool = True,
     only_validated_events: bool = False,
+    strict: bool = True,
     rule_discovery_grades: Optional[Iterable[str]] = None,
     progress: bool = True,
 ) -> ForgeResult:
@@ -449,6 +452,15 @@ def forge(
         (the previous behaviour).  Contracts filtered out here still appear in
         ``contracts`` / ``promoted`` for audit; they simply get no rule
         response and never reach the Rule Registry.
+    strict : bool, default True
+        Stop on a configuration that makes a stage **structurally incapable** of
+        producing a verdict — a `FAIL` finding from
+        :func:`forgedge.config_report`, such as issue #173's walk-forward
+        bucket.  Such a run cannot tell you anything: every candidate is
+        eliminated for configuration reasons, and the wall of rejections is
+        indistinguishable from "the signal is bad".  Failing fast is the point.
+        ``strict=False`` degrades every finding to a ``UserWarning`` and runs
+        anyway.  Non-critical incoherences are always warnings, never errors.
     progress : bool, default True
         Print per-stage status and a Rule Discovery progress bar to ``stderr``.
         Independently of this flag every milestone is emitted at ``INFO`` on the
@@ -507,15 +519,29 @@ def forge(
     context = collect_context(
         _bundle, PipelineContext.from_frame(kpi_table, timeframe=timeframe)
     )
-    _bundle, resolution, coherence = resolve(_bundle, context)
+    coherence = config_report(
+        event_discovery_config, cfg, rule_discovery_config, registry_config,
+        market_context_config, ctx=context,
+    )
+    _bundle = coherence.configs
     market_context_config = _bundle["market_context"]
     event_discovery_config = _bundle["event_discovery"]
     cfg = _bundle["alpha"]
     rule_discovery_config = _bundle["rule_discovery"]
     registry_config = _bundle["registry"]
+    resolution = coherence.trace
     report.stage(resolution.describe())
-    for _violation in coherence:
-        logger.warning("[%s] %s: %s", resolved_ticker, _violation.code, _violation.message)
+    if coherence.findings:
+        logger.info("[%s] %s", resolved_ticker, coherence.one_line())
+    if coherence.has_critical and strict:
+        raise ValueError(
+            "forge(): the configuration cannot produce a verdict — every "
+            "candidate would be eliminated for configuration reasons, not for "
+            "signal quality. Fix the values below, or pass strict=False to run "
+            "anyway.\n" + coherence.one_line()
+        )
+    for _finding in coherence.findings:
+        warnings.warn(f"{_finding.code}: {_finding.message}", UserWarning, stacklevel=2)
 
     # ── Modulo 0 — Market Context ─────────────────────────────────────────
     mc: Optional[MarketContext] = None

@@ -588,6 +588,398 @@ CONSTRAINTS: List[Constraint] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Statistical and structural constraints — check-only for now
+# ---------------------------------------------------------------------------
+#
+# Every one of these relates materialisations of a latent parameter that the
+# audit found mutually unsatisfiable in practice.  They are registered here and
+# evaluated in *check* mode; each has its `derive` switched on by the issue that
+# owns the corresponding fix (#177, #178, #181, #182).  Until then the
+# configuration can still be built wrong — it simply is no longer built wrong in
+# silence.
+
+def _need(values: Dict[str, Any], *paths: str) -> Optional[Tuple[Any, ...]]:
+    """Return the values at ``paths``, or ``None`` if any is absent or unset.
+
+    A constraint whose inputs are not all present has nothing to say — a
+    partial bundle is a supported case, not a violation.
+    """
+    out = []
+    for path in paths:
+        v = values.get(path, _MISSING)
+        if v is _MISSING or not is_set(v) or v is None:
+            return None
+        out.append(v)
+    return tuple(out)
+
+
+def _min_trades_abs() -> int:
+    """M3's absolute trade floor.  Imported lazily: rule_discovery imports this
+    module, so a top-level import would close the cycle."""
+    from .rule_discovery.discovery import _MIN_TRADES_ABS
+
+    return int(_MIN_TRADES_ABS)
+
+
+def _check_wf_bucket(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """#173 — the first walk-forward train window versus the configured rate.
+
+    Under ``selection_mode="walk_forward"`` the early-elimination screen runs on
+    the *first train window*, whose length is ``min_train_months`` — a parameter
+    nobody relates to ``min_tpm``.  When the product falls under the absolute
+    floor, every candidate is eliminated at the first fold regardless of signal
+    quality, and nothing says so.
+    """
+    got = _need(values,
+                "rule_discovery.walk_forward.min_train_months",
+                "rule_discovery.criteria.min_tpm")
+    if got is None:
+        return None
+    months, rate = float(got[0]), float(got[1])
+    mode = values.get("rule_discovery.selection_mode", _MISSING)
+    if mode is not _MISSING and is_set(mode) and mode != "walk_forward":
+        return None
+    floor = _min_trades_abs()
+    expected = months * rate
+    if expected >= floor:
+        return None
+
+    need = poisson_min_window(floor, rate)
+    msg = (f"walk_forward.min_train_months={months:g} × criteria.min_tpm={rate:g} "
+           f"= {expected:.1f} trade attesi, sotto il floor assoluto di {floor}: "
+           f"ogni candidato verrà eliminato al primo fold, indipendentemente dalla "
+           f"qualità del segnale (#173). ")
+    if need == float("inf"):
+        return msg + (f"A questo tasso il floor non è raggiungibile con nessuna "
+                      f"finestra: alzare criteria.min_tpm.")
+    span = ctx.span_months
+    if span and need > span:
+        return msg + (f"Servono min_train_months >= {need:.0f} mesi ma i dati ne "
+                      f"coprono {span:.0f}: su questi dati non è raggiungibile con "
+                      f"nessun valore. Alzare criteria.min_tpm a >= "
+                      f"{floor / max(span, 1e-9):.2f}, oppure allungare la storia.")
+    return msg + (f"Servono min_train_months >= {need:.0f} (margine di Poisson 95 %), "
+                  f"oppure criteria.min_tpm >= {floor / months:.2f}.")
+
+
+def _check_m1_fold(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """F1 — the OOS fold length versus the absolute episode floor.
+
+    ``GateParams`` documents itself as rate/ratio invariant, but
+    ``min_episodes`` is an absolute count and the walk-forward reuses the
+    in-sample instance verbatim on folds whose length comes from two unrelated
+    parameters.
+    """
+    got = _need(values,
+                "event_discovery.train_ratio",
+                "event_discovery.walk_forward.n_splits",
+                "event_discovery.gate_params.min_tpm",
+                "event_discovery.gate_params.min_episodes")
+    if got is None:
+        return None
+    train_ratio, n_splits, rate, min_episodes = (
+        float(got[0]), int(got[1]), float(got[2]), int(got[3]))
+    counting = values.get("event_discovery.gate_params.event_counting", "episode")
+    if counting != "episode" or train_ratio >= 1.0 or n_splits < 1:
+        return None
+    span = ctx.span_months
+    if not span:
+        return None
+
+    fold_months = span * (1.0 - train_ratio) / n_splits
+    expected = fold_months * rate
+    if expected >= min_episodes:
+        return None
+    implied = min_episodes / fold_months if fold_months > 0 else float("inf")
+    max_splits = int(span * (1.0 - train_ratio) * rate / min_episodes)
+    fix = (f"usare n_splits <= {max_splits}" if max_splits >= 1
+           else f"abbassare train_ratio, oppure ridurre gate_params.min_episodes")
+    return (f"i fold OOS durano {fold_months:.1f} mesi (train_ratio={train_ratio:g}, "
+            f"n_splits={n_splits}) e a min_tpm={rate:g} ne attendono {expected:.1f} "
+            f"episodi, sotto il floor assoluto min_episodes={min_episodes}: il gate "
+            f"OOS chiede di fatto {implied:.1f} episodi/mese, {implied / rate:.1f}× "
+            f"quello in-sample, quindi nessun candidato risulterà OOS-stabile. {fix}.")
+
+
+def _check_oos_span(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """F4 — the pooled walk-forward test span versus ``min_oos_trades``."""
+    got = _need(values,
+                "rule_discovery.criteria.min_tpm",
+                "rule_discovery.criteria.min_oos_trades",
+                "rule_discovery.walk_forward.min_train_months")
+    if got is None:
+        return None
+    rate, min_oos, train_months = float(got[0]), int(got[1]), float(got[2])
+    span = ctx.span_months
+    if not span:
+        return None
+    test_months = span - train_months
+    if test_months <= 0:
+        return (f"walk_forward.min_train_months={train_months:g} copre l'intero span "
+                f"disponibile ({span:.0f} mesi): non resta nessuna finestra di test.")
+    expected = test_months * rate
+    if expected >= min_oos:
+        return None
+    return (f"le finestre di test aggregate coprono {test_months:.0f} mesi e a "
+            f"criteria.min_tpm={rate:g} producono {expected:.1f} trade attesi, sotto "
+            f"criteria.min_oos_trades={min_oos}: ogni verdetto positivo verrà "
+            f"degradato a INSUFFICIENT-DATA. Alzare min_tpm a >= "
+            f"{min_oos / test_months:.2f}, o abbassare min_oos_trades.")
+
+
+def _check_m3_vs_m1(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """F2 — M3 must not demand a higher rate than M1 admitted."""
+    got = _need(values,
+                "event_discovery.gate_params.min_tpm",
+                "rule_discovery.criteria.min_tpm")
+    if got is None:
+        return None
+    m1, m3 = float(got[0]), float(got[1])
+    if m3 <= m1:
+        return None
+    return (f"criteria.min_tpm={m3:g} (M3) supera gate_params.min_tpm={m1:g} (M1): "
+            f"gli eventi ammessi da Event Discovery vengono rifiutati da Rule "
+            f"Discovery per una frequenza che nessuno ha mai richiesto a monte. "
+            f"forge_preset() tiene M3 leggermente più permissivo di M1 proprio per "
+            f"evitarlo.")
+
+
+def _check_scoring(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """F3 — the scoring knobs versus the frequency the gate demands."""
+    got = _need(values,
+                "rule_discovery.criteria.min_tpm",
+                "rule_discovery.scoring.pf_min_tpm")
+    if got is None:
+        return None
+    rate, pf_min_tpm = float(got[0]), float(got[1])
+    problems = []
+    if pf_min_tpm > rate:
+        problems.append(
+            f"scoring.pf_min_tpm={pf_min_tpm:g} supera criteria.min_tpm={rate:g}, "
+            f"quindi il punteggio composito penalizza regole che il gate ammette")
+    target = values.get("rule_discovery.scoring.pf_tpm_target", _MISSING)
+    if target is not _MISSING and is_set(target) and float(target) > 0:
+        t = float(target)
+        if not (0.5 * rate <= t <= 2.0 * rate):
+            problems.append(
+                f"scoring.pf_tpm_target={t:g} è fuori dalla banda [{0.5 * rate:.2f}, "
+                f"{2.0 * rate:.2f}] attorno a criteria.min_tpm={rate:g}: c_norm — e "
+                f"quindi pf_score_tpm, che è il criterio di selezione della griglia — "
+                f"è calibrato su una frequenza diversa da quella richiesta dal gate")
+    return "; ".join(problems) or None
+
+
+def _untouched_default(path: str, value: Any) -> bool:
+    """``True`` when the field still holds its class default.
+
+    The same question ``_warn_if_hourly_grid_on_slow_timeframe`` asks: a value
+    the caller chose is their business, but an hourly-calibrated default that
+    reached daily data is the footgun.  These fields are plain defaults rather
+    than ``UNSET``, so the class is the only place to read them from.
+    """
+    lazy = {
+        "rule_discovery.base_params.target_h": ("rule_discovery.models", "BacktestParams", "target_h"),
+        "rule_discovery.base_params.buy_delay_bar": ("rule_discovery.models", "BacktestParams", "buy_delay_bar"),
+        "alpha.horizon_grid": ("alpha_discovery.models", "AlphaConfig", "horizon_grid"),
+    }
+    spec = lazy.get(path)
+    if spec is None:
+        return False
+    import importlib
+
+    mod = importlib.import_module(f".{spec[0]}", package="forgedge")
+    cls = getattr(mod, spec[1])
+    return cls.__dataclass_fields__[spec[2]].default == value
+
+
+def _check_timeframe(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """F5 — the declared timeframe versus the bar counts configured against it.
+
+    Bar-count fields are only flagged when they still hold their **hourly**
+    class default on a slower timeframe: ``target_h=24`` means 24 hours on 1H
+    and 24 *days* on 1D, and a caller who wrote 24 deliberately does not need
+    telling.  This is the check ``forge()`` already performs for
+    ``horizon_grid``, generalised to the two M3 fields that never got it.
+    """
+    problems = []
+    declared = values.get("alpha.timeframe", _MISSING)
+    if declared is not _MISSING and is_set(declared) and declared != ctx.timeframe:
+        problems.append(
+            f"AlphaConfig.timeframe={declared!r} ma la sessione dichiara "
+            f"{ctx.timeframe!r}: i due scalano parametri diversi")
+
+    if ctx.bar_minutes > 60:
+        bars_per_day = ctx.bars_per_day
+        for path, label in (
+            ("rule_discovery.base_params.target_h", "BacktestParams.target_h"),
+            ("rule_discovery.base_params.buy_delay_bar", "BacktestParams.buy_delay_bar"),
+        ):
+            v = values.get(path, _MISSING)
+            if v is _MISSING or not is_set(v) or not _untouched_default(path, v):
+                continue
+            problems.append(
+                f"{label}={v:g} è il default tarato su barre orarie, e a "
+                f"{ctx.timeframe} vale {float(v) / bars_per_day:.0f} giorni")
+        grid = values.get("alpha.horizon_grid", _MISSING)
+        if (grid is not _MISSING and is_set(grid) and len(grid)
+                and _untouched_default("alpha.horizon_grid", grid)):
+            problems.append(
+                f"max(horizon_grid)={max(grid)} è il default orario e a "
+                f"{ctx.timeframe} vale {max(grid) / bars_per_day:.0f} giorni")
+    return "; ".join(problems) or None
+
+
+def _check_split(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """F6 — M1 and M2 cutting the timeline at different points."""
+    got = _need(values, "event_discovery.train_ratio", "alpha.train_ratio")
+    if got is None:
+        return None
+    m1, m2 = float(got[0]), float(got[1])
+    if abs(m1 - m2) < 1e-9 or m1 >= 1.0:
+        # train_ratio=1.0 on M1 is a deliberate, documented choice: M1 never
+        # observes the forward return, so seeing the whole table leaks no
+        # return information (see #180).
+        return None
+    return (f"DiscoveryConfig.train_ratio={m1:g} e AlphaConfig.train_ratio={m2:g} "
+            f"tagliano la timeline in punti diversi, e ForgeResult.time_budget "
+            f"riporta solo quello di M2. Passare un TimeBudget esplicito per "
+            f"condividere un asse solo.")
+
+
+def _check_registry_pf(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """F8 — the cross-ticker bar versus the bar that admitted the rule."""
+    got = _need(values,
+                "registry.cross_pf_threshold",
+                "rule_discovery.criteria.partial_min_profit_factor")
+    if got is None:
+        return None
+    cross, partial = float(got[0]), float(got[1])
+    if cross <= partial:
+        return None
+    return (f"RegistryConfig.cross_pf_threshold={cross:g} supera "
+            f"criteria.partial_min_profit_factor={partial:g}: una regola ammessa a "
+            f"PF {partial:g} in casa dovrebbe fare meglio altrove per essere "
+            f"GENERIC, quindi l'intera classe PARTIAL-EDGE è strutturalmente esclusa "
+            f"dalla genericità.")
+
+
+def _check_alpha_drift(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """F9 — the per-hypothesis thresholds versus the session's alpha."""
+    drifted = []
+    for path in ("alpha.thresholds.max_p_value", "alpha.thresholds.ic_max_p",
+                 "rule_discovery.criteria.max_ttest_p",
+                 "rule_discovery.criteria.max_rotation_p"):
+        v = values.get(path, _MISSING)
+        if v is _MISSING or not is_set(v):
+            continue
+        if abs(float(v) - ctx.alpha) > 1e-12:
+            drifted.append(f"{path.split('.')[-1]}={v:g}")
+    if not drifted:
+        return None
+    return (f"soglie per-ipotesi diverse dall'alpha di sessione ({ctx.alpha:g}): "
+            f"{', '.join(drifted)}. Non è un errore — fdr_q e oos_max_p sono "
+            f"quantità diverse e restano scelte dal preset — ma le soglie che *sono* "
+            f"un alpha dovrebbero derivare da uno solo.")
+
+
+def _check_tp_floor(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """F11 — M3's hardcoded take-profit floor versus M2's own.
+
+    Only reported where it can actually bite.  ``mfe_floor`` (0.005) sits below
+    M3's clamp (0.01) at the *class defaults*, so an unconditional check fires
+    on every run — and a warning that is always on is one users learn to
+    ignore, which is the failure mode F14 was about.  The clamp binds when the
+    derived take-profit is routinely sub-1 %, i.e. on intraday bars; on daily
+    and slower the median-MFE target sits well above it (measured minimum 2.5 %
+    on the reference fixture), so the conflict stays latent and saying so adds
+    nothing.
+    """
+    got = _need(values, "alpha.mfe_floor")
+    if got is None:
+        return None
+    mfe_floor = float(got[0])
+    m3_floor = 0.01   # hardcoded in _seed_base_params until #177
+    if mfe_floor >= m3_floor or ctx.bar_minutes >= 1440:
+        return None
+    return (f"AlphaConfig.mfe_floor={mfe_floor:g} è sotto il floor di take-profit "
+            f"cablato in Rule Discovery ({m3_floor:g}): un target derivato fra i due "
+            f"viene sostituito da una costante, e il floor più severo è quello che "
+            f"non si può configurare.")
+
+
+def _check_entry_mode_gate(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """A fill-rate gate that the entry mode makes inert."""
+    got = _need(values, "rule_discovery.entry_mode", "rule_discovery.criteria.min_fill_rate")
+    if got is None:
+        return None
+    mode, min_fill = got[0], float(got[1])
+    if mode == "limit" or min_fill <= 0:
+        return None
+    return (f"entry_mode={mode!r} riempie ~100 %, quindi criteria.min_fill_rate="
+            f"{min_fill:g} non scatta mai e uno dei tre criteri di early "
+            f"elimination sparisce. In questa modalità la soglia che conta è "
+            f"min_fill_rate_opt.")
+
+
+def _statistical_constraints() -> List[Constraint]:
+    return [
+        Constraint(code="wf_bucket_too_short", level="FAIL", stage=STATISTICAL,
+                   free=("rule_discovery.walk_forward.min_train_months",
+                         "rule_discovery.criteria.min_tpm",
+                         "rule_discovery.selection_mode"),
+                   check=_check_wf_bucket),
+        Constraint(code="m1_oos_fold_too_short", level="FAIL", stage=STATISTICAL,
+                   free=("event_discovery.train_ratio",
+                         "event_discovery.walk_forward.n_splits",
+                         "event_discovery.gate_params.min_tpm",
+                         "event_discovery.gate_params.min_episodes",
+                         "event_discovery.gate_params.event_counting"),
+                   check=_check_m1_fold),
+        Constraint(code="oos_span_too_short", level="FAIL", stage=STRUCTURAL,
+                   free=("rule_discovery.criteria.min_tpm",
+                         "rule_discovery.criteria.min_oos_trades",
+                         "rule_discovery.walk_forward.min_train_months"),
+                   check=_check_oos_span),
+        Constraint(code="m3_stricter_than_m1", level="WARN", stage=STRUCTURAL,
+                   free=("event_discovery.gate_params.min_tpm",
+                         "rule_discovery.criteria.min_tpm"),
+                   check=_check_m3_vs_m1),
+        Constraint(code="scoring_uncalibrated", level="WARN", stage=STATISTICAL,
+                   free=("rule_discovery.criteria.min_tpm",
+                         "rule_discovery.scoring.pf_min_tpm",
+                         "rule_discovery.scoring.pf_tpm_target"),
+                   check=_check_scoring),
+        Constraint(code="timeframe_mismatch", level="WARN", stage=STATISTICAL,
+                   free=("alpha.timeframe", "alpha.horizon_grid",
+                         "rule_discovery.base_params.target_h",
+                         "rule_discovery.base_params.buy_delay_bar"),
+                   check=_check_timeframe),
+        Constraint(code="split_disagreement", level="WARN", stage=STRUCTURAL,
+                   free=("event_discovery.train_ratio", "alpha.train_ratio"),
+                   check=_check_split),
+        Constraint(code="registry_stricter_than_m3", level="WARN", stage=STATISTICAL,
+                   free=("registry.cross_pf_threshold",
+                         "rule_discovery.criteria.partial_min_profit_factor"),
+                   check=_check_registry_pf),
+        Constraint(code="alpha_level_drift", level="WARN", stage=STATISTICAL,
+                   free=("alpha.thresholds.max_p_value", "alpha.thresholds.ic_max_p",
+                         "rule_discovery.criteria.max_ttest_p",
+                         "rule_discovery.criteria.max_rotation_p"),
+                   check=_check_alpha_drift),
+        Constraint(code="tp_floor_conflict", level="WARN", stage=STATISTICAL,
+                   free=("alpha.mfe_floor",),
+                   check=_check_tp_floor),
+        Constraint(code="entry_mode_inert_gate", level="WARN", stage=STRUCTURAL,
+                   free=("rule_discovery.entry_mode",
+                         "rule_discovery.criteria.min_fill_rate"),
+                   check=_check_entry_mode_gate),
+    ]
+
+
+CONSTRAINTS.extend(_statistical_constraints())
+
+
 #: What each resolvable field would be without the resolver.  The trace's
 #: ``default → resolved`` column is the actual debugging question, and once a
 #: field's class default becomes ``UNSET`` the historical value is no longer
