@@ -219,6 +219,10 @@ class PipelineContext:
         count as transferring (M4, F8).  Policy rather than data, which is why
         it lives here next to ``alpha`` and ``min_sample`` instead of being a
         literal buried in the cross-ticker loop.
+    net_gain_retention : float
+        Fraction of the market point's OOS net gain the limit point must retain
+        to be adopted (M3, #185).  The same shape as ``cross_pf_retention`` and
+        here for the same reason.
     n_bars, span_months : int, float
         Data facts.  **Read by check mode only.**
     """
@@ -236,6 +240,7 @@ class PipelineContext:
     min_sample: int = 10
     target_rate_tpm: Optional[float] = None
     cross_pf_retention: float = 0.8
+    net_gain_retention: float = 0.5
     # data facts — check mode only
     n_bars: int = 0
     span_months: float = 0.0
@@ -627,6 +632,14 @@ CONSTRAINTS: List[Constraint] = [
         free=(),
         derived="registry.min_cross_pf_retention",
         derive=_from_context("cross_pf_retention"),
+    ),
+    Constraint(
+        code="entry_adoption_policy",
+        level="WARN",
+        stage=PROPAGATION,
+        free=(),
+        derived="rule_discovery.criteria.min_net_gain_retention",
+        derive=_from_context("net_gain_retention"),
     ),
     # ── economics ────────────────────────────────────────────────────
     Constraint(

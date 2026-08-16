@@ -21,6 +21,7 @@ from forgedge.rule_discovery import (
     GridSpec,
     ScoringParams,
     SelectionCriteria,
+    ValidatedRule,
     WalkForwardConfig,
     build_grid,
     deflated_sharpe,
@@ -820,6 +821,42 @@ def _predictive_kpi_table(n=8000, seed=7):
     )
 
 
+def _market_edge_kpi_table(n=9000, seed=3, drift=0.05, span=12, sigma=0.009,
+                           intrabar=0.02):
+    """A table whose signal survives a *market* entry.
+
+    ``_predictive_kpi_table`` reverts too weakly: at a next-open fill its
+    profit factor sits around 1.1, below every gate, so the market stage
+    returns NON-EDGE and the limit stage is never reached.  That is fine for
+    the tests it was written for and useless for testing Stage 2.
+
+    Here a low ``feat`` is followed by a real drift over the next ``span``
+    bars, strong enough relative to ``sigma`` to clear the gates at a market
+    entry.  ``intrabar`` is wide enough that a limit order fills *sometimes* —
+    around two thirds of the time — which is the interesting regime: a limit
+    that always fills is a market order, and one that never fills is not an
+    operating point.
+    """
+    rng = np.random.default_rng(seed)
+    feat = rng.uniform(0.0, 1.0, n)
+    boost = np.zeros(n)
+    for i in np.flatnonzero(feat < 0.15):
+        boost[i + 1:min(i + span + 1, n)] += drift / span
+    r = rng.normal(0.0, sigma, n) + boost
+    close = 100.0 * np.exp(np.cumsum(r))
+    return pd.DataFrame(
+        {
+            "open_dt": pd.date_range("2023-01-01", periods=n, freq="1h"),
+            "open": close,
+            "high": close * (1 + intrabar),
+            "low": close * (1 - intrabar),
+            "close": close,
+            "volume": np.abs(rng.normal(1e6, 1e5, n)),
+            "feat": feat,
+        }
+    )
+
+
 class TestEndToEnd:
     @pytest.fixture(scope="class")
     def pipeline(self):
@@ -956,16 +993,38 @@ class TestEndToEnd:
         with pytest.raises(ValueError, match="entry_mode"):
             rd.run()
 
-    def test_entry_mode_limit_matches_default(self, pipeline):
-        """entry_mode='limit' is the default path — bit-for-bit identical output."""
+    def test_entry_mode_auto_matches_default(self, pipeline):
+        """entry_mode='auto' is the default path — bit-for-bit identical output.
+
+        The default moved from ``"limit"`` to ``"auto"`` (#185).  In limit mode
+        the grid varies ``buy_drop_pct``, so the limit entry does double duty as
+        order mechanic *and* entry-price optimiser, and the deeper the discount
+        the more it fills only on favourable paths — the fill confound, which
+        inflates PF on a subset that is not tradeable.  ``"auto"`` makes the
+        verdict a measurement of the *signal* and leaves the entry price to a
+        separate, out-of-sample-confirmed stage.
+        """
         ed, _, promoted, by_id = pipeline
         c = promoted[0]
         cand = by_id[c.event_candidate_id]
         default = RuleDiscovery(ed.df, c, cand).run()
         explicit = RuleDiscovery(
-            ed.df, c, cand, RuleDiscoveryConfig(entry_mode="limit")
+            ed.df, c, cand, RuleDiscoveryConfig(entry_mode="auto")
         ).run()
         assert _nan_safe_eq(explicit.to_dict(), default.to_dict())
+
+    def test_entry_mode_limit_is_still_fully_supported(self, pipeline):
+        """The old default is a mode, not a removal: it still runs end to end
+        and still publishes a limit operating point."""
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        resp = RuleDiscovery(
+            ed.df, c, by_id[c.event_candidate_id],
+            RuleDiscoveryConfig(entry_mode="limit"),
+        ).run()
+        assert resp.verdict in {"EDGE", "PARTIAL-EDGE", "NON-EDGE", "INSUFFICIENT-DATA"}
+        if resp.validated_rule is not None:
+            assert resp.validated_rule.params.buy_type == "limit"
 
     def test_entry_mode_market_fills_and_no_buydrop_reject(self, pipeline):
         """Market baseline: ~100% fill, never rejected for 'buy_drop too deep'."""
@@ -1012,41 +1071,165 @@ class TestEndToEnd:
             rd._frame, cfg.signal_col, base.merged(buy_type="market"),
             scoring=cfg.scoring, timestamp_col=cfg.timestamp_col,
         )
+        market_params = base.merged(buy_type="market")
         fake = SimpleNamespace(
             in_sample_summary=mkt,
-            validated_rule=SimpleNamespace(params=base.merged(buy_type="market")),
+            walk_forward=None,
+            statistical_validation=None,
+            grid_results=[],
+            validated_rule=ValidatedRule(
+                expression="x", event_candidate_id="e", params=market_params,
+            ),
         )
-        opt = rd._optimize_limit_entry(fake, base)
+        opt = rd._optimize_limit_entry(fake, base, rd._market_grid(market_params))
         assert isinstance(opt, EntryOptimization)
         assert opt.min_fill_rate_opt == 1.01
         assert opt.adopted is False
         assert opt.selected_entry == "market"
+        assert opt.failed_condition == "fill"
         assert opt.limit_fill_rate is None      # nothing reached the floor
+        # The verdict never comes from Stage 2, adopted or not.
+        assert opt.authoritative == "market"
 
-    def test_optimize_limit_adopts_when_it_improves(self, pipeline):
-        """With a weak market baseline, a tradeable limit at fill ≥ floor is adopted."""
-        ed, _, promoted, by_id = pipeline
-        c = promoted[0]
-        cfg = RuleDiscoveryConfig(
-            entry_mode="auto",
-            criteria=SelectionCriteria(min_fill_rate_opt=0.40),
-        )
-        rd = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id], cfg)
-        rd._inject_signal()
-        base = rd._seed_base_params([])
-        # Force a deliberately weak market baseline (pf_score_tpm = 0) so any
-        # tradeable limit candidate constitutes an improvement.
-        weak_market = SimpleNamespace(profit_factor=1.0, fill_rate=1.0, pf_score_tpm=0.0)
-        fake = SimpleNamespace(
-            in_sample_summary=weak_market,
-            validated_rule=SimpleNamespace(params=base.merged(buy_type="market")),
-        )
-        opt = rd._optimize_limit_entry(fake, base)
-        if opt.limit_pf_score_tpm is not None and opt.limit_pf_score_tpm > 0.0:
-            assert opt.adopted is True
-            assert opt.selected_entry == "limit"
-            assert opt.limit_fill_rate >= 0.40
-            assert opt.limit_buy_drop_pct is not None
+
+class TestEntryAdoption:
+    """The three-condition, out-of-sample adoption criterion (#185).
+
+    The fixture is engineered to produce a *market* edge — the previous
+    synthetic reverts too weakly for the market baseline to clear the gates, so
+    Stage 2 never ran on it and the criterion could not be observed at all.
+    """
+
+    @pytest.fixture(scope="class")
+    def pipeline(self):
+        df = _market_edge_kpi_table()
+        ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))
+        cands = ed.run()
+        ad = AlphaDiscovery(ed.df, cands, AlphaConfig(asset="SYN", timeframe="1H"))
+        ad.run()
+        promoted = ad.promoted_contracts()
+        by_id = {c.event_id: c for c in cands}
+        assert promoted
+        return ed, promoted, by_id
+
+    @staticmethod
+    def _cfg(**criteria):
+        # A permissive optimisation floor: on this fixture a 1% discount fills
+        # ~65% of the time (a real limit entry misses the moves that run away),
+        # and the default 0.80 would stop every candidate at condition 1 —
+        # leaving conditions 2 and 3 untested.
+        base = dict(min_fill_rate_opt=0.20)
+        base.update(criteria)
+        return RuleDiscoveryConfig(criteria=SelectionCriteria(**base))
+
+    def _first_with_stage_two(self, pipeline, cfg):
+        ed, promoted, by_id = pipeline
+        for c in promoted[:6]:
+            resp = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id], cfg).run()
+            if resp.entry_optimization is not None:
+                return resp
+        pytest.skip("no market edge reached Stage 2 on this fixture")
+
+    def test_the_verdict_is_never_stage_twos_to_give(self, pipeline):
+        resp = self._first_with_stage_two(pipeline, self._cfg())
+        assert resp.entry_optimization.authoritative == "market"
+        assert resp.is_edge
+
+    def test_both_operating_points_are_published_with_evidence(self, pipeline):
+        """The defect this replaces: the limit point was adopted on a single
+        in-sample pass while the market point it displaced had a walk-forward,
+        statistics and a regime breakdown.  Three scalars cannot say how many
+        trades a point makes or at what win rate, and M4 then catalogued — and
+        cross-ticker tested — an operating point never validated out of sample.
+        """
+        opt = self._first_with_stage_two(pipeline, self._cfg()).entry_optimization
+        assert opt.market_rule is not None
+        assert opt.market_summary is not None
+        assert opt.limit_summary is not None
+        assert opt.limit_walk_forward is not None
+        # Full artefacts, not scalars: the questions a trader asks are answerable.
+        assert opt.limit_summary.total_trades >= 0
+        assert opt.limit_summary.win_rate_pct == opt.limit_summary.win_rate_pct
+
+    def test_the_limit_point_is_replayed_not_reoptimised(self, pipeline):
+        """`reoptimise=False`: one fixed `buy_drop_pct` scored on every test
+        window.  A replay adds no selection, so it adds no `n_trials` — which is
+        what makes it fair to give the limit point an OOS record at all."""
+        opt = self._first_with_stage_two(pipeline, self._cfg()).entry_optimization
+        wf = opt.limit_walk_forward
+        assert len(wf.splits) >= 2
+        distinct = {(s.params.buy_drop_pct, s.params.sell_pct, s.params.target_h)
+                    for s in wf.splits}
+        assert len(distinct) == 1
+
+    def test_n_trials_is_per_operating_point(self, pipeline):
+        """D5 — the market point was chosen over Stage 1's cells, the limit point
+        over those *and* Stage 2's.  The `min_dsr` gate always reads the market
+        point's, so the verdict never pays for Stage 2."""
+        resp = self._first_with_stage_two(pipeline, self._cfg())
+        opt = resp.entry_optimization
+        market_trials = resp.statistical_validation.n_trials_tested
+        assert market_trials == 15          # 5 sell_pct x 3 target_h, entry collapsed
+        assert opt.limit_validation is not None
+        assert opt.limit_validation.n_trials_tested > market_trials
+
+    def test_a_rejected_point_still_reports_its_statistics(self, pipeline):
+        """D9 — the DSR is reported per point as an absolute metric.  A point
+        that was measured and turned down is exactly where a reader wants the
+        number that was measured."""
+        opt = self._first_with_stage_two(pipeline, self._cfg()).entry_optimization
+        if opt.adopted:
+            pytest.skip("this fixture adopted the limit point")
+        assert opt.limit_validation is not None
+        assert opt.failed_condition in {"fill", "sharpe", "net_gain"}
+
+    def test_a_better_deflated_sharpe_does_not_buy_adoption(self, pipeline):
+        """The substance of the change, and why the new quantity was needed.
+
+        On this fixture the limit point comes back with a **higher Deflated
+        Sharpe than the market point** — even carrying the larger trial count
+        from Stage 2 — and is still turned down.  A criterion built on any
+        statistic the pipeline already computes would have published it.
+
+        The two disagree because they annualise differently.  The DSR goes
+        through `validate`, which annualises by *capacity*
+        (`bars_per_year / avg_holding_bars`): a point that fills two thirds as
+        often holds for the same length, so capacity barely moves and the
+        frequency the choice is about cancels out.  `opportunity_sharpe` counts
+        realised trades, so filling 66% of the time costs `sqrt(0.66) ~ 0.81x`
+        that the per-trade edge has to beat.  Here it does not: 67.3 against
+        79.1, and 15.7 of net gain against 23.9.
+
+        Capacity is the right denominator for "how good is this rule" and the
+        wrong one for choosing between two operating points on the same rule.
+        Reusing `StatisticalValidation.sharpe_ratio` would have looked like
+        implementing the criterion while quietly defeating it.
+        """
+        resp = self._first_with_stage_two(pipeline, self._cfg())
+        opt = resp.entry_optimization
+        if opt.failed_condition != "sharpe":
+            pytest.skip("this fixture did not fail on the Sharpe condition")
+        assert opt.limit_validation.deflated_sharpe > resp.statistical_validation.deflated_sharpe
+        assert opt.limit_opportunity_sharpe < opt.market_opportunity_sharpe
+        assert opt.limit_oos_net_gain < opt.market_oos_net_gain
+        assert opt.adopted is False
+        assert opt.selected_entry == "market"
+
+    def test_the_published_point_is_the_selected_one(self, pipeline):
+        resp = self._first_with_stage_two(pipeline, self._cfg())
+        opt = resp.entry_optimization
+        expected = "limit" if opt.adopted else "market"
+        assert opt.selected_entry == expected
+        assert resp.validated_rule.params.buy_type == expected
+
+    def test_to_dict_summarises_the_replay_without_carrying_its_ledger(self, pipeline):
+        """`asdict` would deep-copy the walk-forward's trade DataFrame into the
+        "summary" dict — a memory bug waiting for a large run."""
+        opt = self._first_with_stage_two(pipeline, self._cfg()).entry_optimization
+        d = opt.to_dict()
+        assert d["authoritative"] == "market"
+        assert "limit_oos_summary" in d and "market_oos_summary" in d
+        assert not any(isinstance(v, pd.DataFrame) for v in d.values())
 
 
 # ---------------------------------------------------------------------------

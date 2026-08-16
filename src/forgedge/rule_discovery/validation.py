@@ -85,6 +85,45 @@ def _profit_factor(net: np.ndarray) -> float:
     return pos / neg
 
 
+def opportunity_sharpe(trades: pd.DataFrame, span_years: float) -> float:
+    """Risk-adjusted return per unit of *time*, from the realised trade count.
+
+    ``(mu / sigma) * sqrt(trades per year)`` — deliberately **not** the same
+    quantity as :attr:`StatisticalValidation.sharpe_ratio`, and the difference
+    is the whole reason this function exists.
+
+    ``validate`` annualises by *capacity*: ``bars_per_year / avg_holding_bars``,
+    the number of non-overlapping holding periods that fit in a year.  That is
+    the right denominator for asking "how good is this rule", because it does
+    not reward a rule for the accident of how often it happened to fire.
+
+    It is the wrong denominator for choosing between two operating points on the
+    *same* rule.  A deeper limit entry fills less often while holding for the
+    same length, so capacity barely moves and the two points would annualise
+    almost identically — the frequency the choice is about would cancel out, and
+    a point that trades half as often for a slightly better per-trade edge would
+    look strictly better.  Counting realised trades restores the trade-off:
+    halving the trades costs ``sqrt(2) ~ 1.41x``, which the per-trade quality
+    has to beat to break even.
+
+    Both operating points are measured over the identical out-of-sample windows,
+    so ``span_years`` is common to them and the comparison is scale-free in it;
+    it is applied anyway so the number reported is an annual rate rather than an
+    uninterpretable intermediate.
+
+    Returns ``nan`` for fewer than two trades or zero dispersion.
+    """
+    if trades is None or len(trades) < 2 or span_years <= 0:
+        return float("nan")
+    net = trades["net_pct_gain"].to_numpy(dtype=float)
+    sd = float(net.std(ddof=1))
+    if not (sd > 0):
+        return float("nan")
+    per_trade = float(net.mean()) / sd
+    trades_per_year = len(net) / float(span_years)
+    return per_trade * math.sqrt(max(trades_per_year, 1e-12))
+
+
 def validate(
     trades: pd.DataFrame,
     base_rate: float,
