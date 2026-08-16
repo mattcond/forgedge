@@ -499,9 +499,13 @@ class TestPromotionGates:
                     if c.derived_target.direction in ("long", "short")]
         assert all(c.promoted for c in directed)
         with_oos = [c for c in ad._contracts if c.oos_validation is not None]
+        # The failed confirmation is a diagnostic, not a rejection: it lands in
+        # `diagnostics` and leaves `rejection_reasons` empty on the promoted
+        # contracts — which is exactly what "diagnostic only" means.
         assert any(
-            any("OOS" in r for r in c.rejection_reasons) for c in with_oos
+            any("OOS" in d for d in c.diagnostics) for c in with_oos
         )
+        assert all(not c.rejection_reasons for c in directed)
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +779,7 @@ class TestPersist:
         assert ldt.advantage_by_h == dt.advantage_by_h
         assert loaded.alpha_score.grade == contract.alpha_score.grade
         assert loaded.rejection_reasons == contract.rejection_reasons
+        assert loaded.diagnostics == contract.diagnostics
 
     def test_persist_accepts_str_path(self, contract, tmp_path):
         path = str(tmp_path / "as_str.pkl")
