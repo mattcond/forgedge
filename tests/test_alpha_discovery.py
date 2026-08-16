@@ -423,8 +423,11 @@ class TestAlphaDiscoveryEndToEnd:
         scores = [c.alpha_score.composite_score for c in noise]
         assert np.mean(scores) < 0.35
         # Diagnostics should flag weak evidence on most noise candidates.
-        with_diagnostics = [c for c in noise if c.rejection_reasons]
+        # They live in `diagnostics`, not in `rejection_reasons`: nothing here
+        # blocked promotion (the contracts above are all promoted).
+        with_diagnostics = [c for c in noise if c.diagnostics]
         assert len(with_diagnostics) >= 0.5 * len(noise)
+        assert all(not c.rejection_reasons for c in directed)
 
     def test_expression_is_propagated_unchanged(self, fitted):
         _, cands, ad, contracts = fitted
@@ -464,11 +467,15 @@ class TestPromotionGates:
         directed = [c for c in ad._contracts
                     if c.derived_target.direction in ("long", "short")]
         assert all(c.promoted for c in directed)
-        has_diagnostic = any(
-            any("[diagnostic]" in r for r in c.rejection_reasons)
-            for c in directed
+        # Non-blocking observations land in `diagnostics`; `rejection_reasons`
+        # stays empty because nothing actually blocked promotion.  The old
+        # "[diagnostic]" prefix is gone — the field separation carries the
+        # meaning now.
+        assert any(c.diagnostics for c in directed)
+        assert all(not c.rejection_reasons for c in directed)
+        assert not any(
+            "[diagnostic]" in d for c in directed for d in c.diagnostics
         )
-        assert has_diagnostic
 
     def test_train_ratio_one_disables_oos(self):
         """With no held-out tail there is no OOS validation — contracts carry
@@ -1397,3 +1404,59 @@ class TestCategoricalFeature:
         contract = contracts[0]
         assert contract.underlying_feature is not None
         assert math.isfinite(contract.underlying_feature.ic)
+
+
+class TestRejectionReasonsVsDiagnostics:
+    """``rejection_reasons`` holds only what blocked promotion.
+
+    Alpha Discovery promotes every contract with a derivable direction — Rule
+    Discovery is the sole economic judge — so weak IC, lift, Cohen's d, FDR and
+    OOS produce *diagnostics*, not rejections.  They used to share
+    ``rejection_reasons`` behind a ``"[diagnostic]"`` prefix, which left a field
+    named *rejection reasons* consisting almost entirely of non-rejections.
+    """
+
+    def test_promoted_contracts_carry_no_rejection_reasons(self):
+        df = _predictive_kpi_table(include_noise=True)
+        _, cands = _make_candidates(df)
+        contracts = AlphaDiscovery(df.copy(), cands, AlphaConfig()).run()
+
+        promoted = [c for c in contracts if c.promoted]
+        assert promoted
+        assert all(not c.rejection_reasons for c in promoted)
+
+    def test_undirected_contracts_carry_the_blocking_reason(self):
+        """The only blocking cause is an underivable direction."""
+        df = _predictive_kpi_table(include_noise=True)
+        _, cands = _make_candidates(df)
+        contracts = AlphaDiscovery(df.copy(), cands, AlphaConfig()).run()
+
+        rejected = [c for c in contracts if not c.promoted]
+        for c in rejected:
+            assert c.rejection_reasons
+            assert all("no derivable target" in r for r in c.rejection_reasons)
+
+    def test_diagnostics_are_populated_and_unprefixed(self):
+        df = _predictive_kpi_table(include_noise=True)
+        _, cands = _make_candidates(df)
+        contracts = AlphaDiscovery(
+            df.copy(), cands,
+            AlphaConfig(thresholds=PromotionThresholds(min_lift=0.95, min_cohens_d=5.0)),
+        ).run()
+
+        assert any(c.diagnostics for c in contracts)
+        assert not any(
+            "[diagnostic]" in d for c in contracts for d in c.diagnostics
+        )
+
+    def test_both_fields_survive_the_exports(self):
+        """``rejection_reasons`` keeps its key — the split adds, never removes."""
+        df = _predictive_kpi_table()
+        _, cands = _make_candidates(df)
+        ad = AlphaDiscovery(df.copy(), cands, AlphaConfig())
+        contracts = ad.run()
+
+        flat = contracts[0].to_dict()
+        assert "rejection_reasons" in flat and "diagnostics" in flat
+        assert "rejection_reasons" in ad.summary().columns
+        assert "diagnostics" in ad.summary().columns

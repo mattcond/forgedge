@@ -24,7 +24,7 @@ pipeline is tunable through one call::
         forge, MarketContextConfig, EMAProxyConfig,
         DiscoveryConfig, AlphaConfig, RuleDiscoveryConfig, RegistryConfig,
     )
-    from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+    from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
     from forgedge.alpha_discovery.models import PromotionThresholds
 
     result = forge(
@@ -36,7 +36,7 @@ pipeline is tunable through one call::
         ),
         event_discovery_config=DiscoveryConfig(
             train_ratio=0.80,
-            walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
+            walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
             gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
         ),
         alpha_config=AlphaConfig(

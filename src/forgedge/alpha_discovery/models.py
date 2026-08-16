@@ -643,6 +643,25 @@ class AlphaContract:
     ``"HYPOTHESIS"``) from those rejected (``status`` ``"REJECTED"``).  The
     contract never alters the event expression — it only references and
     measures it.
+
+    Rejections and diagnostics are two different things and live in two
+    different fields:
+
+    * ``rejection_reasons`` — the causes that actually **blocked** promotion.
+      Alpha Discovery promotes every contract with a derivable direction (Rule
+      Discovery is the sole economic judge), so in practice this holds at most
+      the "no derivable target" reason.  It is empty on a promoted contract.
+    * ``diagnostics`` — **non-blocking** observations that inform the grade but
+      gate nothing: weak IC, lift or Cohen's d below the thresholds, failure
+      under the BH FDR gate, thin IS/OOS samples, an underpowered or weak OOS
+      confirmation.  A promoted contract routinely carries several.
+
+    Until they were split, both lived in ``rejection_reasons`` with the
+    non-blocking ones prefixed ``[diagnostic]``.  That made a field named
+    *rejection reasons* consist almost entirely of non-rejections — on the
+    audit's reference run, the single most frequent entry appeared on 89.7 % of
+    contracts at ``train_ratio=0.70`` and 96.8 % at ``0.85``, none of which
+    rejected anything.  The prefix is gone; the separation carries the meaning.
     """
 
     alpha_id: str
@@ -672,7 +691,10 @@ class AlphaContract:
     oos_validation: Optional[OOSValidation]
 
     promoted: bool
+    #: Causes that blocked promotion.  Empty on a promoted contract.
     rejection_reasons: List[str] = field(default_factory=list)
+    #: Non-blocking observations that inform the grade but gate nothing.
+    diagnostics: List[str] = field(default_factory=list)
     fdr_promoted: Optional[bool] = None
 
     # Search-level rotation null calibration (issue #116, RotationCalibrator).
@@ -738,6 +760,7 @@ class AlphaContract:
             "composite_score": sc.composite_score,
             "grade": sc.grade,
             "rejection_reasons": "; ".join(self.rejection_reasons),
+            "diagnostics": "; ".join(self.diagnostics),
         }
 
     def to_contract_dict(self) -> dict:
@@ -794,6 +817,7 @@ class AlphaContract:
             "alpha_score": asdict(self.alpha_score),
             "promoted": self.promoted,
             "rejection_reasons": self.rejection_reasons,
+            "diagnostics": self.diagnostics,
             "fdr_promoted": self.fdr_promoted,
             "handoff_status": self.handoff_status,
             "rule_discovery_response": self.rule_discovery_response,

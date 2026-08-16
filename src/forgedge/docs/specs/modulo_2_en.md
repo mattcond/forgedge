@@ -170,7 +170,7 @@ The IC is classified as weak if **both** conditions hold:
 
 If the IC is small but statistically significant, the candidate is still
 admitted (`ic.admitted = True`). A weak IC produces a
-`"[diagnostic] IC weak …"` entry in `rejection_reasons` but does not block
+`"IC weak …"` entry in `diagnostics` but does not block
 promotion.
 
 #### Rolling IC stability (IS)
@@ -236,7 +236,7 @@ After all IS measurements, the derived target `(h*, sell_pct*, direction*)` is
   3. `p_value < oos_max_p` (default: 0.10)
 
 **Failing OOS confirmation produces a non-blocking diagnostic** —
-`"[diagnostic] OOS weak …"` in `rejection_reasons` — but does not prevent
+`"OOS weak …"` in `diagnostics` — but does not prevent
 promotion. The OOS statistical signal contributes to the grade.
 
 Output — `OOSValidation`:
@@ -287,19 +287,20 @@ The **only rejection gate** is the absence of a determined direction:
 | **Hard (blocks)** | `direction == "undetermined"` — no finite advantage across the entire grid |
 | **Diagnostics (non-blocking)** | Weak IC, lift below threshold, cohens_d below threshold, insufficient activations, non-significant FDR/p-value, weak OOS |
 
-Diagnostics are annotated with the `[diagnostic]` prefix in
-`rejection_reasons`. A promoted contract may have a non-empty `rejection_reasons`
-list — it documents the statistical weaknesses detected.
+Diagnostics live in their own field, `diagnostics`. `rejection_reasons` holds
+only what actually blocked promotion, so it is **empty on a promoted contract**;
+`diagnostics` documents the statistical weaknesses detected and is routinely
+non-empty on promoted contracts.
 
 ```python
 for c in contracts:
     print(f"{c.event_candidate_id}: promoted={c.promoted}, grade={c.alpha_score.grade}")
-    for r in c.rejection_reasons:
-        print(f"  {r}")
+    for d in c.diagnostics:
+        print(f"  {d}")
 # Example:
 # EVT-rsi_25-PR-0042: promoted=True, grade=C
-#   [diagnostic] lift 0.0520 < 0.08
-#   [diagnostic] OOS weak (p=0.143 vs 0.10, mean_adv=0.00210, n_act=7)
+#   lift 0.0520 < 0.08
+#   OOS weak (p=0.143 vs 0.10, mean_adv=0.00210, n_act=7)
 ```
 
 BH FDR is applied to IS p-values of all candidates simultaneously;
@@ -344,7 +345,8 @@ c.oos_validation      # OOSValidation | None
 # Score and promotion
 c.alpha_score         # AlphaScore: composite score and grade (Step 6)
 c.promoted            # bool: True if direction is "long" or "short"
-c.rejection_reasons   # list[str]: diagnostics ([diagnostic] prefix = non-blocking)
+c.rejection_reasons   # list[str]: blocking causes only — empty when promoted
+c.diagnostics         # list[str]: non-blocking observations that feed the grade
 c.fdr_promoted        # bool | None: BH FDR outcome (non-blocking)
 
 # Handoff to Rule Discovery
@@ -396,7 +398,8 @@ holding_period_h, sell_pct, direction, mean_advantage,
 feature, ic, ic_p_value, ic_admitted, rolling_ic_stable,
 n_activations, win_rate, base_rate, lift, fwd_return_mean, cohens_d, t_stat, p_value,
 fdr_promoted, oos_passed, oos_p_value, oos_lift,
-regime_dependency, regime_breadth, composite_score, grade, rejection_reasons
+regime_dependency, regime_breadth, composite_score, grade, rejection_reasons,
+diagnostics
 ```
 
 ---

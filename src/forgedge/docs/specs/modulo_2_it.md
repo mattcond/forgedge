@@ -168,7 +168,7 @@ Se **entrambe** le condizioni sono vere, l'IC è classificato come debole:
 
 Se l'IC è piccolo ma statisticamente significativo, il candidato è comunque
 ammesso (`ic.admitted = True`). Un IC debole produce una diagnostica
-`"[diagnostic] IC weak …"` in `rejection_reasons` ma non blocca la promozione.
+`"IC weak …"` in `diagnostics` ma non blocca la promozione.
 
 #### Rolling IC stability (sull'IS)
 
@@ -234,7 +234,7 @@ Dopo tutte le misure IS, il target derivato `(h*, sell_pct*, direction*)` viene
   3. `p_value < oos_max_p` (default: 0.10)
 
 **La mancata conferma OOS produce una diagnostica non bloccante** —
-`"[diagnostic] OOS weak …"` in `rejection_reasons` — ma non impedisce la
+`"OOS weak …"` in `diagnostics` — ma non impedisce la
 promozione. Il segnale statistico OOS contribuisce al grade.
 
 Output — `OOSValidation`:
@@ -285,19 +285,21 @@ L'**unico gate di rifiuto** è l'assenza di una direzione determinata:
 | **Hard (blocca)** | `direction == "undetermined"` — nessun vantaggio finito su tutta la grid |
 | **Diagnostiche (non bloccanti)** | IC debole, lift < soglia, cohens_d < soglia, attivazioni insufficienti, non significativo FDR/p-value, OOS debole |
 
-Le diagnostiche sono annotate con il prefisso `[diagnostic]` in
-`rejection_reasons`. Un contratto promosso può avere `rejection_reasons`
+Le diagnostiche vivono in un campo dedicato, `diagnostics`. `rejection_reasons`
+contiene solo ciò che ha effettivamente bloccato la promozione, quindi è **vuoto
+su un contratto promosso**; `diagnostics` documenta le debolezze statistiche
+rilevate ed è normalmente non vuoto sui contratti promossi. Un tempo `rejection_reasons`
 non vuoto — la lista documenta le debolezze statistiche rilevate.
 
 ```python
 for c in contracts:
     print(f"{c.event_candidate_id}: promoted={c.promoted}, grade={c.alpha_score.grade}")
-    for r in c.rejection_reasons:
-        print(f"  {r}")
+    for d in c.diagnostics:
+        print(f"  {d}")
 # Esempio:
 # EVT-rsi_25-PR-0042: promoted=True, grade=C
-#   [diagnostic] lift 0.0520 < 0.08
-#   [diagnostic] OOS weak (p=0.143 vs 0.10, mean_adv=0.00210, n_act=7)
+#   lift 0.0520 < 0.08
+#   OOS weak (p=0.143 vs 0.10, mean_adv=0.00210, n_act=7)
 ```
 
 Il BH FDR è applicato ai p-value IS di tutti i candidati simultaneamente;
@@ -342,7 +344,8 @@ c.oos_validation      # OOSValidation | None
 # Score e promozione
 c.alpha_score         # AlphaScore: score composito e grade (Step 6)
 c.promoted            # bool: True se direction è "long" o "short"
-c.rejection_reasons   # list[str]: diagnostiche (prefisso [diagnostic] = non bloccante)
+c.rejection_reasons   # list[str]: solo cause bloccanti — vuoto se promosso
+c.diagnostics         # list[str]: osservazioni non bloccanti che pesano sul grade
 c.fdr_promoted        # bool | None: esito BH FDR (non bloccante)
 
 # Handoff a Rule Discovery
@@ -394,7 +397,8 @@ holding_period_h, sell_pct, direction, mean_advantage,
 feature, ic, ic_p_value, ic_admitted, rolling_ic_stable,
 n_activations, win_rate, base_rate, lift, fwd_return_mean, cohens_d, t_stat, p_value,
 fdr_promoted, oos_passed, oos_p_value, oos_lift,
-regime_dependency, regime_breadth, composite_score, grade, rejection_reasons
+regime_dependency, regime_breadth, composite_score, grade, rejection_reasons,
+diagnostics
 ```
 
 ---

@@ -557,11 +557,11 @@ maintains the same activation structure on unseen data. It is a measure of
 stability, not predictive power (that is Module 2's job).
 
 ```python
-from forgedge.event_discovery.models import WalkForwardConfig
+from forgedge.event_discovery.models import EventWalkForwardConfig
 
 config = DiscoveryConfig(
     train_ratio=0.80,           # 80% IS, 20% OOS
-    walk_forward=WalkForwardConfig(
+    walk_forward=EventWalkForwardConfig(
         n_splits=3,             # divide OOS into 3 windows
         min_pass_rate=0.60,     # must pass the gate in at least 2/3 windows
     ),
@@ -627,7 +627,7 @@ for cand in candidates:
 | `max_conc` | 0.40 | Maximum share of activations concentrated in a single month |
 | `min_tpm` | 2.0 | Average activations per month (total / total_months_in_range) |
 
-### `WalkForwardConfig`
+### `EventWalkForwardConfig`
 
 | Parameter | Default | Description |
 |---|---|---|

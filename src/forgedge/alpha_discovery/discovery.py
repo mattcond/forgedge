@@ -404,7 +404,7 @@ class AlphaDiscovery:
             "fwd_return_mean", "cohens_d", "t_stat", "p_value", "fdr_promoted",
             "oos_passed", "oos_p_value", "oos_lift",
             "regime_dependency", "regime_breadth", "composite_score", "grade",
-            "rejection_reasons",
+            "rejection_reasons", "diagnostics",
         ]
         if not self._contracts:
             return pd.DataFrame(columns=_cols)
@@ -1204,60 +1204,66 @@ class AlphaDiscovery:
         cfg = self.config
         th = cfg.thresholds
 
-        # Hard gate: no actionable direction means nothing to hand off.
-        diagnostics: List[str] = []
+        # Hard gate: no actionable direction means nothing to hand off.  This
+        # is the only cause that blocks promotion, so it is the only thing that
+        # belongs in rejection_reasons.
+        rejection_reasons: List[str] = []
         if derived.direction not in ("long", "short"):
-            diagnostics.append(
+            rejection_reasons.append(
                 "no derivable target (no finite advantage on the grid)"
             )
 
         # Non-blocking diagnostics — inform the grade, do not gate promotion.
+        # They live in their own field: a promoted contract routinely carries
+        # several, and folding them into rejection_reasons made that field
+        # consist almost entirely of non-rejections.
+        diagnostics: List[str] = []
         if not ic.admitted:
             diagnostics.append(
-                f"[diagnostic] IC weak (|IC|={abs(ic.ic):.4f} < {th.ic_min_abs} "
+                f"IC weak (|IC|={abs(ic.ic):.4f} < {th.ic_min_abs} "
                 f"or p={ic.p_value:.4f})"
             )
         if np.isfinite(ev.lift) and ev.lift < th.min_lift:
             diagnostics.append(
-                f"[diagnostic] lift {ev.lift:.4f} < {th.min_lift}"
+                f"lift {ev.lift:.4f} < {th.min_lift}"
             )
         if np.isfinite(ev.cohens_d) and ev.cohens_d < th.min_cohens_d:
             diagnostics.append(
-                f"[diagnostic] cohens_d {ev.cohens_d:.4f} < {th.min_cohens_d}"
+                f"cohens_d {ev.cohens_d:.4f} < {th.min_cohens_d}"
             )
         if ev.n_activations < _MIN_STATS_CASES:
             diagnostics.append(
-                f"[diagnostic] IS sample too small for reliable statistics "
+                "IS sample too small for reliable statistics "
                 f"(n_activations={ev.n_activations} < {_MIN_STATS_CASES})"
             )
 
         if th.use_fdr:
             if not fdr_ok:
                 diagnostics.append(
-                    f"[diagnostic] not significant under BH FDR (q={th.fdr_q})"
+                    f"not significant under BH FDR (q={th.fdr_q})"
                 )
         else:
             if not (np.isfinite(ev.p_value) and ev.p_value < th.max_p_value):
                 diagnostics.append(
-                    f"[diagnostic] p_value {ev.p_value:.6f} >= {th.max_p_value}"
+                    f"p_value {ev.p_value:.6f} >= {th.max_p_value}"
                 )
 
         if oos is not None:
             if oos.n_activations < _MIN_STATS_CASES:
                 diagnostics.append(
-                    f"[diagnostic] OOS sample too small for reliable statistics "
+                    "OOS sample too small for reliable statistics "
                     f"(n_oos_activations={oos.n_activations} < {_MIN_STATS_CASES})"
                 )
             if (math.isfinite(oos.min_detectable_effect)
                     and np.isfinite(ev.cohens_d)
                     and oos.min_detectable_effect > abs(ev.cohens_d)):
                 diagnostics.append(
-                    f"[diagnostic] OOS underpowered: MDE={oos.min_detectable_effect:.2f} "
+                    f"OOS underpowered: MDE={oos.min_detectable_effect:.2f} "
                     f"> IS Cohen's d={ev.cohens_d:.2f}; OOS cannot confirm IS effect size"
                 )
             if not oos.passed:
                 diagnostics.append(
-                    f"[diagnostic] OOS weak (p={oos.p_value:.4f} vs {th.oos_max_p}, "
+                    f"OOS weak (p={oos.p_value:.4f} vs {th.oos_max_p}, "
                     f"mean_adv={oos.mean_advantage:.5f}, n_act={oos.n_activations})"
                 )
 
@@ -1287,7 +1293,8 @@ class AlphaDiscovery:
             alpha_score=score,
             oos_validation=oos,
             promoted=promoted,
-            rejection_reasons=diagnostics,
+            rejection_reasons=rejection_reasons,
+            diagnostics=diagnostics,
             fdr_promoted=bool(fdr_ok),
             dominant_window=cand.dominant_window(),
         )

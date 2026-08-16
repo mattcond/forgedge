@@ -17,7 +17,12 @@ from .calibration import (
     RotationCalibrator,
     RotationConfig,
 )
-from .event_discovery import CustomEvent, DiscoveryConfig, EventDiscovery
+from .event_discovery import (
+    CustomEvent,
+    DiscoveryConfig,
+    EventDiscovery,
+    EventWalkForwardConfig,
+)
 from .forge import ForgeResult, forge, forge_multi
 from .ledger import HypothesisLedger
 from .rule_report import RuleSpec, rule_performance_report
@@ -34,6 +39,7 @@ from .rule_discovery import (
     RuleDiscovery,
     RuleDiscoveryConfig,
     RuleDiscoveryResponse,
+    RuleWalkForwardConfig,
     SelectionCriteria,
     ValidatedRule,
     WalkForwardConfig,
@@ -83,6 +89,9 @@ __all__ = [
     "RuleDiscoveryResponse",
     "BacktestParams",
     "SelectionCriteria",
+    "EventWalkForwardConfig",
+    "RuleWalkForwardConfig",
+    # Ambiguous legacy alias — resolves to RuleWalkForwardConfig.
     "WalkForwardConfig",
     "ValidatedRule",
     "RuleRegistry",

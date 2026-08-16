@@ -182,7 +182,7 @@ class GateResult:
 
 
 @dataclass
-class WalkForwardConfig:
+class EventWalkForwardConfig:
     """Parameters for walk-forward out-of-sample validation.
 
     After in-sample discovery, the OOS portion (controlled by
@@ -212,6 +212,16 @@ class WalkForwardConfig:
     n_splits: int = 3
     min_pass_rate: float = 0.6
     oos_gate_params: Optional[GateParams] = None
+
+
+#: Backwards-compatible alias.  Until it was renamed, this class shared the
+#: name ``WalkForwardConfig`` with :class:`forgedge.rule_discovery.models.RuleWalkForwardConfig`
+#: — a different dataclass, with a ``n_splits`` field carrying different
+#: semantics (OOS *validation* windows here, walk-forward *test* windows
+#: there).  Both were imported in the same usage example in ``forge()``'s
+#: docstring, and the top-level ``forgedge.WalkForwardConfig`` silently
+#: resolved to the Rule Discovery one.  Prefer the explicit name.
+WalkForwardConfig = EventWalkForwardConfig
 
 
 @dataclass
@@ -251,7 +261,7 @@ class ValidationResult:
     pass_rate : float
         ``n_passed / n_folds``.
     passed : bool
-        True when ``pass_rate >= WalkForwardConfig.min_pass_rate``.
+        True when ``pass_rate >= EventWalkForwardConfig.min_pass_rate``.
     fold_results : list[FoldResult]
         Per-fold detail, ordered chronologically.
     """

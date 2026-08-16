@@ -49,7 +49,7 @@ from forgedge.rule_discovery.models import (
     ScoringParams,
     GridSpec,
     SelectionCriteria,
-    WalkForwardConfig,
+    RuleWalkForwardConfig,
     RuleDiscoveryConfig,
 )
 from forgedge.target_optimizer import TargetOptimizer

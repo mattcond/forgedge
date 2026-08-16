@@ -51,7 +51,7 @@ from forgedge.rule_discovery import (
     GridSpec,
     ScoringParams,
     SelectionCriteria,
-    WalkForwardConfig,
+    RuleWalkForwardConfig,
     text_report,
 )
 
@@ -110,7 +110,7 @@ config = RuleDiscoveryConfig(
         target_h=[12, 24, 48],
     ),
     scoring=ScoringParams(pf_min_trades=15, pf_min_tpm=2, pf_tpm_target=3),
-    walk_forward=WalkForwardConfig(n_splits=4, min_train_months=6),
+    walk_forward=RuleWalkForwardConfig(n_splits=4, min_train_months=6),
     criteria=SelectionCriteria(min_profit_factor=2.0, min_win_rate=0.55),
 )
 

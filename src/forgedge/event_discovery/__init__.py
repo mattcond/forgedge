@@ -13,12 +13,14 @@ from .models import (
     GateResult,
     RawEvent,
     ValidationResult,
+    EventWalkForwardConfig,
     WalkForwardConfig,
 )
 
 __all__ = [
     "EventDiscovery",
     "DiscoveryConfig",
+    "EventWalkForwardConfig",
     "WalkForwardConfig",
     "GateParams",
     "CustomEvent",

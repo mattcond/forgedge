@@ -501,3 +501,60 @@ class TestForgeProgress:
         assert "forge:BTCUSDC" in err
         assert "M3 Rule Discovery" in err
         assert "done" in err
+
+
+class TestWalkForwardConfigNaming:
+    """The two ``WalkForwardConfig`` classes are distinct and both reachable.
+
+    Until they were renamed, Event Discovery and Rule Discovery each exported a
+    dataclass called ``WalkForwardConfig``.  They are different types with a
+    ``n_splits`` field carrying different semantics — OOS *validation* windows
+    in M1, walk-forward *test* windows in M3 — yet ``forge()``'s own docstring
+    example imported one while the top-level ``forgedge.WalkForwardConfig``
+    silently resolved to the other.  These tests pin the disambiguation and the
+    backwards-compatible aliases.
+    """
+
+    def test_the_two_configs_are_distinct_types(self):
+        from forgedge import EventWalkForwardConfig, RuleWalkForwardConfig
+
+        assert EventWalkForwardConfig is not RuleWalkForwardConfig
+        # The field that made the collision dangerous: same name, different
+        # meaning, different default.
+        assert EventWalkForwardConfig().n_splits == 3
+        assert RuleWalkForwardConfig().n_splits == 4
+        assert hasattr(EventWalkForwardConfig(), "min_pass_rate")
+        assert hasattr(RuleWalkForwardConfig(), "min_train_months")
+
+    def test_legacy_module_aliases_still_resolve(self):
+        """Old imports keep working, each to its own module's class."""
+        from forgedge.event_discovery.models import (
+            EventWalkForwardConfig,
+            WalkForwardConfig as LegacyEventWF,
+        )
+        from forgedge.rule_discovery.models import (
+            RuleWalkForwardConfig,
+            WalkForwardConfig as LegacyRuleWF,
+        )
+
+        assert LegacyEventWF is EventWalkForwardConfig
+        assert LegacyRuleWF is RuleWalkForwardConfig
+
+    def test_top_level_alias_keeps_resolving_to_rule_discovery(self):
+        """``forgedge.WalkForwardConfig`` has always been the M3 one — it stays
+        that way, so existing top-level imports do not silently change type."""
+        import forgedge
+
+        assert forgedge.WalkForwardConfig is forgedge.RuleWalkForwardConfig
+
+    def test_legacy_names_still_configure_the_pipeline(self):
+        """A config built with the legacy names behaves identically."""
+        from forgedge.event_discovery.models import WalkForwardConfig as LegacyEventWF
+        from forgedge.rule_discovery.models import WalkForwardConfig as LegacyRuleWF
+
+        disc = DiscoveryConfig(
+            train_ratio=0.8, walk_forward=LegacyEventWF(n_splits=2, min_pass_rate=0.5)
+        )
+        rd = RuleDiscoveryConfig(walk_forward=LegacyRuleWF(n_splits=2, reoptimise=False))
+        assert disc.walk_forward.n_splits == 2
+        assert rd.walk_forward.reoptimise is False

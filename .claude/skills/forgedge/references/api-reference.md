@@ -153,7 +153,7 @@ ed.summary()    # pd.DataFrame, one row per candidate
 `gate_params: GateParams = GateParams()`, `max_categorical_classes: int = 20`,
 `scale_free_overrides: dict[str, bool] | None = None`, `timestamp_col: str =
 "open_dt"`, `max_and_components: int = 2`, `train_ratio: float = 1.0`,
-`walk_forward: WalkForwardConfig | None = None`, `diversity_gate_enabled:
+`walk_forward: EventWalkForwardConfig | None = None`, `diversity_gate_enabled:
 bool = False`, `diversity_threshold: float = 0.85`, `indicator_lag_cross_lags:
 tuple[int, ...] = (1, 3)` (lag set for the price-scale-indicator-vs-lagged-
 OHLC-base feature family below; pass `()` to disable that family entirely).
@@ -187,7 +187,8 @@ out of the generic same-family grouping (naming-convention mismatch) can
 still be reached by one of these five. See `docs/manual-en.md` §8/§17 for the
 full narrative and the measured cost breakdown.
 
-`WalkForwardConfig` (event-level, in `event_discovery.models`) — `n_splits:
+`EventWalkForwardConfig` (M1; legacy alias `WalkForwardConfig` in
+`event_discovery.models`) — `n_splits:
 int = 3`, `min_pass_rate: float = 0.6`, `oos_gate_params: GateParams | None =
 None` (defaults to the IS `gate_params`). With this set and `train_ratio <
 1.0`, each candidate exposes `.validation: ValidationResult` with `.passed`,
@@ -263,8 +264,11 @@ DerivedTarget` (`holding_period_h`, `sell_pct`, `direction`, `base_rate`,
 `cohens_d`, `p_value`, …), `regime_analysis: RegimeAnalysis`
 (`dependency_type: "agnostic"|"conditional"|"specific"|"broken"|"unknown"`),
 `alpha_score: AlphaScore` (`composite_score`, `grade: "A"|"B"|"C"|"D"`),
-`rejection_reasons: list[str]` (non-blocking `[diagnostic]`-prefixed entries
-can appear even on promoted contracts), `rotation_p` / `rotation_threshold`
+`rejection_reasons: list[str]` (blocking causes only — empty on a promoted
+contract; in practice just "no derivable target"), `diagnostics: list[str]`
+(non-blocking observations that feed the grade — weak IC/lift/Cohen's d, FDR,
+thin IS/OOS samples; routinely non-empty on promoted contracts), `rotation_p` /
+`rotation_threshold`
 (set by the search-level rotation null, see below). `.to_contract_dict()`
 for JSON/YAML export.
 
@@ -307,7 +311,7 @@ resp = rd.run() -> RuleDiscoveryResponse
 `RuleDiscoveryConfig` fields and defaults (`src/forgedge/rule_discovery/models.py`):
 `base_params: BacktestParams`, `scoring: ScoringParams`, `grid: GridSpec`
 (auto-built around the contract target when empty), `walk_forward:
-WalkForwardConfig`, `criteria: SelectionCriteria`, `entry_mode: "limit"|
+RuleWalkForwardConfig`, `criteria: SelectionCriteria`, `entry_mode: "limit"|
 "market"|"auto" = "limit"`, `use_contract_target: bool = True`,
 `timestamp_col: str = "open_dt"`, `selection_mode: "walk_forward"|
 "full_sample" = "walk_forward"` (operating point selected inside WF train
@@ -319,7 +323,8 @@ windows only — the final test window is never read by any selection),
 str = "close"`, `sell_pct: float = 0.040`, `target_h: int = 24`, `fee: float
 = 0.002`, `early_stopping: bool = True`.
 
-`WalkForwardConfig` (rule-level, distinct from the M1 one) — `n_splits: int
+`RuleWalkForwardConfig` (M3; legacy alias `WalkForwardConfig`, which is also
+what top-level `forgedge.WalkForwardConfig` resolves to) — `n_splits: int
 = 4`, `train_span_months: int | None = None` (`None` = anchored/expanding
 train window), `test_span_months: int | None = None`, `min_train_months: int
 = 6`, `reoptimise: bool = True`, `purge_bars: int | None = None` (`None`
@@ -461,7 +466,7 @@ so they share one IS/OOS split; purging removes IS rows whose forward
 window crosses into OOS (on by default for Alpha Discovery — purge width =
 `max(horizon_grid)` — and for Rule Discovery's walk-forward). To reproduce
 pre-purging numbers exactly, pass `purge_bars=0` explicitly (and
-`WalkForwardConfig(purge_bars=0)` for M3). Embargo is `0`/opt-in everywhere.
+`RuleWalkForwardConfig(purge_bars=0)` for M3). Embargo is `0`/opt-in everywhere.
 `result.time_budget.describe()` for a human-readable summary.
 
 ## Hypothesis ledger

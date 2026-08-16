@@ -103,9 +103,9 @@ config = DiscoveryConfig(
 
 ---
 
-### WalkForwardConfig (Modulo 1)
+### EventWalkForwardConfig (Modulo 1)
 
-Configura la validazione walk-forward OOS del Modulo 1. Questo è il `WalkForwardConfig` specifico per Event Discovery: importarlo da `forgedge.event_discovery.models`, non da `forgedge` direttamente (che espone invece il `WalkForwardConfig` del Modulo 3).
+Configura la validazione walk-forward OOS del Modulo 1. Prima si chiamava `WalkForwardConfig` e collideva con l'omonima classe — diversa — del Modulo 3; il vecchio nome resta come alias in `event_discovery.models`, ma è preferibile quello esplicito.
 
 | Parametro | Tipo | Default | Descrizione |
 |---|---|---|---|
@@ -115,11 +115,11 @@ Configura la validazione walk-forward OOS del Modulo 1. Questo è il `WalkForwar
 
 ```python
 from forgedge import DiscoveryConfig
-from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 
 config = DiscoveryConfig(
     train_ratio=0.80,
-    walk_forward=WalkForwardConfig(
+    walk_forward=EventWalkForwardConfig(
         n_splits=4,
         min_pass_rate=0.75,   # più severo: 3 su 4 finestre devono passare
     ),
@@ -140,13 +140,13 @@ Configurazione principale del Modulo 1. Controlla gate, composizione degli event
 | `timestamp_col` | str | `"open_dt"` | Colonna datetime nella KPI Table (o nome dell'indice DatetimeIndex). |
 | `max_and_components` | int | `2` | Numero massimo di singoli eventi da combinare in un AND. Valori > 3 sono tecnicamente accettati ma sconsigliati (overfitting strutturale). |
 | `train_ratio` | float | `1.0` | Frazione di barre IS (0 < train_ratio ≤ 1.0). Default 1.0 = tutto IS (nessun split). |
-| `walk_forward` | WalkForwardConfig \| None | `None` | Configurazione walk-forward OOS. Attivo solo se anche `train_ratio < 1.0`. |
+| `walk_forward` | EventWalkForwardConfig \| None | `None` | Configurazione walk-forward OOS. Attivo solo se anche `train_ratio < 1.0`. |
 | `diversity_gate_enabled` | bool | `False` | Se True, applica una deduplicazione Jaccard degli eventi singoli dopo il ConsistencyGate e prima della composizione AND. Opt-in — nessun breaking change. |
 | `diversity_threshold` | float | `0.85` | Similarità Jaccard massima tollerata tra due eventi conservati. Usato solo con `diversity_gate_enabled=True`. A p99 della distribuzione Jaccard inter-evento (12 mesi di dati 1H), Jaccard=0.47 — valori sopra 0.70 sono genuine near-duplicate. |
 
 ```python
 from forgedge import EventDiscovery, DiscoveryConfig
-from forgedge.event_discovery.models import GateParams, WalkForwardConfig
+from forgedge.event_discovery.models import GateParams, EventWalkForwardConfig
 
 ed = EventDiscovery(
     enriched,
@@ -154,7 +154,7 @@ ed = EventDiscovery(
         train_ratio=0.80,
         max_and_components=2,
         gate_params=GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0),
-        walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
+        walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         scale_free_overrides={"rsi_14": True},  # forza scale-free su RSI
         diversity_gate_enabled=True,            # deduplicazione Jaccard opt-in
         diversity_threshold=0.85,
@@ -173,7 +173,7 @@ Soglie statistiche IS che contribuiscono al grade A–D. Non bloccano la promozi
 
 | Parametro | Tipo | Default | Descrizione |
 |---|---|---|---|
-| `ic_min_abs` | float | `0.02` | IC (Spearman) minimo in valore assoluto. Sotto questa soglia la metrica IC contribuisce come `[diagnostic]`. |
+| `ic_min_abs` | float | `0.02` | IC (Spearman) minimo in valore assoluto. Sotto questa soglia la metrica IC viene registrata in `AlphaContract.diagnostics` (non bloccante). |
 | `ic_max_p` | float | `0.05` | P-value massimo per l'IC. |
 | `min_lift` | float | `0.08` | Lift minimo (win_rate − base_rate). |
 | `min_cohens_d` | float | `0.15` | Cohen's d minimo (separazione tra distribuzioni active/inactive). |
@@ -333,9 +333,9 @@ grid = GridSpec(
 
 ---
 
-### WalkForwardConfig (Modulo 3)
+### RuleWalkForwardConfig (Modulo 3)
 
-Configura la validazione walk-forward OOS del Modulo 3. Distinto dal `WalkForwardConfig` del Modulo 1: importabile direttamente da `forgedge`.
+Configura la validazione walk-forward OOS del Modulo 3. Prima si chiamava `WalkForwardConfig`; il vecchio nome resta come alias, sia in `rule_discovery.models` sia al livello superiore (`forgedge.WalkForwardConfig` ha sempre risolto a questa classe).
 
 | Parametro | Tipo | Default | Descrizione |
 |---|---|---|---|
@@ -391,7 +391,7 @@ Configurazione principale del Modulo 3. Aggrega tutti i sotto-configuratori: par
 | `base_params` | BacktestParams | `BacktestParams()` | Parametri base del backtest (punto di partenza per la grid search). |
 | `scoring` | ScoringParams | `ScoringParams()` | Pesi dello scoring della grid. |
 | `grid` | GridSpec | `GridSpec()` | Spazio di ricerca della grid. Se tutti i campi sono None, si usa la grid di default. |
-| `walk_forward` | WalkForwardConfig | `WalkForwardConfig()` | Configurazione walk-forward OOS. |
+| `walk_forward` | RuleWalkForwardConfig | `RuleWalkForwardConfig()` | Configurazione walk-forward OOS. |
 | `criteria` | SelectionCriteria | `SelectionCriteria()` | Criteri EDGE/PARTIAL-EDGE/NON-EDGE. |
 | `entry_mode` | str | `"limit"` | Modalità di valutazione dell'ingresso: `"limit"` (default, retro-compatibile), `"market"` (baseline al next-open, fill ≈ 100%, nessun ottimizzatore) o `"auto"` (pipeline a due stadi: il **market** decide il verdetto, il **limit** ottimizza l'operating point dei soli sopravvissuti a fill ≥ `min_fill_rate_opt`). |
 | `use_contract_target` | bool | `True` | Se True, usa `direction`, `sell_pct` e `target_h` dall'AlphaContract come punto di partenza per la grid. |
@@ -402,7 +402,7 @@ Configurazione principale del Modulo 3. Aggrega tutti i sotto-configuratori: par
 ```python
 from forgedge import (
     RuleDiscovery, RuleDiscoveryConfig, BacktestParams,
-    SelectionCriteria, WalkForwardConfig,
+    SelectionCriteria, RuleWalkForwardConfig,
 )
 from forgedge.rule_discovery.models import GridSpec, ScoringParams
 
@@ -414,7 +414,7 @@ config = RuleDiscoveryConfig(
         target_h=[12, 24, 36, 48],
         buy_delay_bar=[3, 6],
     ),
-    walk_forward=WalkForwardConfig(n_splits=5, min_train_months=8),
+    walk_forward=RuleWalkForwardConfig(n_splits=5, min_train_months=8),
     criteria=SelectionCriteria(min_profit_factor=2.0, min_win_rate=0.55),
     scoring=ScoringParams(pf_tpm_target=4),
 )
@@ -468,16 +468,16 @@ registry = RuleRegistry.from_forge_results(results, config=config).run()
 | `EMAProxyConfig` | `from forgedge import EMAProxyConfig` | 0 — Market Context |
 | `MarketContextConfig` | `from forgedge import MarketContextConfig` | 0 — Market Context |
 | `GateParams` | `from forgedge.event_discovery.models import GateParams` | 1 — Event Discovery |
-| `WalkForwardConfig` (M1) | `from forgedge.event_discovery.models import WalkForwardConfig` | 1 — Event Discovery |
+| `EventWalkForwardConfig` | `from forgedge import EventWalkForwardConfig` | 1 — Event Discovery |
 | `DiscoveryConfig` | `from forgedge import DiscoveryConfig` | 1 — Event Discovery |
 | `PromotionThresholds` | `from forgedge import PromotionThresholds` | 2 — Alpha Discovery |
 | `AlphaConfig` | `from forgedge import AlphaConfig` | 2 — Alpha Discovery |
 | `BacktestParams` | `from forgedge import BacktestParams` | 3 — Rule Discovery |
 | `ScoringParams` | `from forgedge.rule_discovery.models import ScoringParams` | 3 — Rule Discovery |
 | `GridSpec` | `from forgedge.rule_discovery.models import GridSpec` | 3 — Rule Discovery |
-| `WalkForwardConfig` (M3) | `from forgedge import WalkForwardConfig` | 3 — Rule Discovery |
+| `RuleWalkForwardConfig` | `from forgedge import RuleWalkForwardConfig` | 3 — Rule Discovery |
 | `SelectionCriteria` | `from forgedge import SelectionCriteria` | 3 — Rule Discovery |
 | `RuleDiscoveryConfig` | `from forgedge import RuleDiscoveryConfig` | 3 — Rule Discovery |
 | `RegistryConfig` | `from forgedge import RegistryConfig` | 4 — Rule Registry |
 
-> **Nota:** `WalkForwardConfig` importato da `forgedge` direttamente è quello del Modulo 3 (Rule Discovery). Il `WalkForwardConfig` del Modulo 1 deve essere importato da `forgedge.event_discovery.models`.
+> **Nota:** le due config walk-forward hanno ora nomi espliciti — `EventWalkForwardConfig` (Modulo 1) e `RuleWalkForwardConfig` (Modulo 3), entrambe importabili da `forgedge`. L'alias `WalkForwardConfig` continua a funzionare: al livello superiore risolve alla classe del Modulo 3, dentro `event_discovery.models` / `rule_discovery.models` a quella del modulo corrispondente.

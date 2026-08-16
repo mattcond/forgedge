@@ -570,11 +570,11 @@ mai visti. È una misura di stabilità, non di potere predittivo (quello
 è compito del Modulo 2).
 
 ```python
-from forgedge.event_discovery.models import WalkForwardConfig
+from forgedge.event_discovery.models import EventWalkForwardConfig
 
 config = DiscoveryConfig(
     train_ratio=0.80,           # 80% IS, 20% OOS
-    walk_forward=WalkForwardConfig(
+    walk_forward=EventWalkForwardConfig(
         n_splits=3,             # divide l'OOS in 3 finestre
         min_pass_rate=0.60,     # deve passare il gate in almeno 2/3 finestre
     ),
@@ -640,7 +640,7 @@ for cand in candidates:
 | `max_conc` | 0.40 | Quota massima di attivazioni concentrate in un singolo mese |
 | `min_tpm` | 2.0 | Media attivazioni per mese (totale / n_mesi_totali_nel_range) |
 
-### `WalkForwardConfig`
+### `EventWalkForwardConfig`
 
 | Parametro | Default | Descrizione |
 |---|---|---|

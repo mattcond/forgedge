@@ -488,7 +488,7 @@ p_value_oos < oos_max_p                    (default 0.10)
 ```
 
 La conferma OOS **non è un gate di promozione**: una conferma mancata viene
-registrata come diagnostica non bloccante (`[diagnostic] OOS weak …`) e pesa
+registrata come diagnostica non bloccante (`OOS weak …` in `diagnostics`) e pesa
 sul voto A–D. Il contratto passa comunque al Modulo 3 — Rule Discovery, con
 walk-forward e meccanica reale degli ordini, è l'unico giudice economico.
 
@@ -728,7 +728,7 @@ quantile_profile = kpi_table.groupby('q').agg(
 ### 4.3 Soglie diagnostiche (non bloccanti)
 
 Le soglie alimentano il voto A–D ma **non scartano** il candidato — ogni
-violazione viene scritta come `[diagnostic]` nel contratto:
+violazione viene scritta in `diagnostics` sul contratto:
 
 ```
 lift      >= 0.08    (almeno +8pp sopra il base rate)
@@ -952,7 +952,8 @@ rule_discovery_response:
     avoid_in:    ["uptrend_continuous"]
 
   # Solo se verdict = NON-EDGE
-  rejection_reasons: null
+  rejection_reasons: null      # solo cause bloccanti — vuoto se promosso
+  diagnostics: null            # osservazioni non bloccanti che pesano sul grade
 
 status: "VALIDATED"
 ```

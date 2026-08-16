@@ -238,11 +238,11 @@ For production, enabling walk-forward validation is strongly recommended:
 
 ```python
 from forgedge import EventDiscovery, DiscoveryConfig
-from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 
 config = DiscoveryConfig(
     train_ratio=0.80,           # 80% IS for discovery, 20% reserved for OOS
-    walk_forward=WalkForwardConfig(
+    walk_forward=EventWalkForwardConfig(
         n_splits=4,             # split OOS into 4 windows
         min_pass_rate=0.75,     # event must pass the gate in ≥75% of windows
     ),
@@ -473,17 +473,19 @@ for c in rejected:
     print(f"REJECTED {c.event_candidate_id}: {c.rejection_reasons}")
 # Only cause: "no derivable target" → no horizon produces a finite advantage
 
-# Promoted contracts may carry non-blocking diagnostics
+# Promoted contracts carry non-blocking diagnostics in their own field.
+# `rejection_reasons` is empty on a promoted contract — it holds blocking
+# causes only.
 for c in promoted:
-    if c.rejection_reasons:
+    if c.diagnostics:
         print(f"PROMOTED {c.event_candidate_id} (grade={c.alpha_score.grade}):")
-        for r in c.rejection_reasons:
-            print(f"  {r}")
-# Examples of diagnostics on promoted contracts ([diagnostic] prefix):
-# "[diagnostic] IC weak (|IC|=0.012 < 0.02, p=0.083)"
-# "[diagnostic] lift 0.052 < 0.08"
-# "[diagnostic] OOS weak (p=0.143 vs 0.10, mean_adv=0.0021, n_act=7)"
-# "[diagnostic] not significant under BH FDR"
+        for d in c.diagnostics:
+            print(f"  {d}")
+# Examples of diagnostics on promoted contracts:
+# "IC weak (|IC|=0.012 < 0.02, p=0.083)"
+# "lift 0.052 < 0.08"
+# "OOS weak (p=0.143 vs 0.10, mean_adv=0.0021, n_act=7)"
+# "not significant under BH FDR"
 # These statistical weaknesses inform the grade (A–D) but do not block promotion.
 ```
 
@@ -786,7 +788,7 @@ from forgedge import (
     forge, MarketContextConfig, EMAProxyConfig,
     DiscoveryConfig, AlphaConfig,
 )
-from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 from forgedge.alpha_discovery.models import PromotionThresholds
 
 result = forge(
@@ -798,7 +800,7 @@ result = forge(
     ),
     event_discovery_config=DiscoveryConfig(
         train_ratio=0.80,
-        walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
+        walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         gate_params=GateParams(min_tpm=0.5, max_dispersion=1.5),  # defaults shown explicitly
     ),
     alpha_config=AlphaConfig(
@@ -991,14 +993,14 @@ defaults `purge_bars` to `horizon_bars` when omitted. Passed to `forge()` it is
 threaded into both `EventDiscovery` and `AlphaDiscovery` so they share one
 split; `ForgeResult.time_budget` exposes the effective budget. **Purging is on
 by default** for Alpha Discovery (purge width = `max(horizon_grid)`) and for
-Rule Discovery's walk-forward (via `WalkForwardConfig.purge_bars` /
+Rule Discovery's walk-forward (via `RuleWalkForwardConfig.purge_bars` /
 `embargo_bars`, `None`/`0` by default — `None` also defaults to the horizon
 being tested) — this is a real, if usually small, numeric change from
 pre-`TimeBudget` results (boundary rows that used to leak OOS information are
 now excluded). To reproduce old, unpurged numbers exactly, pass an explicit
 `TimeBudget.build(n_bars=..., purge_bars=0)` and, for Rule Discovery,
-`WalkForwardConfig(purge_bars=0)`. `AlphaConfig.embargo_bars` (default `0`) and
-`WalkForwardConfig.embargo_bars` (default `0`) change nothing unless you opt
+`RuleWalkForwardConfig(purge_bars=0)`. `AlphaConfig.embargo_bars` (default `0`) and
+`RuleWalkForwardConfig.embargo_bars` (default `0`) change nothing unless you opt
 in — only purging is on by default.
 
 ### Building it by hand
@@ -1014,7 +1016,7 @@ from forgedge import (
     AlphaDiscovery, AlphaConfig,
     RuleDiscovery,
 )
-from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 from forgedge.alpha_discovery.models import PromotionThresholds
 from forgedge.rule_discovery import html_report
 
@@ -1060,7 +1062,7 @@ def run_forge_pipeline(
     # ── Module 1: events ────────────────────────────────────────────────
     ed_config = DiscoveryConfig(
         train_ratio=0.80,
-        walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
+        walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         gate_params=GateParams(min_tpm=0.5, max_dispersion=1.5),
         max_and_components=2,
     )
