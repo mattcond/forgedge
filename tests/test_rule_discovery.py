@@ -107,6 +107,120 @@ def _candle_with_signal(
 # Backtest engine
 # ---------------------------------------------------------------------------
 
+def _persistent_signal_table(n=600, run_len=5, every=40, seed=4):
+    """Candles whose signal fires in *runs* — the case overlap is about.
+
+    ``run_backtest`` opens a trade on every active bar with no flat-state
+    check, so a ``run_len``-bar episode becomes ``run_len`` positions on one
+    price path.  The great majority of what Event Discovery produces is
+    threshold-type and therefore persistent, which is why this is the normal
+    case rather than a contrived one.
+    """
+    rng = np.random.default_rng(seed)
+    close = 100 * np.exp(np.cumsum(rng.normal(0.0004, 0.006, n)))
+    sig = np.zeros(n, dtype=int)
+    for i in range(0, n - run_len - 20, every):
+        sig[i:i + run_len] = 1
+    return pd.DataFrame({
+        "open_dt": pd.date_range("2023-01-01", periods=n, freq="1D"),
+        "open": close, "high": close * 1.02, "low": close * 0.98,
+        "close": close, "__sig__": sig,
+    })
+
+
+class TestOverlapVisibility:
+    """Issue #168 — how much capital does reproducing these numbers take?
+
+    The engine's entry policy is unchanged and deliberately so: firing on every
+    active bar is reproducible in production *given the capital*.  What was
+    missing is any supported way to find out how much capital that is.
+    """
+
+    _PARAMS = dict(buy_type="market", sell_pct=0.05, target_h=12)
+
+    def test_the_summary_reports_what_the_ledger_costs(self):
+        df = _persistent_signal_table(run_len=5, every=40)
+        s = run_backtest(df, "__sig__", BacktestParams(**self._PARAMS))
+
+        # 5-bar runs, each bar a trade, each held 12 bars → the run stacks.
+        assert s.max_concurrent_positions == 5
+        assert 3.0 < s.mean_concurrent_positions < 5.0
+        assert s.n_episodes * 5 == s.total_trades
+
+    def test_the_ledger_attributes_each_trade_to_its_episode(self):
+        df = _persistent_signal_table(run_len=5, every=40)
+        _s, trades = run_backtest(
+            df, "__sig__", BacktestParams(**self._PARAMS), return_trades=True
+        )
+        assert "episode_id" in trades.columns
+        assert (trades.groupby("episode_id").size() == 5).all()
+        assert (trades["episode_id"] >= 0).all()
+
+    def test_a_non_persistent_signal_shows_no_overlap(self):
+        """One-bar episodes spaced further apart than the holding horizon: one
+        position at a time, which is what a reader should be told."""
+        df = _persistent_signal_table(run_len=1, every=40)
+        s = run_backtest(
+            df, "__sig__", BacktestParams(buy_type="market", sell_pct=0.05, target_h=5)
+        )
+        assert s.max_concurrent_positions == 1
+        assert s.mean_concurrent_positions == pytest.approx(1.0)
+        assert s.n_episodes == s.total_trades
+
+    def test_the_horizon_drives_the_overlap_not_the_signal(self):
+        """The same signal at a longer horizon costs more capital.  This is the
+        part the M1 episode counts cannot answer: M3's grid picks `target_h`,
+        and M1 never saw it."""
+        df = _persistent_signal_table(run_len=1, every=10)
+        short = run_backtest(df, "__sig__", BacktestParams(
+            buy_type="market", sell_pct=0.9, target_h=3))
+        long = run_backtest(df, "__sig__", BacktestParams(
+            buy_type="market", sell_pct=0.9, target_h=30))
+
+        # Same signal — the episode count differs by at most the tail trade a
+        # 30-bar horizon cannot close before the table ends.
+        assert short.total_signals == long.total_signals
+        assert abs(short.n_episodes - long.n_episodes) <= 1
+        assert short.max_concurrent_positions == 1
+        assert long.max_concurrent_positions > 1
+
+    def test_effective_trades_is_smaller_than_the_nominal_count(self):
+        """What #177 will consume.  The economics stay nominal — PF, expectancy
+        and net gain are reproducible given the capital — but a stack of
+        positions on one price path is not a stack of independent observations.
+        """
+        df = _persistent_signal_table(run_len=5, every=40)
+        s = run_backtest(df, "__sig__", BacktestParams(**self._PARAMS))
+        effective = s.total_trades / s.mean_concurrent_positions
+        assert effective < s.total_trades / 3
+
+    def test_no_trades_leaves_the_overlap_undefined(self):
+        df = _persistent_signal_table()
+        df["__sig__"] = 0
+        s = run_backtest(df, "__sig__", BacktestParams(**self._PARAMS))
+        assert s.total_trades == 0
+        assert s.max_concurrent_positions == 0
+        assert math.isnan(s.mean_concurrent_positions)
+
+    def test_the_walk_forward_measures_its_own_concatenated_ledger(self):
+        """The OOS summary is built from concatenated test-window trades, and
+        its overlap is recomputed from those — not inherited from the in-sample
+        pass, which covers a different stretch of the data."""
+        df = _persistent_signal_table(n=1400, run_len=4, every=25)
+        summary = _summarise_from_frame(df)
+        assert summary.max_concurrent_positions >= 2
+
+
+def _summarise_from_frame(df):
+    """Re-summarise a materialised ledger, exercising the frame-based path."""
+    from forgedge.rule_discovery.backtest import _month_index, _summarise
+
+    params = BacktestParams(buy_type="market", sell_pct=0.05, target_h=12)
+    _s, trades = run_backtest(df, "__sig__", params, return_trades=True)
+    months = _month_index(None, None, pd.to_datetime(df["open_dt"]).to_numpy())
+    return _summarise(trades, int(df["__sig__"].sum()), months, ScoringParams())
+
+
 class TestBacktestEngine:
     def test_market_buy_fills_every_signal(self):
         df = _candle_with_signal(n=2000, signal_every=50)

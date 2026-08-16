@@ -39,11 +39,17 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from ..episodes import ConcurrencyStats, concurrency, episode_ids
 from ..unset import coalesce
 from .models import BacktestParams, BacktestSummary, ScoringParams
 
 # Sigmoid steepness on the trade count (hardcoded, see backtest_scoring.md).
 _K_TRADES = 0.15
+
+#: Gap bridged when grouping active bars into episodes for the trade ledger.
+#: Matches ``GateParams.episode_gap``'s default so M1's episode count and M3's
+#: describe the same thing — a one-bar interruption is not a new event.
+_EPISODE_GAP = 1
 
 
 # ---------------------------------------------------------------------------
@@ -264,16 +270,33 @@ def run_backtest(
     # ledger, the walk-forward OOS trades) — is materialised on demand.  This
     # keeps the ~200 grid/walk-forward screening calls free of DataFrame
     # construction.
-    summary = _summarise_arrays(net, fill_dt, hit, total_signals, months, scoring)
+    # ── overlap (issue #168) ─────────────────────────────────────────────
+    # A trade opens on every active bar, with no flat-state check, so a
+    # persistent event produces a stack of positions on the same price path.
+    # Measured here, on the ledger the parameters actually produce, rather than
+    # inferred from M1's discovery-window episode counts: the grid can pick a
+    # different target_h than M1 ever saw, so those numbers would answer a
+    # different question.
+    open_rn, close_rn = fill_rn[valid], exit_rn[valid]
+    conc = concurrency(open_rn, close_rn, n_bars=n)
+    ep_ids = episode_ids(active, _EPISODE_GAP)
+    trade_episodes = ep_ids[signal_rn[valid]]
+    n_episodes = int(np.unique(trade_episodes).size) if trade_episodes.size else 0
+
+    summary = _summarise_arrays(
+        net, fill_dt, hit, total_signals, months, scoring,
+        n_episodes=n_episodes, concurrency_stats=conc,
+    )
     if not return_trades:
         return summary
 
     trades = pd.DataFrame(
         {
             "signal_rn": signal_rn[valid],
-            "fill_rn": fill_rn[valid],
+            "fill_rn": open_rn,
             "target_rn": target_rn[valid],
-            "exit_rn": exit_rn[valid],
+            "exit_rn": close_rn,
+            "episode_id": trade_episodes,
             "fill_dt": fill_dt,
             "exit_dt": dt[exit_rn[valid]],
             "direction": params.direction,
@@ -390,7 +413,22 @@ def _summarise(
 
     Thin adapter over :func:`_summarise_arrays`; kept for callers that already
     hold a materialised trades frame (e.g. the walk-forward OOS concatenation).
+
+    The overlap fields are recomputed from the frame's own bar indices when it
+    carries them.  For the walk-forward that is the right thing rather than an
+    approximation: the concatenated OOS ledger is the record a user would have
+    traded across all test windows, so its concurrency is the concurrency they
+    would have had to fund.
     """
+    has_geometry = {"fill_rn", "exit_rn", "episode_id"} <= set(trades.columns)
+    conc = (
+        concurrency(trades["fill_rn"].to_numpy(), trades["exit_rn"].to_numpy())
+        if has_geometry and len(trades)
+        else None
+    )
+    n_episodes = (
+        int(trades["episode_id"].nunique()) if has_geometry and len(trades) else 0
+    )
     return _summarise_arrays(
         trades["net_pct_gain"].to_numpy(),
         trades["fill_dt"].to_numpy(),
@@ -398,6 +436,8 @@ def _summarise(
         total_signals,
         months,
         scoring,
+        n_episodes=n_episodes,
+        concurrency_stats=conc,
     )
 
 
@@ -408,8 +448,17 @@ def _summarise_arrays(
     total_signals: int,
     months: pd.PeriodIndex,
     scoring: ScoringParams,
+    *,
+    n_episodes: int = 0,
+    concurrency_stats: Optional[ConcurrencyStats] = None,
 ) -> BacktestSummary:
-    """Aggregate per-trade numpy arrays into a :class:`BacktestSummary`."""
+    """Aggregate per-trade numpy arrays into a :class:`BacktestSummary`.
+
+    ``n_episodes`` and ``concurrency_stats`` are keyword-only and optional: the
+    overlap measurements need the bar-index geometry, which the caller has and
+    this function does not.  Omitting them leaves the overlap fields at their
+    defaults rather than inventing values.
+    """
     n_months = max(len(months), 1)
     n = int(net.size)
 
@@ -481,6 +530,15 @@ def _summarise_arrays(
         pf_score_tpm=pf_score_tpm,
         exp_score_tpm=exp_score_tpm,
         sharpe_raw=round(sharpe_raw, 6),
+        n_episodes=int(n_episodes),
+        mean_concurrent_positions=(
+            round(concurrency_stats.mean, 4)
+            if concurrency_stats is not None and math.isfinite(concurrency_stats.mean)
+            else float("nan")
+        ),
+        max_concurrent_positions=(
+            concurrency_stats.peak if concurrency_stats is not None else 0
+        ),
     )
 
 
@@ -522,9 +580,9 @@ def _empty_summary(n_months: int) -> BacktestSummary:
 def _empty_trades() -> pd.DataFrame:
     return pd.DataFrame(
         columns=[
-            "signal_rn", "fill_rn", "target_rn", "exit_rn", "fill_dt", "exit_dt",
-            "direction", "buy_price", "sell_price", "exit_price", "net_pct_gain",
-            "target_hit",
+            "signal_rn", "fill_rn", "target_rn", "exit_rn", "episode_id",
+            "fill_dt", "exit_dt", "direction", "buy_price", "sell_price",
+            "exit_price", "net_pct_gain", "target_hit",
         ]
     )
 

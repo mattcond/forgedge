@@ -399,6 +399,27 @@ StatisticalValidation | None` (`.temporal_stability: "PASS"|"WARN"|"FAIL"`,
 (`.avoid_in`), `excursion: ExcursionStats | None` (MAE/MFE), `grid_results:
 list[GridResult]`.
 
+`BacktestSummary` also carries the **overlap** measurements (issue #168):
+`n_episodes` (activation episodes behind the trades), `mean_concurrent_positions`
+(average open positions over the bars where at least one is open) and
+`max_concurrent_positions` (the peak). `run_backtest(..., return_trades=True)`
+tags each ledger row with `episode_id`.
+
+`run_backtest` opens a position on every active bar with no flat-state check —
+a deliberate, capital-permitting policy, unchanged — so these say how much
+capital reproducing the reported economics takes.  Episodes group by *signal*,
+concurrency by *price path*, and they generally disagree: trades from separate
+episodes still overlap when the horizon outruns the gap between them.
+`total_trades / mean_concurrent_positions` is the sample size the overlap
+supports; the economics (PF, expectancy, net gain) stay nominal.
+
+`from forgedge import episode_starts, episode_ids, concurrency, ConcurrencyStats`
+(module `forgedge.episodes`) — `episode_starts(active, gap=1)` marks the first
+bar of each episode, `episode_ids` labels every bar (`-1` when inactive), and
+`concurrency(open_rn, close_rn, n_bars=None) -> ConcurrencyStats`
+(`.mean`, `.peak`, `.occupied_bars`, `.position_bars`, `.n_trades`,
+`.effective_trades`) measures inclusive `[open, close]` bar intervals.
+
 `from forgedge.rule_discovery import text_report, html_report` — human /
 HTML report builders from a `RuleDiscoveryResponse`. `resp.to_dict()` for
 JSON export.

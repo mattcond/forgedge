@@ -361,16 +361,20 @@ def _compute_rule(spec: RuleSpec, frame, dts, timestamp_col) -> dict:
         for m in pd.period_range(dts[0], dts[-1], freq="M")
     ]
 
-    exposure = (
-        float(sum(int(t.exit_rn) - int(t.fill_rn) for _, t in trades.iterrows())) / n
-        if n else 0.0
+    # Capital *utilisation*: position-bars over the whole history, idle stretches
+    # included.  This used to be labelled "avg concurrent positions", which it is
+    # not — a rule idle four fifths of the time reports 0.7 here while the trader
+    # funds four positions at once whenever it fires.  The concurrency proper now
+    # comes from the summary (issue #168); this stays, under its own name.
+    utilisation = (
+        float((trades["exit_rn"] - trades["fill_rn"] + 1).sum()) / n if n else 0.0
     )
     return dict(
         spec=spec, uid=re.sub(r"[^A-Za-z0-9_-]", "_", spec.name),
         summary=summary, trades=trades, net=net, eq=eq, dd=dd,
         months=months, split=split, last_sig=last_sig,
         active_now=last_sig == n - 1 if last_sig is not None else False,
-        exposure=exposure,
+        utilisation=utilisation,
         # Boolean activation mask (the event condition, not fill/execution) —
         # feeds the return-distribution section's "event" selection.
         active=sig.to_numpy(dtype=bool),
@@ -818,6 +822,18 @@ ValidatedRule parameters · net returns (per-side fee included)</p>
 {rows}</table>"""
 
 
+def _concurrency_tile(s) -> str:
+    """``avg · peak`` open positions, from the replay's own ledger (#168).
+
+    The number a reader needs before funding the rule: the backtest opens a
+    position on every active bar with no flat-state check, so reproducing these
+    statistics live takes capital for the peak, not for one position.
+    """
+    if not np.isfinite(s.mean_concurrent_positions):
+        return "—"
+    return f"{s.mean_concurrent_positions:.1f} · {s.max_concurrent_positions}"
+
+
 def _rule_section(R, bh, dates, dts, regime_arr, close, low, high, window, min_trades, recent) -> str:
     spec, s, t, net = R["spec"], R["summary"], R["trades"], R["net"]
     p = spec.params
@@ -863,7 +879,7 @@ def _rule_section(R, bh, dates, dts, regime_arr, close, low, high, window, min_t
             (_num(s.profit_factor), "profit factor"),
             (_num(s.win_rate_pct * 100, "{:.0f}%"), "win rate"),
             (f"{s.total_trades} / {s.total_signals}", "trades / signals"),
-            (f"{R['exposure']:.1f}", "avg concurrent positions"),
+            (_concurrency_tile(s), "concurrent positions (avg · peak)"),
         ]
     )
     stats_row = ""
@@ -933,11 +949,32 @@ def _footer_note(computed, dates) -> str:
             "descriptive, not predictive — the honest estimate is the OOS zone and the walk-forward "
             "expectancy shown next to the replay one."
         )
+    # The overlap warning used to be a fixed sentence, identical on every
+    # report, with no number attached — so a rule needing 1x the capital of a
+    # single position and one needing 12x read the same (issue #168).  Now it
+    # carries what was measured on this report's own ledger.
+    peaks = [R["summary"].max_concurrent_positions for R in computed
+             if R["summary"].max_concurrent_positions]
+    means = [R["summary"].mean_concurrent_positions for R in computed
+             if np.isfinite(R["summary"].mean_concurrent_positions)]
+    if peaks:
+        worst = max(peaks)
+        avg = f"{min(means):.1f}–{max(means):.1f}" if len(means) > 1 else f"{means[0]:.1f}"
+        overlap = (
+            f" The backtest opens a position on <b>every</b> active bar, with no flat-state "
+            f"check: on this data the rules here hold <b>{avg} positions open on average</b> "
+            f"and up to <b>{worst} at once</b>. Reproducing these statistics live takes capital "
+            f"for the peak — it is a legitimate policy, not a modelling error, but it is not "
+            f"one position."
+        )
+    else:
+        overlap = (" The backtest opens <b>overlapping positions</b> and models no portfolio "
+                   "sizing; no trade was executed here, so there is no measured figure.")
     return f"""<div class="note"><b>How to read this report.</b> The replay applies the published parameters
 to every candle provided.{is_note} The dual axis uses <b>independent scales</b> (compare shapes, not
-magnitudes). The backtest opens <b>overlapping positions</b> and models no portfolio sizing; there is no
-stop-loss — the MAE scatter shows the intra-trade risk that follows. Equity is the arithmetic sum of
-per-trade nets (compounding would assume full re-allocation per trade, which the mechanics do not model).</div>"""
+magnitudes).{overlap} There is no stop-loss — the MAE scatter shows the intra-trade risk that follows.
+Equity is the arithmetic sum of per-trade nets (compounding would assume full re-allocation per trade,
+which the mechanics do not model).</div>"""
 
 
 def _hover_js(computed, bh, dates) -> str:

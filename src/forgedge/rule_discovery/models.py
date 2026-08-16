@@ -488,6 +488,32 @@ class BacktestSummary:
     Holds the standard performance metrics plus the composite scores defined in
     ``backtest_scoring.md``.  All attributes carry ``nan`` when there are no
     executed trades.
+
+    Overlap
+    -------
+    ``run_backtest`` opens a trade on **every** active bar, with no flat-state
+    check.  That is a deliberate, capital-permitting policy — the reported
+    economics are reproducible in production *given enough capital to fund the
+    concurrent positions* — but until issue #168 there was no supported way to
+    find out how much capital that is.  Three fields answer it:
+
+    n_episodes : int
+        Activation *episodes* behind the trades — consecutive (gap-bridged)
+        active bars counted as one thing happening.  Answers "how often does
+        this signal fire".
+    mean_concurrent_positions : float
+        Average open positions over the bars where at least one is open.
+        Answers "when this rule is working, how many positions am I funding" —
+        and ``total_trades / mean_concurrent_positions`` is the sample size the
+        overlap actually supports.
+    max_concurrent_positions : int
+        The peak.  Decides whether the rule is deployable at all on a given
+        account.
+
+    Episodes and concurrency are **different measures and generally disagree**:
+    episodes group by signal, concurrency by price path, and trades from
+    distinct episodes still overlap whenever the holding period outruns the gap
+    between them.  On the case in #168: 76 episodes, mean concurrency 3.71.
     """
 
     total_signals: int
@@ -515,6 +541,11 @@ class BacktestSummary:
     pf_score_tpm: float
     exp_score_tpm: float
     sharpe_raw: float
+    # overlap (issue #168) — defaulted so a summary built before these existed
+    # still constructs; every summary the engine produces fills them in.
+    n_episodes: int = 0
+    mean_concurrent_positions: float = float("nan")
+    max_concurrent_positions: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
