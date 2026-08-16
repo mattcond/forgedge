@@ -47,8 +47,10 @@ Usage
 from __future__ import annotations
 
 import math
+import math
 import warnings
 from collections import Counter
+from dataclasses import replace
 from datetime import date
 from typing import List, Optional
 
@@ -72,8 +74,8 @@ from .models import (
     ValidatedRule,
 )
 from ..resolver import resolve_config
-from ..unset import UNSET, is_set
-from .validation import expectancy_mde, validate
+from ..unset import UNSET, coalesce, is_set
+from .validation import expectancy_mde, opportunity_sharpe, validate
 from .walkforward import _fmt as _fmt_ts, selection_windows, walk_forward
 
 # RD-04 — the minimum executed-trade count is scaled to the in-sample length
@@ -90,6 +92,29 @@ _MIN_TRADES_ABS = 10
 def _dynamic_min_trades(n_months: float, min_tpm: float) -> int:
     """Minimum executed trades scaled to the IS period (spec RD-04)."""
     return max(_MIN_TRADES_ABS, int(n_months * min_tpm))
+
+
+def _is_opportunity_sharpe(result, span_years: float) -> float:
+    """``opportunity_sharpe`` of a grid cell, from its summary alone.
+
+    ``BacktestSummary.sharpe_raw`` is already ``expectancy / std`` — the
+    per-trade Sharpe — so the annualisation only needs the realised trade count,
+    and the cell's trade ledger does not have to be materialised to rank it.
+    """
+    s = result.summary
+    if not np.isfinite(s.sharpe_raw) or s.total_trades < 2 or span_years <= 0:
+        return float("nan")
+    return float(s.sharpe_raw) * math.sqrt(max(s.total_trades / span_years, 1e-12))
+
+
+def _sortable(value: float) -> float:
+    """``nan`` sorts last, so ``max()`` never picks an unmeasurable candidate."""
+    return value if np.isfinite(value) else float("-inf")
+
+
+def _round6(value: float) -> float:
+    """Round for storage, leaving ``nan``/``inf`` alone."""
+    return round(float(value), 6) if np.isfinite(value) else float(value)
 
 
 def _pick_wf_params(splits, policy: str) -> BacktestParams:
@@ -506,8 +531,9 @@ class RuleDiscovery:
         NON-EDGE-market rule.
         """
         market_base = base.merged(buy_type="market")
+        market_grid = self._market_grid(market_base)
         notes.append("entry_mode=auto — Stage 1 market baseline (authoritative verdict)")
-        resp = self._run_stage(market_base, self._market_grid(market_base), notes)
+        resp = self._run_stage(market_base, market_grid, notes)
 
         if not resp.is_edge:
             resp.notes.append(
@@ -515,35 +541,87 @@ class RuleDiscovery:
             )
             return resp
 
-        opt = self._optimize_limit_entry(resp, base)
+        opt = self._optimize_limit_entry(resp, base, market_grid)
         resp.entry_optimization = opt
         resp.notes.append(f"entry_mode=auto — {opt.reason}")
         if opt.adopted:
             # Swap only the entry mechanics of the operating point; the exit
             # (sell_pct / target_h) and the verdict are unchanged.
-            resp.validated_rule = ValidatedRule(
-                expression=self.contract.event_expression,
-                event_candidate_id=self.candidate.event_id,
-                params=resp.validated_rule.params.merged(
-                    buy_type="limit", buy_drop_pct=opt.limit_buy_drop_pct,
-                ),
-            )
+            resp.validated_rule = opt.limit_rule
         return resp
 
-    def _optimize_limit_entry(
-        self, resp: RuleDiscoveryResponse, base: BacktestParams
-    ) -> EntryOptimization:
-        """Optimise the limit entry price for an already-validated market edge.
+    def _limit_replay(self, limit_params: BacktestParams, market_grid: GridSpec):
+        """Walk-forward **replay** of a fixed limit point — no re-optimisation.
 
-        Sweeps ``buy_drop_pct`` around the configured centre while holding the
-        market winner's exit (``sell_pct`` / ``target_h``) fixed, then adopts the
-        best candidate that both reaches the fill floor and improves the
-        composite ``pf_score_tpm`` over the market baseline.
+        ``reoptimise=False`` evaluates the given parameters on every test window
+        instead of re-selecting per window, which is exactly what "give this
+        operating point an out-of-sample record" means.  It adds no selection,
+        so it adds nothing to ``n_trials``.
+
+        ``market_grid`` is passed as the spec even though no grid is run: the
+        walk-forward's purge width is derived from the spec's widest trade span,
+        so reusing the market stage's spec makes the two runs share their
+        window geometry bar for bar.  Comparing two operating points scored on
+        different windows would not be a comparison.
+        """
+        cfg = self.config
+        replay_cfg = replace(cfg.walk_forward, reoptimise=False)
+        return walk_forward(
+            self._frame, cfg.signal_col, limit_params, market_grid, replay_cfg,
+            scoring=cfg.scoring, criteria=cfg.criteria,
+            timestamp_col=cfg.timestamp_col,
+            base_rate=float(self.contract.base_rate or 0.0),
+        )
+
+    @staticmethod
+    def _oos_span_years(wf) -> float:
+        """Calendar years spanned by the concatenated test windows."""
+        if wf is None or not wf.splits:
+            return 0.0
+        start = pd.Timestamp(wf.splits[0].test_from)
+        end = pd.Timestamp(wf.splits[-1].test_to)
+        return max((end - start).total_seconds() / (365.25 * 86400.0), 1e-9)
+
+    def _optimize_limit_entry(
+        self, resp: RuleDiscoveryResponse, base: BacktestParams,
+        market_grid: GridSpec,
+    ) -> EntryOptimization:
+        """Evaluate a limit operating point against the market one, out-of-sample.
+
+        Stage 2 in three moves: sweep ``buy_drop_pct`` in-sample (the exit stays
+        the market winner's), replay the sweep's winner out-of-sample on the
+        market point's own test windows, then adopt only if all three conditions
+        hold **on that replay**.
+
+        Why out-of-sample.  The previous criterion compared in-sample
+        ``pf_score_tpm`` and adopted whichever was higher.  That published a
+        point selected in-sample and never confirmed anywhere else, on strictly
+        less evidence than the market point it replaced — which is the
+        definition of selection.  Adopting the limit point *because it is
+        better* obliges it to be better where selection did not reach.
         """
         cfg = self.config
         floor = cfg.criteria.min_fill_rate_opt
+        retention = float(coalesce(cfg.criteria.min_net_gain_retention, default=0.5))
         market = resp.in_sample_summary
         winner = resp.validated_rule.params  # market operating point
+        market_rule = resp.validated_rule
+
+        def _kept(reason: str, failed: Optional[str] = None, **extra) -> EntryOptimization:
+            """A decision that keeps the market point, with whatever was measured."""
+            return EntryOptimization(
+                selected_entry="market", adopted=False, min_fill_rate_opt=floor,
+                market_profit_factor=market.profit_factor,
+                market_fill_rate=market.fill_rate,
+                market_pf_score_tpm=market.pf_score_tpm,
+                limit_profit_factor=extra.pop("limit_profit_factor", None),
+                limit_fill_rate=extra.pop("limit_fill_rate", None),
+                limit_pf_score_tpm=extra.pop("limit_pf_score_tpm", None),
+                limit_buy_drop_pct=extra.pop("limit_buy_drop_pct", None),
+                reason=reason, failed_condition=failed,
+                min_net_gain_retention=retention,
+                market_rule=market_rule, **extra,
+            )
 
         limit_base = winner.merged(buy_type="limit")
         limit_grid = GridSpec(
@@ -552,58 +630,158 @@ class RuleDiscovery:
             target_h=[winner.target_h],
             buy_delay_bar=[base.buy_delay_bar],
         )
-        # In walk-forward selection mode the optimiser sweeps the same
-        # selection span the verdict metrics were computed on — the final
-        # test window stays untouched by any selection.
+        # The sweep stays on the selection span — the final test window is
+        # untouched by any selection, here as everywhere else.
         results = run_grid(
             self._frame, cfg.signal_col, limit_base, limit_grid,
             scoring=cfg.scoring, timestamp_col=cfg.timestamp_col,
             timerange_to=self._selection_to,
         )
-
-        market_score = market.pf_score_tpm
         tradeable = [
             r for r in results
             if np.isfinite(r.summary.fill_rate) and r.summary.fill_rate >= floor
         ]
         if not tradeable:
-            return EntryOptimization(
-                selected_entry="market", adopted=False, min_fill_rate_opt=floor,
-                market_profit_factor=market.profit_factor,
-                market_fill_rate=market.fill_rate,
-                market_pf_score_tpm=market_score,
-                limit_profit_factor=None, limit_fill_rate=None,
-                limit_pf_score_tpm=None, limit_buy_drop_pct=None,
-                reason=(f"no limit entry reached fill ≥ {floor:.2f}; "
-                        "kept market operating point"),
+            return _kept(
+                f"no limit entry reached fill ≥ {floor:.2f} in-sample; "
+                "kept market operating point",
+                failed="fill",
             )
 
-        best_limit = max(tradeable, key=lambda r: r.summary.pf_score_tpm)
+        # Pick the in-sample candidate on the same quantity the adoption
+        # decision uses, rather than on `pf_score_tpm`: a PF-based pick would
+        # hand the OOS stage whichever point traded least, and the criterion
+        # that follows exists precisely because that is not the same as best.
+        is_span_years = max(market.n_months, 1) / 12.0
+        best_limit = max(
+            tradeable,
+            key=lambda r: _sortable(_is_opportunity_sharpe(r, is_span_years)),
+        )
         ls = best_limit.summary
-        improved = ls.pf_score_tpm > market_score
-        if improved:
-            reason = (
-                f"limit @ buy_drop={best_limit.params.buy_drop_pct} improved "
-                f"pf_score_tpm {market_score:.3f}→{ls.pf_score_tpm:.3f} at fill "
-                f"{ls.fill_rate:.2f} ≥ {floor:.2f}; operating point adopted"
-            )
-        else:
-            reason = (
-                f"limit did not improve pf_score_tpm at fill ≥ {floor:.2f} "
-                f"(market {market_score:.3f} ≥ limit {ls.pf_score_tpm:.3f}); "
-                "kept market operating point"
-            )
-        return EntryOptimization(
-            selected_entry="limit" if improved else "market",
-            adopted=improved, min_fill_rate_opt=floor,
-            market_profit_factor=market.profit_factor,
-            market_fill_rate=market.fill_rate,
-            market_pf_score_tpm=market_score,
+        limit_params = best_limit.params.merged(buy_type="limit")
+        seen = dict(
             limit_profit_factor=ls.profit_factor,
             limit_fill_rate=ls.fill_rate,
             limit_pf_score_tpm=ls.pf_score_tpm,
             limit_buy_drop_pct=best_limit.params.buy_drop_pct,
-            reason=reason,
+            # Computed here, not in the adopted branch: D9 asks for the DSR of
+            # *each* point as an absolute metric, and a point that was measured
+            # and rejected is exactly the case where a reader wants to see the
+            # number that was measured.
+            limit_validation=self._limit_validation(resp, limit_params, len(results)),
+        )
+
+        market_wf = resp.walk_forward
+        if market_wf is None or market_wf.oos_trades is None:
+            return _kept(
+                "market point has no walk-forward record to compare against; "
+                "kept market operating point (adoption requires OOS evidence)",
+                **seen,
+            )
+
+        limit_wf = self._limit_replay(limit_params, market_grid)
+        if limit_wf is None or limit_wf.oos_trades is None:
+            return _kept(
+                f"limit @ buy_drop={best_limit.params.buy_drop_pct} produced no "
+                "out-of-sample trades on replay; kept market operating point",
+                failed="fill", **seen,
+            )
+
+        span_years = self._oos_span_years(market_wf)
+        m_sharpe = opportunity_sharpe(market_wf.oos_trades, span_years)
+        l_sharpe = opportunity_sharpe(limit_wf.oos_trades, span_years)
+        m_gain = float(market_wf.oos_summary.total_net_gain)
+        l_gain = float(limit_wf.oos_summary.total_net_gain)
+        l_fill = float(limit_wf.oos_summary.fill_rate)
+        measured = dict(
+            market_opportunity_sharpe=_round6(m_sharpe),
+            limit_opportunity_sharpe=_round6(l_sharpe),
+            market_oos_net_gain=_round6(m_gain),
+            limit_oos_net_gain=_round6(l_gain),
+            limit_oos_fill_rate=_round6(l_fill),
+            limit_summary=limit_wf.oos_summary,
+            market_summary=market_wf.oos_summary,
+            limit_walk_forward=limit_wf,
+            **seen,
+        )
+
+        # ── the three conditions, in the order that makes a failure readable ──
+        if not (np.isfinite(l_fill) and l_fill >= floor):
+            return _kept(
+                f"limit @ buy_drop={best_limit.params.buy_drop_pct} filled "
+                f"{l_fill:.2f} out-of-sample, below {floor:.2f}; kept market "
+                "operating point",
+                failed="fill", **measured,
+            )
+        if not (np.isfinite(l_sharpe) and np.isfinite(m_sharpe) and l_sharpe >= m_sharpe):
+            return _kept(
+                f"limit @ buy_drop={best_limit.params.buy_drop_pct} did not hold "
+                f"its risk-adjusted return per unit of time out-of-sample "
+                f"({l_sharpe:.3f} < market {m_sharpe:.3f}); kept market "
+                "operating point",
+                failed="sharpe", **measured,
+            )
+        gain_floor = retention * m_gain if m_gain > 0 else m_gain
+        if not (np.isfinite(l_gain) and l_gain >= gain_floor):
+            return _kept(
+                f"limit @ buy_drop={best_limit.params.buy_drop_pct} kept only "
+                f"{l_gain:.4f} of the market point's {m_gain:.4f} out-of-sample "
+                f"net gain, below the {retention:.0%} floor; kept market "
+                "operating point",
+                failed="net_gain", **measured,
+            )
+
+        limit_rule = ValidatedRule(
+            expression=self.contract.event_expression,
+            event_candidate_id=self.candidate.event_id,
+            params=limit_params,
+        )
+        return EntryOptimization(
+            selected_entry="limit", adopted=True, min_fill_rate_opt=floor,
+            market_profit_factor=market.profit_factor,
+            market_fill_rate=market.fill_rate,
+            market_pf_score_tpm=market.pf_score_tpm,
+            reason=(
+                f"limit @ buy_drop={best_limit.params.buy_drop_pct} held up "
+                f"out-of-sample on all three conditions (fill {l_fill:.2f} ≥ "
+                f"{floor:.2f}; annualised Sharpe {l_sharpe:.3f} ≥ market "
+                f"{m_sharpe:.3f}; net gain {l_gain:.4f} ≥ {gain_floor:.4f}); "
+                "operating point adopted"
+            ),
+            failed_condition=None,
+            min_net_gain_retention=retention,
+            market_rule=market_rule, limit_rule=limit_rule,
+            **measured,
+        )
+
+    def _limit_validation(
+        self, resp: RuleDiscoveryResponse, limit_params: BacktestParams,
+        n_limit_cells: int,
+    ):
+        """In-sample statistics of the limit point, with **its own** trial count.
+
+        The market point was chosen over Stage 1's cells; the limit point was
+        chosen over those *and* Stage 2's, so its Deflated Sharpe pays a larger
+        haircut.  Reported as an absolute metric per operating point (D9) — the
+        ``min_dsr`` gate always reads the market point's, so the verdict never
+        pays for Stage 2.
+        """
+        cfg = self.config
+        market_trials = (resp.statistical_validation.n_trials_tested
+                         if resp.statistical_validation is not None
+                         else len(resp.grid_results or []) or 1)
+        _summary, trades = run_backtest(
+            self._frame, cfg.signal_col, limit_params,
+            timerange_to=self._selection_to,
+            scoring=cfg.scoring, timestamp_col=cfg.timestamp_col, return_trades=True,
+        )
+        if trades is None or len(trades) < 2:
+            return None
+        return validate(
+            trades, base_rate=float(self.contract.base_rate or 0.0),
+            n_trials=int(market_trials) + max(int(n_limit_cells), 0),
+            bars_per_year=self._bars_per_year(),
+            avg_holding_bars=self._avg_holding_bars(trades),
         )
 
     def grid_summary(self) -> pd.DataFrame:

@@ -104,6 +104,10 @@ def text_report(resp: RuleDiscoveryResponse) -> str:
             add(f"  OOS t-test: WR p={_f(sv.ttest_winrate_p)}  "
                 f"exp p={_f(sv.ttest_expectancy_p)}  Sharpe={_f(sv.sharpe_ratio)}")
 
+    if resp.entry_optimization:
+        add("-" * 64)
+        add(_entry_points_text(resp.entry_optimization))
+
     if resp.regime_analysis:
         ra = resp.regime_analysis
         add("-" * 64)
@@ -245,6 +249,34 @@ def html_report(resp: RuleDiscoveryResponse) -> str:
                           "OOS Sharpe": _f(sv.sharpe_ratio)})
             add(_kv_table(d))
 
+    if resp.entry_optimization:
+        opt = resp.entry_optimization
+        add("<h2>Entry points</h2>")
+        add(f"<p class='muted'>Verdict from the <b>{html.escape(opt.authoritative)}</b> "
+            f"point; published: <b>{html.escape(opt.selected_entry)}</b>.</p>")
+        if opt.limit_buy_drop_pct is None:
+            add(f"<p class='muted'>{html.escape(opt.reason)}</p>")
+        else:
+            add("<table><tr><th class='l'></th><th>market</th><th>limit</th></tr>"
+                f"<tr><td class='l'>buy_drop_pct</td><td>—</td>"
+                f"<td>{opt.limit_buy_drop_pct}</td></tr>"
+                f"<tr><td class='l'>OOS fill rate</td><td>—</td>"
+                f"<td>{_f(opt.limit_oos_fill_rate)}</td></tr>"
+                f"<tr><td class='l'>OOS return / unit time</td>"
+                f"<td>{_f(opt.market_opportunity_sharpe)}</td>"
+                f"<td>{_f(opt.limit_opportunity_sharpe)}</td></tr>"
+                f"<tr><td class='l'>OOS net gain</td>"
+                f"<td>{_f(opt.market_oos_net_gain)}</td>"
+                f"<td>{_f(opt.limit_oos_net_gain)}</td></tr>"
+                "</table>")
+            if opt.adopted:
+                add("<p class='muted'>Limit point adopted — all three conditions "
+                    "held out-of-sample.</p>")
+            else:
+                add("<p class='muted'>Market point kept; limit failed on: "
+                    f"<b>{html.escape(_CONDITION_LABEL.get(opt.failed_condition, '—'))}"
+                    "</b>.</p>")
+
     if resp.regime_analysis and resp.regime_analysis.per_regime:
         add("<h2>Regime breakdown</h2>")
         rows = "".join(
@@ -272,6 +304,52 @@ def html_report(resp: RuleDiscoveryResponse) -> str:
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
+
+_CONDITION_LABEL = {
+    "fill": "fill rate",
+    "sharpe": "return per unit of time",
+    "net_gain": "net-gain retention",
+}
+
+
+def _entry_points_text(opt) -> str:
+    """Both operating points side by side, on the three quantities that decide.
+
+    Showing them as equals would be the fill confound in new clothes — a limit
+    point that fills rarely looks better on every per-trade metric — so the
+    asymmetry is stated rather than left to the reader: the verdict comes from
+    the market point, and the limit point has to earn its way in.
+    """
+    out: List[str] = ["ENTRY POINTS (entry_mode=auto)"]
+    out.append(f"  verdict from : {opt.authoritative}  ·  published: {opt.selected_entry}")
+    if opt.limit_buy_drop_pct is None:
+        out.append(f"  {opt.reason}")
+        return "\n".join(out)
+
+    out.append(f"  {'':<26}{'market':>14}{'limit':>14}")
+    out.append(f"  {'buy_drop_pct':<26}{'—':>14}{opt.limit_buy_drop_pct:>14}")
+    rows = (
+        ("OOS fill rate", None, opt.limit_oos_fill_rate),
+        ("OOS return / unit time", opt.market_opportunity_sharpe,
+         opt.limit_opportunity_sharpe),
+        ("OOS net gain", opt.market_oos_net_gain, opt.limit_oos_net_gain),
+    )
+    for label, m, l in rows:
+        out.append(f"  {label:<26}{(_f(m) if m is not None else '—'):>14}"
+                   f"{(_f(l) if l is not None else '—'):>14}")
+    if opt.limit_validation is not None:
+        out.append(f"  {'DSR (own n_trials)':<26}{'—':>14}"
+                   f"{_f(opt.limit_validation.deflated_sharpe):>14}"
+                   f"   (n_trials={opt.limit_validation.n_trials_tested})")
+    out.append(f"  thresholds: fill ≥ {opt.min_fill_rate_opt:.2f}  ·  "
+               f"net gain ≥ {opt.min_net_gain_retention:.0%} of market's")
+    if opt.adopted:
+        out.append("  → limit point adopted (all three conditions held OOS)")
+    else:
+        failed = _CONDITION_LABEL.get(opt.failed_condition, "—")
+        out.append(f"  → market point kept; limit failed on: {failed}")
+    return "\n".join(out)
+
 
 def _kv_table(d: dict) -> str:
     rows = "".join(

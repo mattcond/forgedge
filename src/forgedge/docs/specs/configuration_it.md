@@ -358,7 +358,8 @@ Gate di promozione del Modulo 3. Definisce le condizioni per i verdetti `EDGE`, 
 | `min_tpm` | float | `2.0` | Frequenza media minima (trades/mese) per EDGE. È anche l'unico gate sul numero di trade: la soglia minima di trade eseguiti è dinamica, `max(10, n_months × min_tpm)`, e scala con la lunghezza dell'IS (spec RD-04) invece di una soglia assoluta fissa. |
 | `min_pf_score_tpm` | float | `0.30` | Score composito minimo PF×TPM per includere una configurazione nella selezione. |
 | `min_fill_rate` | float | `0.40` | Fill rate minimo del limit order: almeno il 40% degli eventi deve tradursi in un trade. |
-| `min_fill_rate_opt` | float | `0.80` | Floor di fill per lo stadio di ottimizzazione limit di `entry_mode="auto"`: il limit può migliorare l'operating point solo se fila ancora a ≥ 80%, evitando il confound del fill-collasso. |
+| `min_fill_rate_opt` | float | `0.80` | Prima condizione di adozione: il punto limite può essere pubblicato solo se fila ancora a ≥ 80% **fuori campione**, evitando il confound del fill-collasso. |
+| `min_net_gain_retention` | float | `0.5` *(risolto dalla sessione)* | Terza condizione di adozione: frazione del net gain OOS del punto market che il limite deve mantenere. Deliberatamente larga — è un backstop contro il caso di μ minuscolo e σ minuscolo, che lo Sharpe non vede perché è scale-free in μ. |
 | `partial_min_profit_factor` | float | `1.5` | PF IS minimo per PARTIAL-EDGE (non raggiunge EDGE ma non è NON-EDGE). |
 | `max_zero_months_edge` | int | `1` | Mesi a zero o negativi massimi ammessi per EDGE. |
 | `max_zero_months_partial` | int | `4` | Mesi a zero o negativi massimi ammessi per PARTIAL-EDGE. |
@@ -393,7 +394,7 @@ Configurazione principale del Modulo 3. Aggrega tutti i sotto-configuratori: par
 | `grid` | GridSpec | `GridSpec()` | Spazio di ricerca della grid. Se tutti i campi sono None, si usa la grid di default. |
 | `walk_forward` | RuleWalkForwardConfig | `RuleWalkForwardConfig()` | Configurazione walk-forward OOS. |
 | `criteria` | SelectionCriteria | `SelectionCriteria()` | Criteri EDGE/PARTIAL-EDGE/NON-EDGE. |
-| `entry_mode` | str | `"limit"` | Modalità di valutazione dell'ingresso: `"limit"` (default, retro-compatibile), `"market"` (baseline al next-open, fill ≈ 100%, nessun ottimizzatore) o `"auto"` (pipeline a due stadi: il **market** decide il verdetto, il **limit** ottimizza l'operating point dei soli sopravvissuti a fill ≥ `min_fill_rate_opt`). |
+| `entry_mode` | str | `"auto"` | Modalità di valutazione dell'ingresso: `"auto"` (default — lo Stage 1 a entrata market decide il verdetto, lo Stage 2 sweepa `buy_drop_pct`, replaya il vincitore fuori campione e lo pubblica solo se supera tutte e tre le condizioni di adozione), `"market"` (solo la baseline al next-open, fill ≈ 100%, nessun ottimizzatore) o `"limit"` (il default pre-#185: la griglia ottimizza `buy_drop_pct`, quindi l'ingresso fa anche da ottimizzatore del prezzo di ingresso). |
 | `use_contract_target` | bool | `True` | Se True, usa `direction`, `sell_pct` e `target_h` dall'AlphaContract come punto di partenza per la grid. |
 | `timestamp_col` | str | `"open_dt"` | Colonna datetime. |
 | `signal_col` | str | `"__rule_signal__"` | Colonna interna temporanea per il segnale. |

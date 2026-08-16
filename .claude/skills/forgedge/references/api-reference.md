@@ -312,8 +312,8 @@ resp = rd.run() -> RuleDiscoveryResponse
 `RuleDiscoveryConfig` fields and defaults (`src/forgedge/rule_discovery/models.py`):
 `base_params: BacktestParams`, `scoring: ScoringParams`, `grid: GridSpec`
 (auto-built around the contract target when empty), `walk_forward:
-RuleWalkForwardConfig`, `criteria: SelectionCriteria`, `entry_mode: "limit"|
-"market"|"auto" = "limit"`, `use_contract_target: bool = True`,
+RuleWalkForwardConfig`, `criteria: SelectionCriteria`, `entry_mode: "auto"|
+"market"|"limit" = "auto"`, `use_contract_target: bool = True`,
 `timestamp_col: str = "open_dt"`, `selection_mode: "walk_forward"|
 "full_sample" = "walk_forward"` (operating point selected inside WF train
 windows only — the final test window is never read by any selection),
@@ -355,11 +355,36 @@ support the verdict), `min_oos_trades: int = 10`, `early_elimination: bool =
 True` (set `False` to force the full walk-forward/diagnostics pipeline even
 on a fast-screened `NON-EDGE`).
 
-`entry_mode`: `"limit"` (default, grid optimises `buy_drop_pct`, can suffer
-the "fill confound"), `"market"` (baseline at next-open, ≈100% fill,
-isolates the signal's edge), `"auto"` (two-stage: market-mode verdict is
-authoritative, limit optimiser only refines EDGE/PARTIAL-EDGE survivors that
-still clear `min_fill_rate_opt`) — records `resp.entry_optimization`.
+`entry_mode`: `"auto"` (**default**, two stages — a market-entry verdict that
+is authoritative, then a limit sweep whose winner is replayed out-of-sample and
+published only if it clears all three adoption conditions), `"market"`
+(baseline alone: next-open, ≈100% fill, isolates the signal's edge), `"limit"`
+(the pre-#185 default: the grid optimises `buy_drop_pct`, so the entry doubles
+as an entry-price optimiser and can suffer the "fill confound"). Records
+`resp.entry_optimization`.
+
+Adoption conditions, all measured on the out-of-sample replay:
+`fill_rate >= criteria.min_fill_rate_opt`; `opportunity_sharpe >= market's`;
+`net_gain >= criteria.min_net_gain_retention * market's`.
+
+`opportunity_sharpe(trades, span_years)` (`forgedge.rule_discovery`) is
+`(mu/sigma) * sqrt(trades per year)` — **not**
+`StatisticalValidation.sharpe_ratio`, which annualises by *capacity*
+(`bars_per_year / avg_holding_bars`). Two operating points on the same rule
+hold for the same length, so capacity is identical for both and cancels out:
+the capacity-annualised comparison reduces to the per-trade Sharpe, which is
+blind to the frequency the choice is about. Counting realised trades restores
+it — halving the trades costs `sqrt(2)`.
+
+`EntryOptimization` — `selected_entry`, `authoritative` (always `"market"`),
+`adopted`, `failed_condition: "fill"|"sharpe"|"net_gain"|None`,
+`market_rule`/`limit_rule: ValidatedRule|None`,
+`market_summary`/`limit_summary: BacktestSummary|None` (OOS, identical
+windows), `limit_walk_forward: WalkForwardResult|None` (a *replay* at fixed
+`buy_drop_pct`, `reoptimise=False`, so it adds no `n_trials`),
+`limit_validation: StatisticalValidation|None` (the limit point's own trial
+count: Stage 1 cells + Stage 2 cells), plus the measured sides of each
+condition. The `min_dsr` gate always reads the *market* point's validation.
 
 `RuleDiscoveryResponse` — `verdict: "EDGE"|"PARTIAL-EDGE"|"NON-EDGE"|
 "INSUFFICIENT-DATA"`, `is_edge: bool` (True for EDGE/PARTIAL-EDGE),

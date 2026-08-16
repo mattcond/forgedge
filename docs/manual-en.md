@@ -524,6 +524,69 @@ resp = rd.run() -> RuleDiscoveryResponse
 
 The `event_candidate` you pass must be the one `contract.event_candidate_id` actually points to, or the constructor raises `ValueError`.
 
+#### Entry mode — what the verdict measures
+
+`entry_mode` defaults to **`"auto"`** (it was `"limit"` before #185), and the
+change is worth understanding because it moves verdicts.
+
+In `"limit"` mode the grid varies `buy_drop_pct`, so the limit entry does two
+jobs at once: order mechanic *and* entry-price optimiser. A deeper discount
+fills less often and — this is the part that matters — **only on the paths that
+came back down to it**. The profit factor rises on a subset of trades that is
+not the tradeable population. That is the *fill confound*, and under `"limit"`
+the verdict partly measures the entry price rather than the signal.
+
+`"auto"` splits the two readings apart:
+
+- **Stage 1** evaluates the rule at a market entry (next-open fill, ≈100%). This
+  verdict is authoritative. Stage 2 can never turn a `NON-EDGE` into an edge.
+- **Stage 2** sweeps `buy_drop_pct` on the survivors, **replays** the winner
+  out-of-sample on Stage 1's own test windows, and publishes it only if it
+  clears all three adoption conditions.
+
+The adoption conditions, all measured on that replay:
+
+| # | condition | what it stops |
+|---|---|---|
+| 1 | `fill_rate >= min_fill_rate_opt` | a PF inflated by rare fills |
+| 2 | `opportunity_sharpe >= market's` | a point that trades less for a slightly better edge |
+| 3 | `net_gain >= min_net_gain_retention × market's` | a tiny µ with a tiny σ |
+
+Condition 2 uses a **different Sharpe from the one on
+`StatisticalValidation`**, and the difference is the whole criterion.
+`validate()` annualises by *capacity* — `bars_per_year / avg_holding_bars`, how
+many non-overlapping holding periods fit in a year. That is the right
+denominator for "how good is this rule", because it does not reward a rule for
+the accident of firing often. But both operating points sit on the *same* rule
+and hold for the same length, so capacity is **identical for the two** and the
+`sqrt` factor cancels: the comparison collapses onto the per-trade Sharpe,
+which is exactly the opportunity-blind metric the criterion exists to escape.
+
+`opportunity_sharpe` counts realised trades instead — `(µ/σ) × sqrt(trades per
+year)` — so halving the trades costs `sqrt(2) ≈ 1.41×` that the per-trade edge
+has to beat. On the issue's own worked example:
+
+| | market | limit | ratio |
+|---|---|---|---|
+| Sharpe per trade | 0.267 | 0.375 | 1.41× |
+| annualised by capacity | 5.095 | 7.164 | 1.41× — unchanged |
+| `opportunity_sharpe` | 1.461 | 1.299 | **0.89×** |
+| total return | 48% | 36% | **0.75×** |
+
+The capacity reading adopts a point that earns a quarter less.
+
+Both points are reported in full on `RuleDiscoveryResponse.entry_optimization`
+— each with its own rule, out-of-sample summary and statistics, plus
+`failed_condition` naming which condition stopped an adoption. The limit point's
+walk-forward is a *replay* (`reoptimise=False`), so it adds no selection and no
+`n_trials`; its Deflated Sharpe carries its own larger trial count (Stage 1 +
+Stage 2 cells) as an absolute metric, while the `min_dsr` gate always reads the
+market point's — the verdict never pays for Stage 2.
+
+`"limit"` remains fully supported and is the right choice when the limit order
+*is* the strategy rather than an execution refinement.
+
+
 A `RuleDiscoveryResponse`'s important attributes: `verdict` (`"EDGE"|"PARTIAL-EDGE"|"NON-EDGE"|"INSUFFICIENT-DATA"`), `is_edge` (true for the first two), `rejection_reasons`, `validated_rule` (carries `.params`, a `BacktestParams`), `in_sample_summary` (`total_trades`, `profit_factor`, `win_rate_pct`, `expectancy`, `tpm_mu`), `execution_envelope` (`.conservative`/`.optimistic` — see §17), `walk_forward` (`.oos_summary`, `.consistency`), `statistical_validation` (`.temporal_stability`, `.deflated_sharpe`), `regime_analysis`, `excursion` (MAE/MFE), `entry_optimization` (only populated when `entry_mode="auto"`, §15).
 
 `from forgedge.rule_discovery import text_report, html_report` build human-readable/HTML reports from a response; `resp.to_dict()` gives a JSON-serializable form.
@@ -736,7 +799,7 @@ Every module accepts a dataclass carrying its knobs. This section covers the one
 | `grid` | auto-built | search grid around the contract's derived target when left empty |
 | `walk_forward` | `RuleWalkForwardConfig()` | `n_splits=4`, `min_train_months=6`, `purge_bars=None` (→ horizon under test) |
 | `criteria` | `SelectionCriteria()` | verdict gates — see §15 |
-| `entry_mode` | `"limit"` | `"limit"`/`"market"`/`"auto"`, §15 |
+| `entry_mode` | `"auto"` | `"auto"`/`"market"`/`"limit"`, §15 |
 | `selection_mode` | `"walk_forward"` | operating point chosen inside train windows only; `"full_sample"` is the legacy behavior |
 
 `BacktestParams` defaults: `direction="long"`, `buy_type="limit"`, `buy_drop_pct=0.010`, `buy_delay_bar=6`, `sell_pct=0.040`, `target_h=24`, `fee=0.002`, `early_stopping=True`.
@@ -1174,7 +1237,7 @@ This is the section the task description asked to treat with particular care. "O
 | **`time_budget=` (explicit `TimeBudget`)** | `None` — but purging is still on by default even without it | `forge(..., time_budget=TimeBudget.build(n_bars=len(kpi), horizon_bars=48, embargo_bars=5))` | One shared, explicit IS/OOS axis across Event and Alpha Discovery, with a controllable embargo | More to configure correctly; get the `horizon_bars` argument wrong and the purge width is wrong too | Multi-module pipelines built by hand (not via `forge()`) where you need Event and Alpha Discovery's splits to agree exactly |
 | **`purge_bars=0`** (opting *out* of the default-on purge) | purge width = `max(horizon_grid)` (default-on) | `TimeBudget.build(..., purge_bars=0)`, or `RuleWalkForwardConfig(purge_bars=0)` for M3 | Reproduces pre-purging numeric results exactly (useful for comparing against old runs, or the library's own older golden-test values) | Reintroduces a real, if usually small, look-ahead: IS bars whose forward window crosses into OOS are no longer excluded | Only when you specifically need historical reproducibility, not for normal use |
 | **`power_gate=False`** (`SelectionCriteria`) | `True` (default-on, opt-out) | `RuleDiscoveryConfig(criteria=SelectionCriteria(power_gate=False))` | A verdict that would otherwise be demoted to `INSUFFICIENT-DATA` for lacking OOS statistical power is allowed through as `EDGE`/`PARTIAL-EDGE` | You lose the pipeline's own signal that the OOS evidence is too thin to trust the point estimate — a contract can look tradeable purely because nobody checked whether the sample size could support the claim | Essentially never for a live decision; only for inspecting what the *un-gated* verdict would have been |
-| **`entry_mode="market"` or `"auto"`** | `"limit"` | `RuleDiscoveryConfig(entry_mode="market")` | `"market"` isolates the signal's edge from the entry mechanism (no fill-rate confound); `"auto"` lets a market-mode verdict be authoritative while still trying to refine the entry price on survivors | `"market"` assumes ~100% fills at next-open, which may overstate real-world executability for illiquid instruments; `"auto"` is the most complex of the three and adds a second backtest pass | `"market"` when you suspect a `"limit"`-mode EDGE is a fill-rate artefact (few, deep, cherry-picked fills); `"auto"` as a middle ground once you trust the market-mode verdict |
+| **`entry_mode="limit"`** (opting *out* of the default two-stage evaluation) | `"auto"` (default since #185) | `RuleDiscoveryConfig(entry_mode="limit")` | The grid optimises `buy_drop_pct` as part of the verdict, so a strategy whose *edge is the limit order itself* is measured as one thing rather than split into signal + execution | Reintroduces the fill confound into the verdict: a deeper discount fills only on the paths that came back to it, so the PF rises on a subset that is not the tradeable population | When the limit order genuinely *is* the strategy. For a signal you are trying to measure, `"auto"` separates the two readings and still publishes the limit point when it earns it |
 | **`selection_mode="full_sample"`** | `"walk_forward"` | `RuleDiscoveryConfig(selection_mode="full_sample")` | Restores the legacy behavior: the operating point is chosen by screening the *entire* table, not just walk-forward train windows | The IS profit factor and the published operating parameters can be influenced by data that later becomes part of the OOS test window — a documented, real leak the walk-forward mode exists to close | Legacy compatibility only; the documented reason to avoid it in new work is explicit in the source |
 | **`AlphaConfig.horizon_enrichment=None`** (opting out) | `(0.5, 1.0, 2.0)` (default-on) | `AlphaConfig(horizon_enrichment=None)` | Restricts Alpha Discovery strictly to the base `horizon_grid`, with no per-event additions | On the authors' own measurement, **34 of 247** promoted alphas on the ADA dataset found their best horizon *only* because of this enrichment — turning it off would silently lose those | Reproducing a pre-enrichment baseline, or when you have a specific reason the base grid must not be extended |
 | **`pattern_features()`** (a separate function call, not a config flag) | not called | `from forgedge import pattern_features; kpi = pattern_features(kpi)` | Adds a single categorical `candle_pattern` column (ten named formations: HAMMER, DOJI, engulfing patterns, …) that flows end-to-end through `forge()` as one-hot events | Named patterns encode fixed, human-chosen thresholds; `candle_features()`'s continuous geometry is preferred for automatic discovery specifically because FORGE derives its own asset-adaptive thresholds instead | Manual/exploratory work where you specifically want to test named-pattern hypotheses, not for the default automatic-discovery path |

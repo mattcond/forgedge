@@ -273,15 +273,29 @@ class TestWarnConstraints:
             config_report(None, alpha, None, ctx=_ctx(timeframe="15m")))
 
     def test_entry_mode_inert_gate(self):
+        """A fill gate the caller *tuned*, that the entry mode makes inert."""
         rd = RuleDiscoveryConfig(
-            entry_mode="market", criteria=SelectionCriteria(min_fill_rate=0.40))
+            entry_mode="market", criteria=SelectionCriteria(min_fill_rate=0.65))
         rep = config_report(None, None, rd, ctx=_ctx())
 
         assert "entry_mode_inert_gate" in _codes(rep)
         # Fully meaningful in limit mode, so silent there.
-        rd_limit = RuleDiscoveryConfig(entry_mode="limit")
+        rd_limit = RuleDiscoveryConfig(
+            entry_mode="limit", criteria=SelectionCriteria(min_fill_rate=0.65))
         assert "entry_mode_inert_gate" not in _codes(
             config_report(None, None, rd_limit, ctx=_ctx()))
+
+    def test_the_inert_gate_is_silent_on_an_untouched_default(self):
+        """`entry_mode` now defaults to "auto" (#185), where Stage 1 fills
+        ≈ 100%.  A check that fired whenever the mode is not "limit" would fire
+        on *every* default configuration — the always-on warning F14 is about,
+        and the one users learn to scroll past on their way to real findings.
+
+        The value that was inherited is not a finding; the value that was moved
+        is.  Same rule as `timeframe_mismatch`.
+        """
+        rep = config_report(None, None, RuleDiscoveryConfig(), ctx=_ctx())
+        assert "entry_mode_inert_gate" not in _codes(rep)
 
     def test_schema_and_fee_mismatches_are_reported(self):
         disc = DiscoveryConfig(timestamp_col="a")

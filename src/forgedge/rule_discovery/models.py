@@ -266,6 +266,14 @@ class SelectionCriteria:
         Minimum composite ``pf_score_tpm``.
     min_fill_rate : float
         Minimum fill rate — below it the limit discount is too deep.
+
+        **Inert under the default ``entry_mode="auto"``**, where Stage 1 is a
+        market entry and fills ≈ 100%.  The field is kept, not removed: it is
+        fully meaningful in ``entry_mode="limit"``, and under ``"auto"`` the
+        floor that actually bites is ``min_fill_rate_opt``.  ``config_report()``
+        raises ``entry_mode_inert_gate`` when this has been *moved off its
+        default* and the mode makes it inert, rather than letting a
+        deliberately-tuned gate pass silently unused.
     min_fill_rate_opt : float
         Fill-rate floor for the ``entry_mode="auto"`` limit-optimisation stage.
         Distinct from ``min_fill_rate`` (the general gate): the limit optimiser
@@ -273,6 +281,18 @@ class SelectionCriteria:
         the optimised entry still fills at ``>= min_fill_rate_opt`` — high by
         design (default ``0.80``), so a deep, rarely-filled limit cannot inflate
         PF on a non-tradeable subset of trades (the "fill confound").
+    min_net_gain_retention : float
+        Fraction of the market point's out-of-sample **net gain** the limit
+        point must retain to be adopted — the third and last of the adoption
+        conditions, and deliberately the loosest.  Its job is not to co-decide
+        with the annualised Sharpe but to backstop the one case the Sharpe
+        cannot see: a tiny mu with a tiny sigma gives an excellent Sharpe while
+        producing almost nothing, because the Sharpe is scale-free in mu.  At
+        the default ``0.5`` the Sharpe decides and this floor only intervenes
+        once half the return has been burnt.
+
+        Session-resolved.  Same shape as ``RegistryConfig.min_cross_pf_retention``
+        (#181): absolute condition plus relative retention.
     partial_min_profit_factor : float
         Lower PF bound for a ``PARTIAL-EDGE`` (between this and
         ``min_profit_factor``).
@@ -339,6 +359,7 @@ class SelectionCriteria:
     min_pf_score_tpm: float = 0.30
     min_fill_rate: float = 0.40
     min_fill_rate_opt: float = 0.80
+    min_net_gain_retention: float = UNSET
     partial_min_profit_factor: float = 1.5
     min_active_month_rate: float = 0.80
     max_regime_dependency: float = 0.30
@@ -369,25 +390,33 @@ class RuleDiscoveryConfig:
     criteria : SelectionCriteria
         Acceptance / verdict thresholds.
     entry_mode : str
-        How the entry order is evaluated — ``"limit"`` (default), ``"market"``
-        or ``"auto"``.
+        How the entry order is evaluated — ``"auto"`` (default), ``"market"``
+        or ``"limit"``.
 
-        * ``"limit"`` — current behaviour: the grid varies ``buy_drop_pct`` and
-          the limit entry doubles as an entry-price optimiser.  **Default, fully
-          backward-compatible.**
-        * ``"market"`` — pure baseline: enter at the next bar's open (fill
+        * ``"auto"`` — two stages.  Stage 1 evaluates the rule at a **market**
+          entry and that verdict is authoritative.  Stage 2 sweeps
+          ``buy_drop_pct`` on the survivors, replays the winner out-of-sample,
+          and publishes it only if it clears all three adoption conditions (see
+          :class:`EntryOptimization`).  Stage 2 chooses *which parameters* get
+          published, never *whether* the rule is an edge.
+        * ``"market"`` — the baseline alone: enter at the next bar's open (fill
           ≈ 100%), no entry optimiser.  Isolates the *signal's* edge; the
           ``fill_rate`` gate is effectively inert.
-        * ``"auto"`` — two-stage pipeline.  Stage 1 evaluates the rule in
-          **market** mode and that verdict is authoritative.  Stage 2 then runs
-          a **limit** optimiser (varying ``buy_drop_pct``) *only* on EDGE /
-          PARTIAL survivors, crediting the improved operating point **only** at a
-          comparable fill (``>= criteria.min_fill_rate_opt``).  The optimiser can
-          improve the operating point but can never turn a NON-EDGE-market rule
-          into an EDGE — eliminating the fill confound while keeping the
-          diagnostic separation baseline ↔ optimiser.  The chosen operating point
-          and the before/after metrics are reported on
-          ``RuleDiscoveryResponse.entry_optimization``.
+        * ``"limit"`` — the pre-#185 default: the grid varies ``buy_drop_pct``
+          and the limit entry doubles as an entry-price optimiser.  Fully
+          supported, and the right choice when the limit order *is* the strategy
+          rather than an execution refinement — but be aware of what it mixes
+          together (below).
+
+        **Why the default moved.**  In ``"limit"`` mode the entry does double
+        duty: order mechanic *and* entry-price optimiser.  A deeper discount
+        fills more rarely and, crucially, **only on the paths that came back to
+        it** — so the profit factor rises on a subset of trades that is not the
+        tradeable population.  The verdict then measures the entry price rather
+        than the signal.  ``"auto"`` keeps both readings and separates them.
+
+        Both operating points and the adoption decision are reported on
+        ``RuleDiscoveryResponse.entry_optimization``.
     use_contract_target : bool
         Seed ``sell_pct``/``target_h`` from the contract's derived target.
     timestamp_col : str
@@ -438,7 +467,7 @@ class RuleDiscoveryConfig:
     grid: GridSpec = field(default_factory=GridSpec)
     walk_forward: RuleWalkForwardConfig = field(default_factory=RuleWalkForwardConfig)
     criteria: SelectionCriteria = field(default_factory=SelectionCriteria)
-    entry_mode: str = "limit"
+    entry_mode: str = "auto"
     use_contract_target: bool = True
     timestamp_col: str = UNSET
     signal_col: str = "__rule_signal__"
@@ -685,29 +714,76 @@ class ValidatedRule:
 
 @dataclass
 class EntryOptimization:
-    """Outcome of the ``entry_mode="auto"`` two-stage entry evaluation.
+    """Both operating points of the ``entry_mode="auto"`` evaluation, with evidence.
 
-    The verdict always comes from the market baseline (Stage 1).  Stage 2 runs a
-    limit optimiser over ``buy_drop_pct`` on the survivor and reports here whether
-    a tradeable improvement was found and adopted, with the before/after metrics
-    for full transparency.
+    Stage 1 evaluates the rule at a **market** entry and that verdict is
+    authoritative — Stage 2 can never turn a NON-EDGE into an edge, only choose
+    which parameters get published.  Stage 2 sweeps ``buy_drop_pct`` on the
+    survivor, replays the winner out-of-sample, and adopts it only if it clears
+    all three conditions below.
+
+    Both points are carried as full artefacts rather than as three scalars each.
+    Three scalars cannot answer "how many trades, at what win rate, with what
+    expectancy" about a point you are being asked to trade, and the limit point
+    used to be published on strictly less evidence than the market point it
+    replaced.
+
+    The adoption criterion, all three evaluated **out-of-sample**
+    ----------------------------------------------------------------
+    1. ``fill_rate >= min_fill_rate_opt`` — no PF inflated by rare fills.
+    2. ``opportunity_sharpe >= market's`` — risk-adjusted return per unit of
+       *time*, so a point that trades less often must earn more per trade to
+       compensate.  See :func:`forgedge.rule_discovery.opportunity_sharpe` for
+       why this is not ``StatisticalValidation.sharpe_ratio``.
+    3. ``net_gain >= min_net_gain_retention × market's`` — a backstop against
+       the one case the Sharpe cannot see, a tiny mu with a tiny sigma.
+
+    Evaluating out-of-sample is the conservative choice and the only defensible
+    one: adopting the limit point *because it is better* means it has to be
+    better where selection did not reach.
 
     Attributes
     ----------
     selected_entry : str
-        Entry mechanism of the adopted operating point — ``"market"`` (baseline
-        kept) or ``"limit"`` (optimiser improved it at an acceptable fill).
+        Entry mechanism of the published point — ``"market"`` or ``"limit"``.
+    authoritative : str
+        Where the **verdict** came from.  Always ``"market"``.
     adopted : bool
-        ``True`` when the limit optimiser improved ``pf_score_tpm`` at a fill
-        ``>= min_fill_rate_opt`` and was adopted as the operating point.
-    min_fill_rate_opt : float
-        The fill floor enforced on the optimisation stage.
-    market_profit_factor, market_fill_rate, market_pf_score_tpm : float
-        Stage-1 (market baseline) in-sample metrics.
-    limit_profit_factor, limit_fill_rate, limit_pf_score_tpm : float or None
-        Best limit candidate meeting the fill floor (``None`` when none did).
+        ``True`` when the limit point cleared all three conditions.
+    failed_condition : str or None
+        ``"fill"`` / ``"sharpe"`` / ``"net_gain"`` — which condition stopped the
+        adoption, or ``None`` when adopted (or when there was no candidate at
+        all).  This is the field that separates *"the limit point was better but
+        did not survive out-of-sample"* from *"the limit point was not better"*,
+        two cases the previous implementation could not tell apart because the
+        information that distinguishes them was never computed.
+    min_fill_rate_opt, min_net_gain_retention : float
+        The thresholds actually applied.
+    market_rule, limit_rule : ValidatedRule or None
+        The two operating points as publishable rules.
+    market_summary, limit_summary : BacktestSummary or None
+        Their **out-of-sample** summaries, over identical test windows.
+    limit_walk_forward : WalkForwardResult or None
+        The limit point's own walk-forward — a *replay* of a fixed
+        ``buy_drop_pct`` (``reoptimise=False``), not a re-optimisation, so it
+        adds no selection and therefore no ``n_trials``.
+    limit_validation : StatisticalValidation or None
+        The limit point's in-sample statistics, carrying **its own** trial count
+        (Stage 1 cells + Stage 2 cells).  Reported as an absolute metric; the
+        ``min_dsr`` gate always reads the market point's.
+    market_opportunity_sharpe, limit_opportunity_sharpe : float or None
+        Condition 2's two sides.
+    market_oos_net_gain, limit_oos_net_gain : float or None
+        Condition 3's two sides.
+    limit_oos_fill_rate : float or None
+        Condition 1's measured value.
     limit_buy_drop_pct : float or None
-        ``buy_drop_pct`` of that candidate.
+        The swept parameter's winning value.
+    market_profit_factor, market_fill_rate, market_pf_score_tpm : float
+        Stage-1 **in-sample** metrics (unchanged meaning).
+    limit_profit_factor, limit_fill_rate, limit_pf_score_tpm : float or None
+        The best in-sample limit candidate's metrics.  Retained for continuity;
+        ``pf_score_tpm`` is no longer the adoption criterion.
     reason : str
         Human-readable explanation of the decision.
     """
@@ -723,9 +799,61 @@ class EntryOptimization:
     limit_pf_score_tpm: Optional[float]
     limit_buy_drop_pct: Optional[float]
     reason: str
+    # -- the published-evidence half (#185) --
+    authoritative: str = "market"
+    failed_condition: Optional[str] = None
+    min_net_gain_retention: float = 0.5
+    market_rule: Optional["ValidatedRule"] = None
+    limit_rule: Optional["ValidatedRule"] = None
+    market_summary: Optional[BacktestSummary] = None
+    limit_summary: Optional[BacktestSummary] = None
+    limit_walk_forward: Optional["WalkForwardResult"] = field(default=None, repr=False)
+    limit_validation: Optional["StatisticalValidation"] = None
+    market_opportunity_sharpe: Optional[float] = None
+    limit_opportunity_sharpe: Optional[float] = None
+    market_oos_net_gain: Optional[float] = None
+    limit_oos_net_gain: Optional[float] = None
+    limit_oos_fill_rate: Optional[float] = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        """Flat, JSON-friendly view.
+
+        Hand-written rather than ``asdict``: the walk-forward carries a trade
+        ledger, and a serialiser that deep-copies a DataFrame into a "summary"
+        dict is a memory bug waiting for a large run.  The replay is summarised
+        by the numbers a reader needs; the object itself stays reachable on the
+        attribute.
+        """
+        out = {
+            "selected_entry": self.selected_entry,
+            "authoritative": self.authoritative,
+            "adopted": self.adopted,
+            "failed_condition": self.failed_condition,
+            "min_fill_rate_opt": self.min_fill_rate_opt,
+            "min_net_gain_retention": self.min_net_gain_retention,
+            "market_profit_factor": self.market_profit_factor,
+            "market_fill_rate": self.market_fill_rate,
+            "market_pf_score_tpm": self.market_pf_score_tpm,
+            "limit_profit_factor": self.limit_profit_factor,
+            "limit_fill_rate": self.limit_fill_rate,
+            "limit_pf_score_tpm": self.limit_pf_score_tpm,
+            "limit_buy_drop_pct": self.limit_buy_drop_pct,
+            "market_opportunity_sharpe": self.market_opportunity_sharpe,
+            "limit_opportunity_sharpe": self.limit_opportunity_sharpe,
+            "market_oos_net_gain": self.market_oos_net_gain,
+            "limit_oos_net_gain": self.limit_oos_net_gain,
+            "limit_oos_fill_rate": self.limit_oos_fill_rate,
+            "reason": self.reason,
+        }
+        for name, point in (("market", self.market_summary), ("limit", self.limit_summary)):
+            out[f"{name}_oos_summary"] = asdict(point) if point is not None else None
+        out["market_params"] = (asdict(self.market_rule.params)
+                                if self.market_rule is not None else None)
+        out["limit_params"] = (asdict(self.limit_rule.params)
+                               if self.limit_rule is not None else None)
+        out["limit_validation"] = (asdict(self.limit_validation)
+                                   if self.limit_validation is not None else None)
+        return out
 
 
 @dataclass

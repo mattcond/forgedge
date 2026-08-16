@@ -524,6 +524,73 @@ resp = rd.run() -> RuleDiscoveryResponse
 
 L'`event_candidate` che passi deve essere quello a cui `contract.event_candidate_id` effettivamente punta, o il costruttore solleva `ValueError`.
 
+#### Modalità d'ingresso — cosa misura il verdetto
+
+`entry_mode` ha default **`"auto"`** (era `"limit"` prima della #185), e vale la
+pena capire il cambio perché muove i verdetti.
+
+In modalità `"limit"` la griglia varia `buy_drop_pct`, quindi l'entrata a limite
+fa due lavori insieme: meccanica d'ordine *e* ottimizzatore del prezzo
+d'ingresso. Uno sconto più profondo riempie di rado e — qui sta il punto —
+**solo sui percorsi che sono tornati giù a prenderlo**. Il profit factor sale su
+un sottoinsieme di trade che non è la popolazione tradeable. È il *fill
+confound*, e sotto `"limit"` il verdetto misura in parte il prezzo d'ingresso
+invece del segnale.
+
+`"auto"` separa le due letture:
+
+- **Stage 1** valuta la regola con entrata market (fill al next-open, ≈100%).
+  Questo verdetto è autoritativo. Lo Stage 2 non può mai trasformare un
+  `NON-EDGE` in un edge.
+- **Stage 2** sweepa `buy_drop_pct` sui sopravvissuti, **replaya** il vincitore
+  fuori campione sulle stesse finestre di test dello Stage 1, e lo pubblica solo
+  se supera tutte e tre le condizioni di adozione.
+
+Le condizioni, tutte misurate su quel replay:
+
+| # | condizione | cosa impedisce |
+|---|---|---|
+| 1 | `fill_rate >= min_fill_rate_opt` | un PF gonfiato da fill rari |
+| 2 | `opportunity_sharpe >= quello del market` | un punto che trada meno per un edge poco migliore |
+| 3 | `net_gain >= min_net_gain_retention × quello del market` | un µ minuscolo con un σ minuscolo |
+
+La condizione 2 usa uno **Sharpe diverso da quello su
+`StatisticalValidation`**, e la differenza è tutto il criterio. `validate()`
+annualizza per *capacità* — `bars_per_year / avg_holding_bars`, quanti periodi
+di holding non sovrapposti stanno in un anno. È il denominatore giusto per
+«quanto è buona questa regola», perché non la premia per l'accidente di essersi
+attivata spesso. Ma i due punti operativi stanno sulla *stessa* regola e tengono
+la posizione per la stessa durata, quindi la capacità è **identica per entrambi**
+e il fattore `sqrt` si semplifica: il confronto collassa sullo Sharpe per trade,
+esattamente la metrica cieca all'opportunità da cui il criterio vuole uscire.
+
+`opportunity_sharpe` conta invece i trade realizzati — `(µ/σ) × sqrt(trade per
+anno)` — quindi dimezzare i trade costa `sqrt(2) ≈ 1.41×` che la qualità per
+trade deve battere. Sull'esempio della issue:
+
+| | market | limite | rapporto |
+|---|---|---|---|
+| Sharpe per trade | 0.267 | 0.375 | 1.41× |
+| annualizzato per capacità | 5.095 | 7.164 | 1.41× — invariato |
+| `opportunity_sharpe` | 1.461 | 1.299 | **0.89×** |
+| rendimento totale | 48% | 36% | **0.75×** |
+
+La lettura per capacità adotta un punto che rende un quarto in meno.
+
+Entrambi i punti sono riportati per intero su
+`RuleDiscoveryResponse.entry_optimization` — ciascuno con la propria regola,
+il proprio summary fuori campione e le proprie statistiche, più
+`failed_condition` che nomina quale condizione ha fermato l'adozione. Il
+walk-forward del punto limite è un *replay* (`reoptimise=False`), quindi non
+aggiunge selezione né `n_trials`; la sua DSR porta il proprio conteggio di
+tentativi più alto (celle Stage 1 + Stage 2) come metrica assoluta, mentre il
+gate `min_dsr` legge sempre quella del punto market — il verdetto non paga mai
+per lo Stage 2.
+
+`"limit"` resta pienamente supportata ed è la scelta giusta quando l'ordine a
+limite *è* la strategia, non un raffinamento dell'esecuzione.
+
+
 Gli attributi importanti di una `RuleDiscoveryResponse`: `verdict` (`"EDGE"|"PARTIAL-EDGE"|"NON-EDGE"|"INSUFFICIENT-DATA"`), `is_edge` (vero per i primi due), `rejection_reasons`, `validated_rule` (porta `.params`, un `BacktestParams`), `in_sample_summary` (`total_trades`, `profit_factor`, `win_rate_pct`, `expectancy`, `tpm_mu`), `execution_envelope` (`.conservative`/`.optimistic` — vedi §17), `walk_forward` (`.oos_summary`, `.consistency`), `statistical_validation` (`.temporal_stability`, `.deflated_sharpe`), `regime_analysis`, `excursion` (MAE/MFE), `entry_optimization` (popolato solo quando `entry_mode="auto"`, §15).
 
 `from forgedge.rule_discovery import text_report, html_report` costruiscono report human-readable/HTML da una response; `resp.to_dict()` dà una forma serializzabile in JSON.
@@ -740,7 +807,7 @@ Ogni modulo accetta una dataclass che porta i suoi parametri. Questa sezione cop
 | `grid` | costruita automaticamente | griglia di ricerca attorno al target derivato del contratto quando lasciata vuota |
 | `walk_forward` | `RuleWalkForwardConfig()` | `n_splits=4`, `min_train_months=6`, `purge_bars=None` (→ orizzonte testato) |
 | `criteria` | `SelectionCriteria()` | gate del verdetto — vedi §15 |
-| `entry_mode` | `"limit"` | `"limit"`/`"market"`/`"auto"`, §15 |
+| `entry_mode` | `"auto"` | `"auto"`/`"market"`/`"limit"`, §15 |
 | `selection_mode` | `"walk_forward"` | punto operativo scelto solo dentro le finestre di train; `"full_sample"` è il comportamento legacy |
 
 Default di `BacktestParams`: `direction="long"`, `buy_type="limit"`, `buy_drop_pct=0.010`, `buy_delay_bar=6`, `sell_pct=0.040`, `target_h=24`, `fee=0.002`, `early_stopping=True`.
@@ -1179,7 +1246,7 @@ Questa è la sezione che il compito ha chiesto di trattare con particolare cura.
 | **`time_budget=` (`TimeBudget` esplicito)** | `None` — ma il purging resta attivo di default anche senza | `forge(..., time_budget=TimeBudget.build(n_bars=len(kpi), horizon_bars=48, embargo_bars=5))` | Un unico asse IS/OOS condiviso ed esplicito tra Event e Alpha Discovery, con un embargo controllabile | Più da configurare correttamente; sbagliare l'argomento `horizon_bars` sbaglia anche la larghezza di purge | Pipeline multi-modulo costruite a mano (non via `forge()`) dove serve che gli split di Event e Alpha Discovery coincidano esattamente |
 | **`purge_bars=0`** (opt-out dal purging attivo di default) | larghezza di purge = `max(horizon_grid)` (default-on) | `TimeBudget.build(..., purge_bars=0)`, o `RuleWalkForwardConfig(purge_bars=0)` per M3 | Riproduce esattamente i risultati numerici pre-purging (utile per confrontare con run vecchie, o i vecchi valori golden-test della libreria stessa) | Reintroduce un look-ahead reale, anche se di solito piccolo: le barre IS il cui orizzonte forward attraversa nel OOS non vengono più escluse | Solo quando serve specificamente riproducibilità storica, non per uso normale |
 | **`power_gate=False`** (`SelectionCriteria`) | `True` (default-on, opt-out) | `RuleDiscoveryConfig(criteria=SelectionCriteria(power_gate=False))` | Un verdetto che altrimenti verrebbe declassato a `INSUFFICIENT-DATA` per mancanza di potere statistico OOS viene lasciato passare come `EDGE`/`PARTIAL-EDGE` | Perdi il segnale proprio della pipeline che l'evidenza OOS è troppo debole per fidarsi della stima puntuale — un contratto può sembrare tradabile puramente perché nessuno ha controllato se la dimensione del campione potesse sostenere l'affermazione | Praticamente mai per una decisione live; solo per ispezionare quale sarebbe stato il verdetto *non filtrato* |
-| **`entry_mode="market"` o `"auto"`** | `"limit"` | `RuleDiscoveryConfig(entry_mode="market")` | `"market"` isola l'edge del segnale dal meccanismo di ingresso (nessun confound sul fill rate); `"auto"` lascia che un verdetto in modalità market sia autoritativo mentre prova comunque a raffinare il prezzo di ingresso sui sopravvissuti | `"market"` assume fill ≈100% al prossimo open, che può sovrastimare l'eseguibilità reale per strumenti illiquidi; `"auto"` è il più complesso dei tre e aggiunge un secondo passaggio di backtest | `"market"` quando sospetti che un EDGE in modalità `"limit"` sia un artefatto del fill rate (pochi fill profondi e selezionati); `"auto"` come via di mezzo una volta che ti fidi del verdetto in modalità market |
+| **`entry_mode="limit"`** (uscire dalla valutazione a due stadi di default) | `"auto"` (default dalla #185) | `RuleDiscoveryConfig(entry_mode="limit")` | La griglia ottimizza `buy_drop_pct` come parte del verdetto, quindi una strategia il cui *edge è l'ordine a limite stesso* viene misurata come una cosa sola invece che divisa in segnale + esecuzione | Reintroduce il fill confound nel verdetto: uno sconto più profondo riempie solo sui percorsi che sono tornati a prenderlo, quindi il PF sale su un sottoinsieme che non è la popolazione tradeable | Quando l'ordine a limite *è* davvero la strategia. Per un segnale che stai cercando di misurare, `"auto"` separa le due letture e pubblica comunque il punto limite quando se lo merita |
 | **`selection_mode="full_sample"`** | `"walk_forward"` | `RuleDiscoveryConfig(selection_mode="full_sample")` | Ripristina il comportamento legacy: il punto operativo viene scelto vagliando l'*intera* tabella, non solo le finestre di train walk-forward | Il profit factor in-sample e i parametri operativi pubblicati possono essere influenzati da dati che poi diventano parte della finestra di test OOS — una fuga reale e documentata che la modalità walk-forward esiste per chiudere | Solo compatibilità legacy; la ragione documentata per evitarlo in lavoro nuovo è esplicita nel sorgente |
 | **`AlphaConfig.horizon_enrichment=None`** (opt-out) | `(0.5, 1.0, 2.0)` (default-on) | `AlphaConfig(horizon_enrichment=None)` | Restringe Alpha Discovery strettamente alla `horizon_grid` base, senza aggiunte per-evento | Secondo la misurazione degli stessi autori, **34 su 247** alpha promossi sul dataset ADA hanno trovato il loro orizzonte migliore *solo* grazie a questo arricchimento — disattivarlo li perderebbe silenziosamente | Riprodurre una baseline pre-arricchimento, o quando hai una ragione specifica per cui la griglia base non deve essere estesa |
 | **`pattern_features()`** (una chiamata a funzione separata, non un flag di config) | non chiamata | `from forgedge import pattern_features; kpi = pattern_features(kpi)` | Aggiunge un'unica colonna categoriale `candle_pattern` (dieci formazioni con nome: HAMMER, DOJI, pattern di engulfing, …) che attraversa `forge()` end-to-end come eventi one-hot | I pattern con nome codificano soglie fisse scelte dall'uomo; la geometria continua di `candle_features()` è preferita per la discovery automatica specificamente perché FORGE deriva le proprie soglie asset-adattive invece | Lavoro manuale/esplorativo dove vuoi specificamente testare ipotesi su pattern con nome, non per il percorso di discovery automatica di default |
