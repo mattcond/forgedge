@@ -338,3 +338,43 @@ class TestStandaloneModules:
         })
         ed = EventDiscovery(df, config=DiscoveryConfig())
         assert ed.config.timestamp_col == "open_dt"
+
+
+class TestUnresolvedFieldsAtPublicBoundaries:
+    """A public function that receives an unresolved config field falls back to
+    its own documented default.
+
+    Forwarding a config field straight into a helper is an ordinary, documented
+    pattern::
+
+        cfg = RuleDiscoveryConfig(...)
+        run_backtest(frame, cfg.signal_col, params, timestamp_col=cfg.timestamp_col)
+
+    Once a field's class default becomes ``UNSET``, that pattern hands the
+    sentinel to a function whose signature already declares a default. ``UNSET``
+    means "you decide", so the function's default *is* the decision — anything
+    else turns a resolvable state into a ``KeyError`` deep inside a column
+    lookup.  This will keep mattering as later steps convert more fields.
+    """
+
+    def test_run_backtest_accepts_an_unresolved_timestamp_col(self):
+        import numpy as np
+        from forgedge.rule_discovery.backtest import run_backtest
+        from forgedge.rule_discovery.models import BacktestParams
+
+        rng = np.random.default_rng(11)
+        n = 300
+        close = 100 + np.cumsum(rng.normal(0, 0.5, n))
+        frame = pd.DataFrame({
+            "open_dt": pd.date_range("2024-01-01", periods=n, freq="D"),
+            "open": close, "high": close * 1.01, "low": close * 0.99, "close": close,
+            "sig": (rng.random(n) < 0.1).astype(float),
+        })
+        cfg = RuleDiscoveryConfig()
+        assert cfg.timestamp_col is UNSET       # the caller never resolved it
+
+        summary = run_backtest(
+            frame, "sig", BacktestParams(target_h=3),
+            timestamp_col=cfg.timestamp_col,
+        )
+        assert summary.total_signals > 0
