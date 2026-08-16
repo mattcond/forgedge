@@ -990,13 +990,31 @@ def _check_tp_floor(values: Dict[str, Any], ctx: PipelineContext) -> Optional[st
             f"non si può configurare.")
 
 
+#: `SelectionCriteria.min_fill_rate`'s class default — see `_check_entry_mode_gate`.
+_DEFAULT_MIN_FILL_RATE = 0.40
+
+
 def _check_entry_mode_gate(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
-    """A fill-rate gate that the entry mode makes inert."""
+    """A fill-rate gate the caller tuned, that the entry mode makes inert.
+
+    Silent on the untouched class default.  Since ``entry_mode`` defaults to
+    ``"auto"`` (#185), where Stage 1 fills ≈ 100%, a check that fired whenever
+    the mode is not ``"limit"`` would fire on *every* default configuration —
+    the always-on warning that F14 is about, and the one users learn to skip
+    past on their way to the real findings.
+
+    The same technique as ``_check_timeframe``: flag the value that was moved,
+    not the value that was inherited.  A caller who deliberately sets the
+    default back gets silence — the cost of not carrying an ``UNSET`` sentinel
+    on this field, and the same limitation its sibling accepts.
+    """
     got = _need(values, "rule_discovery.entry_mode", "rule_discovery.criteria.min_fill_rate")
     if got is None:
         return None
     mode, min_fill = got[0], float(got[1])
     if mode == "limit" or min_fill <= 0:
+        return None
+    if abs(min_fill - _DEFAULT_MIN_FILL_RATE) < 1e-12:
         return None
     return (f"entry_mode={mode!r} riempie ~100 %, quindi criteria.min_fill_rate="
             f"{min_fill:g} non scatta mai e uno dei tre criteri di early "

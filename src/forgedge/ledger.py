@@ -49,6 +49,16 @@ class HypothesisLedger:
         Operational-grid combinations screened per contract by Rule Discovery
         (0 until the first rule is backtested; the grid is the same shape for
         every contract of a run).
+
+        **The number changed meaning with ``entry_mode="auto"`` (#185)** and is
+        not comparable with runs from before it.  Stage 1 collapses
+        ``buy_drop_pct`` and ``buy_delay_bar`` to one value each — they are
+        inert at a next-open fill — so the default grid screens 15 cells where
+        ``"limit"`` mode screened 75.  This is a genuinely smaller search, not a
+        bookkeeping change: it is also why the Deflated Sharpe's selection
+        haircut shrank.  Stage 2's five cells are counted against the *limit*
+        operating point only (``EntryOptimization.limit_validation``), never
+        against the verdict.
     """
 
     m1_candidates: int = 0

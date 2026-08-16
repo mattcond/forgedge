@@ -111,17 +111,22 @@ def opportunity_sharpe(trades: pd.DataFrame, span_years: float) -> float:
     it is applied anyway so the number reported is an annual rate rather than an
     uninterpretable intermediate.
 
-    Returns ``nan`` for fewer than two trades or zero dispersion.
+    Returns ``nan`` for fewer than two trades or dispersion indistinguishable
+    from zero.  The second guard is relative, not ``sd > 0``: a ledger of
+    identical gains has a standard deviation around ``1e-18`` rather than
+    exactly zero, which would sail through and yield a Sharpe of ``1e16``.  An
+    "infinitely good" operating point entering a comparison would win it every
+    time; zero dispersion means the ratio is *undefined*, not enormous.
     """
     if trades is None or len(trades) < 2 or span_years <= 0:
         return float("nan")
     net = trades["net_pct_gain"].to_numpy(dtype=float)
+    mu = float(net.mean())
     sd = float(net.std(ddof=1))
-    if not (sd > 0):
+    if not (np.isfinite(sd) and sd > 1e-9 * max(abs(mu), 1.0)):
         return float("nan")
-    per_trade = float(net.mean()) / sd
     trades_per_year = len(net) / float(span_years)
-    return per_trade * math.sqrt(max(trades_per_year, 1e-12))
+    return (mu / sd) * math.sqrt(max(trades_per_year, 1e-12))
 
 
 def validate(

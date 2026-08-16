@@ -34,7 +34,7 @@ from forgedge.rule_discovery import (
     walk_forward,
 )
 from forgedge.rule_discovery import excursion_stats, execution_envelope
-from forgedge.rule_discovery.validation import _ttest_1samp_greater
+from forgedge.rule_discovery.validation import _ttest_1samp_greater, opportunity_sharpe
 from forgedge.resolver import PipelineContext, collect_context, resolve, resolve_config
 from forgedge.unset import UNSET
 
@@ -625,12 +625,22 @@ class TestRangeOfAction:
         promoted = ad.promoted_contracts()
         by_id = {c.event_id: c for c in cands}
         c = promoted[0]
-        resp = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id]).run()
-        if resp.in_sample_summary.total_trades > 0:
-            assert resp.execution_envelope is not None
-            assert resp.excursion is not None
-            d = resp.to_dict()
-            assert "execution_envelope" in d and "excursion" in d
+        # `early_elimination=False` so the full pipeline always runs.  Guarding
+        # on `total_trades > 0` was not the right condition: under a market
+        # entry every signal fills, so a rule short-circuited by the fast screen
+        # still has trades while legitimately carrying no diagnostics — which is
+        # what early elimination *is*, and what `test_early_elimination_toggle`
+        # pins.  This test is about the response carrying its diagnostics when
+        # they were computed.
+        resp = RuleDiscovery(
+            ed.df, c, by_id[c.event_candidate_id],
+            RuleDiscoveryConfig(criteria=SelectionCriteria(early_elimination=False)),
+        ).run()
+        assert resp.in_sample_summary.total_trades > 0
+        assert resp.execution_envelope is not None
+        assert resp.excursion is not None
+        d = resp.to_dict()
+        assert "execution_envelope" in d and "excursion" in d
 
 
 # ---------------------------------------------------------------------------
@@ -1092,6 +1102,79 @@ class TestEndToEnd:
         assert opt.authoritative == "market"
 
 
+class TestOpportunitySharpe:
+    """The quantity condition 2 is built on, and why it is not the other one.
+
+    The worked example from #185: the limit point earns more per trade and
+    trades far less often.  Which point wins depends entirely on how "annualise"
+    is defined, and the two definitions disagree in opposite directions.
+    """
+
+    @staticmethod
+    def _trades(n: int, mu: float, sd: float, seed: int = 0) -> pd.DataFrame:
+        """A ledger with exactly the requested mean and standard deviation."""
+        rng = np.random.default_rng(seed)
+        x = rng.normal(0.0, 1.0, n)
+        x = (x - x.mean()) / x.std(ddof=1)
+        return pd.DataFrame({"net_pct_gain": mu + sd * x})
+
+    def test_it_matches_the_closed_form(self):
+        tr = self._trades(60, mu=0.008, sd=0.030)
+        got = opportunity_sharpe(tr, span_years=2.0)
+        expected = (0.008 / 0.030) * math.sqrt(60 / 2.0)
+        assert got == pytest.approx(expected, rel=1e-9)
+
+    def test_halving_the_trades_costs_root_two(self):
+        """The property the whole criterion rests on: the same per-trade edge
+        at half the frequency is worth `1/sqrt(2)` as much."""
+        many = opportunity_sharpe(self._trades(120, 0.01, 0.03), span_years=2.0)
+        few = opportunity_sharpe(self._trades(60, 0.01, 0.03), span_years=2.0)
+        assert many / few == pytest.approx(math.sqrt(2.0), rel=1e-9)
+
+    def test_it_disagrees_with_the_capacity_annualisation_where_it_matters(self):
+        """`validate()` annualises by `bars_per_year / avg_holding_bars` — the
+        number of non-overlapping holding periods that fit in a year.
+
+        Two operating points on the *same* rule hold for the same length, so
+        that factor is identical for both and cancels: the comparison collapses
+        onto the per-trade Sharpe, which is blind to frequency.  Here the limit
+        point wins on it by 41% while earning 25% less in total, which is the
+        adoption the criterion exists to prevent.
+        """
+        market = self._trades(60, mu=0.0080, sd=0.030, seed=1)
+        limit = self._trades(24, mu=0.0150, sd=0.040, seed=2)
+        hold_bars, bpy, span = 24.0, 24 * 365, 2.0
+
+        capacity = {
+            name: validate(tr, base_rate=0.5, n_trials=1,
+                           bars_per_year=bpy, avg_holding_bars=hold_bars).sharpe_ratio
+            for name, tr in (("market", market), ("limit", limit))
+        }
+        opportunity = {
+            name: opportunity_sharpe(tr, span_years=span)
+            for name, tr in (("market", market), ("limit", limit))
+        }
+        total = {name: float(tr["net_pct_gain"].sum())
+                 for name, tr in (("market", market), ("limit", limit))}
+
+        assert capacity["limit"] > capacity["market"]        # would adopt
+        assert opportunity["limit"] < opportunity["market"]  # correctly refuses
+        assert total["limit"] < total["market"]              # and it earns less
+        # The capacity reading is the per-trade Sharpe times a constant: the
+        # ratio it reports is the per-trade ratio, unchanged by annualising.
+        per_trade = {name: tr["net_pct_gain"].mean() / tr["net_pct_gain"].std(ddof=1)
+                     for name, tr in (("market", market), ("limit", limit))}
+        assert (capacity["limit"] / capacity["market"]) == pytest.approx(
+            per_trade["limit"] / per_trade["market"], rel=1e-6   # sharpe_ratio is rounded
+        )
+
+    def test_it_is_undefined_rather_than_wrong_on_thin_input(self):
+        assert math.isnan(opportunity_sharpe(self._trades(1, 0.01, 0.03), 1.0))
+        assert math.isnan(opportunity_sharpe(self._trades(10, 0.01, 0.03), 0.0))
+        flat = pd.DataFrame({"net_pct_gain": [0.01] * 10})   # zero dispersion
+        assert math.isnan(opportunity_sharpe(flat, 1.0))
+
+
 class TestEntryAdoption:
     """The three-condition, out-of-sample adoption criterion (#185).
 
@@ -1241,7 +1324,12 @@ class TestWalkForwardSelection:
 
     @pytest.fixture(scope="class")
     def pipeline(self):
-        df = _predictive_kpi_table()
+        # `_market_edge_kpi_table` since #185.  `_predictive_kpi_table`
+        # produced a tradeable verdict only under the old `"limit"` default,
+        # where the entry discount was part of the measured edge; at a market
+        # entry it reverts too weakly and every rule is NON-EDGE, which would
+        # have quietly switched this whole class off via its skip guard.
+        df = _market_edge_kpi_table()
         ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))
         cands = ed.run()
         ad = AlphaDiscovery(ed.df, cands, AlphaConfig(asset="SYN", timeframe="1H"))
@@ -1321,7 +1409,12 @@ class TestPowerGate:
 
     @pytest.fixture(scope="class")
     def pipeline(self):
-        df = _predictive_kpi_table()
+        # `_market_edge_kpi_table` since #185.  `_predictive_kpi_table`
+        # produced a tradeable verdict only under the old `"limit"` default,
+        # where the entry discount was part of the measured edge; at a market
+        # entry it reverts too weakly and every rule is NON-EDGE, which would
+        # have quietly switched this whole class off via its skip guard.
+        df = _market_edge_kpi_table()
         ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))
         cands = ed.run()
         ad = AlphaDiscovery(ed.df, cands, AlphaConfig(asset="SYN", timeframe="1H"))
@@ -1421,7 +1514,12 @@ class TestSearchLevelGates:
 
     @pytest.fixture(scope="class")
     def pipeline(self):
-        df = _predictive_kpi_table()
+        # `_market_edge_kpi_table` since #185.  `_predictive_kpi_table`
+        # produced a tradeable verdict only under the old `"limit"` default,
+        # where the entry discount was part of the measured edge; at a market
+        # entry it reverts too weakly and every rule is NON-EDGE, which would
+        # have quietly switched this whole class off via its skip guard.
+        df = _market_edge_kpi_table()
         ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))
         cands = ed.run()
         ad = AlphaDiscovery(ed.df, cands, AlphaConfig(asset="SYN", timeframe="1H"))
@@ -1515,8 +1613,16 @@ class TestConfig:
         c = promoted[0]
 
         # A 30% limit discount never fills (1% intrabar) → fast-screen NON-EDGE.
+        #
+        # `entry_mode="limit"` is pinned deliberately.  The never-filling
+        # discount is a *limit-mode device*: under the default `"auto"`, Stage 1
+        # enters at the next open, `buy_drop_pct` is inert, the rule fills 100%
+        # and the fill screen has nothing to fire on.  This test is about
+        # `early_elimination`, so it keeps the mode in which its trigger exists
+        # rather than swapping in a different trigger and testing something else.
         def make_cfg(early):
             return RuleDiscoveryConfig(
+                entry_mode="limit",
                 grid=GridSpec(buy_drop_pct=[0.30], sell_pct=[0.05], target_h=[12]),
                 walk_forward=WalkForwardConfig(n_splits=2, min_train_months=3),
                 criteria=SelectionCriteria(early_elimination=early),

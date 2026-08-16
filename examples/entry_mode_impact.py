@@ -18,10 +18,15 @@ The two DSR channels matter independently and are easy to conflate:
 
   2. **A defined DSR where there was none.**  The radicand goes negative — DSR
      undefined, which blocks a full EDGE in ``_decide`` — when
-     ``n_trials >= n_obs**(1/gamma) = n_obs**1.73``.  At 75 trials that is every
-     rule with <= 12 trades; at 15 it is <= 4.  On low-frequency data that is
-     not an edge case, and a rule unblocked this way did not get a *better*
-     statistic, it got one at all.
+     ``n_obs <= n_trials ** gamma``.  At 75 trials that is every rule with
+     <= 12 trades; at 15 it is <= 4.  A rule unblocked this way did not get a
+     *better* statistic, it got one at all.
+
+     On this fixture the channel turns out to be **empty**, and the reason is
+     worth knowing: a rule with 12 trades is eliminated by the dynamic
+     trade-count floor (``max(10, n_months * min_tpm)``) before ``validate()``
+     is ever called, so it never has a Deflated Sharpe to be undefined.  The
+     two mechanisms overlap almost exactly, and the floor gets there first.
 
 Run::
 
@@ -59,11 +64,18 @@ def _run(kpi: pd.DataFrame, entry_mode: str):
 def _dsr_undefined_below(n_trials: int) -> float:
     """Trade count at or below which the DSR radicand goes negative.
 
-    ``1 - gamma*ln(n_trials)/ln(n_obs) < 0``  <=>  ``n_obs < n_trials**(1/gamma)``.
+    ``1 - gamma*ln(n_trials)/ln(n_obs) <= 0``
+      <=>  ``ln(n_obs) <= gamma*ln(n_trials)``
+      <=>  ``n_obs <= n_trials ** gamma``
+
+    Note the exponent is ``gamma``, not ``1/gamma``: 75 trials makes the DSR
+    undefined for rules with <= 12 trades, 15 trials for <= 4.  (Inverting it
+    gives 1772 and 109, which "explains" every rule on any realistic fixture
+    and is how you end up reporting a channel that is not there.)
     """
     if n_trials <= 1:
         return 0.0
-    return math.exp(math.log(n_trials) / _GAMMA)
+    return math.exp(_GAMMA * math.log(n_trials))
 
 
 def _profile(result, label: str) -> dict:
@@ -88,6 +100,19 @@ def _profile(result, label: str) -> dict:
             "n_trials": sv.n_trials_tested if sv else float("nan"),
             "grid_cells": len(resp.grid_results or []),
             "adopted_limit": bool(opt and opt.adopted),
+            # What the *old* criterion would have decided, from the numbers this
+            # run already recorded: adopt whenever a candidate cleared the fill
+            # floor in-sample and beat the market point's `pf_score_tpm`.
+            # Computed inside the same run rather than by diffing against a
+            # previous build — nothing here depends on trusting two versions of
+            # the code to have been identical everywhere else.
+            "old_would_adopt": bool(
+                opt is not None
+                and opt.limit_pf_score_tpm is not None
+                and opt.limit_pf_score_tpm > opt.market_pf_score_tpm
+            ),
+            "reached_stage_two": opt is not None,
+            "failed_condition": (opt.failed_condition if opt else None),
         })
     df = pd.DataFrame(rows)
     val = df[df["validated"]]
@@ -161,6 +186,23 @@ def main() -> None:
     newly = both[(both["dsr_l"] != both["dsr_l"]) & (both["dsr_a"] == both["dsr_a"])]
     print(f"Channel 2 (undefined → defined): {len(newly)} rules, among "
           f"{len(both)} validated in both modes")
+
+    auto = frames["auto"]
+    stage_two = auto[auto["reached_stage_two"]]
+    if len(stage_two):
+        old_yes = stage_two["old_would_adopt"]
+        new_yes = stage_two["adopted_limit"]
+        print(f"\n─── adoption criterion, old vs new (within the same run) ───")
+        print(f"  reached Stage 2                : {len(stage_two)}")
+        print(f"  old criterion would adopt      : {int(old_yes.sum())}")
+        print(f"  new criterion adopts           : {int(new_yes.sum())}")
+        print(f"  old yes → new no               : {int((old_yes & ~new_yes).sum())}")
+        print(f"  old no  → new yes              : {int((~old_yes & new_yes).sum())}")
+        blocked = stage_two[old_yes & ~new_yes]["failed_condition"]
+        if len(blocked):
+            print("  of those, stopped by:")
+            for cond, k in blocked.value_counts().items():
+                print(f"    {cond:<10} {k}")
 
     changed = both[both["verdict_l"] != both["verdict_a"]]
     print(f"\n─── {len(changed)} verdict(s) changed ───")

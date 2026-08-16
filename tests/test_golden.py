@@ -84,11 +84,41 @@ _AD_GOLDEN = {
 # a minimum detectable expectancy of 0.0160 vs a claimed IS expectancy of
 # 0.0114, so the OOS cannot confirm an effect of the claimed size.  Economics
 # pins unchanged; the rule keeps its ValidatedRule but is not tradeable.
+#
+# ── Re-pinned again with entry_mode="auto" as the default (issue #185) ──────
+#
+# Previous values, under the "limit" default:
+#     INSUFFICIENT-DATA · PF 1.7337 · 82 trades · expectancy 0.011362
+#
+# These moved because the *measurement* changed, not because the rule did.  In
+# "limit" mode the grid varies buy_drop_pct, so the limit entry doubles as an
+# entry-price optimiser: a deeper discount fills only on the paths that came
+# back down to it, and the PF is computed on that favourable subset.  Under
+# "auto" the verdict comes from a market entry (fill 1.00 here, against 0.88),
+# so it measures the signal.
+#
+# Hence the direction of each move:
+#   · PF 1.7337 → 1.5818   — the entry discount was part of the old PF
+#   · 82 → 93 trades       — every signal fills at a market entry
+#   · expectancy up        — the surviving trades are the whole population now
+#   · INSUFFICIENT-DATA → PARTIAL-EDGE — 11 more trades and a larger claimed
+#     effect put the pooled OOS above its minimum detectable expectancy, so the
+#     §3.2 power gate no longer demotes it.  The rule is *not* newly good; the
+#     OOS is newly able to confirm it.
+#
+# This golden also exercises Stage 2's adoption path end to end: the limit
+# point clears all three out-of-sample conditions — fill 0.94 ≥ 0.80,
+# opportunity Sharpe 1.4998 ≥ 1.4302, net gain 1.9608 ≥ 0.8830 (50% of the
+# market point's 1.7661) — and is published.  A change that broke the
+# adoption criterion would move these numbers.
+#
+# Event and Alpha Discovery goldens are untouched: entry mechanics are M3's
+# business and M1/M2 never see them.
 _RD_GOLDEN = {
-    "verdict":        "INSUFFICIENT-DATA",
-    "profit_factor":  pytest.approx(1.7337, rel=1e-3),
-    "total_trades":   82,
-    "expectancy":     pytest.approx(0.011362, rel=1e-3),
+    "verdict":        "PARTIAL-EDGE",
+    "profit_factor":  pytest.approx(1.5818, rel=1e-3),
+    "total_trades":   93,
+    "expectancy":     pytest.approx(0.016959, rel=1e-3),
 }
 
 # A deterministic *long* contract under the default PROJ_LOG target_mode (issue

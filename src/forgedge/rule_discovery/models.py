@@ -266,6 +266,14 @@ class SelectionCriteria:
         Minimum composite ``pf_score_tpm``.
     min_fill_rate : float
         Minimum fill rate — below it the limit discount is too deep.
+
+        **Inert under the default ``entry_mode="auto"``**, where Stage 1 is a
+        market entry and fills ≈ 100%.  The field is kept, not removed: it is
+        fully meaningful in ``entry_mode="limit"``, and under ``"auto"`` the
+        floor that actually bites is ``min_fill_rate_opt``.  ``config_report()``
+        raises ``entry_mode_inert_gate`` when this has been *moved off its
+        default* and the mode makes it inert, rather than letting a
+        deliberately-tuned gate pass silently unused.
     min_fill_rate_opt : float
         Fill-rate floor for the ``entry_mode="auto"`` limit-optimisation stage.
         Distinct from ``min_fill_rate`` (the general gate): the limit optimiser
@@ -382,25 +390,33 @@ class RuleDiscoveryConfig:
     criteria : SelectionCriteria
         Acceptance / verdict thresholds.
     entry_mode : str
-        How the entry order is evaluated — ``"limit"`` (default), ``"market"``
-        or ``"auto"``.
+        How the entry order is evaluated — ``"auto"`` (default), ``"market"``
+        or ``"limit"``.
 
-        * ``"limit"`` — current behaviour: the grid varies ``buy_drop_pct`` and
-          the limit entry doubles as an entry-price optimiser.  **Default, fully
-          backward-compatible.**
-        * ``"market"`` — pure baseline: enter at the next bar's open (fill
+        * ``"auto"`` — two stages.  Stage 1 evaluates the rule at a **market**
+          entry and that verdict is authoritative.  Stage 2 sweeps
+          ``buy_drop_pct`` on the survivors, replays the winner out-of-sample,
+          and publishes it only if it clears all three adoption conditions (see
+          :class:`EntryOptimization`).  Stage 2 chooses *which parameters* get
+          published, never *whether* the rule is an edge.
+        * ``"market"`` — the baseline alone: enter at the next bar's open (fill
           ≈ 100%), no entry optimiser.  Isolates the *signal's* edge; the
           ``fill_rate`` gate is effectively inert.
-        * ``"auto"`` — two-stage pipeline.  Stage 1 evaluates the rule in
-          **market** mode and that verdict is authoritative.  Stage 2 then runs
-          a **limit** optimiser (varying ``buy_drop_pct``) *only* on EDGE /
-          PARTIAL survivors, crediting the improved operating point **only** at a
-          comparable fill (``>= criteria.min_fill_rate_opt``).  The optimiser can
-          improve the operating point but can never turn a NON-EDGE-market rule
-          into an EDGE — eliminating the fill confound while keeping the
-          diagnostic separation baseline ↔ optimiser.  The chosen operating point
-          and the before/after metrics are reported on
-          ``RuleDiscoveryResponse.entry_optimization``.
+        * ``"limit"`` — the pre-#185 default: the grid varies ``buy_drop_pct``
+          and the limit entry doubles as an entry-price optimiser.  Fully
+          supported, and the right choice when the limit order *is* the strategy
+          rather than an execution refinement — but be aware of what it mixes
+          together (below).
+
+        **Why the default moved.**  In ``"limit"`` mode the entry does double
+        duty: order mechanic *and* entry-price optimiser.  A deeper discount
+        fills more rarely and, crucially, **only on the paths that came back to
+        it** — so the profit factor rises on a subset of trades that is not the
+        tradeable population.  The verdict then measures the entry price rather
+        than the signal.  ``"auto"`` keeps both readings and separates them.
+
+        Both operating points and the adoption decision are reported on
+        ``RuleDiscoveryResponse.entry_optimization``.
     use_contract_target : bool
         Seed ``sell_pct``/``target_h`` from the contract's derived target.
     timestamp_col : str
