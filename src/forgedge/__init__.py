@@ -65,6 +65,7 @@ from .rule_registry import (
 from .target_optimizer import TargetOptimizer
 from .presets import forge_preset, preset_info, PRESETS
 from .summary_report import summary_report, DataQualityReport, Finding
+from .config_report import config_report, ConfigReport
 from .kpi_builder import build_features, lag_features, candle_features, pattern_features
 
 __all__ = [
@@ -88,6 +89,8 @@ __all__ = [
     "resolve",
     "resolve_config",
     "collect_context",
+    "config_report",
+    "ConfigReport",
     "EventDiscovery",
     "DiscoveryConfig",
     "CustomEvent",

@@ -582,7 +582,15 @@ class TestForgeResolution:
         assert result.context.span_months > 0
         assert result.resolution is not None
         assert "derived" in result.resolution.describe()
-        assert result.coherence == []
+        # `coherence` is the report produced by the same resolver call the
+        # pipeline ran with — so `coherence.configs` is what executed.
+        assert result.coherence is not None
+        assert not result.coherence.has_critical
+        # The module re-resolves defensively on construction, and resolve()
+        # returns copies — so the guarantee is equality of what will run,
+        # not object identity.
+        assert (result.coherence.configs["alpha"].timestamp_col
+                == result.alpha_discovery.config.timestamp_col)
 
     def test_a_schema_set_on_one_module_reaches_the_others(self):
         """The F10 case, end to end: Event Discovery's column is collected into
