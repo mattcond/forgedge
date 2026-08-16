@@ -632,13 +632,21 @@ concordavano solo condividendo un default. E `forge_preset(timestamp_col="ts")`
 configurava solo M1, quindi M2 falliva più avanti chiedendo un valore che
 credevi di aver già dato.
 
-La propagazione non è simmetrica alla raccolta, in un punto deliberato:
-`buy_price_anchor` viene *riempito* dalla colonna prezzo della sessione, ma
-impostarlo esplicitamente è una scelta di meccanica d'ordine (ancorare il limite
-sull'`"open"`) e **non** ridefinisce come la sessione chiama la sua colonna
-prezzo. `target_col` è diverso — l'uscita a orizzonte dev'essere prezzata sulla
-serie su cui M2 ha misurato i rendimenti — quindi lì un disaccordo viene
-segnalato.
+La propagazione non è simmetrica alla raccolta, in un punto deliberato, e la
+ragione va detta con precisione. `buy_price_anchor` **non è un campo di schema**:
+nomina il *livello di riferimento* a cui si applica l'offset del limite —
+`buy_price = anchor × (1 ∓ buy_drop_pct)` — e qualsiasi colonna numerica della
+tabella candele è ammessa, indicatori derivati compresi. `buy_price_anchor=
+"close_sma_3"` con `buy_drop_pct=0.10` è il modo di dire *«metti un limite al 90%
+della SMA a 3 barre»*; il motore non ha altro modo di esprimerlo.
+
+Quindi l'anchor viene *riempito* dalla colonna prezzo — il suo livello di
+riferimento di default è il close, e rinominare la colonna deve portarselo
+dietro — ma non *semina* mai il contesto, e non viene confrontato con `close_col`.
+Seminare da lì rispingerebbe `"close_sma_3"` dentro `AlphaConfig.close_col` e
+farebbe misurare a M2 i rendimenti futuri su una media mobile. `target_col` è
+diverso — l'uscita a orizzonte dev'essere prezzata sulla serie su cui M2 ha
+misurato i rendimenti — quindi lì un disaccordo viene segnalato.
 
 > **La genericità è ora un test di trasferibilità, non di qualità.**
 > `cross_pf_threshold` aveva default `2.0` indipendente da M3, mentre

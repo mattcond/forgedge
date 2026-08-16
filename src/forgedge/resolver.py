@@ -508,12 +508,19 @@ def _check_all_equal(paths: Sequence[str], label: str):
 #: subset over which disagreement is a *bug* rather than a choice.
 #:
 #: The two lists differ in exactly one place, and the difference is the whole
-#: point.  ``buy_price_anchor`` is filled from the session's price column
-#: because that is the sane default, but a caller who anchors the limit order
-#: on ``"open"`` has made an order-mechanics decision, not a schema error — so
-#: it is not in the equality check.  ``target_col`` is: the horizon exit has to
-#: be priced on the same series M2 measured its forward returns on, or the two
-#: modules are describing different instruments.
+#: point.  ``buy_price_anchor`` is **not a schema field at all**: it names the
+#: *reference level* the limit offset is applied to
+#: (``buy_price = anchor × (1 ∓ buy_drop_pct)``), and any numeric column on the
+#: candle table is legal there — including a derived indicator, which is how
+#: "place a limit at 90% of the 3-bar SMA" is expressed
+#: (``buy_price_anchor="close_sma_3"``).  It is in the propagation list only
+#: because its *default* reference level happens to be the session's close, so
+#: renaming the price column has to carry it along.  Checking it for equality
+#: against the price column would flag a whole category of legitimate strategy.
+#:
+#: ``target_col`` is checked: the horizon exit has to be priced on the same
+#: series M2 measured its forward returns on, or the two modules are describing
+#: different instruments.
 #:
 #: ``target_hit_col`` appears in neither.  It names an exit *convention*
 #: (``"close"`` conservative, ``"high"``/``"low"`` optimistic) and the
@@ -1221,11 +1228,12 @@ _CONTEXT_SOURCES: Dict[str, Tuple[str, ...]] = {
     ),
     # Note the absence of `rule_discovery.base_params.buy_price_anchor`, which
     # `_SCHEMA_GROUPS` does fill in from this field.  Propagation and seeding
-    # are not symmetric: a caller who anchors the limit on "open" is choosing
-    # order mechanics, and letting that choice define the *session's* price
-    # column would push "open" back out into `alpha.close_col` and change what
-    # M2 measures returns on.  A field seeds the context only when setting it
-    # means "this is what the column is called".
+    # are not symmetric, because the anchor is a *level*, not a name for the
+    # price series: `buy_price_anchor="close_sma_3"` says where to put the
+    # limit, not what the KPI table calls its close.  Seeding from it would
+    # push "close_sma_3" back out into `alpha.close_col` and have M2 measure
+    # forward returns on a moving average.  A field seeds the context only when
+    # setting it means "this is what the column is called".
     "close_col": (
         "alpha.close_col",
         "rule_discovery.base_params.target_col",

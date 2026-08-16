@@ -287,7 +287,7 @@ Parametri dell'esecuzione di un singolo backtest: direzione, tipo di ordine, liv
 | `buy_type` | str | `"limit"` | Tipo di ordine di ingresso. In v1.0 solo `"limit"`. |
 | `buy_drop_pct` | float | `0.010` | Distanza percentuale sotto il close a cui si piazza il limit order (1%). |
 | `buy_delay_bar` | int | `6` | Numero massimo di barre successive all'evento in cui il limit può essere eseguito. |
-| `buy_price_anchor` | str | `"close"` *(risolto dalla sessione)* | Colonna usata come anchor per il prezzo di ingresso. Viene riempita da `close_col`, ma impostarla esplicitamente è una scelta di meccanica d'ordine e **non** ridefinisce la colonna prezzo della sessione. |
+| `buy_price_anchor` | str | `"close"` *(risolto dalla sessione)* | Colonna a cui si applica l'offset del limite: `buy_price = anchor × (1 ∓ buy_drop_pct)`. **Qualsiasi colonna numerica è ammessa**, anche un indicatore derivato — `buy_price_anchor="close_sma_3", buy_drop_pct=0.10` significa "un limite al 90% della SMA a 3 barre". Viene riempita da `close_col` perché rinominare la colonna prezzo deve portarsi dietro l'anchor *di default*; un anchor esplicito è un livello di riferimento a sé e **non** ridefinisce la colonna prezzo della sessione. |
 | `sell_pct` | float | `0.040` | Take-profit come percentuale dal fill price (4%). |
 | `target_h` | int | `24` | Orizzonte massimo in barre: se il TP non viene raggiunto entro questo numero di barre, si chiude al close. |
 | `target_col` | str | `"close"` *(risolto dalla sessione)* | Colonna usata per verificare il raggiungimento dello stop a orizzonte. Deve nominare la stessa serie di `close_col`; un disaccordo viene segnalato. |

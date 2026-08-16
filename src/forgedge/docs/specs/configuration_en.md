@@ -309,7 +309,7 @@ entry/exit levels, and fee.
 | `buy_type` | str | `"limit"` | Entry order type. In v1.0 only `"limit"` is supported. |
 | `buy_drop_pct` | float | `0.010` | Percentage drop below close at which the limit order is placed (1%). |
 | `buy_delay_bar` | int | `6` | Maximum number of bars after the event signal in which the limit can be filled. |
-| `buy_price_anchor` | str | `"close"` *(session-resolved)* | Column used as anchor for the entry price. Filled in from `close_col`, but setting it explicitly is an order-mechanics choice and does **not** redefine the session's price column. |
+| `buy_price_anchor` | str | `"close"` *(session-resolved)* | Column the limit offset is applied to: `buy_price = anchor × (1 ∓ buy_drop_pct)`. **Any numeric column is legal**, including a derived indicator — `buy_price_anchor="close_sma_3", buy_drop_pct=0.10` means "a limit at 90% of the 3-bar SMA". Filled in from `close_col` so that renaming the price column carries the *default* anchor along; an explicit anchor is a reference level of its own and does **not** redefine the session's price column. |
 | `sell_pct` | float | `0.040` | Take-profit as percentage from fill price (4%). |
 | `target_h` | int | `24` | Horizon stop in bars: if take-profit is not reached within this number of bars, close at that bar's close. |
 | `target_col` | str | `"close"` *(session-resolved)* | Column used to check horizon stop. Must name the same series `close_col` does; a disagreement is reported. |

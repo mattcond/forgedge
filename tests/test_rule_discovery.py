@@ -148,6 +148,37 @@ class TestBacktestEngine:
         hi = run_backtest(df, "__sig__", BacktestParams(fee=0.01, buy_drop_pct=0.005))
         assert lo.expectancy > hi.expectancy
 
+    def test_the_limit_anchor_can_be_a_derived_indicator(self):
+        """`buy_price = anchor × (1 - buy_drop_pct)`, and the anchor is read
+        with `_PreparedCandles.column()` — any numeric column on the table.
+
+        That is not incidental: "place a limit at 90% of the 3-bar SMA" has no
+        other expression in this engine, and it is why the anchor is a
+        *reference level* rather than another name for the price series.  Pinned
+        because the resolver fills this field in from `close_col`, and a future
+        change that tightened it to price columns would remove the capability
+        without any test noticing.
+        """
+        df = _candle_with_signal(n=2000, signal_every=40, drift_after_signal=0.06)
+        df["close_sma_3"] = df["close"].rolling(3).mean().bfill()
+        base = dict(buy_type="limit", buy_drop_pct=0.005, buy_delay_bar=6,
+                    sell_pct=0.03, target_h=24)
+
+        on_close = run_backtest(df, "__sig__", BacktestParams(**base))
+        on_sma = run_backtest(
+            df, "__sig__", BacktestParams(buy_price_anchor="close_sma_3", **base)
+        )
+
+        assert on_sma.total_trades > 0
+        # A different reference level is a different set of fills — if these
+        # matched, the anchor would not be doing anything.
+        assert on_sma.total_trades != on_close.total_trades
+
+    def test_an_unknown_anchor_column_is_a_clear_error(self):
+        df = _candle_with_signal(n=500, signal_every=40)
+        with pytest.raises(KeyError, match="buy_price_anchor"):
+            run_backtest(df, "__sig__", BacktestParams(buy_price_anchor="nope"))
+
     def test_an_unresolved_fee_charges_the_documented_default(self):
         """`BacktestParams.fee` is session-resolved, so a caller who builds one
         by hand and hands it straight here holds `UNSET` (see forgedge.unset).

@@ -330,6 +330,13 @@ columns from `close_col`; `target_hit_col` is not, because it names an exit
 the documented defaults, and `run_backtest` calls it, so a hand-built params
 object handed straight in behaves exactly as before.
 
+`buy_price_anchor` is the column the limit offset is applied to —
+`buy_price = anchor * (1 -/+ buy_drop_pct)` — and accepts **any numeric column
+on the candle table**, not only a price column: `buy_price_anchor="close_sma_3"`
+with `buy_drop_pct=0.10` is "a limit at 90% of the 3-bar SMA". It is filled in
+from `close_col` (its default level is the close) but never seeds the session's
+price column and is never checked against it.
+
 `RuleWalkForwardConfig` (M3; legacy alias `WalkForwardConfig`, which is also
 what top-level `forgedge.WalkForwardConfig` resolves to) — `n_splits: int
 = 4`, `train_span_months: int | None = None` (`None` = anchored/expanding

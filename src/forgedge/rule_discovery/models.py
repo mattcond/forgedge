@@ -51,8 +51,15 @@ class BacktestParams:
     buy_delay_bar : int
         Number of bars the limit order stays live.  Ignored for market orders.
     buy_price_anchor : str
-        Column used as the anchor for the limit price.  Session-resolved from
-        the KPI table's ``close_col``; default ``"close"``.
+        Column the limit offset is applied to:
+        ``buy_price = anchor × (1 ∓ buy_drop_pct)``.  **Any numeric column on
+        the candle table is legal**, not only a price column — anchoring on a
+        derived indicator is how "place a limit at 90% of the 3-bar SMA" is
+        expressed (``buy_price_anchor="close_sma_3", buy_drop_pct=0.10``).
+
+        Session-resolved (default ``"close"``) so that renaming the price
+        column carries the *default* anchor along; an explicit anchor is a
+        reference level of its own and is never checked against ``close_col``.
     sell_pct : float
         Take-profit target as a fraction of the fill price (e.g. ``0.04`` = 4%):
         above the entry for a long, below it for a short.

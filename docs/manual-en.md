@@ -629,12 +629,21 @@ documenting 5 bp and a backtest charging 20 — silently, since the two agreed
 only by sharing a default. And `forge_preset(timestamp_col="ts")` configured M1
 alone, so M2 failed later asking for a value you believed you had already given.
 
-Propagation is not symmetric with seeding, in one deliberate place:
-`buy_price_anchor` is *filled in* from the session's price column, but setting
-it explicitly is an order-mechanics choice (anchor the limit on `"open"`) and
-does **not** redefine what the session calls its price column. `target_col` is
-different — the horizon exit must be priced on the series M2 measured returns
-on — so a disagreement there is reported.
+Propagation is not symmetric with seeding, in one deliberate place, and the
+reason is worth stating precisely. `buy_price_anchor` is **not a schema field**:
+it names the *reference level* the limit offset is applied to —
+`buy_price = anchor × (1 ∓ buy_drop_pct)` — and any numeric column on the candle
+table is legal there, including a derived indicator. `buy_price_anchor=
+"close_sma_3"` with `buy_drop_pct=0.10` is how you say *"place a limit at 90% of
+the 3-bar SMA"*; the engine has no other way to express it.
+
+So the anchor is *filled in* from the price column — its default reference level
+is the close, and renaming the column has to carry that along — but it never
+*seeds* the context, and it is not checked for equality against `close_col`.
+Seeding from it would push `"close_sma_3"` back out into `AlphaConfig.close_col`
+and have M2 measure forward returns on a moving average. `target_col` is
+different — the horizon exit must be priced on the series M2 measured returns on
+— so a disagreement there is reported.
 
 > **Genericity is now a transfer test, not a quality test.**
 > `cross_pf_threshold` used to default to `2.0` independently of M3, while

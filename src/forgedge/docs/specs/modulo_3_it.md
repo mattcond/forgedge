@@ -420,7 +420,7 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `buy_type` | `"limit"` | `"limit"` o `"market"` |
 | `buy_drop_pct` | `0.010` | Entità dello scostamento dal anchor (es. 0.01 = 1%): sconto per long, premio per short |
 | `buy_delay_bar` | `6` | Barre di vita dell'ordine limite |
-| `buy_price_anchor` | `"close"` *(risolto dalla sessione)* | Colonna usata come anchor del limite. Riempita da `close_col`; impostarla esplicitamente è una scelta di meccanica d'ordine e non ridefinisce la colonna prezzo della sessione |
+| `buy_price_anchor` | `"close"` *(risolto dalla sessione)* | Colonna a cui si applica l'offset del limite — qualsiasi colonna numerica, anche un indicatore derivato (`"close_sma_3"` con `buy_drop_pct=0.10` = un limite al 90% della SMA a 3 barre). Riempita da `close_col` perché una colonna prezzo rinominata si porti dietro l'anchor di default; un anchor esplicito è un livello a sé |
 | `sell_pct` | `0.040` | Take-profit come frazione del prezzo di fill |
 | `target_h` | `24` | Barre tenute *dopo* la barra di fill prima dell'uscita a orizzonte (l'intervallo segnale→uscita è sempre `1 + target_h`). `0` = round-trip nella stessa sessione (close della barra di fill) |
 | `target_col` | `"close"` *(risolto dalla sessione)* | Colonna per l'uscita a orizzonte. Deve nominare la stessa serie di `close_col` |

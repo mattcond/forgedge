@@ -422,7 +422,7 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `buy_type` | `"limit"` | `"limit"` or `"market"` |
 | `buy_drop_pct` | `0.010` | Magnitude of the limit offset from anchor (e.g. 0.01 = 1%): a discount for long, a premium for short |
 | `buy_delay_bar` | `6` | Lifetime of the limit order in bars |
-| `buy_price_anchor` | `"close"` *(session-resolved)* | Column used as the limit anchor. Filled in from `close_col`; setting it explicitly is an order-mechanics choice and does not redefine the session's price column |
+| `buy_price_anchor` | `"close"` *(session-resolved)* | Column the limit offset is applied to — any numeric column, including a derived indicator (`"close_sma_3"` with `buy_drop_pct=0.10` = a limit at 90% of the 3-bar SMA). Filled in from `close_col` so a renamed price column carries the default anchor along; an explicit anchor is a level of its own |
 | `sell_pct` | `0.040` | Take-profit as a fraction of fill price |
 | `target_h` | `24` | Bars held *after* the fill bar before the close-at-horizon exit (signal→exit span is always `1 + target_h`). `0` = same-session round-trip (fill bar's own close) |
 | `target_col` | `"close"` *(session-resolved)* | Column used for the horizon exit. Must name the same series as `close_col` |

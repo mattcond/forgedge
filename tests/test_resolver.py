@@ -205,29 +205,43 @@ class TestSchemaPropagation:
         assert out["alpha"].regime_col == "rg"
         assert out["alpha"].regime_stable_col == "rg_ok"
 
-    def test_an_explicit_limit_anchor_is_mechanics_not_schema(self):
+    def test_the_limit_anchor_is_a_level_not_a_name_for_the_price_series(self):
         """The one asymmetry in the schema table, and the reason it exists.
 
-        `buy_price_anchor` is *filled in* from the session's price column, but
-        it does not *define* it: a caller who anchors the limit order on
-        "open" has chosen order mechanics.  Seeding the context from it would
-        push "open" back out into `alpha.close_col` and change the series M2
-        measures forward returns on — a config the caller never asked for.
+        `buy_price_anchor` is not a schema field.  It names the *reference
+        level* the offset is applied to — `buy_price = anchor × (1 - drop)` —
+        and any numeric column on the candle table is legal there, including a
+        derived indicator: `buy_price_anchor="close_sma_3", buy_drop_pct=0.10`
+        is how you say "put a limit at 90% of the 3-bar SMA".
 
-        It is out of the equality check for the same reason: disagreement here
-        is a choice, and a warning that fires on a legitimate choice is one
-        users learn to ignore.
+        So it is *filled in* from the session's price column (its default
+        reference level is the close, and renaming the column must carry that
+        along) but it never *seeds* the context.  Seeding from it would push
+        "close_sma_3" back out into `alpha.close_col` and have M2 measure
+        forward returns on a moving average.
+
+        It is out of the equality check for the same reason: an anchor that
+        differs from the price column is a whole category of legitimate
+        strategy, and a warning that fires on those is one users learn to
+        ignore.
         """
         bundle = _bundle(alpha=AlphaConfig())
-        bundle["rule_discovery"].base_params.buy_price_anchor = "open"
+        bundle["rule_discovery"].base_params.buy_price_anchor = "close_sma_3"
         ctx = collect_context(bundle)
 
         assert ctx.close_col == "close"          # unmoved by the anchor
         out, _trace, violations = resolve(bundle, ctx)
         assert out["alpha"].close_col == "close"
-        assert out["rule_discovery"].base_params.buy_price_anchor == "open"
+        assert out["rule_discovery"].base_params.buy_price_anchor == "close_sma_3"
         assert out["rule_discovery"].base_params.target_col == "close"
         assert "schema_mismatch" not in {v.code for v in violations}
+
+    def test_renaming_the_price_column_carries_the_default_anchor(self):
+        """The other half: an anchor left alone *is* "the close", so it has to
+        follow when the session's close is called something else."""
+        bundle = _bundle(alpha=AlphaConfig(close_col="px"))
+        out, _trace, _v = resolve(bundle, collect_context(bundle))
+        assert out["rule_discovery"].base_params.buy_price_anchor == "px"
 
     def test_a_disagreeing_exit_column_is_still_reported(self):
         """`target_col` *is* in the equality check: the horizon exit has to be
