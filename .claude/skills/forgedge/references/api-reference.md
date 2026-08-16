@@ -453,6 +453,64 @@ z-score), time continuity (gaps, duplicate/out-of-order timestamps). Each
 exposes `.worst`, `.has_critical`, `.has_warnings`, `.one_line()`,
 `.to_text()`, `.findings` (full list).
 
+## Parameter resolution (`UNSET`, `PipelineContext`, `resolve`)
+
+`forgedge.resolver` is the single place where the pipeline's *latent parameters*
+— quantities with one meaning for the whole pipeline, materialised as several
+independent config fields — are named, propagated and checked. It is a
+constraint propagator, not a defaulting mechanism.
+
+`UNSET` (`from forgedge import UNSET`) separates "the caller chose this" from
+"class default". A field left at `UNSET` means *the resolver decides*; any other
+value, including one equal to the historical default, is a choice and is
+**never** overwritten. `UNSET` is falsy, is not arithmetic (`UNSET * 2` raises,
+so an unresolved value reaching a computation fails loudly), and survives
+`copy`/`deepcopy`/`pickle` as the same object.
+
+`PipelineContext` — session facts no module owns individually: `timeframe`,
+`timestamp_col`, `close_col`, `regime_col`, `regime_stable_col`, `fee_per_side`,
+`alpha`, `min_sample`, `target_rate_tpm`, plus the data facts `n_bars` /
+`span_months`. Bar arithmetic via `bars_per_day` / `bars_per_month` /
+`bar_hours` / `months_of()` / `bars_of()`. Build with
+`PipelineContext.from_frame(kpi, timeframe="1D")`.
+
+`resolve(bundle, ctx, active_stages=(PROPAGATION,)) -> (bundle, trace,
+violations)`. The bundle is `{"market_context", "event_discovery", "alpha",
+"rule_discovery", "registry"}`; missing entries are skipped. **Returns copies —
+the caller's configs are never mutated.** Idempotent. Two modes off one table:
+a field at `UNSET` is *derived*; a field that is set is left alone and the
+relation is *checked* instead, producing a `Violation` that
+`config_report()` (#176) renders.
+
+**Derivation never reads the data.** `n_bars` / `span_months` are visible to
+check mode only — otherwise a resolver could cap a requirement to fit the
+available span, silently weakening the gate the caller asked for.
+
+`collect_context(bundle, base, **overrides)` seeds the context from fields the
+caller set explicitly (precedence: overrides → explicit context → config
+fields → class default). This is what makes a `timestamp_col` set on one module
+reach the other three.
+
+`ResolutionTrace` / `Derivation` — ordered record of every field derived, with
+`default → resolved`, the rule that fired, the inputs it read, and `superseded`
+when a more conservative derivation won. `trace.describe()` for one line,
+`trace.to_text()` for the table. Carried on `ForgeResult.resolution`;
+`ForgeResult.context` and `ForgeResult.coherence` alongside it.
+
+`resolve_config(cfg, kind, ctx=None)` — single-config path; every module's
+constructor calls it, so "what you inspect is what runs" holds for hand-built
+pipelines too.
+
+`poisson_min_window(floor, rate, confidence=0.95)` — smallest window reaching
+`floor` with the given probability under Poisson arrivals, ≈ `1.65 × floor /
+rate`. The naive `floor / rate` satisfies the constraint *in expectation* only:
+at floor=10, rate=0.8 it gives λ=10.4, under which fewer than 10 events occur
+~44 % of the time.
+
+Currently only the `PROPAGATION` stage derives (schema columns). `STATISTICAL`
+constraints are registered and checked; each has its `derive` switched on by the
+issue that owns the fix (#177, #178, #181, #182).
+
 ## Time budget (purging / embargo)
 
 ```

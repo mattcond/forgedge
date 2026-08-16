@@ -481,3 +481,45 @@ registry = RuleRegistry.from_forge_results(results, config=config).run()
 | `RegistryConfig` | `from forgedge import RegistryConfig` | 4 — Rule Registry |
 
 > **Nota:** le due config walk-forward hanno ora nomi espliciti — `EventWalkForwardConfig` (Modulo 1) e `RuleWalkForwardConfig` (Modulo 3), entrambe importabili da `forgedge`. L'alias `WalkForwardConfig` continua a funzionare: al livello superiore risolve alla classe del Modulo 3, dentro `event_discovery.models` / `rule_discovery.models` a quella del modulo corrispondente.
+
+---
+
+## Risoluzione dei parametri — `UNSET` e il resolver
+
+I campi di configurazione hanno tre stati, non due:
+
+| stato | significato | chi lo scrive |
+|---|---|---|
+| esplicito | il chiamante ha scelto questo valore | mai sovrascritto; è un *input* alla derivazione |
+| `UNSET` | "decide il resolver" | derivato dai vincoli che lo legano a ciò che è stato impostato |
+| nessun vincolo | né il preset né la sessione hanno un'opinione | il default di classe documentato, esattamente come prima |
+
+`UNSET` esiste perché un default normale non può rispondere alla domanda che un
+resolver deve porsi: `AlphaConfig.timestamp_col == "open_dt"` è identico sia che
+l'utente l'abbia scritto sia che l'abbia ereditato.
+
+```python
+from forgedge import UNSET, PipelineContext, collect_context, resolve
+
+bundle = {"event_discovery": disc, "alpha": alpha, "rule_discovery": rd}
+ctx = collect_context(bundle, PipelineContext.from_frame(kpi, timeframe="1D"))
+resolved, trace, violations = resolve(bundle, ctx)
+print(trace.to_text())
+```
+
+`resolve()` restituisce **copie** — ispezionare una configurazione non è mai un
+effetto collaterale su di essa — ed è idempotente. `forge()` lo fa una volta
+all'avvio ed espone il risultato su `ForgeResult.context` / `.resolution` /
+`.coherence`.
+
+La derivazione legge il timeframe, lo schema e i valori delle config; non legge
+mai i dati (`n_bars`, `span_months`), visibili solo alla metà *check*. Questo
+rende `resolve()` totale senza il frame — ed è ciò che permette a un'ispezione di
+mostrare esattamente quello che girerà — e toglie la tentazione di limitare un
+requisito alla storia disponibile invece di segnalare che non ci sta.
+
+Precedenza, dalla più forte: un `PipelineContext` esplicito → argomenti di
+`forge()` → campi impostati in una qualsiasi config → default di classe. Due
+config in disaccordo sullo stesso valore vengono **segnalate**, mai riconciliate
+in silenzio.
+

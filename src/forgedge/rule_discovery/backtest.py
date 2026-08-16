@@ -39,6 +39,7 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from ..unset import coalesce
 from .models import BacktestParams, BacktestSummary, ScoringParams
 
 # Sigmoid steepness on the trade count (hardcoded, see backtest_scoring.md).
@@ -88,6 +89,9 @@ class _PreparedCandles:
     __slots__ = ("n", "dt", "low", "high", "open", "close", "signal", "_frame", "_cache")
 
     def __init__(self, candle: pd.DataFrame, signal_col: str, timestamp_col: str):
+        # A caller may forward an unresolved config field (see forgedge.unset):
+        # UNSET means "you decide", and "open_dt" is this module's decision.
+        timestamp_col = coalesce(timestamp_col, default="open_dt")
         if timestamp_col not in candle.columns:
             raise KeyError(f"timestamp column {timestamp_col!r} not found on candle table")
         self.n = len(candle)

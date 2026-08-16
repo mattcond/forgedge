@@ -71,6 +71,7 @@ from .models import (
     RuleDiscoveryResponse,
     ValidatedRule,
 )
+from ..resolver import resolve_config
 from .validation import expectancy_mde, validate
 from .walkforward import _fmt as _fmt_ts, selection_windows, walk_forward
 
@@ -137,7 +138,7 @@ class RuleDiscovery:
         event_candidate: EventCandidate,
         config: Optional[RuleDiscoveryConfig] = None,
     ):
-        self.config = config or RuleDiscoveryConfig()
+        self.config = resolve_config(config or RuleDiscoveryConfig(), "rule_discovery")
         self.contract = alpha_contract
         self.candidate = event_candidate
 

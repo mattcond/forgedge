@@ -23,6 +23,7 @@ from typing import List, Optional
 
 import pandas as pd
 
+from ..unset import coalesce
 from .analysis import excursion_stats
 from .backtest import _as_datetime64, _PreparedCandles, optimistic_hit_col, run_backtest
 from .grid import build_grid, run_grid, select_best
@@ -40,6 +41,7 @@ from .validation import validate
 
 
 def _month_bounds(candle: pd.DataFrame, timestamp_col: str):
+    timestamp_col = coalesce(timestamp_col, default="open_dt")
     dt = pd.DatetimeIndex(_as_datetime64(candle[timestamp_col]))
     start = dt.min().to_period("M").to_timestamp()
     # Exclusive upper bound: first day of the month after the last candle.

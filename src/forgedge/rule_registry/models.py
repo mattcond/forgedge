@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
+from ..unset import UNSET
+
 import pandas as pd
 
 from ..event_discovery.models import EventCandidate
@@ -90,7 +92,7 @@ class RegistryConfig:
     export_non_generic: bool = True
     html_include_tradelog: bool = True
     html_charts: bool = True
-    timestamp_col: str = "open_dt"
+    timestamp_col: str = UNSET
     session_date: Optional[str] = None
 
 

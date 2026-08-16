@@ -39,44 +39,24 @@ Utilizzo
 """
 from __future__ import annotations
 
-import re
 from typing import Optional, Tuple
 
 from .alpha_discovery.models import AlphaConfig, PromotionThresholds
 from .event_discovery.discovery import DiscoveryConfig
 from .event_discovery.models import GateParams
+from .resolver import timeframe_minutes
 from .rule_discovery.models import RuleDiscoveryConfig, SelectionCriteria
+from .unset import UNSET
 
 __all__ = ["forge_preset", "preset_info", "default_horizon_grid", "PRESETS"]
 
 
 # ── Timeframe parsing ─────────────────────────────────────────────────────────
 
-_TF_RE = re.compile(r"^(\d+)\s*([a-zA-Z]+)$")
-
-_UNIT_MINUTES = {
-    "m": 1, "min": 1,
-    "h": 60, "H": 60,
-    "d": 1440, "D": 1440,
-    "w": 10080, "W": 10080,
-}
-
-
-def _tf_minutes(timeframe: str) -> int:
-    """Parse a timeframe string and return its duration in minutes."""
-    m = _TF_RE.match(timeframe.strip())
-    if m is None:
-        raise ValueError(
-            f"Unrecognised timeframe '{timeframe}'. "
-            "Expected format: '1D', '4H', '15m', '1W', etc."
-        )
-    n, unit = int(m.group(1)), m.group(2)
-    if unit not in _UNIT_MINUTES:
-        raise ValueError(
-            f"Unknown timeframe unit '{unit}' in '{timeframe}'. "
-            f"Supported: {list(_UNIT_MINUTES)}"
-        )
-    return n * _UNIT_MINUTES[unit]
+#: Timeframe parsing lives in :mod:`forgedge.resolver` — a single
+#: implementation shared with the session context, rather than one copy here
+#: and one there.
+_tf_minutes = timeframe_minutes
 
 
 class _TFClass:
@@ -304,7 +284,10 @@ def forge_preset(
         "max_dispersion", tf.scale_dispersion(spec["daily_max_dispersion"])
     )
     max_and = overrides.pop("max_and_components", spec["max_and_components"])
-    timestamp_col = overrides.pop("timestamp_col", "open_dt")
+    # Left UNSET unless the caller asks for one: the schema is a session
+    # fact, not a profile choice, and the resolver propagates it to every
+    # module instead of the preset setting M1's copy alone (F10).
+    timestamp_col = overrides.pop("timestamp_col", UNSET)
 
     disc_cfg = DiscoveryConfig(
         gate_params=GateParams(

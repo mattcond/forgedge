@@ -76,6 +76,7 @@ from .models import (
     RegimeStat,
 )
 from ..timebudget import TimeBudget
+from ..resolver import resolve_config
 from .target import (
     forward_log_returns,
     forward_returns,
@@ -170,7 +171,7 @@ class AlphaDiscovery:
         config: Optional[AlphaConfig] = None,
         time_budget: Optional["TimeBudget"] = None,
     ):
-        self.config = config or AlphaConfig()
+        self.config = resolve_config(config or AlphaConfig(), "alpha")
         self.event_candidates = list(event_candidates)
         self.time_budget = time_budget
 

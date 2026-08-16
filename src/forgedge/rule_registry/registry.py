@@ -47,6 +47,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from ..event_discovery.discovery import _infer_timestamp_unit
+from ..resolver import resolve_config
 from . import correlation, dedup, export, ingestion, report
 from .cross_ticker import cross_ticker_backtest
 from .models import (
@@ -84,7 +85,7 @@ class RuleRegistry:
         frames: Dict[str, pd.DataFrame],
         config: Optional[RegistryConfig] = None,
     ):
-        self.config = config or RegistryConfig()
+        self.config = resolve_config(config or RegistryConfig(), "registry")
         self.submissions = list(submissions)
         self.frames: Dict[str, pd.DataFrame] = {
             t: self._prepare_frame(df) for t, df in frames.items()

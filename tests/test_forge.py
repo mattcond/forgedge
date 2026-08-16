@@ -558,3 +558,48 @@ class TestWalkForwardConfigNaming:
         rd = RuleDiscoveryConfig(walk_forward=LegacyRuleWF(n_splits=2, reoptimise=False))
         assert disc.walk_forward.n_splits == 2
         assert rd.walk_forward.reoptimise is False
+
+
+class TestForgeResolution:
+    """``forge()`` resolves the configuration once, and says what it did.
+
+    The session context is seeded from whatever the caller set explicitly, so a
+    schema chosen on one module reaches the others — and the trace makes the
+    decision auditable after the fact, next to ``ledger.describe()``.
+    """
+
+    def test_result_carries_the_context_and_the_trace(self):
+        kpi = _ohlc_kpi_table(n=900, seed=3)
+        result = forge(
+            kpi, ticker="X", timeframe="1D",
+            event_discovery_config=_FAST_ED_CONFIG,
+            run_rule_discovery=False, run_registry=False,
+            fast_null=False, progress=False,
+        )
+        assert result.context is not None
+        assert result.context.timeframe == "1D"
+        assert result.context.n_bars == len(kpi)
+        assert result.context.span_months > 0
+        assert result.resolution is not None
+        assert "derived" in result.resolution.describe()
+        assert result.coherence == []
+
+    def test_a_schema_set_on_one_module_reaches_the_others(self):
+        """The F10 case, end to end: Event Discovery's column is collected into
+        the session context and distributed to Alpha and Rule Discovery."""
+        kpi = _ohlc_kpi_table(n=900, seed=3).rename(columns={"open_dt": "ts"})
+        disc = DiscoveryConfig(
+            max_and_components=1,
+            gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
+            timestamp_col="ts",
+        )
+        result = forge(
+            kpi, ticker="X", timeframe="1D",
+            event_discovery_config=disc,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            run_registry=False, fast_null=False, progress=False,
+        )
+        assert result.alpha_discovery.config.timestamp_col == "ts"
+        derived = {d.field for d in result.resolution.effective}
+        assert "alpha.timestamp_col" in derived
+        assert "rule_discovery.timestamp_col" in derived
