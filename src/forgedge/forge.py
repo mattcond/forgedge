@@ -57,7 +57,7 @@ import logging
 import sys
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 import pandas as pd
@@ -77,6 +77,7 @@ from .event_discovery.models import (
 from .market_context.context import MarketContext
 from .market_context.models import REGIME_COL, MarketContextConfig
 from .presets import default_horizon_grid
+from .resolver import PipelineContext, ResolutionTrace, Violation, collect_context, resolve
 from .rule_discovery.discovery import RuleDiscovery
 from .rule_discovery.models import RuleDiscoveryConfig, RuleDiscoveryResponse
 from .rule_registry.models import RegistryConfig, RuleSubmission
@@ -220,6 +221,18 @@ class ForgeResult:
         The effective temporal axis of Alpha Discovery — split, purge and
         embargo (see :mod:`forgedge.timebudget`).  Built from the alpha config
         unless an explicit budget was passed to :func:`forge`.
+    context : PipelineContext or None
+        The session's resolved facts — timeframe, schema, economics,
+        statistical policy (see :mod:`forgedge.resolver`).
+    resolution : ResolutionTrace or None
+        Ordered record of every field the resolver derived, with the rule that
+        produced it and the inputs it read.  Log it alongside
+        ``ledger.describe()``: together they say what was searched and with
+        what configuration.
+    coherence : list[Violation]
+        Constraint violations found in *check* mode — configuration copies that
+        are set but mutually inconsistent.  Advisory here; ``config_report()``
+        renders them (#176).
     """
 
     enriched: pd.DataFrame
@@ -236,6 +249,9 @@ class ForgeResult:
     calibration: Optional[CalibrationReport] = None
     ledger: Optional[HypothesisLedger] = None
     time_budget: Optional[TimeBudget] = None
+    context: Optional[PipelineContext] = None
+    resolution: Optional[ResolutionTrace] = None
+    coherence: List[Violation] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Convenience accessors
@@ -475,6 +491,32 @@ def forge(
     report = _Reporter(progress, label=resolved_ticker)
     report.stage(f"start — {len(kpi_table)} bars")
 
+    # ── Parameter resolution ──────────────────────────────────────────────
+    # One context for the session, seeded from whatever the caller set
+    # explicitly (see forgedge.resolver): every config field left at UNSET is
+    # derived from it, and every field that was set is left alone and merely
+    # checked.  Resolution never reads the data, only the timeframe, the schema
+    # and the configs themselves.
+    _bundle = {
+        "market_context": market_context_config,
+        "event_discovery": event_discovery_config,
+        "alpha": cfg,
+        "rule_discovery": rule_discovery_config,
+        "registry": registry_config,
+    }
+    context = collect_context(
+        _bundle, PipelineContext.from_frame(kpi_table, timeframe=timeframe)
+    )
+    _bundle, resolution, coherence = resolve(_bundle, context)
+    market_context_config = _bundle["market_context"]
+    event_discovery_config = _bundle["event_discovery"]
+    cfg = _bundle["alpha"]
+    rule_discovery_config = _bundle["rule_discovery"]
+    registry_config = _bundle["registry"]
+    report.stage(resolution.describe())
+    for _violation in coherence:
+        logger.warning("[%s] %s: %s", resolved_ticker, _violation.code, _violation.message)
+
     # ── Modulo 0 — Market Context ─────────────────────────────────────────
     mc: Optional[MarketContext] = None
     already_enriched = REGIME_COL in kpi_table.columns
@@ -601,6 +643,9 @@ def forge(
         calibration=cal_report,
         ledger=ledger,
         time_budget=effective_budget,
+        context=context,
+        resolution=resolution,
+        coherence=coherence,
     )
     if run_rule_discovery:
         report.stage(f"M3 Rule Discovery — {len(result.edges())} tradeable rule(s)")

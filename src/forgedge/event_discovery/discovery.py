@@ -16,6 +16,8 @@ from typing import Optional
 import pandas as pd
 
 from ..timebudget import TimeBudget
+from ..unset import UNSET
+from ..resolver import resolve_config
 from .and_composer import ANDComposer
 from .classifier import TypeClassifier
 from .consistency_gate import ConsistencyGate, _build_month_index, _monthly_counts
@@ -113,7 +115,7 @@ class DiscoveryConfig:
     gate_params: GateParams = field(default_factory=GateParams)
     max_categorical_classes: int = 20
     scale_free_overrides: Optional[dict[str, bool]] = None
-    timestamp_col: str = "open_dt"
+    timestamp_col: str = UNSET
     max_and_components: int = 2
     train_ratio: float = 1.0
     walk_forward: Optional[EventWalkForwardConfig] = None
@@ -150,7 +152,7 @@ class EventDiscovery:
         time_budget: Optional["TimeBudget"] = None,
     ):
         self.df = kpi_table.copy()
-        self.config = config or DiscoveryConfig()
+        self.config = resolve_config(config or DiscoveryConfig(), "event_discovery")
         self.time_budget = time_budget
         self._classifications: Optional[dict] = None
         self._candidates: Optional[list[EventCandidate]] = None

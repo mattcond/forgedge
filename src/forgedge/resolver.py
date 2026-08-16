@@ -1,0 +1,853 @@
+"""The central parameter resolver — one place where the pipeline's latent
+parameters are named, propagated and checked.
+
+FORGE has a handful of **latent parameters**: quantities with exactly one
+meaning for the whole pipeline — *how often do we expect this to fire*, *how
+many observations make a statistic credible*, *how long is one bar*, *where does
+in-sample end*, *what does a round trip cost*, *what counts as significant*.
+None of them is represented anywhere.  Each is materialised as several
+independent config fields, in different modules, each with its own class
+default, and nothing verifies that the copies are jointly satisfiable.  Issue
+#173 is what that looks like from the outside: a configuration that cannot
+produce a verdict, failing silently as a wall of rejections.
+
+This module is the answer.  It is **not** a defaulting mechanism: it is a
+constraint propagator.  The caller sets what they care about, and every field
+left at :data:`~forgedge.unset.UNSET` is derived from the constraints that
+relate it to what was set.
+
+Two modes, one table
+--------------------
+Every constraint is a relation between materialisations of one latent
+parameter, and it is read in one of two modes depending on the state of the
+field it governs:
+
+============  ==========  ==========================================
+field state   mode        outcome
+============  ==========  ==========================================
+``UNSET``     **derive**  the resolver computes it — no conflict possible
+set           **check**   left alone; the relation is verified instead
+============  ==========  ==========================================
+
+The check mode is what :func:`forgedge.config_report` consumes.  One definition
+per constraint, two uses — the resolver and the coherence report can never
+disagree, because they are the same table.
+
+Directed, not symmetric
+-----------------------
+``min_train_months × min_tpm >= 10`` relates three quantities; to be solvable it
+must declare which one is **free** (typically the profile choice, ``min_tpm``)
+and which is **derived** (``min_train_months``).  Every constraint carries that
+direction.  Some declare no derived field at all: deriving them would mean
+weakening a statistical guard until it passes, which is exactly the silent
+failure this plan exists to remove.  Those are check-only.
+
+Staged activation
+-----------------
+Constraints carry a :attr:`Constraint.stage`.  Only ``"propagation"`` — moving
+an identical value between configs — derives today; ``"statistical"``
+constraints are registered and checked here, and each has its ``derive`` turned
+on by the issue that owns the corresponding fix (#177, #178, #181, #182).  That
+staging is what keeps this change additive: propagation is a no-op at default
+values, so no verdict moves.
+
+The resolver never reads the data
+---------------------------------
+Derivation uses the timeframe, the schema and the configs' own values.  It never
+reads ``n_bars`` or ``span_months`` — those are visible to *check* mode only.
+Besides being unnecessary (deriving a window from a rate is arithmetic on the
+rate), it is a design guard: a resolver that could see the available span would
+be tempted to *cap* a requirement to fit it, silently weakening the gate the
+caller asked for.  A window that cannot support a test must be reported, not
+accommodated.  The invariant also makes ``resolve()`` total and deterministic
+without the data, which is what lets the config report show exactly what will
+run.
+"""
+from __future__ import annotations
+
+import math
+import re
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from .unset import UNSET, is_set
+
+__all__ = [
+    "PipelineContext",
+    "Derivation",
+    "ResolutionTrace",
+    "Constraint",
+    "Violation",
+    "CONSTRAINTS",
+    "resolve",
+    "resolve_config",
+    "collect_context",
+    "timeframe_minutes",
+    "poisson_min_window",
+]
+
+
+# ---------------------------------------------------------------------------
+# Timeframe arithmetic
+# ---------------------------------------------------------------------------
+
+_TF_RE = re.compile(r"^(\d+)\s*([a-zA-Z]+)$")
+
+_UNIT_MINUTES = {
+    "m": 1, "min": 1,
+    "h": 60, "H": 60,
+    "d": 1440, "D": 1440,
+    "w": 10080, "W": 10080,
+}
+
+
+def timeframe_minutes(timeframe: str) -> int:
+    """Parse a timeframe string (``"1D"``, ``"4H"``, ``"15m"``) into minutes.
+
+    The single implementation of this conversion in the package;
+    :mod:`forgedge.presets` reuses it rather than keeping its own copy.
+    """
+    m = _TF_RE.match(str(timeframe).strip())
+    if m is None:
+        raise ValueError(
+            f"Unrecognised timeframe {timeframe!r}. "
+            "Expected format: '1D', '4H', '15m', '1W', etc."
+        )
+    n, unit = int(m.group(1)), m.group(2)
+    if unit not in _UNIT_MINUTES:
+        raise ValueError(
+            f"Unknown timeframe unit {unit!r} in {timeframe!r}. "
+            f"Supported: {list(_UNIT_MINUTES)}"
+        )
+    return n * _UNIT_MINUTES[unit]
+
+
+# ---------------------------------------------------------------------------
+# Statistical primitives shared by the constraints
+# ---------------------------------------------------------------------------
+
+def _poisson_sf(floor: int, lam: float) -> float:
+    """``P(X >= floor)`` for ``X ~ Poisson(lam)``.
+
+    Pure-Python recursion over the pmf — the package deliberately carries no
+    scipy dependency.  Underflow at very large ``lam`` is harmless: the answer
+    there is ``1.0`` to every digit that matters, and the short-circuit says so.
+    """
+    if floor <= 0:
+        return 1.0
+    if lam <= 0.0:
+        return 0.0
+    if lam > 700.0:  # e**-lam underflows; P(X >= floor) is 1.0 for any sane floor
+        return 1.0 if lam > floor else 0.0
+    term = math.exp(-lam)      # pmf(0)
+    cdf = term
+    for i in range(1, int(floor)):
+        term *= lam / i
+        cdf += term
+    return max(0.0, min(1.0, 1.0 - cdf))
+
+
+def poisson_min_window(floor: int, rate: float, confidence: float = 0.95,
+                       cap: float = 1200.0) -> float:
+    """Smallest window (in the units of ``rate``) that reaches ``floor`` with
+    probability ``confidence`` under Poisson arrivals.
+
+    The naive inversion ``floor / rate`` satisfies the constraint *in
+    expectation*, which is not the same as satisfying it.  At ``floor=10`` and
+    ``rate=0.8`` it returns 12.5 months — λ = 10.4 expected events, of which
+    fewer than 10 are observed about 44 % of the time.  A configuration derived
+    that way fails roughly one run in two, which is issue #173 in milder form
+    *after* having been "fixed".
+
+    This returns the smallest ``n`` with ``P(Poisson(n · rate) >= floor) >=
+    confidence`` — about ``1.65 × floor / rate`` for the default confidence.
+
+    Returns ``inf`` when no window under ``cap`` suffices (a rate so low the
+    floor is unreachable in any plausible history).
+    """
+    if rate <= 0:
+        return float("inf")
+    if floor <= 0:
+        return 0.0
+    lo = floor / rate                      # expectation-only lower bound
+    n = lo
+    step = max(lo * 0.05, 1e-3)
+    while n <= cap:
+        if _poisson_sf(int(floor), n * rate) >= confidence:
+            return n
+        n += step
+    return float("inf")
+
+
+# ---------------------------------------------------------------------------
+# Session context
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PipelineContext:
+    """Session facts that no single module owns.
+
+    Built once per :func:`forgedge.forge` run and threaded through the
+    resolver.  Splits deliberately into two halves:
+
+    * **derivable facts** — timeframe, schema, economics, statistical policy.
+      These are what *derive* mode may read.
+    * **data facts** — ``n_bars`` and ``span_months``.  These are readable by
+      *check* mode only; see the module docstring for why the resolver must not
+      see them.
+
+    Attributes
+    ----------
+    timeframe : str
+        Bar size, e.g. ``"1D"``, ``"4H"``, ``"15m"``.  The single declared
+        source of bar duration for the session.
+    timestamp_col, close_col, regime_col, regime_stable_col : str
+        The KPI table's schema, propagated to every module that needs it.
+    fee_per_side : float
+        Round-trip cost basis, one per session.
+    alpha : float
+        Per-hypothesis significance level (see #182 — the seven p-thresholds
+        derive from this one).
+    min_sample : int
+        Minimum observation count below which a statistic is not credible.
+    target_rate_tpm : float or None
+        The session's arrival rate.  Note the direction: this is an *output* of
+        the preset (its most characterising choice), collected into the context
+        — not an input to it.
+    n_bars, span_months : int, float
+        Data facts.  **Read by check mode only.**
+    """
+
+    timeframe: str = "1H"
+    # schema
+    timestamp_col: str = "open_dt"
+    close_col: str = "close"
+    regime_col: str = "regime"
+    regime_stable_col: str = "regime_stable"
+    # economics
+    fee_per_side: float = 0.002
+    # statistical policy
+    alpha: float = 0.05
+    min_sample: int = 10
+    target_rate_tpm: Optional[float] = None
+    # data facts — check mode only
+    n_bars: int = 0
+    span_months: float = 0.0
+
+    # -- bar arithmetic ------------------------------------------------
+
+    @property
+    def bar_minutes(self) -> int:
+        return timeframe_minutes(self.timeframe)
+
+    @property
+    def bar_hours(self) -> float:
+        return self.bar_minutes / 60.0
+
+    @property
+    def bars_per_day(self) -> float:
+        return 1440.0 / self.bar_minutes
+
+    @property
+    def bars_per_month(self) -> float:
+        return self.bars_per_day * 30.0
+
+    def months_of(self, n_bars: int) -> float:
+        """Convert a bar count to calendar months at this timeframe."""
+        return float(n_bars) / self.bars_per_month
+
+    def bars_of(self, months: float) -> int:
+        """Convert calendar months to a bar count at this timeframe."""
+        return int(round(float(months) * self.bars_per_month))
+
+    # -- construction --------------------------------------------------
+
+    @classmethod
+    def from_frame(cls, frame, *, timeframe: str = "1H", **overrides) -> "PipelineContext":
+        """Build a context from a KPI table, filling the data facts.
+
+        Reads the timestamp source once — a ``DatetimeIndex`` or the
+        ``timestamp_col`` column — to populate ``n_bars`` and ``span_months``.
+        Every other field comes from ``overrides`` or the class default.
+        """
+        import pandas as pd
+
+        timestamp_col = overrides.get("timestamp_col", cls.timestamp_col)
+        n_bars = int(len(frame))
+        span_months = 0.0
+        stamps = None
+        if isinstance(getattr(frame, "index", None), pd.DatetimeIndex):
+            stamps = pd.Series(frame.index)
+        elif timestamp_col in getattr(frame, "columns", ()):
+            stamps = pd.to_datetime(frame[timestamp_col], errors="coerce")
+        if stamps is not None and len(stamps.dropna()) >= 2:
+            s = stamps.dropna()
+            span_days = (s.iloc[-1] - s.iloc[0]).total_seconds() / 86400.0
+            span_months = max(span_days / 30.0, 0.0)
+        return cls(timeframe=timeframe, n_bars=n_bars, span_months=span_months,
+                   **overrides)
+
+
+# ---------------------------------------------------------------------------
+# Resolution trace
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Derivation:
+    """One field the resolver filled in, and why.
+
+    Attributes
+    ----------
+    order : int
+        Position in the topological order — the numbering is the chain, so
+        ``min_tpm → min_train_months → pf_min_tpm`` reads top to bottom.
+    field : str
+        Dotted path of the field written, e.g.
+        ``"rule_discovery.walk_forward.min_train_months"``.
+    default : Any
+        What the field would have been without the resolver.  The
+        ``default → resolved`` diff is the actual debugging question.
+    resolved : Any
+        What the pipeline will use.
+    rule : str
+        Code of the constraint that fired.
+    reason : str
+        Human-readable derivation, with the input values inlined — so the
+        number is never a magic number.
+    inputs : tuple of str
+        Dotted paths read.  Reconstructs the dependency chain.
+    superseded : bool
+        ``True`` when another constraint produced a more conservative value for
+        the same field and won.  The losing derivation is kept, not discarded.
+    """
+
+    order: int
+    field: str
+    default: Any
+    resolved: Any
+    rule: str
+    reason: str
+    inputs: Tuple[str, ...] = ()
+    superseded: bool = False
+
+
+@dataclass
+class ResolutionTrace:
+    """Ordered record of everything :func:`resolve` decided.
+
+    A resolver that adapts parameters behind the caller's back is powerful and
+    can surprise.  The trace is what keeps it auditable: every derived value
+    carries the rule that produced it and the inputs it read, in the order they
+    were applied.
+    """
+
+    derivations: List[Derivation] = field(default_factory=list)
+    untouched: int = 0
+
+    def __len__(self) -> int:
+        return len(self.derivations)
+
+    def __iter__(self):
+        return iter(self.derivations)
+
+    @property
+    def effective(self) -> List[Derivation]:
+        """Derivations that actually took effect (losers of a conflict excluded)."""
+        return [d for d in self.derivations if not d.superseded]
+
+    def describe(self) -> str:
+        """One-line summary, in the idiom of ``ledger.describe()``."""
+        n = len(self.effective)
+        return (f"resolution: {n} field(s) derived, "
+                f"{self.untouched} left at their documented default")
+
+    def to_text(self, verbose: bool = False) -> str:
+        """Full table — the ``default → resolved`` diff with the reason."""
+        lines = [
+            f"RESOLUTION TRACE  ({len(self.effective)} derived, "
+            f"{self.untouched} left at default)"
+        ]
+        if not self.derivations:
+            lines.append("  (nothing to derive — every field was set explicitly)")
+            return "\n".join(lines)
+        lines.append(f" {'#':>2}  {'field':<44} {'default':>12} → {'resolved':<12} rule")
+        for d in self.derivations:
+            mark = "  (superseded)" if d.superseded else ""
+            lines.append(
+                f" {d.order:>2}  {d.field:<44} {str(d.default):>12} → "
+                f"{str(d.resolved):<12} {d.rule}{mark}"
+            )
+            if verbose or d.reason:
+                lines.append(f"        ← {d.reason}")
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class Violation:
+    """A constraint that failed in *check* mode.
+
+    Returned by :func:`resolve` for :func:`forgedge.config_report` to render;
+    this module never prints, warns or raises on one.
+    """
+
+    code: str
+    level: str      # "FAIL" | "WARN"
+    message: str
+    fields: Tuple[str, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# Constraints
+# ---------------------------------------------------------------------------
+
+# Stages — see the module docstring.  Only PROPAGATION derives today.
+PROPAGATION = "propagation"    # moves an identical value between configs
+STATISTICAL = "statistical"    # derive turned on by the issue owning the fix
+STRUCTURAL = "structural"      # check-only, always
+
+
+@dataclass(frozen=True)
+class Constraint:
+    """One relation between materialisations of a latent parameter.
+
+    Attributes
+    ----------
+    code : str
+        Stable identifier, shared with the coherence report.
+    level : {"FAIL", "WARN"}
+        Severity when violated in check mode.  ``FAIL`` is reserved for
+        configurations that make a stage *structurally incapable* of producing
+        a verdict.
+    stage : str
+        :data:`PROPAGATION`, :data:`STATISTICAL` or :data:`STRUCTURAL`.
+    free : tuple of str
+        Dotted paths read.  Also the edges of the dependency graph.
+    derived : str or None
+        Dotted path written.  ``None`` marks a check-only constraint: deriving
+        it would mean weakening a statistical guard until it passes.
+    derive : callable or None
+        ``(values, ctx) -> (value, reason)``.  Called only when ``derived`` is
+        currently ``UNSET`` and the stage is active.
+    check : callable or None
+        ``(values, ctx) -> str | None``.  Returns a message when the relation
+        is violated.
+    """
+
+    code: str
+    level: str
+    stage: str
+    free: Tuple[str, ...]
+    derived: Optional[str] = None
+    derive: Optional[Callable[[Dict[str, Any], PipelineContext], Tuple[Any, str]]] = None
+    check: Optional[Callable[[Dict[str, Any], PipelineContext], Optional[str]]] = None
+
+
+# -- path access -------------------------------------------------------
+
+_MISSING = object()
+
+
+def _get_path(bundle: Dict[str, Any], path: str) -> Any:
+    """Read a dotted path out of the config bundle, or ``_MISSING``."""
+    head, *rest = path.split(".")
+    node = bundle.get(head, None)
+    if node is None:
+        return _MISSING
+    for part in rest:
+        if not hasattr(node, part):
+            return _MISSING
+        node = getattr(node, part)
+    return node
+
+
+def _set_path(bundle: Dict[str, Any], path: str, value: Any) -> bool:
+    """Write a dotted path into the bundle.  ``False`` when the target is absent."""
+    head, *rest = path.split(".")
+    node = bundle.get(head, None)
+    if node is None or not rest:
+        return False
+    for part in rest[:-1]:
+        if not hasattr(node, part):
+            return False
+        node = getattr(node, part)
+    if not hasattr(node, rest[-1]):
+        return False
+    setattr(node, rest[-1], value)
+    return True
+
+
+# -- the registry ------------------------------------------------------
+
+def _ctx_str(attr: str):
+    """Derive a schema/economics field straight from the context."""
+    def _derive(values: Dict[str, Any], ctx: PipelineContext):
+        return getattr(ctx, attr), f"session {attr}={getattr(ctx, attr)!r}"
+    return _derive
+
+
+def _check_all_equal(paths: Sequence[str], label: str):
+    def _check(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+        seen = {p: v for p, v in values.items() if v is not _MISSING and is_set(v)}
+        distinct = set(seen.values())
+        if len(distinct) <= 1:
+            return None
+        detail = ", ".join(f"{p}={v!r}" for p, v in sorted(seen.items()))
+        return (f"{label} disagree across modules ({detail}); the pipeline will "
+                f"read a different column in each, and the mismatch surfaces "
+                f"later as a missing-column error")
+    return _check
+
+
+def _schema_constraints() -> List[Constraint]:
+    """Propagate the KPI table's schema to every module that reads it."""
+    out: List[Constraint] = []
+    groups = {
+        "timestamp_col": [
+            "event_discovery.timestamp_col",
+            "alpha.timestamp_col",
+            "rule_discovery.timestamp_col",
+            "registry.timestamp_col",
+        ],
+    }
+    for attr, paths in groups.items():
+        for path in paths:
+            out.append(Constraint(
+                code="schema_mismatch",
+                level="WARN",
+                stage=PROPAGATION,
+                free=(),
+                derived=path,
+                derive=_ctx_str(attr),
+            ))
+        out.append(Constraint(
+            code="schema_mismatch",
+            level="WARN",
+            stage=PROPAGATION,
+            free=tuple(paths),
+            derived=None,
+            check=_check_all_equal(paths, f"`{attr}`"),
+        ))
+    return out
+
+
+def _check_fee(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    alpha = values.get("alpha.fee_per_side", _MISSING)
+    rd = values.get("rule_discovery.base_params.fee", _MISSING)
+    if alpha is _MISSING or rd is _MISSING:
+        return None
+    if not (is_set(alpha) and is_set(rd)):
+        return None
+    if abs(float(alpha) - float(rd)) < 1e-12:
+        return None
+    return (f"AlphaConfig.fee_per_side={alpha} but BacktestParams.fee={rd}: the "
+            f"contracts document one cost basis and the backtest charges "
+            f"another. Rule Discovery never reads the contract's fee")
+
+
+def _derive_backtest_fee(values: Dict[str, Any], ctx: PipelineContext):
+    """M3's fee follows the contract's cost basis when the caller set one.
+
+    `_seed_base_params` seeds direction, target_h and sell_pct from the
+    contract but never the fee, so a caller who sets `AlphaConfig.fee_per_side`
+    gets contracts documenting one cost and backtests charging another (F7).
+    """
+    upstream = values.get("alpha.fee_per_side", _MISSING)
+    if upstream is not _MISSING and is_set(upstream):
+        return upstream, f"alpha.fee_per_side={upstream}"
+    return ctx.fee_per_side, f"session fee_per_side={ctx.fee_per_side}"
+
+
+CONSTRAINTS: List[Constraint] = [
+    *_schema_constraints(),
+    # ── economics ────────────────────────────────────────────────────
+    Constraint(
+        code="fee_mismatch",
+        level="WARN",
+        stage=PROPAGATION,
+        free=("alpha.fee_per_side",),
+        derived="rule_discovery.base_params.fee",
+        derive=_derive_backtest_fee,
+    ),
+    Constraint(
+        code="fee_mismatch",
+        level="WARN",
+        stage=PROPAGATION,
+        free=(),
+        derived="alpha.fee_per_side",
+        derive=lambda v, ctx: (ctx.fee_per_side,
+                               f"session fee_per_side={ctx.fee_per_side}"),
+    ),
+    Constraint(
+        code="fee_mismatch",
+        level="WARN",
+        stage=PROPAGATION,
+        free=("alpha.fee_per_side", "rule_discovery.base_params.fee"),
+        derived=None,
+        check=_check_fee,
+    ),
+]
+
+
+#: What each resolvable field would be without the resolver.  The trace's
+#: ``default → resolved`` column is the actual debugging question, and once a
+#: field's class default becomes ``UNSET`` the historical value is no longer
+#: machine-readable — so it is recorded here, next to the constraints that
+#: derive it.
+_DOCUMENTED_DEFAULTS: Dict[str, Any] = {
+    "event_discovery.timestamp_col": "open_dt",
+    "alpha.timestamp_col": "open_dt",
+    "rule_discovery.timestamp_col": "open_dt",
+    "registry.timestamp_col": "open_dt",
+    "alpha.fee_per_side": 0.002,
+    "rule_discovery.base_params.fee": 0.002,
+}
+
+
+# ---------------------------------------------------------------------------
+# Resolution
+# ---------------------------------------------------------------------------
+
+def _topological(constraints: Sequence[Constraint]) -> List[Constraint]:
+    """Order constraints so a derived field is written before it is read.
+
+    Kahn's algorithm over the field-dependency graph, with a deterministic
+    tie-break on declaration order.  A cycle is a configuration error in the
+    table itself, not in the user's config, so it raises.
+    """
+    indexed = list(enumerate(constraints))
+    producers: Dict[str, List[int]] = {}
+    for i, c in indexed:
+        if c.derived:
+            producers.setdefault(c.derived, []).append(i)
+
+    edges: Dict[int, set] = {i: set() for i, _ in indexed}
+    indegree: Dict[int, int] = {i: 0 for i, _ in indexed}
+    for i, c in indexed:
+        for path in c.free:
+            for j in producers.get(path, ()):
+                if j != i and i not in edges[j]:
+                    edges[j].add(i)
+                    indegree[i] += 1
+
+    queue = sorted(i for i, d in indegree.items() if d == 0)
+    order: List[int] = []
+    while queue:
+        i = queue.pop(0)
+        order.append(i)
+        for j in sorted(edges[i]):
+            indegree[j] -= 1
+            if indegree[j] == 0:
+                queue.append(j)
+        queue.sort()
+
+    if len(order) != len(indexed):
+        stuck = sorted(constraints[i].code for i in indegree if indegree[i] > 0)
+        raise RuntimeError(
+            f"Cyclic constraint dependency among {stuck}. The constraint table "
+            f"is malformed — a derived field is, transitively, its own input."
+        )
+    return [constraints[i] for i in order]
+
+
+def _copy_configs(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep-ish copy: dataclasses are replaced, so the caller's objects are never
+    mutated.  ``resolve()`` returning copies is what makes it safe for
+    ``config_report()`` to call on a user's live configs."""
+    import copy
+
+    return {k: (copy.deepcopy(v) if v is not None else None) for k, v in bundle.items()}
+
+
+def resolve(
+    bundle: Dict[str, Any],
+    ctx: Optional[PipelineContext] = None,
+    *,
+    active_stages: Sequence[str] = (PROPAGATION,),
+) -> Tuple[Dict[str, Any], ResolutionTrace, List[Violation]]:
+    """Fill every ``UNSET`` field the constraints can derive, and check the rest.
+
+    Parameters
+    ----------
+    bundle : dict
+        ``{"market_context": …, "event_discovery": …, "alpha": …,
+        "rule_discovery": …, "registry": …}``.  Missing or ``None`` entries are
+        skipped, so a partial bundle resolves fine.
+    ctx : PipelineContext, optional
+        Session facts.  Defaults to :class:`PipelineContext` — which reproduces
+        today's class defaults exactly, so standalone use is unchanged.
+    active_stages : sequence of str
+        Which constraint stages may **derive**.  Defaults to propagation only;
+        the statistical stages are switched on by the issues that own them
+        (#177, #178, #181, #182).  Check mode runs for every stage regardless.
+
+    Returns
+    -------
+    (resolved_bundle, trace, violations)
+        The bundle is a **copy** — the caller's configs are never mutated.
+
+    Notes
+    -----
+    Idempotent: resolving an already-resolved bundle derives nothing and
+    returns an empty trace.
+    """
+    ctx = ctx or PipelineContext()
+    out = _copy_configs(bundle)
+    trace = ResolutionTrace()
+    violations: List[Violation] = []
+    winners: Dict[str, Tuple[Any, str]] = {}
+    order = 0
+
+    for c in _topological(CONSTRAINTS):
+        values = {p: _get_path(out, p) for p in c.free}
+
+        # ── derive ────────────────────────────────────────────────────
+        if c.derived and c.derive and c.stage in active_stages:
+            current = _get_path(out, c.derived)
+            if current is not _MISSING and not is_set(current):
+                value, reason = c.derive(values, ctx)
+                if is_set(value) and value is not None:
+                    order += 1
+                    prior = winners.get(c.derived)
+                    superseded = False
+                    if prior is not None:
+                        # Conflict on the same field: the more conservative
+                        # value wins, and the loser stays in the trace.
+                        keep = _more_conservative(prior[0], value)
+                        superseded = keep is not value
+                        if not superseded:
+                            _set_path(out, c.derived, value)
+                            winners[c.derived] = (value, c.code)
+                    else:
+                        _set_path(out, c.derived, value)
+                        winners[c.derived] = (value, c.code)
+                    trace.derivations.append(Derivation(
+                        order=order,
+                        field=c.derived,
+                        default=_documented_default(c.derived),
+                        resolved=value,
+                        rule=c.code,
+                        reason=reason,
+                        inputs=c.free,
+                        superseded=superseded,
+                    ))
+
+        # ── check ─────────────────────────────────────────────────────
+        if c.check is not None:
+            values = {p: _get_path(out, p) for p in c.free}
+            message = c.check(values, ctx)
+            if message:
+                violations.append(Violation(
+                    code=c.code, level=c.level, message=message, fields=c.free
+                ))
+
+    trace.untouched = _count_unset(out)
+    return out, trace, violations
+
+
+#: Where each context field may be *collected from* — level 3 of the precedence
+#: ladder.  A value the caller wrote into any config is a choice, and the
+#: session adopts it rather than overwriting it with a class default.  This is
+#: what makes ``forge_preset(timestamp_col="ts")`` reach M2/M3/M4: the preset
+#: sets M1's, the context collects it, and the resolver distributes it.
+_CONTEXT_SOURCES: Dict[str, Tuple[str, ...]] = {
+    "timestamp_col": (
+        "event_discovery.timestamp_col",
+        "alpha.timestamp_col",
+        "rule_discovery.timestamp_col",
+        "registry.timestamp_col",
+    ),
+    "fee_per_side": (
+        "alpha.fee_per_side",
+        "rule_discovery.base_params.fee",
+    ),
+}
+
+
+def collect_context(
+    bundle: Dict[str, Any],
+    base: Optional[PipelineContext] = None,
+    **overrides: Any,
+) -> PipelineContext:
+    """Build the session context, seeding it from explicitly-set config fields.
+
+    Precedence, strongest first:
+
+    1. ``overrides`` — ``forge()``'s own arguments;
+    2. ``base`` — an explicit :class:`PipelineContext` from the caller;
+    3. fields the caller set in any config (this function's job);
+    4. the :class:`PipelineContext` class default.
+
+    When two configs disagree the first source in :data:`_CONTEXT_SOURCES` wins;
+    the disagreement itself is reported by the corresponding check constraint,
+    never silently reconciled.
+    """
+    base = base or PipelineContext()
+    collected: Dict[str, Any] = {}
+    for attr, paths in _CONTEXT_SOURCES.items():
+        if attr in overrides:
+            continue
+        if getattr(base, attr) != getattr(PipelineContext, attr, None):
+            continue  # the caller's explicit context outranks the configs
+        for path in paths:
+            value = _get_path(bundle, path)
+            if value is not _MISSING and is_set(value) and value is not None:
+                collected[attr] = value
+                break
+    return replace(base, **{**collected, **overrides})
+
+
+def resolve_config(cfg: Any, kind: str, ctx: Optional[PipelineContext] = None,
+                   **kwargs) -> Any:
+    """Resolve a single config, for standalone module use.
+
+    Every module's ``run()`` opens with this, so ``what you inspect is what
+    runs`` holds for hand-built pipelines too — not only for :func:`forge`.
+    Cross-config constraints simply find nothing to read and stay inert.
+    """
+    if cfg is None:
+        return cfg
+    out, _trace, _violations = resolve({kind: cfg}, ctx, **kwargs)
+    return out[kind]
+
+
+def _more_conservative(a: Any, b: Any) -> Any:
+    """Pick the safer of two derivations for the same field.
+
+    Numerically that is the larger value: every derived quantity in this table
+    is a *requirement* (a window length, a floor, a count), so demanding more is
+    the conservative direction.  Non-numeric values keep the first derivation.
+    """
+    try:
+        return a if float(a) >= float(b) else b
+    except (TypeError, ValueError):
+        return a
+
+
+def _documented_default(path: str) -> Any:
+    """What the field would have been without the resolver (see
+    :data:`_DOCUMENTED_DEFAULTS`)."""
+    return _DOCUMENTED_DEFAULTS.get(path, UNSET)
+
+
+def _count_unset(bundle: Dict[str, Any]) -> int:
+    """Count fields still at ``UNSET`` after resolution (the documented-default
+    population)."""
+    total = 0
+
+    def _walk(obj: Any, depth: int = 0) -> None:
+        nonlocal total
+        if depth > 3 or obj is None:
+            return
+        fields = getattr(type(obj), "__dataclass_fields__", None)
+        if not fields:
+            return
+        for name in fields:
+            value = getattr(obj, name, None)
+            if value is UNSET:
+                total += 1
+            elif hasattr(type(value), "__dataclass_fields__"):
+                _walk(value, depth + 1)
+
+    for cfg in bundle.values():
+        _walk(cfg)
+    return total

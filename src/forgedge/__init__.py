@@ -25,6 +25,17 @@ from .event_discovery import (
 )
 from .forge import ForgeResult, forge, forge_multi
 from .ledger import HypothesisLedger
+from .resolver import (
+    Constraint,
+    Derivation,
+    PipelineContext,
+    ResolutionTrace,
+    Violation,
+    collect_context,
+    resolve,
+    resolve_config,
+)
+from .unset import UNSET
 from .rule_report import RuleSpec, rule_performance_report
 from .timebudget import TimeBudget
 from .market_context import (
@@ -68,6 +79,15 @@ __all__ = [
     "RuleSpec",
     "rule_performance_report",
     "TimeBudget",
+    "UNSET",
+    "PipelineContext",
+    "ResolutionTrace",
+    "Derivation",
+    "Constraint",
+    "Violation",
+    "resolve",
+    "resolve_config",
+    "collect_context",
     "EventDiscovery",
     "DiscoveryConfig",
     "CustomEvent",

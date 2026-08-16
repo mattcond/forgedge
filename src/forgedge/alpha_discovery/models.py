@@ -17,6 +17,8 @@ import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Literal, Optional, Tuple
 
+from ..unset import UNSET
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -496,7 +498,7 @@ class AlphaConfig:
     timeframe: str = "1H"
     fee_per_side: float = 0.002
     close_col: str = "close"
-    timestamp_col: str = "open_dt"
+    timestamp_col: str = UNSET
     regime_col: str = "regime"
     regime_stable_col: str = "regime_stable"
     use_stable_regime_only: bool = False

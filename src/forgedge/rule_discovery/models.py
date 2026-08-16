@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from ..unset import UNSET
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -401,7 +403,7 @@ class RuleDiscoveryConfig:
     criteria: SelectionCriteria = field(default_factory=SelectionCriteria)
     entry_mode: str = "limit"
     use_contract_target: bool = True
-    timestamp_col: str = "open_dt"
+    timestamp_col: str = UNSET
     signal_col: str = "__rule_signal__"
     discovery_date: Optional[str] = None
     selection_mode: str = "walk_forward"

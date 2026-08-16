@@ -492,6 +492,46 @@ registry = RuleRegistry.from_forge_results(results, config=config).run()
 
 ---
 
+---
+
+## Parameter resolution — `UNSET` and the resolver
+
+Configuration fields fall into three states rather than two:
+
+| state | meaning | who writes it |
+|---|---|---|
+| explicit | the caller chose this value | never overwritten; it is an *input* to derivation |
+| `UNSET` | "the resolver decides" | derived from the constraints that relate it to what was set |
+| no constraint | neither the preset nor the session has an opinion | the documented class default, exactly as before |
+
+`UNSET` exists because a plain default cannot answer the question a resolver has
+to ask: `AlphaConfig.timestamp_col == "open_dt"` looks identical whether the
+caller wrote it or inherited it.
+
+```python
+from forgedge import UNSET, PipelineContext, collect_context, resolve
+
+bundle = {"event_discovery": disc, "alpha": alpha, "rule_discovery": rd}
+ctx = collect_context(bundle, PipelineContext.from_frame(kpi, timeframe="1D"))
+resolved, trace, violations = resolve(bundle, ctx)
+print(trace.to_text())
+```
+
+`resolve()` returns **copies** — inspecting a configuration is never a side
+effect on it — and is idempotent. `forge()` does this once at start-up and
+exposes the result on `ForgeResult.context` / `.resolution` / `.coherence`.
+
+Derivation reads the timeframe, the schema and the configs' own values; it never
+reads the data (`n_bars`, `span_months`), which are visible to the *check* half
+only. That keeps `resolve()` total without the frame — which is what lets an
+inspection show exactly what will run — and it removes the temptation to cap a
+requirement to fit the available history instead of reporting that it does not
+fit.
+
+Precedence, strongest first: an explicit `PipelineContext` → `forge()`'s own
+arguments → fields set in any config → the class default. Two configs that
+disagree on the same value are **reported**, never silently reconciled.
+
 ## Import summary
 
 > The two walk-forward configs are now explicitly named:
