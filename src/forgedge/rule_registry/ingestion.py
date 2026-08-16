@@ -54,7 +54,11 @@ def build_document(
     """
     resp = submission.response
     vr = resp.validated_rule
-    params = vr.params
+    # Resolved here rather than trusted: a submission assembled by hand — a
+    # caller replaying a rule, a test — can carry unresolved fields, and this
+    # is the point where they stop being configuration and become a catalogue
+    # record.  A document that reads `fee=UNSET` is not a record of anything.
+    params = vr.params.resolved()
     candidate = submission.candidate
 
     # ── replay the validated rule on the source frame for the trade ledger ──

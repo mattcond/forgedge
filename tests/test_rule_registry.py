@@ -15,7 +15,6 @@ from forgedge.rule_discovery.models import (
     ValidatedRule,
 )
 from forgedge.resolver import PipelineContext, resolve, resolve_config
-from forgedge.rule_registry.cross_ticker import transfer_bar
 from forgedge.rule_registry import (
     RegistryConfig,
     RuleRegistry,
@@ -29,8 +28,10 @@ from forgedge.rule_registry.correlation import (
     correlation_matrices,
     gain_correlation_by_date,
 )
+from forgedge.rule_registry.cross_ticker import transfer_bar
 from forgedge.rule_registry.dedup import mark_duplicates
 from forgedge.rule_registry.models import RuleDocument
+from forgedge.unset import UNSET
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +415,22 @@ class TestRuleRegistry:
         sub = _submission("ADAUSDC", f, thr)
         with pytest.raises(ValueError):
             RuleRegistry([sub], {"SOLUSDC": f})  # wrong ticker frame
+
+    def test_a_catalogued_rule_records_values_not_sentinels(self):
+        """A submission assembled by hand — a caller replaying a rule, a test —
+        carries whatever `BacktestParams` it was given, unresolved fields
+        included.  Ingestion is where configuration becomes a *catalogue
+        record*, and a record that reads `fee=UNSET` is not a record of
+        anything: the flat table and the HTML report both render this dict.
+        """
+        f = _profitable_frame(seed=1)
+        thr = float(np.quantile(f["feat"], 0.20))
+        sub = _submission("ADAUSDC", f, thr)
+        assert sub.response.validated_rule.params.fee is UNSET   # as handed in
+
+        reg = RuleRegistry([sub], {"ADAUSDC": f}).run()
+        assert reg.documents[0].params["fee"] == pytest.approx(0.002)
+        assert flat_table(reg.documents).iloc[0]["fee"] == pytest.approx(0.002)
 
     def test_export_csv(self, tmp_path):
         f = _profitable_frame(seed=1)
