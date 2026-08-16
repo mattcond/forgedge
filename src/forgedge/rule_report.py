@@ -110,6 +110,15 @@ class RuleSpec:
     verdict: Optional[str] = None
     oos_expectancy: Optional[float] = None
 
+    def __post_init__(self) -> None:
+        # Three BacktestParams fields are session-resolved (see forgedge.unset),
+        # so a spec assembled by hand carries the sentinel.  `run_backtest`
+        # resolves its own copy, but this report *renders* the parameters —
+        # `fee:.2%` on an UNSET raises — and a spec is also something callers
+        # read.  Resolve once, at the boundary, as ingestion does for the
+        # registry: the same fix, in the place the census missed.
+        self.params = self.params.resolved()
+
     # ------------------------------------------------------------------
 
     @classmethod
