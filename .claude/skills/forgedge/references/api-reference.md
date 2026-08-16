@@ -235,9 +235,10 @@ None = (0.5, 1.0, 2.0)` (adds horizons at 0.5×/1×/2× each event's dominant
 indicator window — union, statistically capped, never a restriction),
 `horizon_enrichment_min_obs: int = 20`, `thresholds: PromotionThresholds =
 PromotionThresholds()`, `asset: str = "ASSET"`, `timeframe: str = "1H"`,
-`fee_per_side: float = 0.002`, `close_col: str = "close"`, `timestamp_col:
-str = "open_dt"`, `regime_col: str = "regime"`, `regime_stable_col: str =
-"regime_stable"`, `use_stable_regime_only: bool = False`, `min_regime_obs:
+`fee_per_side: float = UNSET` (0.002), `close_col: str = UNSET` (`"close"`),
+`timestamp_col: str = UNSET` (`"open_dt"`), `regime_col: str = UNSET`
+(`"regime"`), `regime_stable_col: str = UNSET` (`"regime_stable"`) — all five
+session-resolved, resolved default in brackets, `use_stable_regime_only: bool = False`, `min_regime_obs:
 int = 10`, `bars_per_day: float | None = None`, `fixed_target: TargetConfig
 | None = None` (fixed-target / `TargetOptimizer` mode), `target_mode:
 "abs"|"proj" = "proj"`, `trend_sma_mult: float = 2.0`.
@@ -320,8 +321,21 @@ windows only — the final test window is never read by any selection),
 
 `BacktestParams` — `direction: str = "long"`, `buy_type: str = "limit"`,
 `buy_drop_pct: float = 0.010`, `buy_delay_bar: int = 6`, `buy_price_anchor:
-str = "close"`, `sell_pct: float = 0.040`, `target_h: int = 24`, `fee: float
-= 0.002`, `early_stopping: bool = True`.
+str = UNSET` (`"close"`), `sell_pct: float = 0.040`, `target_h: int = 24`,
+`target_col: str = UNSET` (`"close"`), `target_hit_col: str = "close"`, `fee:
+float = UNSET` (0.002), `early_stopping: bool = True`.  The three `UNSET`
+fields are session-resolved — `fee` from `AlphaConfig.fee_per_side`, the two
+columns from `close_col`; `target_hit_col` is not, because it names an exit
+*convention* rather than a schema fact.  `BacktestParams.resolved()` applies
+the documented defaults, and `run_backtest` calls it, so a hand-built params
+object handed straight in behaves exactly as before.
+
+`buy_price_anchor` is the column the limit offset is applied to —
+`buy_price = anchor * (1 -/+ buy_drop_pct)` — and accepts **any numeric column
+on the candle table**, not only a price column: `buy_price_anchor="close_sma_3"`
+with `buy_drop_pct=0.10` is "a limit at 90% of the 3-bar SMA". It is filled in
+from `close_col` (its default level is the close) but never seeds the session's
+price column and is never checked against it.
 
 `RuleWalkForwardConfig` (M3; legacy alias `WalkForwardConfig`, which is also
 what top-level `forgedge.WalkForwardConfig` resolves to) — `n_splits: int
@@ -379,8 +393,11 @@ reg.html_report(timeframe="1H")     # self-contained HTML, inline SVG
 `RegistryConfig` fields and defaults (`src/forgedge/rule_registry/models.py`):
 `overlap_threshold: float = 0.70` (Jaccard ≥ this → duplicate, weaker PF
 flagged), `gain_corr_threshold: float = 0.70` (reporting only),
-`cross_pf_threshold: float = 2.0` (min PF for cross-ticker `PASS`),
-`generic_ratio_threshold: float = 2/3`, `cross_min_active: int = 10`,
+`cross_pf_threshold: float = UNSET` (1.5 — absolute PF floor for a
+cross-ticker `PASS`, session-resolved from
+`SelectionCriteria.partial_min_profit_factor`),
+`min_cross_pf_retention: float = UNSET` (0.8 — fraction of the rule's *home*
+PF it must retain), `generic_ratio_threshold: float = 2/3`, `cross_min_active: int = 10`,
 `export_format: "excel"|"csv" = "excel"`, `export_duplicates: bool = True`,
 `export_non_generic: bool = True`, `html_include_tradelog: bool = True`,
 `html_charts: bool = True`, `timestamp_col: str = "open_dt"`.
@@ -390,10 +407,20 @@ flagged), `gain_corr_threshold: float = 0.70` (reporting only),
 `cross_ticker: dict[str, CrossTickerResult]`, `cross_ticker_score`,
 `is_generic`, `classification: "GENERIC"|"PARTIAL"|"SPECIFIC"|"ISOLATED"`.
 
-Classification: `GENERIC` when the rule clears `cross_pf_threshold` on ≥
-`generic_ratio_threshold` of the other tickers it was replayed on (with
-thresholds recalibrated on each ticker's local distribution — the rule's
-logical structure stays fixed); otherwise `PARTIAL`/`SPECIFIC`/`ISOLATED`.
+`CrossTickerResult` — `ticker`, `expression_adapted`, `pf`, `win_rate`,
+`total_trades`, `zero_months`, `verdict`, `bar` (the PF this rule had to reach
+on this ticker).
+
+Classification: a target ticker is a `PASS` when the rule clears **both**
+halves of the transfer criterion —
+`pf >= cross_pf_threshold AND pf >= min_cross_pf_retention * pf_home` — and the
+rule is `GENERIC` when it PASSes on ≥ `generic_ratio_threshold` of the other
+tickers it was replayed on (with thresholds recalibrated on each ticker's local
+distribution — the rule's logical structure stays fixed); otherwise
+`PARTIAL`/`SPECIFIC`/`ISOLATED`.  The absolute half asks *is it tradeable
+there*, the relative half asks *does it transfer*: a single bar at 2.0 failed
+every `PARTIAL-EDGE` rule (admitted at 1.5) on every ticker, and passed a rule
+that had lost a third of its edge.
 
 `RuleSubmission(ticker, response, candidate, grade=None)` — manual
 construction path when not orchestrating via `forge()`/`forge_multi()`.
@@ -469,7 +496,7 @@ so an unresolved value reaching a computation fails loudly), and survives
 
 `PipelineContext` — session facts no module owns individually: `timeframe`,
 `timestamp_col`, `close_col`, `regime_col`, `regime_stable_col`, `fee_per_side`,
-`alpha`, `min_sample`, `target_rate_tpm`, plus the data facts `n_bars` /
+`alpha`, `min_sample`, `target_rate_tpm`, `cross_pf_retention`, plus the data facts `n_bars` /
 `span_months`. Bar arithmetic via `bars_per_day` / `bars_per_month` /
 `bar_hours` / `months_of()` / `bars_of()`. Build with
 `PipelineContext.from_frame(kpi, timeframe="1D")`.

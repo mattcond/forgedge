@@ -214,6 +214,11 @@ class PipelineContext:
         The session's arrival rate.  Note the direction: this is an *output* of
         the preset (its most characterising choice), collected into the context
         — not an input to it.
+    cross_pf_retention : float
+        Fraction of a rule's home profit factor it must retain elsewhere to
+        count as transferring (M4, F8).  Policy rather than data, which is why
+        it lives here next to ``alpha`` and ``min_sample`` instead of being a
+        literal buried in the cross-ticker loop.
     n_bars, span_months : int, float
         Data facts.  **Read by check mode only.**
     """
@@ -230,6 +235,7 @@ class PipelineContext:
     alpha: float = 0.05
     min_sample: int = 10
     target_rate_tpm: Optional[float] = None
+    cross_pf_retention: float = 0.8
     # data facts — check mode only
     n_bars: int = 0
     span_months: float = 0.0
@@ -478,8 +484,8 @@ def _set_path(bundle: Dict[str, Any], path: str, value: Any) -> bool:
 
 # -- the registry ------------------------------------------------------
 
-def _ctx_str(attr: str):
-    """Derive a schema/economics field straight from the context."""
+def _from_context(attr: str):
+    """Derive a schema/economics/policy field straight from the context."""
     def _derive(values: Dict[str, Any], ctx: PipelineContext):
         return getattr(ctx, attr), f"session {attr}={getattr(ctx, attr)!r}"
     return _derive
@@ -498,18 +504,48 @@ def _check_all_equal(paths: Sequence[str], label: str):
     return _check
 
 
+#: Schema propagation, per context field: every path it fills in, and the
+#: subset over which disagreement is a *bug* rather than a choice.
+#:
+#: The two lists differ in exactly one place, and the difference is the whole
+#: point.  ``buy_price_anchor`` is **not a schema field at all**: it names the
+#: *reference level* the limit offset is applied to
+#: (``buy_price = anchor × (1 ∓ buy_drop_pct)``), and any numeric column on the
+#: candle table is legal there — including a derived indicator, which is how
+#: "place a limit at 90% of the 3-bar SMA" is expressed
+#: (``buy_price_anchor="close_sma_3"``).  It is in the propagation list only
+#: because its *default* reference level happens to be the session's close, so
+#: renaming the price column has to carry it along.  Checking it for equality
+#: against the price column would flag a whole category of legitimate strategy.
+#:
+#: ``target_col`` is checked: the horizon exit has to be priced on the same
+#: series M2 measured its forward returns on, or the two modules are describing
+#: different instruments.
+#:
+#: ``target_hit_col`` appears in neither.  It names an exit *convention*
+#: (``"close"`` conservative, ``"high"``/``"low"`` optimistic) and the
+#: walk-forward sets it per pass.
+_SCHEMA_GROUPS: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
+    "timestamp_col": (
+        ("event_discovery.timestamp_col", "alpha.timestamp_col",
+         "rule_discovery.timestamp_col", "registry.timestamp_col"),
+        ("event_discovery.timestamp_col", "alpha.timestamp_col",
+         "rule_discovery.timestamp_col", "registry.timestamp_col"),
+    ),
+    "close_col": (
+        ("alpha.close_col", "rule_discovery.base_params.target_col",
+         "rule_discovery.base_params.buy_price_anchor"),
+        ("alpha.close_col", "rule_discovery.base_params.target_col"),
+    ),
+    "regime_col": (("alpha.regime_col",), ()),
+    "regime_stable_col": (("alpha.regime_stable_col",), ()),
+}
+
+
 def _schema_constraints() -> List[Constraint]:
     """Propagate the KPI table's schema to every module that reads it."""
     out: List[Constraint] = []
-    groups = {
-        "timestamp_col": [
-            "event_discovery.timestamp_col",
-            "alpha.timestamp_col",
-            "rule_discovery.timestamp_col",
-            "registry.timestamp_col",
-        ],
-    }
-    for attr, paths in groups.items():
+    for attr, (paths, checked) in _SCHEMA_GROUPS.items():
         for path in paths:
             out.append(Constraint(
                 code="schema_mismatch",
@@ -517,16 +553,17 @@ def _schema_constraints() -> List[Constraint]:
                 stage=PROPAGATION,
                 free=(),
                 derived=path,
-                derive=_ctx_str(attr),
+                derive=_from_context(attr),
             ))
-        out.append(Constraint(
-            code="schema_mismatch",
-            level="WARN",
-            stage=PROPAGATION,
-            free=tuple(paths),
-            derived=None,
-            check=_check_all_equal(paths, f"`{attr}`"),
-        ))
+        if len(checked) > 1:
+            out.append(Constraint(
+                code="schema_mismatch",
+                level="WARN",
+                stage=PROPAGATION,
+                free=tuple(checked),
+                derived=None,
+                check=_check_all_equal(checked, f"`{attr}`"),
+            ))
     return out
 
 
@@ -557,8 +594,40 @@ def _derive_backtest_fee(values: Dict[str, Any], ctx: PipelineContext):
     return ctx.fee_per_side, f"session fee_per_side={ctx.fee_per_side}"
 
 
+def _derive_cross_pf_floor(values: Dict[str, Any], ctx: PipelineContext):
+    """M4's absolute cross-ticker floor is the bar that admitted the rule.
+
+    ``cross_pf_threshold`` used to default to 2.0 independently of M3, which
+    made the entire ``PARTIAL-EDGE`` class — admitted at 1.5 — structurally
+    incapable of ever being ``GENERIC`` (F8).
+    """
+    upstream = values.get("rule_discovery.criteria.partial_min_profit_factor", _MISSING)
+    if upstream is not _MISSING and is_set(upstream):
+        value = float(upstream)
+        return value, (f"criteria.partial_min_profit_factor={value:g} — the bar "
+                       f"that admitted the rule at home")
+    return 1.5, "documented criteria.partial_min_profit_factor default 1.5"
+
+
 CONSTRAINTS: List[Constraint] = [
     *_schema_constraints(),
+    # ── genericity: floor + retention ────────────────────────────────
+    Constraint(
+        code="registry_stricter_than_m3",
+        level="WARN",
+        stage=PROPAGATION,
+        free=("rule_discovery.criteria.partial_min_profit_factor",),
+        derived="registry.cross_pf_threshold",
+        derive=_derive_cross_pf_floor,
+    ),
+    Constraint(
+        code="registry_stricter_than_m3",
+        level="WARN",
+        stage=PROPAGATION,
+        free=(),
+        derived="registry.min_cross_pf_retention",
+        derive=_from_context("cross_pf_retention"),
+    ),
     # ── economics ────────────────────────────────────────────────────
     Constraint(
         code="fee_mismatch",
@@ -990,8 +1059,17 @@ _DOCUMENTED_DEFAULTS: Dict[str, Any] = {
     "alpha.timestamp_col": "open_dt",
     "rule_discovery.timestamp_col": "open_dt",
     "registry.timestamp_col": "open_dt",
+    "alpha.close_col": "close",
+    "alpha.regime_col": "regime",
+    "alpha.regime_stable_col": "regime_stable",
+    "rule_discovery.base_params.target_col": "close",
+    "rule_discovery.base_params.buy_price_anchor": "close",
     "alpha.fee_per_side": 0.002,
     "rule_discovery.base_params.fee": 0.002,
+    "registry.cross_pf_threshold": 2.0,
+    # `registry.min_cross_pf_retention` is deliberately absent: the retention
+    # half of the criterion had no value before this table entry would have
+    # described one, and the fallback (`UNSET → 0.8`) says exactly that.
 }
 
 
@@ -1148,6 +1226,20 @@ _CONTEXT_SOURCES: Dict[str, Tuple[str, ...]] = {
         "rule_discovery.timestamp_col",
         "registry.timestamp_col",
     ),
+    # Note the absence of `rule_discovery.base_params.buy_price_anchor`, which
+    # `_SCHEMA_GROUPS` does fill in from this field.  Propagation and seeding
+    # are not symmetric, because the anchor is a *level*, not a name for the
+    # price series: `buy_price_anchor="close_sma_3"` says where to put the
+    # limit, not what the KPI table calls its close.  Seeding from it would
+    # push "close_sma_3" back out into `alpha.close_col` and have M2 measure
+    # forward returns on a moving average.  A field seeds the context only when
+    # setting it means "this is what the column is called".
+    "close_col": (
+        "alpha.close_col",
+        "rule_discovery.base_params.target_col",
+    ),
+    "regime_col": ("alpha.regime_col",),
+    "regime_stable_col": ("alpha.regime_stable_col",),
     "fee_per_side": (
         "alpha.fee_per_side",
         "rule_discovery.base_params.fee",

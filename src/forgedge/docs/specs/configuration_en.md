@@ -235,11 +235,11 @@ IS/OOS split, and traceability metadata.
 | `asset` | str | `"ASSET"` | Asset name (traceability in AlphaContracts). |
 | `exchange` | str | `""` | Exchange/market (optional, traceability). |
 | `timeframe` | str | `"1H"` | Timeframe (traceability). |
-| `fee_per_side` | float | `0.002` | Fee per side (0.2%), recorded in the contract for Rule Discovery. |
-| `close_col` | str | `"close"` | Close price column. |
-| `timestamp_col` | str | `"open_dt"` | Datetime column. |
-| `regime_col` | str | `"regime"` | Regime column (from Module 0). |
-| `regime_stable_col` | str | `"regime_stable"` | Regime-stable column (from Module 0). |
+| `fee_per_side` | float | `0.002` *(session-resolved)* | Fee per side (0.2%), recorded in the contract **and charged by the backtest** — it now propagates into `BacktestParams.fee` instead of being an independent copy. |
+| `close_col` | str | `"close"` *(session-resolved)* | Close price column. Propagates to `BacktestParams.{target_col, buy_price_anchor}`. |
+| `timestamp_col` | str | `"open_dt"` *(session-resolved)* | Datetime column. |
+| `regime_col` | str | `"regime"` *(session-resolved)* | Regime column (from Module 0). |
+| `regime_stable_col` | str | `"regime_stable"` *(session-resolved)* | Regime-stable column (from Module 0). |
 | `use_stable_regime_only` | bool | `False` | When True, excludes bars with `regime_stable=False` from per-regime analysis. |
 | `min_regime_obs` | int | `10` | Minimum observations per regime to compute reliable per-regime metrics. |
 | `rolling_ic_window` | int \| None | `None` | Rolling IC window size. When None, computed automatically (≈ n/20). |
@@ -309,12 +309,12 @@ entry/exit levels, and fee.
 | `buy_type` | str | `"limit"` | Entry order type. In v1.0 only `"limit"` is supported. |
 | `buy_drop_pct` | float | `0.010` | Percentage drop below close at which the limit order is placed (1%). |
 | `buy_delay_bar` | int | `6` | Maximum number of bars after the event signal in which the limit can be filled. |
-| `buy_price_anchor` | str | `"close"` | Column used as anchor for the entry price. |
+| `buy_price_anchor` | str | `"close"` *(session-resolved)* | Column the limit offset is applied to: `buy_price = anchor × (1 ∓ buy_drop_pct)`. **Any numeric column is legal**, including a derived indicator — `buy_price_anchor="close_sma_3", buy_drop_pct=0.10` means "a limit at 90% of the 3-bar SMA". Filled in from `close_col` so that renaming the price column carries the *default* anchor along; an explicit anchor is a reference level of its own and does **not** redefine the session's price column. |
 | `sell_pct` | float | `0.040` | Take-profit as percentage from fill price (4%). |
 | `target_h` | int | `24` | Horizon stop in bars: if take-profit is not reached within this number of bars, close at that bar's close. |
-| `target_col` | str | `"close"` | Column used to check horizon stop. |
+| `target_col` | str | `"close"` *(session-resolved)* | Column used to check horizon stop. Must name the same series `close_col` does; a disagreement is reported. |
 | `target_hit_col` | str | `"close"` | Column used to check take-profit hit. |
-| `fee` | float | `0.002` | Per-side fee (0.2%). |
+| `fee` | float | `0.002` *(session-resolved)* | Per-side fee (0.2%), derived from `AlphaConfig.fee_per_side`. |
 | `early_stopping` | bool | `True` | When True, the grid search stops early when the top-K ranking is stable (compute optimisation). |
 
 ---
@@ -465,7 +465,8 @@ export.
 |---|---|---|---|
 | `overlap_threshold` | float | `0.70` | Jaccard threshold above which two rules are considered duplicates (≥ 70% overlap in activation dates). |
 | `gain_corr_threshold` | float | `0.70` | Spearman threshold above which two rules have correlated gains. Used as a secondary metric in the correlation matrix. |
-| `cross_pf_threshold` | float | `2.0` | Minimum PF on an external ticker to count as PASS in the cross-ticker backtest. |
+| `cross_pf_threshold` | float | `1.5` *(session-resolved)* | Absolute PF floor on an external ticker — half of the PASS criterion. Derived from `SelectionCriteria.partial_min_profit_factor`: the bar that admitted the rule at home. Was an independent `2.0`, which excluded every PARTIAL-EDGE rule from genericity by construction. |
+| `min_cross_pf_retention` | float | `0.8` *(session-resolved)* | The other half: the fraction of its **home** PF the rule must retain on the external ticker. `PASS ⟺ pf ≥ cross_pf_threshold AND pf ≥ retention × pf_home`. |
 | `generic_ratio_threshold` | float | `2/3 ≈ 0.667` | Minimum fraction of external tickers with PASS to classify a rule as GENERIC. PARTIAL if ≥ 1 but < 2/3. |
 | `cross_min_active` | int | `10` | Minimum activations on an external ticker to include it in the cross-ticker count. |
 | `export_format` | str | `"excel"` | Flat table export format: `"excel"` or `"csv"`. |
@@ -481,7 +482,8 @@ from forgedge import RuleRegistry, RegistryConfig
 
 config = RegistryConfig(
     overlap_threshold=0.65,         # more aggressive deduplication
-    cross_pf_threshold=1.8,         # less strict for illiquid assets
+    cross_pf_threshold=1.8,         # raise the absolute floor for illiquid assets
+    min_cross_pf_retention=0.7,     # and tolerate a little more decay away from home
     generic_ratio_threshold=0.5,    # GENERIC if ≥ 50% of tickers PASS
     export_format="csv",
     html_charts=True,

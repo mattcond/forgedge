@@ -66,7 +66,8 @@ registry = RuleRegistry.from_forge_results(
     results,
     RegistryConfig(
         overlap_threshold=0.70,
-        cross_pf_threshold=2.0,
+        cross_pf_threshold=1.5,          # floor assoluto (derivato da M3)
+        min_cross_pf_retention=0.8,     # e la frazione di PF di casa da mantenere
         generic_ratio_threshold=2 / 3,
         export_format="excel",
     ),
@@ -262,10 +263,31 @@ L'espressione adattata è memorizzata in `CrossTickerResult.expression_adapted`.
 Per ogni coppia viene eseguito un backtest completo con i parametri operativi
 della regola sorgente (buy_drop_pct, sell_pct, target_h, ecc.).
 
-Il verdetto è:
+Il verdetto richiede **entrambe** le metà del criterio di trasferibilità:
 
-- `PASS` se `pf >= cross_pf_threshold` (default `2.0`)
-- `FAIL` altrimenti
+```
+PASS  ⟺  pf >= cross_pf_threshold                    (è tradeable là)
+         AND  pf >= min_cross_pf_retention · pf_casa   (trasferisce davvero)
+```
+
+Un'unica asticella assoluta risponde a *«è buona altrove?»*, mentre ogni parola
+del vocabolario `GENERIC`/`PARTIAL`/`SPECIFIC`/`ISOLATED` chiede *«trasferisce?»*.
+Le due cose divergono in entrambe le direzioni:
+
+| regola | PF casa | PF fuori | asticella unica `2.0` |
+|---|---|---|---|
+| trasferisce perfettamente | 1.6 | 1.6 | FAIL — e su ogni ticker, quindi `ISOLATED` |
+| degradata di un terzo | 3.0 | 2.05 | PASS — con un terzo dell'edge perso |
+
+La prima riga non era un caso limite: `partial_min_profit_factor` ammette le
+regole a `1.5`, quindi **l'intera classe `PARTIAL-EDGE` era strutturalmente
+esclusa dalla genericità**. Abbassare l'asticella unica al PF di casa sistema
+quella riga e peggiora la seconda — le regole *più deboli* avrebbero il test di
+genericità *più facile*. Con due metà il floor resta un floor e il rapporto
+misura la trasferibilità; la qualità resta dove il registro già la registra, sul
+verdetto M3 e sul grade.
+
+Il valore effettivamente richiesto è riportato in `CrossTickerResult.bar`.
 
 #### Classificazione di genericità
 
@@ -560,7 +582,8 @@ from forgedge import RegistryConfig
 
 config = RegistryConfig(
     overlap_threshold=0.70,
-    cross_pf_threshold=2.0,
+    cross_pf_threshold=1.5,
+    min_cross_pf_retention=0.8,
     generic_ratio_threshold=2 / 3,
     export_format="excel",
 )
@@ -570,7 +593,8 @@ config = RegistryConfig(
 |---|---|---|
 | `overlap_threshold` | `0.70` | Soglia Jaccard sopra la quale due regole sono considerate duplicate (Step 3). La regola con PF inferiore viene marcata. |
 | `gain_corr_threshold` | `0.70` | Soglia Spearman usata a fini di reporting ("stessa esposizione di regime"). Non guida la deduplicazione. |
-| `cross_pf_threshold` | `2.0` | PF minimo per un verdetto `PASS` nel backtest cross-ticker (Step 4). |
+| `cross_pf_threshold` | `1.5` | Floor assoluto di profit factor per un verdetto `PASS` (Step 4) — metà del criterio. Risolto dalla sessione a partire da `SelectionCriteria.partial_min_profit_factor`: l'asticella che ha ammesso la regola in casa. |
+| `min_cross_pf_retention` | `0.8` | L'altra metà: frazione del profit factor **di casa** che la regola deve mantenere sul ticker target. |
 | `generic_ratio_threshold` | `2/3` | Frazione minima di `PASS` per il flag `is_generic` e il badge `GENERIC`. Usare `2/3` (non `0.67`) per evitare errori di arrotondamento al limite. |
 | `cross_min_active` | `10` | Numero minimo di barre attive allineate per il calcolo della Spearman. Sotto questa soglia, la Spearman è riportata come `0.0`. |
 | `export_format` | `"excel"` | Formato di export della tabella piatta: `"excel"` o `"csv"`. |

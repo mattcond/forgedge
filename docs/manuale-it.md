@@ -609,6 +609,56 @@ fallimento.
 > dal tasso (issue #177); fino ad allora i run col preset su daily richiedono
 > `strict=False`.
 
+#### Cosa riempie il resolver
+
+Un campo lasciato stare non è un valore: è una domanda a cui risponde la
+sessione. Questi sono i campi il cui default arriva ora dalla sessione invece
+che dal corpo di una classe — impostane uno e ogni modulo che legge la stessa
+grandezza lo segue.
+
+| parametro latente | campi in cui si materializzava | default risolto |
+|---|---|---|
+| la colonna timestamp | `timestamp_col` su M1 / M2 / M3 / M4 | `"open_dt"` |
+| la serie dei prezzi | `AlphaConfig.close_col`, `BacktestParams.{target_col, buy_price_anchor}` | `"close"` |
+| le colonne di regime | `AlphaConfig.{regime_col, regime_stable_col}` | `"regime"` / `"regime_stable"` |
+| la base di costo | `AlphaConfig.fee_per_side`, `BacktestParams.fee` | `0.002` |
+| l'asticella di genericità | `RegistryConfig.{cross_pf_threshold, min_cross_pf_retention}` | `1.5` / `0.8` |
+
+Due di questi erano bug veri, non ordine formale. `AlphaConfig.fee_per_side`
+stampigliava il contratto mentre `BacktestParams.fee` addebitava il backtest, e
+niente li collegava: `AlphaConfig(fee_per_side=0.0005)` produceva contratti che
+documentavano 5 bp e backtest che ne addebitavano 20 — in silenzio, perché i due
+concordavano solo condividendo un default. E `forge_preset(timestamp_col="ts")`
+configurava solo M1, quindi M2 falliva più avanti chiedendo un valore che
+credevi di aver già dato.
+
+La propagazione non è simmetrica alla raccolta, in un punto deliberato, e la
+ragione va detta con precisione. `buy_price_anchor` **non è un campo di schema**:
+nomina il *livello di riferimento* a cui si applica l'offset del limite —
+`buy_price = anchor × (1 ∓ buy_drop_pct)` — e qualsiasi colonna numerica della
+tabella candele è ammessa, indicatori derivati compresi. `buy_price_anchor=
+"close_sma_3"` con `buy_drop_pct=0.10` è il modo di dire *«metti un limite al 90%
+della SMA a 3 barre»*; il motore non ha altro modo di esprimerlo.
+
+Quindi l'anchor viene *riempito* dalla colonna prezzo — il suo livello di
+riferimento di default è il close, e rinominare la colonna deve portarselo
+dietro — ma non *semina* mai il contesto, e non viene confrontato con `close_col`.
+Seminare da lì rispingerebbe `"close_sma_3"` dentro `AlphaConfig.close_col` e
+farebbe misurare a M2 i rendimenti futuri su una media mobile. `target_col` è
+diverso — l'uscita a orizzonte dev'essere prezzata sulla serie su cui M2 ha
+misurato i rendimenti — quindi lì un disaccordo viene segnalato.
+
+> **La genericità è ora un test di trasferibilità, non di qualità.**
+> `cross_pf_threshold` aveva default `2.0` indipendente da M3, mentre
+> `partial_min_profit_factor` ammette le regole a `1.5` — quindi una regola
+> `PARTIAL-EDGE` avrebbe dovuto fare *meglio* fuori casa che in casa per essere
+> generica, e l'intera classe era esclusa dalla genericità per costruzione. Il
+> verdetto è ora `PASS ⟺ pf ≥ floor AND pf ≥ retention × pf_casa`: la metà
+> assoluta chiede *è tradeable là*, quella relativa chiede *trasferisce*. La
+> qualità resta sul verdetto M3 e sul grade, dove il registro già la registra.
+> `CrossTickerResult.bar` riporta il numero contro cui ogni verdetto è stato
+> misurato.
+
 ### Qualità dei dati — `summary_report`
 
 ```python
@@ -675,7 +725,7 @@ Ogni modulo accetta una dataclass che porta i suoi parametri. Questa sezione cop
 | `embargo_bars` | `0` | buffer OOS extra opt-in, §15 |
 | `horizon_enrichment` | `(0.5, 1.0, 2.0)` | attivo di default; aggiunge orizzonti attorno alla finestra dominante propria di ogni evento, §15 |
 | `thresholds` | `PromotionThresholds()` | soglie statistiche che guidano il voto, non un gate rigido (eccetto la direzione) |
-| `fee_per_side` | `0.002` | registrata per Rule Discovery, non applicata qui |
+| `fee_per_side` | `0.002` | registrata per Rule Discovery **e addebitata da lui** — non applicata qui (M2 non nettizza le fee), ma è lo stesso valore, non più una copia indipendente |
 | `target_mode` | `"proj"` | scoring eccesso-sopra-trend di default per eventi long, §15 |
 | `trend_sma_mult` | `2.0` | moltiplicatore della finestra SMA di trend per `target_mode="proj"` |
 | `use_stable_regime_only` | `False` | opt-in, restringe l'analisi di regime alle barre `regime_stable=True` |
@@ -699,7 +749,7 @@ Default di `SelectionCriteria` che più probabilmente toccherai: `min_profit_fac
 
 ### `RegistryConfig` (Modulo 4)
 
-`overlap_threshold=0.70` (soglia Jaccard di dedup), `cross_pf_threshold=2.0` (PF minimo per un `PASS` cross-ticker), `generic_ratio_threshold=2/3` (**passalo come `2/3`, non `0.67`** — una regola che passa esattamente 2-su-3 ticker ha rapporto `0.6666...`, che supera `>= 2/3` ma non `>= 0.67`; la documentazione segnala esplicitamente questo problema di precisione), `export_format="excel"`.
+`overlap_threshold=0.70` (soglia Jaccard di dedup), `cross_pf_threshold=1.5` + `min_cross_pf_retention=0.8` (le due metà del `PASS` cross-ticker — floor assoluto, e frazione del PF di casa mantenuta), `generic_ratio_threshold=2/3` (**passalo come `2/3`, non `0.67`** — una regola che passa esattamente 2-su-3 ticker ha rapporto `0.6666...`, che supera `>= 2/3` ma non `>= 0.67`; la documentazione segnala esplicitamente questo problema di precisione), `export_format="excel"`.
 
 ### Configurare via preset invece
 

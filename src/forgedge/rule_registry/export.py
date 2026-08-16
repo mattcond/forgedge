@@ -3,7 +3,9 @@
 One row per rule, every parameter flattened (spec Section 10).  The cross-ticker
 block adds one ``pf_{TICKER}`` / ``wr_{TICKER}`` / ``trades_{TICKER}`` /
 ``verdict_{TICKER}`` column group per ticker tested in the session; a rule's own
-source ticker is blank in its row.
+source ticker is blank in its row.  ``cross_pf_bar`` states the profit factor
+each verdict was measured against — one column, since the bar is a property of
+the rule (its home PF) and the config, not of the target ticker.
 
 FORGE's philosophy is *not to hide complexity* (Section 9): by default the table
 keeps duplicates and non-generic rules with explicit flags, so the user can see
@@ -95,6 +97,10 @@ def flat_table(docs: List[RuleDocument], config: Optional[RegistryConfig] = None
             row[f"wr_{t}"] = res.win_rate if res else float("nan")
             row[f"trades_{t}"] = res.total_trades if res else float("nan")
             row[f"verdict_{t}"] = res.verdict if res else ""
+        # One column, not one per ticker: the bar depends on the rule's home PF
+        # and the config, so it is the same for every target it was tested on.
+        _first = next(iter(d.cross_ticker.values()), None)
+        row["cross_pf_bar"] = _first.bar if _first is not None else float("nan")
         row["cross_ticker_score"] = d.cross_ticker_score
         row["cross_ticker_total"] = d.cross_ticker_total
         row["is_generic"] = d.is_generic

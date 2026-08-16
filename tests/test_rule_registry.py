@@ -9,11 +9,12 @@ from forgedge.event_discovery.models import (
     EventComponent,
     GateResult,
 )
-from forgedge.rule_discovery import BacktestParams, run_backtest
+from forgedge.rule_discovery import BacktestParams, RuleDiscoveryConfig, run_backtest
 from forgedge.rule_discovery.models import (
     RuleDiscoveryResponse,
     ValidatedRule,
 )
+from forgedge.resolver import PipelineContext, resolve, resolve_config
 from forgedge.rule_registry import (
     RegistryConfig,
     RuleRegistry,
@@ -27,8 +28,10 @@ from forgedge.rule_registry.correlation import (
     correlation_matrices,
     gain_correlation_by_date,
 )
+from forgedge.rule_registry.cross_ticker import transfer_bar
 from forgedge.rule_registry.dedup import mark_duplicates
 from forgedge.rule_registry.models import RuleDocument
+from forgedge.unset import UNSET
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +234,87 @@ class TestClassification:
 
 
 # ---------------------------------------------------------------------------
+# The transfer criterion — the F8 case
+# ---------------------------------------------------------------------------
+
+class TestTransferBar:
+    """`PASS ⟺ pf_other >= floor AND pf_other >= retention · pf_home`.
+
+    The bar is computed from a resolved config, so these run against the values
+    a real session would use (floor 1.5, retention 0.8) rather than literals
+    pinned here.
+    """
+
+    @staticmethod
+    def _cfg(**overrides):
+        return resolve_config(RegistryConfig(**overrides), "registry")
+
+    def _passes(self, pf_home: float, pf_other: float, **overrides) -> bool:
+        return pf_other >= transfer_bar(pf_home, self._cfg(**overrides))
+
+    def test_a_rule_that_holds_its_edge_elsewhere_is_generic(self):
+        """The row a single 2.0 bar got backwards: a PARTIAL-EDGE rule admitted
+        at 1.5, keeping the same PF away from home, is the *definition* of a
+        pattern that transfers — and was failed everywhere, on every ticker,
+        making the whole PARTIAL-EDGE class ISOLATED by construction."""
+        assert self._passes(pf_home=1.6, pf_other=1.6)
+
+    def test_a_rule_that_gave_up_a_third_of_its_edge_is_not(self):
+        """The other row it got backwards.  2.05 clears an absolute 2.0, so this
+        used to PASS — while the rule had lost 32% of what it was worth at
+        home, which is what "does not transfer" looks like."""
+        assert not self._passes(pf_home=3.0, pf_other=2.05)
+        assert self._passes(pf_home=3.0, pf_other=2.6)      # −13%: it holds
+
+    def test_the_absolute_floor_still_bites(self):
+        """Retention alone would let a rule decay with its home PF forever:
+        1.2 retains 75% of 1.6, but 1.2 is not a tradeable profit factor.  The
+        floor is the half that says "good enough *here*", independent of how
+        good it was there."""
+        assert not self._passes(pf_home=1.6, pf_other=1.2)
+
+    def test_a_weak_rule_can_be_generic_without_the_test_getting_easier(self):
+        """The objection to deriving the bar from the home PF: weaker rules get
+        a lower bar.  They do — and it is still bounded below by the floor, so
+        the easiest possible test is the one M3 already used to admit the rule.
+
+        The rule may read GENERIC while its M3 verdict stays PARTIAL-EDGE and
+        its grade stays what it is.  Transfer and quality are different axes
+        and the registry records both; this one is not asked to carry the other.
+        """
+        assert self._passes(pf_home=1.5, pf_other=1.5)
+        assert not self._passes(pf_home=1.5, pf_other=1.4)
+
+    def test_the_bar_is_the_higher_half_and_is_recorded(self):
+        cfg = self._cfg()
+        assert transfer_bar(1.5, cfg) == pytest.approx(1.5)    # floor wins
+        assert transfer_bar(4.0, cfg) == pytest.approx(3.2)    # retention wins
+
+    def test_an_undefined_home_pf_leaves_only_the_floor(self):
+        """A rule with no losing trade at home has an infinite PF; 80% of
+        infinity is not a bar anyone can clear, and treating it as one would
+        silently mark the best rules ISOLATED."""
+        cfg = self._cfg()
+        assert transfer_bar(float("inf"), cfg) == pytest.approx(1.5)
+        assert transfer_bar(float("nan"), cfg) == pytest.approx(1.5)
+
+    def test_the_floor_follows_m3_rather_than_being_a_second_opinion(self):
+        """Both halves are resolved, so moving M3's admission bar moves the
+        registry's — which is the point: `cross_pf_threshold` was an
+        independent copy that happened to be stricter."""
+        assert self._cfg().cross_pf_threshold == pytest.approx(1.5)
+
+        bundle = {"rule_discovery": RuleDiscoveryConfig(), "registry": RegistryConfig()}
+        bundle["rule_discovery"].criteria.partial_min_profit_factor = 1.8
+        out, _trace, _v = resolve(bundle, PipelineContext())
+        assert out["registry"].cross_pf_threshold == pytest.approx(1.8)
+
+    def test_an_explicit_threshold_is_still_honoured(self):
+        assert self._cfg(cross_pf_threshold=2.5).cross_pf_threshold == pytest.approx(2.5)
+        assert not self._passes(pf_home=3.0, pf_other=2.4, cross_pf_threshold=2.5)
+
+
+# ---------------------------------------------------------------------------
 # Threshold recalibration
 # ---------------------------------------------------------------------------
 
@@ -331,6 +415,22 @@ class TestRuleRegistry:
         sub = _submission("ADAUSDC", f, thr)
         with pytest.raises(ValueError):
             RuleRegistry([sub], {"SOLUSDC": f})  # wrong ticker frame
+
+    def test_a_catalogued_rule_records_values_not_sentinels(self):
+        """A submission assembled by hand — a caller replaying a rule, a test —
+        carries whatever `BacktestParams` it was given, unresolved fields
+        included.  Ingestion is where configuration becomes a *catalogue
+        record*, and a record that reads `fee=UNSET` is not a record of
+        anything: the flat table and the HTML report both render this dict.
+        """
+        f = _profitable_frame(seed=1)
+        thr = float(np.quantile(f["feat"], 0.20))
+        sub = _submission("ADAUSDC", f, thr)
+        assert sub.response.validated_rule.params.fee is UNSET   # as handed in
+
+        reg = RuleRegistry([sub], {"ADAUSDC": f}).run()
+        assert reg.documents[0].params["fee"] == pytest.approx(0.002)
+        assert flat_table(reg.documents).iloc[0]["fee"] == pytest.approx(0.002)
 
     def test_export_csv(self, tmp_path):
         f = _profitable_frame(seed=1)

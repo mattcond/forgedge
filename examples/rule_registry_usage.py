@@ -76,7 +76,10 @@ registry = RuleRegistry.from_forge_results(
     results,
     RegistryConfig(
         overlap_threshold=0.70,      # Jaccard per la deduplicazione
-        cross_pf_threshold=2.0,      # PF minimo per un PASS cross-ticker
+        # Il PASS cross-ticker ha due metà: un floor assoluto (è tradeable là)
+        # e una ritenzione sul PF di casa (trasferisce davvero). Entrambe
+        # lasciate a UNSET si risolvono a 1.5 e 0.8 — il floor dall'asticella
+        # con cui M3 ha ammesso la regola.
         generic_ratio_threshold=2 / 3,
         export_format="excel",
     ),
