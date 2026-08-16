@@ -416,21 +416,29 @@ class AlphaConfig:
         Registry can attribute the alpha.  They have no effect whatsoever on
         any measurement.
     fee_per_side : float
-        Informational only — recorded in the contract so Rule Discovery knows
-        the assumed cost basis.  Alpha Discovery does not net it out (that is
-        Rule Discovery's job).
+        Recorded in the contract as the assumed cost basis, and — since the
+        parameter-coherence work — the cost Rule Discovery actually charges:
+        the resolver propagates it into ``BacktestParams.fee``, which used to
+        be an independent copy that silently disagreed (F7).  Alpha Discovery
+        still does not net it out; that remains Rule Discovery's job.
+        Session-resolved: default ``0.002``.
     close_col : str
         Name of the close-price column used to build forward returns.
+        Session-resolved from the KPI table's schema, and propagated to
+        ``BacktestParams.{target_col, buy_price_anchor}``.  Default ``"close"``.
     timestamp_col : str
         Datetime column name (or DatetimeIndex name) on the KPI table.
+        Session-resolved; default ``"open_dt"``.
     regime_col : str
         Column holding the market regime (produced by Market Context).  When
         absent from the table, regime sensitivity is skipped and the regime
-        breadth term is dropped from the alpha score.
+        breadth term is dropped from the alpha score.  Session-resolved;
+        default ``"regime"``.
     regime_stable_col : str
         Optional ``regime_stable`` boolean column.  When present and
         ``use_stable_regime_only`` is set, only stable bars feed the per-regime
-        IC to avoid transition-bar contamination.
+        IC to avoid transition-bar contamination.  Session-resolved; default
+        ``"regime_stable"``.
     use_stable_regime_only : bool
         Restrict regime sensitivity to ``regime_stable == True`` bars.
     min_regime_obs : int
@@ -496,11 +504,11 @@ class AlphaConfig:
     asset: str = "ASSET"
     exchange: str = ""
     timeframe: str = "1H"
-    fee_per_side: float = 0.002
-    close_col: str = "close"
+    fee_per_side: float = UNSET
+    close_col: str = UNSET
     timestamp_col: str = UNSET
-    regime_col: str = "regime"
-    regime_stable_col: str = "regime_stable"
+    regime_col: str = UNSET
+    regime_stable_col: str = UNSET
     use_stable_regime_only: bool = False
     min_regime_obs: int = 10
     rolling_ic_window: Optional[int] = None

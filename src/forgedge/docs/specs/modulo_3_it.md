@@ -420,12 +420,12 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `buy_type` | `"limit"` | `"limit"` o `"market"` |
 | `buy_drop_pct` | `0.010` | Entità dello scostamento dal anchor (es. 0.01 = 1%): sconto per long, premio per short |
 | `buy_delay_bar` | `6` | Barre di vita dell'ordine limite |
-| `buy_price_anchor` | `"close"` | Colonna usata come anchor del limite |
+| `buy_price_anchor` | `"close"` *(risolto dalla sessione)* | Colonna usata come anchor del limite. Riempita da `close_col`; impostarla esplicitamente è una scelta di meccanica d'ordine e non ridefinisce la colonna prezzo della sessione |
 | `sell_pct` | `0.040` | Take-profit come frazione del prezzo di fill |
 | `target_h` | `24` | Barre tenute *dopo* la barra di fill prima dell'uscita a orizzonte (l'intervallo segnale→uscita è sempre `1 + target_h`). `0` = round-trip nella stessa sessione (close della barra di fill) |
-| `target_col` | `"close"` | Colonna per l'uscita a orizzonte |
+| `target_col` | `"close"` *(risolto dalla sessione)* | Colonna per l'uscita a orizzonte. Deve nominare la stessa serie di `close_col` |
 | `target_hit_col` | `"close"` | Colonna per rilevare il take-profit. Conservative = `"close"` per entrambe le direzioni; ottimistico = `"high"` per long, `"low"` per short (usare `optimistic_hit_col(direction)`) |
-| `fee` | `0.002` | Fee per lato |
+| `fee` | `0.002` *(risolto dalla sessione)* | Fee per lato, derivata da `AlphaConfig.fee_per_side` — la base di costo del contratto è il costo addebitato |
 | `early_stopping` | `True` | Esci al take-profit; se False, sempre a orizzonte |
 
 ### `GridSpec`

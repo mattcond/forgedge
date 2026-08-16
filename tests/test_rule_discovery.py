@@ -34,6 +34,8 @@ from forgedge.rule_discovery import (
 )
 from forgedge.rule_discovery import excursion_stats, execution_envelope
 from forgedge.rule_discovery.validation import _ttest_1samp_greater
+from forgedge.resolver import PipelineContext, collect_context, resolve, resolve_config
+from forgedge.unset import UNSET
 
 
 def _nan_safe_eq(a, b) -> bool:
@@ -145,6 +147,57 @@ class TestBacktestEngine:
         lo = run_backtest(df, "__sig__", BacktestParams(fee=0.0, buy_drop_pct=0.005))
         hi = run_backtest(df, "__sig__", BacktestParams(fee=0.01, buy_drop_pct=0.005))
         assert lo.expectancy > hi.expectancy
+
+    def test_an_unresolved_fee_charges_the_documented_default(self):
+        """`BacktestParams.fee` is session-resolved, so a caller who builds one
+        by hand and hands it straight here holds `UNSET` (see forgedge.unset).
+
+        The sentinel must never reach the arithmetic — `UNSET * 2` raises by
+        design, and it must not silently become zero either, which would show a
+        free lunch.  A function with a documented default has already decided:
+        0.002/side, exactly as if it had been written out.
+        """
+        df = _candle_with_signal(n=2000, signal_every=40, drift_after_signal=0.06)
+        assert BacktestParams().fee is UNSET
+
+        implicit = run_backtest(df, "__sig__", BacktestParams(buy_drop_pct=0.005))
+        explicit = run_backtest(
+            df, "__sig__", BacktestParams(buy_drop_pct=0.005, fee=0.002)
+        )
+        free = run_backtest(df, "__sig__", BacktestParams(buy_drop_pct=0.005, fee=0.0))
+
+        assert implicit.expectancy == pytest.approx(explicit.expectancy, rel=1e-12)
+        assert implicit.expectancy < free.expectancy
+
+    def test_the_contract_cost_basis_is_the_cost_charged(self):
+        """F7 — `AlphaConfig.fee_per_side` stamped the contract while
+        `BacktestParams.fee` charged the backtest, and nothing connected them.
+
+        They agreed only because both defaulted to 0.002, so a caller who set
+        one got contracts documenting one cost and a backtest charging another,
+        silently.  The resolver now derives the second from the first; here the
+        difference is measured on the net, which is the only place it matters.
+        """
+        df = _candle_with_signal(n=2000, signal_every=40, drift_after_signal=0.06)
+        ctx = PipelineContext(timeframe="1H")
+
+        cheap = resolve_config(
+            RuleDiscoveryConfig(), "rule_discovery", ctx,
+        )
+        # What the resolver does inside forge(): M2's cost basis reaches M3.
+        bundle = {"alpha": AlphaConfig(fee_per_side=0.0005),
+                  "rule_discovery": RuleDiscoveryConfig()}
+        resolved, _trace, _v = resolve(bundle, collect_context(bundle, ctx))
+        assert resolved["rule_discovery"].base_params.fee == pytest.approx(0.0005)
+
+        base = BacktestParams(buy_drop_pct=0.005, sell_pct=0.03, target_h=24)
+        five_bp = run_backtest(df, "__sig__", base.merged(fee=0.0005))
+        twenty_bp = run_backtest(df, "__sig__", base.merged(fee=cheap.base_params.fee))
+
+        # 15 bp/side × 2 sides on every trade — the gap the silent mismatch hid.
+        assert cheap.base_params.fee == pytest.approx(0.002)
+        gap = five_bp.expectancy - twenty_bp.expectancy
+        assert gap == pytest.approx(2 * (0.002 - 0.0005), rel=1e-6)
 
     def test_timerange_restricts_signals(self):
         df = _candle_with_signal(n=4000, signal_every=40)

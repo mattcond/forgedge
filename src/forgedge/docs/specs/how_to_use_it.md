@@ -664,7 +664,8 @@ print(registry.summary().to_string(index=False))
 ```python
 config = RegistryConfig(
     overlap_threshold=0.70,        # Jaccard ≥ 0.70 → duplicato
-    cross_pf_threshold=2.0,        # PF minimo per PASS cross-ticker
+    cross_pf_threshold=1.5,        # floor assoluto di PF per un PASS cross-ticker
+    min_cross_pf_retention=0.8,    # e la frazione di PF di casa da mantenere
     generic_ratio_threshold=2/3,   # ≥ 2/3 dei ticker PASS → GENERIC
     export_format="excel",         # "csv" o "excel"
     html_charts=True,              # SVG inline nel report

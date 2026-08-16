@@ -198,7 +198,14 @@ def _section_detail(add, docs, config):
 
         # cross-ticker lines
         if d.cross_ticker:
-            add("<p class='muted'>Cross-ticker:</p><ul>")
+            # The bar is per rule, not per ticker — it is the higher of the
+            # absolute floor and `retention × PF at home` — so it is stated
+            # once, above the list it applies to.  Without it a FAIL is a bare
+            # assertion: the reader cannot tell "not tradeable here" from "gave
+            # up too much of its home edge".
+            bar = next(iter(d.cross_ticker.values())).bar
+            add(f"<p class='muted'>Cross-ticker <span class='muted'>"
+                f"(PASS at PF ≥ {_f(bar)}):</span></p><ul>")
             for t, res in d.cross_ticker.items():
                 col = "#27ae60" if res.verdict == "PASS" else "#c0392b"
                 add(f"<li>{html.escape(t)} → PF {_f(res.pf)} · WR {_pct(res.win_rate)} "

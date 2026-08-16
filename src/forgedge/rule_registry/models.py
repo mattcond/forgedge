@@ -42,9 +42,11 @@ class RegistryConfig:
     Every knob of the four registry steps is exposed here.  The thresholds left
     ``TBD`` in the specification are given the defaults calibrated against the
     worked example of ``docs/modules/RuleRegistry.md`` (Section 12): the
-    ``OVERLAP_THRESHOLD`` of 0.70 reproduces the deduplication of the example,
-    and ``CROSS_PF_THRESHOLD`` of 2.0 reproduces every PASS/FAIL verdict of the
-    cross-ticker section.
+    ``OVERLAP_THRESHOLD`` of 0.70 reproduces the deduplication of the example.
+    ``CROSS_PF_THRESHOLD`` was calibrated the same way, at 2.0 — but it was
+    calibrated as a *quality* bar on a worked example, and it was then used as
+    a *transfer* test on every rule; ``cross_pf_threshold`` below explains what
+    replaced it and why.
 
     Attributes
     ----------
@@ -55,8 +57,33 @@ class RegistryConfig:
         Spearman correlation used purely for reporting the "same regime
         exposure" reading of Section 6 — does not drive deduplication.
     cross_pf_threshold : float
-        Minimum profit factor for a ``PASS`` verdict in the cross-ticker
-        backtest (Step 4).
+        Absolute profit-factor floor for a ``PASS`` verdict in the cross-ticker
+        backtest (Step 4) — the *first* half of a two-part criterion; see
+        ``min_cross_pf_retention`` for the second.  Session-resolved from
+        ``SelectionCriteria.partial_min_profit_factor``: the bar that admitted
+        the rule at home is the bar it must clear elsewhere.  Default ``1.5``.
+
+        It used to default to ``2.0``, an independent copy of
+        ``min_profit_factor`` — which excluded the whole ``PARTIAL-EDGE`` class
+        from genericity by construction, since those rules were admitted at
+        ``1.5`` and would have had to do *better* away from home than at home
+        to be called generic (F8).
+    min_cross_pf_retention : float
+        Fraction of the rule's home profit factor it must retain on a target
+        ticker — the *second* half of the criterion::
+
+            PASS  ⟺  pf_other >= cross_pf_threshold          (tradeable there)
+                     AND  pf_other >= retention · pf_home     (it transfers)
+
+        The absolute floor alone would give the weakest rules the easiest
+        genericity test; the relative floor alone would let a rule that lost a
+        third of its edge still read ``GENERIC``.  Both together measure what
+        the ``GENERIC``/``PARTIAL``/``SPECIFIC``/``ISOLATED`` vocabulary is
+        about — transfer — and leave *quality* to the M3 verdict and the grade,
+        which is where the registry already records it.  Default ``0.8``.
+
+        Same shape as ``SelectionCriteria.min_net_gain_retention`` (#185):
+        absolute floor plus relative retention.
     generic_ratio_threshold : float
         Minimum fraction of ``PASS`` verdicts for the ``is_generic`` flag and
         the ``GENERIC``/``PARTIAL`` badge boundary (Step 4).  Defaults to exactly
@@ -84,7 +111,8 @@ class RegistryConfig:
 
     overlap_threshold: float = 0.70
     gain_corr_threshold: float = 0.70
-    cross_pf_threshold: float = 2.0
+    cross_pf_threshold: float = UNSET
+    min_cross_pf_retention: float = UNSET
     generic_ratio_threshold: float = 2.0 / 3.0
     cross_min_active: int = 10
     export_format: str = "excel"
@@ -159,7 +187,14 @@ class CrossTickerResult:
     zero_months : int
         Months with no trades on the target ticker.
     verdict : str
-        ``"PASS"`` when ``pf >= cross_pf_threshold``, else ``"FAIL"``.
+        ``"PASS"`` when ``pf >= bar``, else ``"FAIL"``.
+    bar : float
+        The profit factor this rule had to reach *here* — the higher of the
+        absolute floor and ``min_cross_pf_retention × pf_home``.  Recorded
+        rather than recomputed because it varies per rule: without it a reader
+        cannot tell a rule that failed because it is not tradeable on this
+        ticker from one that failed because it gave up too much of its home
+        edge, and those call for opposite conclusions.
     """
 
     ticker: str
@@ -169,6 +204,7 @@ class CrossTickerResult:
     total_trades: int
     zero_months: int
     verdict: str
+    bar: float = float("nan")
 
     def to_dict(self) -> dict:
         return asdict(self)

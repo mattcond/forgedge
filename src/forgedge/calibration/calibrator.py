@@ -57,6 +57,7 @@ import pandas as pd
 from ..alpha_discovery.discovery import AlphaDiscovery
 from ..alpha_discovery.models import AlphaConfig, AlphaContract
 from ..event_discovery.models import EventCandidate
+from ..resolver import resolve_config
 from ..timebudget import TimeBudget
 from .models import CalibrationReport, RotationConfig
 
@@ -190,7 +191,11 @@ class RotationCalibrator:
     ) -> None:
         self._ed_df = ed_df
         self._cands = list(cands)
-        self._config = config
+        # Resolved for the same reason every module's __init__ resolves: this
+        # class reads `close_col` itself (to rotate that column) before handing
+        # the config to AlphaDiscovery, so it cannot rely on AlphaDiscovery's
+        # own resolution to have happened.
+        self._config = resolve_config(config, "alpha")
         # Session TimeBudget, threaded into every null-draw AlphaDiscovery so
         # the null shares the real run's split / purge / embargo.  ``None`` →
         # each draw builds the same default budget from the config.

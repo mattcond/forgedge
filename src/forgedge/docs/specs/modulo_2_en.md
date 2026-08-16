@@ -324,7 +324,8 @@ c.pattern_family      # str: "mean_reversion" | "momentum" | "unspecified"
 c.asset               # str
 c.exchange            # str
 c.timeframe           # str
-c.fee_per_side        # float: informational, not deducted
+c.fee_per_side        # float: not deducted here — but this is the cost
+                      # Rule Discovery charges (session-resolved)
 
 # Origin and derived target
 c.event_candidate_id  # str: link to the source EventCandidate
@@ -418,8 +419,8 @@ diagnostics
 | `asset` | `"ASSET"` | Traceability metadata (copied to contract and alpha_id) |
 | `exchange` | `""` | Traceability metadata |
 | `timeframe` | `"1H"` | Traceability metadata |
-| `fee_per_side` | `0.002` | Informational only; not deducted from target |
-| `close_col` | `"close"` | Close price column |
+| `fee_per_side` | `0.002` *(session-resolved)* | Not deducted from the target here; it is the cost basis M3 charges, propagated into `BacktestParams.fee` |
+| `close_col` | `"close"` *(session-resolved)* | Close price column; propagates to `BacktestParams.{target_col, buy_price_anchor}` |
 | `timestamp_col` | `"open_dt"` | Datetime column name (or DatetimeIndex name) |
 | `regime_col` | `"regime"` | Regime column (from Market Context) |
 | `regime_stable_col` | `"regime_stable"` | Regime stability column |

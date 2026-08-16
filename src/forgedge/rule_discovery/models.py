@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from ..unset import UNSET
+from ..unset import UNSET, coalesce, is_set
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,8 @@ class BacktestParams:
     buy_delay_bar : int
         Number of bars the limit order stays live.  Ignored for market orders.
     buy_price_anchor : str
-        Column used as the anchor for the limit price (default ``"close"``).
+        Column used as the anchor for the limit price.  Session-resolved from
+        the KPI table's ``close_col``; default ``"close"``.
     sell_pct : float
         Take-profit target as a fraction of the fill price (e.g. ``0.04`` = 4%):
         above the entry for a long, below it for a short.
@@ -66,7 +67,10 @@ class BacktestParams:
         round-trip, ``fill_rn == exit_rn``) — it is not a "no horizon"
         placeholder.
     target_col : str
-        Price column used for the close-at-horizon exit (default ``"close"``).
+        Price column used for the close-at-horizon exit.  Session-resolved from
+        the KPI table's ``close_col``; default ``"close"``.  Its sibling
+        ``target_hit_col`` deliberately stays a literal: it selects an exit
+        *convention* (conservative vs optimistic), not a schema fact.
     target_hit_col : str
         Price column scanned to detect the take-profit during the exit window.
         ``"close"`` (default) reproduces the certified reference engine — the
@@ -74,7 +78,11 @@ class BacktestParams:
         The optimistic intrabar convention is ``"high"`` for a long and ``"low"``
         for a short (resolve it with :func:`forgedge.rule_discovery.optimistic_hit_col`).
     fee : float
-        Fee per side (e.g. ``0.002``).  The round-trip cost applied is ``fee * 2``.
+        Fee per side (e.g. ``0.002``).  The round-trip cost applied is
+        ``fee * 2``.  Session-resolved from ``AlphaConfig.fee_per_side`` — the
+        contract's cost basis and the cost actually charged are one value, not
+        two independent copies that happened to share a default (F7).  Default
+        ``0.002``.
     early_stopping : bool
         ``True`` — scan ``target_hit_col`` in the exit window and exit at
         ``sell_price`` on the first bar that reaches the take-profit.
@@ -85,12 +93,12 @@ class BacktestParams:
     buy_type: str = "limit"
     buy_drop_pct: float = 0.010
     buy_delay_bar: int = 6
-    buy_price_anchor: str = "close"
+    buy_price_anchor: str = UNSET
     sell_pct: float = 0.040
     target_h: int = 24
-    target_col: str = "close"
+    target_col: str = UNSET
     target_hit_col: str = "close"
-    fee: float = 0.002
+    fee: float = UNSET
     early_stopping: bool = True
 
     def merged(self, **overrides) -> "BacktestParams":
@@ -98,6 +106,28 @@ class BacktestParams:
         data = asdict(self)
         data.update({k: v for k, v in overrides.items() if v is not None})
         return BacktestParams(**data)
+
+    def resolved(self) -> "BacktestParams":
+        """Return a copy with every ``UNSET`` field at its documented default.
+
+        Three fields (``fee``, ``target_col``, ``buy_price_anchor``) are
+        session-resolved, so a caller who never went through
+        :func:`forgedge.resolve` — a hand-built ``BacktestParams`` handed
+        straight to :func:`run_backtest` — holds the sentinel rather than a
+        value.  ``UNSET`` means *you decide*, and a function that documents a
+        default has already decided; this is where that decision is applied,
+        once, instead of being rediscovered at each read site.
+
+        Returns ``self`` unchanged when there is nothing to resolve, so the
+        grid's ~210 backtests per run do not each pay for a copy.
+        """
+        if is_set(self.fee) and is_set(self.target_col) and is_set(self.buy_price_anchor):
+            return self
+        return self.merged(
+            fee=coalesce(self.fee, default=0.002),
+            target_col=coalesce(self.target_col, default="close"),
+            buy_price_anchor=coalesce(self.buy_price_anchor, default="close"),
+        )
 
 
 @dataclass

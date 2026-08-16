@@ -165,6 +165,10 @@ def run_backtest(
     BacktestSummary
         Aggregated metrics (and the per-trade frame when ``return_trades``).
     """
+    # A caller may forward unresolved config fields (see forgedge.unset); this
+    # is the one place they are turned into values, so no read site below has
+    # to know the sentinel exists.
+    params = params.resolved()
     if params.buy_type not in ("limit", "market"):
         raise ValueError(f"buy_type must be 'limit' or 'market', got {params.buy_type!r}")
     if params.direction not in ("long", "short"):

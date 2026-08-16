@@ -100,7 +100,10 @@ class TestResolveContract:
 
         for key in ("event_discovery", "alpha", "rule_discovery", "registry"):
             assert out[key].timestamp_col == "mine"
-        assert len(trace.effective) == 0
+        # Not a derivation *anywhere* — the bundle's other unset fields are
+        # resolved as usual — but not one that touched the field the caller
+        # wrote.  Silence on that field is what "never overwritten" means.
+        assert [d for d in trace.effective if d.field.endswith("timestamp_col")] == []
 
     def test_is_idempotent(self):
         out1, trace1, _ = resolve(_bundle(), PipelineContext())
@@ -150,7 +153,11 @@ class TestSchemaPropagation:
         # M1/M3 rate gates disagree out of the box — but that is not this
         # test's business.)
         assert "schema_mismatch" not in {v.code for v in violations}
-        assert {d.field for d in trace.effective} == {
+        # Exactly the three that were missing it — M1 named it, so M1 is not
+        # re-derived.  Scoped to this field: the same bundle legitimately
+        # derives the price column, the regime columns, the fee and M4's
+        # genericity floor, and none of that is this test's subject.
+        assert {d.field for d in trace.effective if d.field.endswith("timestamp_col")} == {
             "alpha.timestamp_col",
             "rule_discovery.timestamp_col",
             "registry.timestamp_col",
@@ -176,6 +183,99 @@ class TestSchemaPropagation:
         bundle = _bundle(event_discovery=DiscoveryConfig(timestamp_col="from_cfg"))
         ctx = collect_context(bundle, PipelineContext(timestamp_col="from_ctx"))
         assert ctx.timestamp_col == "from_ctx"
+
+    def test_the_price_column_reaches_the_backtest(self):
+        """"The price series" had four names with independent defaults (F10):
+        `AlphaConfig.close_col` against `BacktestParams.{target_col,
+        buy_price_anchor}`.  M2 measured returns on one column while M3 priced
+        the exit on another, and nothing said so."""
+        bundle = _bundle(alpha=AlphaConfig(close_col="px"))
+        ctx = collect_context(bundle)
+        assert ctx.close_col == "px"
+
+        out, _trace, violations = resolve(bundle, ctx)
+        assert out["rule_discovery"].base_params.target_col == "px"
+        assert out["rule_discovery"].base_params.buy_price_anchor == "px"
+        assert "schema_mismatch" not in {v.code for v in violations}
+
+    def test_the_regime_columns_travel_with_the_schema(self):
+        bundle = _bundle(alpha=AlphaConfig())
+        out, _trace, _v = resolve(bundle, PipelineContext(
+            regime_col="rg", regime_stable_col="rg_ok"))
+        assert out["alpha"].regime_col == "rg"
+        assert out["alpha"].regime_stable_col == "rg_ok"
+
+    def test_an_explicit_limit_anchor_is_mechanics_not_schema(self):
+        """The one asymmetry in the schema table, and the reason it exists.
+
+        `buy_price_anchor` is *filled in* from the session's price column, but
+        it does not *define* it: a caller who anchors the limit order on
+        "open" has chosen order mechanics.  Seeding the context from it would
+        push "open" back out into `alpha.close_col` and change the series M2
+        measures forward returns on — a config the caller never asked for.
+
+        It is out of the equality check for the same reason: disagreement here
+        is a choice, and a warning that fires on a legitimate choice is one
+        users learn to ignore.
+        """
+        bundle = _bundle(alpha=AlphaConfig())
+        bundle["rule_discovery"].base_params.buy_price_anchor = "open"
+        ctx = collect_context(bundle)
+
+        assert ctx.close_col == "close"          # unmoved by the anchor
+        out, _trace, violations = resolve(bundle, ctx)
+        assert out["alpha"].close_col == "close"
+        assert out["rule_discovery"].base_params.buy_price_anchor == "open"
+        assert out["rule_discovery"].base_params.target_col == "close"
+        assert "schema_mismatch" not in {v.code for v in violations}
+
+    def test_a_disagreeing_exit_column_is_still_reported(self):
+        """`target_col` *is* in the equality check: the horizon exit has to be
+        priced on the series M2 measured returns on, or the two modules are
+        describing different instruments."""
+        bundle = _bundle(alpha=AlphaConfig(close_col="px"))
+        bundle["rule_discovery"].base_params.target_col = "close"
+        out, _trace, violations = resolve(bundle, collect_context(bundle))
+
+        assert out["alpha"].close_col == "px"
+        assert out["rule_discovery"].base_params.target_col == "close"
+        assert "schema_mismatch" in {v.code for v in violations}
+
+
+# ---------------------------------------------------------------------------
+# Economics — the F7 case
+# ---------------------------------------------------------------------------
+
+class TestFeePropagation:
+    def test_the_documented_cost_becomes_the_charged_cost(self):
+        """`_seed_base_params` seeded direction, target_h and sell_pct from the
+        contract but never the fee, and no code path read
+        `contract.fee_per_side` at all.  The two agreed only because both
+        defaulted to 0.002."""
+        bundle = _bundle(alpha=AlphaConfig(fee_per_side=0.0005))
+        out, _trace, violations = resolve(bundle, collect_context(bundle))
+
+        assert out["rule_discovery"].base_params.fee == pytest.approx(0.0005)
+        assert "fee_mismatch" not in {v.code for v in violations}
+
+    def test_two_explicit_fees_are_reported_not_reconciled(self):
+        bundle = _bundle(alpha=AlphaConfig(fee_per_side=0.0005))
+        bundle["rule_discovery"].base_params.fee = 0.002
+        out, _trace, violations = resolve(bundle, collect_context(bundle))
+
+        assert out["alpha"].fee_per_side == pytest.approx(0.0005)
+        assert out["rule_discovery"].base_params.fee == pytest.approx(0.002)
+        assert "fee_mismatch" in {v.code for v in violations}
+
+    def test_a_fee_set_only_on_the_backtest_reaches_the_contract(self):
+        """Propagation is not one-directional: whichever side names the cost
+        basis, one value ends up on both."""
+        bundle = _bundle()
+        bundle["rule_discovery"].base_params.fee = 0.0005
+        out, _trace, violations = resolve(bundle, collect_context(bundle))
+
+        assert out["alpha"].fee_per_side == pytest.approx(0.0005)
+        assert "fee_mismatch" not in {v.code for v in violations}
 
 
 # ---------------------------------------------------------------------------

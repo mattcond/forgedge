@@ -422,12 +422,12 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `buy_type` | `"limit"` | `"limit"` or `"market"` |
 | `buy_drop_pct` | `0.010` | Magnitude of the limit offset from anchor (e.g. 0.01 = 1%): a discount for long, a premium for short |
 | `buy_delay_bar` | `6` | Lifetime of the limit order in bars |
-| `buy_price_anchor` | `"close"` | Column used as the limit anchor |
+| `buy_price_anchor` | `"close"` *(session-resolved)* | Column used as the limit anchor. Filled in from `close_col`; setting it explicitly is an order-mechanics choice and does not redefine the session's price column |
 | `sell_pct` | `0.040` | Take-profit as a fraction of fill price |
 | `target_h` | `24` | Bars held *after* the fill bar before the close-at-horizon exit (signal→exit span is always `1 + target_h`). `0` = same-session round-trip (fill bar's own close) |
-| `target_col` | `"close"` | Column used for the horizon exit |
+| `target_col` | `"close"` *(session-resolved)* | Column used for the horizon exit. Must name the same series as `close_col` |
 | `target_hit_col` | `"close"` | Column used to detect the take-profit. Conservative = `"close"` for both directions; optimistic = `"high"` for long, `"low"` for short (use `optimistic_hit_col(direction)`) |
-| `fee` | `0.002` | Fee per side |
+| `fee` | `0.002` *(session-resolved)* | Fee per side, derived from `AlphaConfig.fee_per_side` — the contract's cost basis is the cost charged |
 | `early_stopping` | `True` | Exit at take-profit; if False, always exit at horizon |
 
 ### `GridSpec`

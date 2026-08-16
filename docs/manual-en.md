@@ -607,6 +607,45 @@ Three are `FAIL` — reserved for a configuration that makes a stage
 > early-elimination. It is fixed by deriving `min_train_months` from the rate
 > (issue #177); until then, daily preset runs need `strict=False`.
 
+#### What the resolver fills in
+
+A field left alone is not a value: it is a question the session answers. These
+are the fields whose default now comes from the session rather than from a class
+body — set any one of them and every module that reads the same quantity
+follows.
+
+| latent parameter | fields it materialised as | resolved default |
+|---|---|---|
+| the timestamp column | `timestamp_col` on M1 / M2 / M3 / M4 | `"open_dt"` |
+| the price series | `AlphaConfig.close_col`, `BacktestParams.{target_col, buy_price_anchor}` | `"close"` |
+| the regime columns | `AlphaConfig.{regime_col, regime_stable_col}` | `"regime"` / `"regime_stable"` |
+| the cost basis | `AlphaConfig.fee_per_side`, `BacktestParams.fee` | `0.002` |
+| the genericity bar | `RegistryConfig.{cross_pf_threshold, min_cross_pf_retention}` | `1.5` / `0.8` |
+
+Two of these were live bugs rather than tidiness. `AlphaConfig.fee_per_side`
+stamped the contract while `BacktestParams.fee` charged the backtest and nothing
+connected them, so `AlphaConfig(fee_per_side=0.0005)` produced contracts
+documenting 5 bp and a backtest charging 20 — silently, since the two agreed
+only by sharing a default. And `forge_preset(timestamp_col="ts")` configured M1
+alone, so M2 failed later asking for a value you believed you had already given.
+
+Propagation is not symmetric with seeding, in one deliberate place:
+`buy_price_anchor` is *filled in* from the session's price column, but setting
+it explicitly is an order-mechanics choice (anchor the limit on `"open"`) and
+does **not** redefine what the session calls its price column. `target_col` is
+different — the horizon exit must be priced on the series M2 measured returns
+on — so a disagreement there is reported.
+
+> **Genericity is now a transfer test, not a quality test.**
+> `cross_pf_threshold` used to default to `2.0` independently of M3, while
+> `partial_min_profit_factor` admits rules at `1.5` — so a `PARTIAL-EDGE` rule
+> had to do *better* away from home than at home to be called generic, and the
+> entire class was excluded from genericity by construction. The verdict is now
+> `PASS ⟺ pf ≥ floor AND pf ≥ retention × pf_home`: the absolute half asks *is
+> it tradeable there*, the relative half asks *does it transfer*. Quality stays
+> on the M3 verdict and the grade, where the registry already records it.
+> `CrossTickerResult.bar` reports the number each verdict was measured against.
+
 ### Data quality — `summary_report`
 
 ```python
@@ -673,7 +712,7 @@ Every module accepts a dataclass carrying its knobs. This section covers the one
 | `embargo_bars` | `0` | opt-in extra OOS buffer, §15 |
 | `horizon_enrichment` | `(0.5, 1.0, 2.0)` | on by default; adds horizons around each event's own dominant window, §15 |
 | `thresholds` | `PromotionThresholds()` | statistical thresholds that drive the grade, not a hard gate (except direction) |
-| `fee_per_side` | `0.002` | recorded for Rule Discovery, not applied here |
+| `fee_per_side` | `0.002` | recorded for Rule Discovery **and charged by it** — not applied here (M2 does not net fees out), but it is the same value, no longer an independent copy |
 | `target_mode` | `"proj"` | excess-over-trend scoring by default for long events, §15 |
 | `trend_sma_mult` | `2.0` | trend SMA window multiplier for `target_mode="proj"` |
 | `use_stable_regime_only` | `False` | opt-in, restricts regime analysis to `regime_stable=True` bars |
@@ -697,7 +736,7 @@ Every module accepts a dataclass carrying its knobs. This section covers the one
 
 ### `RegistryConfig` (Module 4)
 
-`overlap_threshold=0.70` (Jaccard dedup bar), `cross_pf_threshold=2.0` (min PF for a cross-ticker `PASS`), `generic_ratio_threshold=2/3` (**pass this as `2/3`, not `0.67`** — a rule passing exactly 2-of-3 tickers has ratio `0.6666...`, which clears `>= 2/3` but not `>= 0.67`; the docs flag this precision issue explicitly), `export_format="excel"`.
+`overlap_threshold=0.70` (Jaccard dedup bar), `cross_pf_threshold=1.5` + `min_cross_pf_retention=0.8` (the two halves of the cross-ticker `PASS` — absolute floor, and fraction of the home PF retained), `generic_ratio_threshold=2/3` (**pass this as `2/3`, not `0.67`** — a rule passing exactly 2-of-3 tickers has ratio `0.6666...`, which clears `>= 2/3` but not `>= 0.67`; the docs flag this precision issue explicitly), `export_format="excel"`.
 
 ### Configuring via presets instead
 

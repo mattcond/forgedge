@@ -72,6 +72,7 @@ from .models import (
     ValidatedRule,
 )
 from ..resolver import resolve_config
+from ..unset import UNSET, is_set
 from .validation import expectancy_mde, validate
 from .walkforward import _fmt as _fmt_ts, selection_windows, walk_forward
 
@@ -616,10 +617,23 @@ class RuleDiscovery:
     # ------------------------------------------------------------------
 
     def _seed_base_params(self, notes: List[str]) -> BacktestParams:
-        """Seed operational defaults from the contract's derived target."""
+        """Seed operational defaults from the contract.
+
+        The cost basis is seeded here too, and separately from the derived
+        target: ``fee`` is not part of the target M2 derived, it is the
+        assumption M2 *recorded*, and it is seeded even when
+        ``use_contract_target`` is off — turning off the target does not mean
+        agreeing to be charged a different fee than the contract documents
+        (F7).  The seed only applies while the caller left ``base_params.fee``
+        unresolved; an explicit fee on the config still wins.
+        """
         base = self.config.base_params
+        contract_fee = getattr(self.contract, "fee_per_side", UNSET)
+        if not is_set(base.fee) and is_set(contract_fee) and contract_fee is not None:
+            base = base.merged(fee=float(contract_fee))
+            notes.append(f"fee seeded from contract cost basis: {float(contract_fee):g}/side")
         if not self.config.use_contract_target:
-            return base
+            return base.resolved()
 
         dt = self.contract.derived_target
         overrides = {}
@@ -636,7 +650,10 @@ class RuleDiscovery:
                 f"seeded from contract target: "
                 + ", ".join(f"{k}={v}" for k, v in overrides.items())
             )
-        return base.merged(**overrides)
+        # `.resolved()` so that every params object descending from this one —
+        # the whole grid, the walk-forward, whatever M4 later catalogues and
+        # every report that renders it — carries values, never the sentinel.
+        return base.merged(**overrides).resolved()
 
     def _inject_signal(self) -> None:
         """Reconstruct the event boolean series and add it as the signal column.

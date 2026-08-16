@@ -66,7 +66,8 @@ registry = RuleRegistry.from_forge_results(
     results,
     config=RegistryConfig(
         overlap_threshold=0.70,
-        cross_pf_threshold=2.0,
+        cross_pf_threshold=1.5,          # absolute floor (derived from M3)
+        min_cross_pf_retention=0.8,     # and the home-PF fraction to retain
         generic_ratio_threshold=2 / 3,
         export_format="excel",
     ),
@@ -269,7 +270,32 @@ recalibrated expression and the same `BacktestParams` as the source ticker:
 | `win_rate` | Win rate on the target ticker (0–1) |
 | `total_trades` | Number of executed trades |
 | `zero_months` | Months with no trades |
-| `verdict` | `"PASS"` if `pf >= cross_pf_threshold`, else `"FAIL"` |
+| `verdict` | `"PASS"` when the rule clears **both** halves of the transfer criterion (below) |
+| `bar` | The profit factor it had to reach here — the higher of the two halves |
+
+##### The transfer criterion
+
+```
+PASS  ⟺  pf >= cross_pf_threshold           (it is tradeable there)
+         AND  pf >= min_cross_pf_retention · pf_home    (it actually transfers)
+```
+
+A single absolute bar answers *"is it good elsewhere?"*, while every label in
+the `GENERIC`/`PARTIAL`/`SPECIFIC`/`ISOLATED` vocabulary asks *"does it
+transfer?"*. Those come apart in both directions:
+
+| rule | PF home | PF away | single `2.0` bar |
+|---|---|---|---|
+| transfers perfectly | 1.6 | 1.6 | FAIL — and on every ticker, so `ISOLATED` |
+| degraded by a third | 3.0 | 2.05 | PASS — while a third of the edge is gone |
+
+The first row was not an edge case: `partial_min_profit_factor` admits rules at
+`1.5`, so **the whole `PARTIAL-EDGE` class was structurally excluded from
+genericity**. Lowering the single bar to the home PF fixes that row and makes
+the second worse still — the *weakest* rules would then get the *easiest*
+genericity test. Two halves keep the floor a floor and let the ratio measure
+transfer; quality stays where the registry already records it, on the M3
+verdict and the grade.
 
 #### Genericity classification
 
@@ -389,7 +415,8 @@ Stores the outcome of replaying one rule on one alternative ticker.
 | `win_rate` | `float` | Win rate (0–1) |
 | `total_trades` | `int` | Number of executed trades |
 | `zero_months` | `int` | Months with no trades |
-| `verdict` | `str` | `"PASS"` if `pf >= cross_pf_threshold`, else `"FAIL"` |
+| `verdict` | `str` | `"PASS"` when `pf >= bar`, else `"FAIL"` |
+| `bar` | `float` | The profit factor required here: `max(cross_pf_threshold, min_cross_pf_retention × pf_home)` |
 
 `result.to_dict()` returns a flat dictionary of all fields.
 
@@ -561,7 +588,8 @@ from forgedge import RegistryConfig
 config = RegistryConfig(
     overlap_threshold=0.70,
     gain_corr_threshold=0.70,
-    cross_pf_threshold=2.0,
+    cross_pf_threshold=1.5,
+    min_cross_pf_retention=0.8,
     generic_ratio_threshold=2 / 3,
     cross_min_active=10,
     export_format="excel",
@@ -578,7 +606,8 @@ config = RegistryConfig(
 |---|---|---|
 | `overlap_threshold` | `0.70` | Jaccard similarity at or above which two rules are considered overlapping (Step 3). The weaker rule of each overlapping pair is flagged as a duplicate. |
 | `gain_corr_threshold` | `0.70` | Spearman correlation threshold used for reporting ("same regime exposure" reading). Does not drive deduplication; the deduplication step uses only Jaccard. |
-| `cross_pf_threshold` | `2.0` | Minimum profit factor for a `PASS` verdict in the cross-ticker backtest (Step 4). |
+| `cross_pf_threshold` | `1.5` | Absolute profit-factor floor for a `PASS` verdict (Step 4) — half the criterion. Session-resolved from `SelectionCriteria.partial_min_profit_factor`: the bar that admitted the rule at home. |
+| `min_cross_pf_retention` | `0.8` | The other half: fraction of the rule's **home** profit factor it must retain on the target ticker. |
 | `generic_ratio_threshold` | `2/3` | Minimum fraction of `PASS` verdicts for a rule to be considered generic (`is_generic=True`). The default is exactly `2/3` — not `0.67` — so that a rule passing 2 of 3 target tickers is correctly classified as `PARTIAL` rather than `GENERIC`. |
 | `cross_min_active` | `10` | Minimum number of dates on which both rules were simultaneously active before a Spearman correlation is computed. Below this count, the Spearman value is reported as `0.0`. |
 | `export_format` | `"excel"` | Format written by `export()`. One of `"excel"` or `"csv"`. |
