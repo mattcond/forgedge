@@ -46,7 +46,7 @@ from forgedge import (
     MarketContext,
     forge,
 )
-from forgedge.event_discovery.models import GateParams, WalkForwardConfig
+from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 from forgedge.presets import _TFClass, forge_preset
 
 PARQUET = os.environ.get("FORGEDGE_PARQUET", "tests/fixtures/ADA_1D_TRAIN.parquet")
@@ -126,7 +126,7 @@ def stage_m1(kpi: pd.DataFrame) -> None:
 
     ed = EventDiscovery(enriched, config=DiscoveryConfig(
         gate_params=gate, train_ratio=train_ratio,
-        walk_forward=WalkForwardConfig(n_splits=n_splits), max_and_components=1,
+        walk_forward=EventWalkForwardConfig(n_splits=n_splits), max_and_components=1,
     ))
     cands = ed.run()
     reasons: collections.Counter = collections.Counter()
@@ -173,7 +173,9 @@ def stage_m2(kpi: pd.DataFrame) -> None:
         n_oos = len(ed.df) - ad.split_idx
         fams: collections.Counter = collections.Counter()
         for contract in contracts:
-            for reason in contract.rejection_reasons or []:
+            # Blocking causes and non-blocking diagnostics live in separate
+            # fields; this stage is about what M2 *reports*, so count both.
+            for reason in (contract.rejection_reasons or []) + (contract.diagnostics or []):
                 fams[_family(reason, 70)] += 1
         print(f"\n  train_ratio={train_ratio}  OOS={n_oos} bars (~{n_oos / 30:.1f} months)  "
               f"promoted={len(ad.promoted_contracts())}/{len(contracts)}")

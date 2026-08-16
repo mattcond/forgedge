@@ -439,7 +439,7 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `target_h` | `None` | List of horizons to test (None = auto) |
 | `buy_delay_bar` | `None` | List of delays to test (None = auto) |
 
-### `WalkForwardConfig` (Rule Discovery)
+### `RuleWalkForwardConfig` (Rule Discovery)
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -473,7 +473,7 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `base_params` | `BacktestParams()` | Fixed parameters and grid centre |
 | `scoring` | `ScoringParams()` | Composite score parameters |
 | `grid` | `GridSpec()` | Operational grid (empty = auto) |
-| `walk_forward` | `WalkForwardConfig()` | Walk-forward OOS settings |
+| `walk_forward` | `RuleWalkForwardConfig()` | Walk-forward OOS settings |
 | `criteria` | `SelectionCriteria()` | Selection and verdict thresholds |
 | `use_contract_target` | `True` | Seed sell_pct/target_h from the contract |
 | `timestamp_col` | `"open_dt"` | Datetime column name |

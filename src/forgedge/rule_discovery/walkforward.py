@@ -7,7 +7,7 @@ operational parameters are re-selected on the *preceding* train window and then
 evaluated **once** on the untouched test window.  Concatenating the per-window
 test trades yields the rule's honest out-of-sample track record.
 
-Two modes (``WalkForwardConfig.train_span_months``):
+Two modes (``RuleWalkForwardConfig.train_span_months``):
 
 * **anchored** (``None``) — the train window always starts at the data origin
   and grows; each test window is a fresh, later slice.
@@ -32,7 +32,7 @@ from .models import (
     GridSpec,
     ScoringParams,
     SelectionCriteria,
-    WalkForwardConfig,
+    RuleWalkForwardConfig,
     WalkForwardResult,
     WalkForwardSplit,
 )
@@ -47,7 +47,7 @@ def _month_bounds(candle: pd.DataFrame, timestamp_col: str):
     return start, end
 
 
-def _build_splits(start: pd.Timestamp, end: pd.Timestamp, cfg: WalkForwardConfig):
+def _build_splits(start: pd.Timestamp, end: pd.Timestamp, cfg: RuleWalkForwardConfig):
     """Return a list of ``(train_from, train_to, test_from, test_to)`` timestamps."""
     total_months = (end.year - start.year) * 12 + (end.month - start.month)
     min_train = max(cfg.min_train_months, 1)
@@ -96,7 +96,7 @@ def walk_forward(
     signal_col: str,
     base: BacktestParams,
     spec: GridSpec,
-    cfg: WalkForwardConfig,
+    cfg: RuleWalkForwardConfig,
     scoring: Optional[ScoringParams] = None,
     criteria: Optional[SelectionCriteria] = None,
     timestamp_col: str = "open_dt",
@@ -220,7 +220,7 @@ def selection_windows(
     candle: pd.DataFrame,
     spec: GridSpec,
     base: BacktestParams,
-    cfg: WalkForwardConfig,
+    cfg: RuleWalkForwardConfig,
     timestamp_col: str = "open_dt",
 ) -> List[tuple]:
     """Purged/embargoed walk-forward windows as Timestamp tuples.

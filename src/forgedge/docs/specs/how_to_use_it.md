@@ -244,11 +244,11 @@ Per produzione, è fortemente raccomandato abilitare la validazione walk-forward
 
 ```python
 from forgedge import EventDiscovery, DiscoveryConfig
-from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 
 config = DiscoveryConfig(
     train_ratio=0.80,           # 80% IS per la scoperta, 20% riservato all'OOS
-    walk_forward=WalkForwardConfig(
+    walk_forward=EventWalkForwardConfig(
         n_splits=4,             # dividi l'OOS in 4 finestre
         min_pass_rate=0.75,     # l'evento deve passare il gate in ≥75% delle finestre
     ),
@@ -482,17 +482,19 @@ for c in rejected:
     print(f"REJECTED {c.event_candidate_id}: {c.rejection_reasons}")
 # Unica causa: "no derivable target" → nessun orizzonte produce un vantaggio finito
 
-# I contratti promossi possono avere diagnostiche non bloccanti
+# I contratti promossi hanno le diagnostiche non bloccanti in un campo
+# dedicato. `rejection_reasons` è vuoto su un contratto promosso: contiene
+# solo cause bloccanti.
 for c in promoted:
-    if c.rejection_reasons:
+    if c.diagnostics:
         print(f"PROMOTED {c.event_candidate_id} (grade={c.alpha_score.grade}):")
-        for r in c.rejection_reasons:
-            print(f"  {r}")
-# Esempi di diagnostiche su contratti promossi (prefisso [diagnostic]):
-# "[diagnostic] IC weak (|IC|=0.012 < 0.02, p=0.083)"
-# "[diagnostic] lift 0.052 < 0.08"
-# "[diagnostic] OOS weak (p=0.143 vs 0.10, mean_adv=0.0021, n_act=7)"
-# "[diagnostic] not significant under BH FDR"
+        for d in c.diagnostics:
+            print(f"  {d}")
+# Esempi di diagnostiche su contratti promossi:
+# "IC weak (|IC|=0.012 < 0.02, p=0.083)"
+# "lift 0.052 < 0.08"
+# "OOS weak (p=0.143 vs 0.10, mean_adv=0.0021, n_act=7)"
+# "not significant under BH FDR"
 # Queste debolezze statistiche informano il grade (A–D) ma non bloccano la promozione.
 ```
 
@@ -794,7 +796,7 @@ from forgedge import (
     forge, MarketContextConfig, EMAProxyConfig,
     DiscoveryConfig, AlphaConfig, RegistryConfig,
 )
-from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 from forgedge.alpha_discovery.models import PromotionThresholds
 
 result = forge(
@@ -806,7 +808,7 @@ result = forge(
     ),
     event_discovery_config=DiscoveryConfig(
         train_ratio=0.80,
-        walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
+        walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         gate_params=GateParams(min_tpm=0.5, max_dispersion=1.5),  # default espliciti
     ),
     alpha_config=AlphaConfig(
@@ -869,7 +871,7 @@ from forgedge import (
     AlphaDiscovery, AlphaConfig,
     RuleDiscovery,
 )
-from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 from forgedge.alpha_discovery.models import PromotionThresholds
 from forgedge.rule_discovery import html_report
 
@@ -915,7 +917,7 @@ def run_forge_pipeline(
     # ── Modulo 1: eventi ────────────────────────────────────────────────
     ed_config = DiscoveryConfig(
         train_ratio=0.80,
-        walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
+        walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         gate_params=GateParams(min_tpm=0.5, max_dispersion=1.5),
         max_and_components=2,
     )
@@ -1110,14 +1112,14 @@ a `forge()` viene inoltrato sia a `EventDiscovery` sia a `AlphaDiscovery`, così
 condividono un unico split; `ForgeResult.time_budget` espone il budget
 effettivo. **Il purging è attivo di default** per Alpha Discovery (larghezza
 di purge = `max(horizon_grid)`) e per il walk-forward di Rule Discovery
-(via `WalkForwardConfig.purge_bars` / `embargo_bars`, `None`/`0` di default —
+(via `RuleWalkForwardConfig.purge_bars` / `embargo_bars`, `None`/`0` di default —
 `None` usa di default l'orizzonte testato) — questo è un cambiamento numerico
 reale, anche se di solito piccolo, rispetto ai risultati pre-`TimeBudget` (le
 righe di confine che prima lasciavano trapelare informazione OOS ora sono
 escluse). Per riprodurre esattamente i vecchi numeri non purgati, passa un
 `TimeBudget.build(n_bars=..., purge_bars=0)` esplicito e, per Rule Discovery,
-`WalkForwardConfig(purge_bars=0)`. `AlphaConfig.embargo_bars` (default `0`) e
-`WalkForwardConfig.embargo_bars` (default `0`) non cambiano nulla a meno che tu
+`RuleWalkForwardConfig(purge_bars=0)`. `AlphaConfig.embargo_bars` (default `0`) e
+`RuleWalkForwardConfig.embargo_bars` (default `0`) non cambiano nulla a meno che tu
 non li attivi esplicitamente — solo il purging è attivo di default.
 
 ---

@@ -114,11 +114,12 @@ config = DiscoveryConfig(
 
 ---
 
-### WalkForwardConfig (Module 1)
+### EventWalkForwardConfig (Module 1)
 
-Configures Module 1 walk-forward OOS validation. This is the Module 1
-`WalkForwardConfig` (`event_discovery.models`); Module 3 has a distinct
-`WalkForwardConfig` importable directly from `forgedge`.
+Configures Module 1 walk-forward OOS validation. Formerly named
+`WalkForwardConfig`, which collided with Module 3's distinct class of the
+same name; the old name still works as an alias in
+`event_discovery.models`, but prefer the explicit one.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -128,11 +129,11 @@ Configures Module 1 walk-forward OOS validation. This is the Module 1
 
 ```python
 from forgedge import DiscoveryConfig
-from forgedge.event_discovery.models import WalkForwardConfig, GateParams
+from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 
 config = DiscoveryConfig(
     train_ratio=0.80,
-    walk_forward=WalkForwardConfig(
+    walk_forward=EventWalkForwardConfig(
         n_splits=4,
         min_pass_rate=0.75,   # stricter: 3 of 4 windows must pass
     ),
@@ -154,13 +155,13 @@ IS/OOS split, and walk-forward.
 | `timestamp_col` | str | `"open_dt"` | Datetime column name in the KPI Table (or DatetimeIndex name). |
 | `max_and_components` | int | `2` | Maximum number of single events to combine in one AND composition. Values > 3 are accepted but strongly discouraged (structural overfitting risk). |
 | `train_ratio` | float | `1.0` | IS fraction (0 < train_ratio ≤ 1.0). Default 1.0 = all IS, no split. |
-| `walk_forward` | WalkForwardConfig \| None | `None` | Walk-forward OOS configuration. Active only when `train_ratio < 1.0`. |
+| `walk_forward` | EventWalkForwardConfig \| None | `None` | Walk-forward OOS configuration. Active only when `train_ratio < 1.0`. |
 | `diversity_gate_enabled` | bool | `False` | When True, applies Jaccard-based deduplication of single events after the ConsistencyGate and before AND composition. Opt-in — no breaking change. |
 | `diversity_threshold` | float | `0.85` | Maximum tolerated Jaccard similarity between any two kept events. Only used when `diversity_gate_enabled=True`. At p99 of the inter-event Jaccard distribution (12 months of 1H data), Jaccard=0.47 — values above 0.70 are genuine near-duplicates. |
 
 ```python
 from forgedge import EventDiscovery, DiscoveryConfig
-from forgedge.event_discovery.models import GateParams, WalkForwardConfig
+from forgedge.event_discovery.models import GateParams, EventWalkForwardConfig
 
 ed = EventDiscovery(
     enriched,
@@ -168,7 +169,7 @@ ed = EventDiscovery(
         train_ratio=0.80,
         max_and_components=2,
         gate_params=GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0),
-        walk_forward=WalkForwardConfig(n_splits=4, min_pass_rate=0.75),
+        walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         scale_free_overrides={"rsi_14": True},  # force scale-free on RSI
         diversity_gate_enabled=True,            # opt-in Jaccard deduplication
         diversity_threshold=0.85,
@@ -188,7 +189,7 @@ promotion (except in extreme cases) — they inform the grade.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `ic_min_abs` | float | `0.02` | Minimum absolute IC (Spearman). Below this threshold the IC metric is recorded as a `[diagnostic]`. |
+| `ic_min_abs` | float | `0.02` | Minimum absolute IC (Spearman). Below this threshold the IC metric is recorded in `AlphaContract.diagnostics` (non-blocking). |
 | `ic_max_p` | float | `0.05` | Maximum p-value for IC significance. |
 | `min_lift` | float | `0.08` | Minimum lift (win_rate − base_rate). |
 | `min_cohens_d` | float | `0.15` | Minimum Cohen's d (distribution separation between active and inactive bars). |
@@ -355,10 +356,12 @@ grid = GridSpec(
 
 ---
 
-### WalkForwardConfig (Module 3)
+### RuleWalkForwardConfig (Module 3)
 
-Configures Module 3 walk-forward OOS validation. Distinct from Module 1's
-`WalkForwardConfig`.
+Configures Module 3 walk-forward OOS validation. Formerly named
+`WalkForwardConfig`; the old name still works as an alias, both in
+`rule_discovery.models` and at the top level (`forgedge.WalkForwardConfig`
+has always resolved to this one).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -415,7 +418,7 @@ Main configuration for Module 3. Aggregates all sub-configurators.
 | `base_params` | BacktestParams | `BacktestParams()` | Base backtest parameters (starting point for the grid search). |
 | `scoring` | ScoringParams | `ScoringParams()` | Grid scoring weights. |
 | `grid` | GridSpec | `GridSpec()` | Grid search space. When all fields are None, the default grid is used. |
-| `walk_forward` | WalkForwardConfig | `WalkForwardConfig()` | Walk-forward OOS configuration. |
+| `walk_forward` | RuleWalkForwardConfig | `RuleWalkForwardConfig()` | Walk-forward OOS configuration. |
 | `criteria` | SelectionCriteria | `SelectionCriteria()` | EDGE/PARTIAL-EDGE/NON-EDGE verdict criteria. |
 | `entry_mode` | str | `"limit"` | Entry evaluation mode: `"limit"` (default, backward-compatible), `"market"` (next-open baseline, fill ≈ 100%, no optimiser) or `"auto"` (two-stage pipeline: **market** decides the verdict, **limit** refines the operating point of survivors only at fill ≥ `min_fill_rate_opt`). |
 | `use_contract_target` | bool | `True` | When True, uses `direction`, `sell_pct`, and `target_h` from the AlphaContract as the grid starting point. |
@@ -426,7 +429,7 @@ Main configuration for Module 3. Aggregates all sub-configurators.
 ```python
 from forgedge import (
     RuleDiscovery, RuleDiscoveryConfig, BacktestParams,
-    SelectionCriteria, WalkForwardConfig,
+    SelectionCriteria, RuleWalkForwardConfig,
 )
 from forgedge.rule_discovery.models import GridSpec, ScoringParams
 
@@ -438,7 +441,7 @@ config = RuleDiscoveryConfig(
         target_h=[12, 24, 36, 48],
         buy_delay_bar=[3, 6],
     ),
-    walk_forward=WalkForwardConfig(n_splits=5, min_train_months=8),
+    walk_forward=RuleWalkForwardConfig(n_splits=5, min_train_months=8),
     criteria=SelectionCriteria(min_profit_factor=2.0, min_win_rate=0.55),
     scoring=ScoringParams(pf_tpm_target=4),
 )
@@ -491,23 +494,25 @@ registry = RuleRegistry.from_forge_results(results, config=config).run()
 
 ## Import summary
 
-> `WalkForwardConfig` imported directly from `forgedge` is the Module 3 (Rule
-> Discovery) version. The Module 1 version must be imported from
-> `forgedge.event_discovery.models`.
+> The two walk-forward configs are now explicitly named:
+> `EventWalkForwardConfig` (Module 1) and `RuleWalkForwardConfig` (Module 3),
+> both importable from `forgedge`. The legacy `WalkForwardConfig` alias still
+> resolves — to the Module 3 class at the top level, and to each module's own
+> class inside `event_discovery.models` / `rule_discovery.models`.
 
 | Class | Import | Module |
 |---|---|---|
 | `EMAProxyConfig` | `from forgedge import EMAProxyConfig` | 0 — Market Context |
 | `MarketContextConfig` | `from forgedge import MarketContextConfig` | 0 — Market Context |
 | `GateParams` | `from forgedge.event_discovery.models import GateParams` | 1 — Event Discovery |
-| `WalkForwardConfig` (M1) | `from forgedge.event_discovery.models import WalkForwardConfig` | 1 — Event Discovery |
+| `EventWalkForwardConfig` | `from forgedge import EventWalkForwardConfig` | 1 — Event Discovery |
 | `DiscoveryConfig` | `from forgedge import DiscoveryConfig` | 1 — Event Discovery |
 | `PromotionThresholds` | `from forgedge import PromotionThresholds` | 2 — Alpha Discovery |
 | `AlphaConfig` | `from forgedge import AlphaConfig` | 2 — Alpha Discovery |
 | `BacktestParams` | `from forgedge import BacktestParams` | 3 — Rule Discovery |
 | `ScoringParams` | `from forgedge.rule_discovery.models import ScoringParams` | 3 — Rule Discovery |
 | `GridSpec` | `from forgedge.rule_discovery.models import GridSpec` | 3 — Rule Discovery |
-| `WalkForwardConfig` (M3) | `from forgedge import WalkForwardConfig` | 3 — Rule Discovery |
+| `RuleWalkForwardConfig` | `from forgedge import RuleWalkForwardConfig` | 3 — Rule Discovery |
 | `SelectionCriteria` | `from forgedge import SelectionCriteria` | 3 — Rule Discovery |
 | `RuleDiscoveryConfig` | `from forgedge import RuleDiscoveryConfig` | 3 — Rule Discovery |
 | `RegistryConfig` | `from forgedge import RegistryConfig` | 4 — Rule Registry |

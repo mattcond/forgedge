@@ -32,7 +32,7 @@ from .models import (
     GateResult,
     RawEvent,
     ValidationResult,
-    WalkForwardConfig,
+    EventWalkForwardConfig,
 )
 from .transform_layer import TransformLayer
 
@@ -72,7 +72,7 @@ class DiscoveryConfig:
         and the remainder are OOS.  All pipeline steps (classification,
         feature generation, threshold calibration, gate) operate on IS
         data only; the OOS period is never seen during discovery.
-    walk_forward : WalkForwardConfig or None
+    walk_forward : EventWalkForwardConfig or None
         Walk-forward validation settings.  When set (and ``train_ratio <
         1.0``), every discovered candidate is replayed on ``n_splits``
         equal OOS windows and evaluated against a scaled Consistency Gate.
@@ -116,7 +116,7 @@ class DiscoveryConfig:
     timestamp_col: str = "open_dt"
     max_and_components: int = 2
     train_ratio: float = 1.0
-    walk_forward: Optional[WalkForwardConfig] = None
+    walk_forward: Optional[EventWalkForwardConfig] = None
     diversity_gate_enabled: bool = False
     diversity_threshold: float = 0.85
     indicator_lag_cross_lags: tuple[int, ...] = (1, 3)
@@ -373,7 +373,7 @@ class EventDiscovery:
     def validated_candidates(self) -> list[EventCandidate]:
         """Return only the candidates that passed walk-forward OOS validation.
 
-        Requires ``DiscoveryConfig(train_ratio=..., walk_forward=WalkForwardConfig(...))``.
+        Requires ``DiscoveryConfig(train_ratio=..., walk_forward=EventWalkForwardConfig(...))``.
         Call ``run()`` first.
 
         Returns
@@ -392,7 +392,7 @@ class EventDiscovery:
         if self.config.walk_forward is None or self.config.train_ratio >= 1.0:
             raise RuntimeError(
                 "Walk-forward validation was not configured. "
-                "Set DiscoveryConfig(train_ratio=<float<1>, walk_forward=WalkForwardConfig(...))"
+                "Set DiscoveryConfig(train_ratio=<float<1>, walk_forward=EventWalkForwardConfig(...))"
                 " and call run() again."
             )
         return [c for c in self._candidates if c.validation is not None and c.validation.passed]

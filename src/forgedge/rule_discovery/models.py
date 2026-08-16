@@ -147,7 +147,7 @@ class GridSpec:
 
 
 @dataclass
-class WalkForwardConfig:
+class RuleWalkForwardConfig:
     """Walk-forward out-of-sample validation parameters (Step 4).
 
     The timeline is divided into ``n_splits`` consecutive **test** windows.
@@ -194,6 +194,17 @@ class WalkForwardConfig:
     reoptimise: bool = True
     purge_bars: Optional[int] = None
     embargo_bars: int = 0
+
+
+#: Backwards-compatible alias.  Until it was renamed, this class shared the
+#: name ``WalkForwardConfig`` with
+#: :class:`forgedge.event_discovery.models.EventWalkForwardConfig` — a
+#: different dataclass, with a ``n_splits`` field carrying different semantics
+#: (walk-forward *test* windows here, OOS *validation* windows there).  The
+#: top-level ``forgedge.WalkForwardConfig`` resolves to *this* one, while
+#: ``forge()``'s own docstring example imports the other from
+#: ``forgedge.event_discovery.models``.  Prefer the explicit name.
+WalkForwardConfig = RuleWalkForwardConfig
 
 
 @dataclass
@@ -314,7 +325,7 @@ class RuleDiscoveryConfig:
         Composite-scoring knobs.
     grid : GridSpec
         Operational grid; auto-built around the contract target when empty.
-    walk_forward : WalkForwardConfig
+    walk_forward : RuleWalkForwardConfig
         OOS walk-forward settings.
     criteria : SelectionCriteria
         Acceptance / verdict thresholds.
@@ -386,7 +397,7 @@ class RuleDiscoveryConfig:
     base_params: BacktestParams = field(default_factory=BacktestParams)
     scoring: ScoringParams = field(default_factory=ScoringParams)
     grid: GridSpec = field(default_factory=GridSpec)
-    walk_forward: WalkForwardConfig = field(default_factory=WalkForwardConfig)
+    walk_forward: RuleWalkForwardConfig = field(default_factory=RuleWalkForwardConfig)
     criteria: SelectionCriteria = field(default_factory=SelectionCriteria)
     entry_mode: str = "limit"
     use_contract_target: bool = True
