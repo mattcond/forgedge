@@ -159,8 +159,7 @@ BASE_CONFIG = {
     'fee':              0.002,
     'early_stopping':   True,
     'pf_min_trades':    15,
-    'pf_min_tpm':       2,
-    'pf_tpm_target':    3,
+    'pf_min_tpm':       2,   # risolto da criteria.min_tpm (#178)
 }
 ```
 

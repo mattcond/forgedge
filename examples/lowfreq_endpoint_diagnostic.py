@@ -30,7 +30,7 @@ RULE_CFG = RuleDiscoveryConfig(
                                target_hit_col="high", fee=0.001, early_stopping=True),
     grid=GridSpec(buy_drop_pct=[0.005, 0.010, 0.015], sell_pct=[0.025, 0.04, 0.06],
                   target_h=[3, 5, 7]),
-    scoring=ScoringParams(pf_min_trades=8, pf_min_tpm=1, pf_tpm_target=2),
+    scoring=ScoringParams(pf_min_trades=8, pf_min_tpm=1),
     walk_forward=WalkForwardConfig(n_splits=3, min_train_months=4),
     criteria=SelectionCriteria(min_profit_factor=1.5, min_win_rate=0.50, min_tpm=1.0,
                                min_fill_rate=0.30, partial_min_profit_factor=1.2,

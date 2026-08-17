@@ -251,23 +251,32 @@ class TestWarnConstraints:
             config_report(disc, None, rd_ok, ctx=_ctx()))
 
     def test_scoring_uncalibrated(self):
-        """F3 — pf_score_tpm is the grid's selection criterion, so a target
-        calibrated on a different frequency steers which operating point gets
-        published."""
+        """F3 — `pf_score_tpm` is what the grid maximises and a gate in
+        `_passes`, so a rate floor calibrated differently from the gate's steers
+        which operating point gets published."""
         rd = RuleDiscoveryConfig(
             criteria=SelectionCriteria(min_tpm=0.25),
-            scoring=ScoringParams(pf_min_tpm=2, pf_tpm_target=3),
+            scoring=ScoringParams(pf_min_tpm=2),
         )
         rep = config_report(None, None, rd, ctx=_ctx())
 
         assert "scoring_uncalibrated" in _codes(rep)
         msg = _message(rep, "scoring_uncalibrated")
-        assert "pf_min_tpm" in msg and "pf_tpm_target" in msg
+        assert "pf_min_tpm" in msg and "min_tpm" in msg
+
+    def test_the_scoring_rate_floor_follows_the_gate(self):
+        """Left alone it is derived, so the two cannot disagree — it used to be
+        a fixed 2 while the gate ran from 0.8 on daily bars to 76.8 on 15m."""
+        rd = RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=0.25))
+        rep = config_report(None, None, rd, ctx=_ctx())
+
+        assert rep.configs["rule_discovery"].scoring.pf_min_tpm == pytest.approx(0.25)
+        assert "scoring_uncalibrated" not in _codes(rep)
 
     def test_scoring_is_silent_when_the_knobs_track_the_rate(self):
         rd = RuleDiscoveryConfig(
             criteria=SelectionCriteria(min_tpm=2.5),
-            scoring=ScoringParams(pf_min_trades=15, pf_min_tpm=2, pf_tpm_target=3),
+            scoring=ScoringParams(pf_min_trades=15, pf_min_tpm=2),
         )
         rep = config_report(None, None, rd, ctx=_ctx())
         assert "scoring_uncalibrated" not in _codes(rep)
@@ -438,7 +447,7 @@ class TestRendering:
         alpha = AlphaConfig(timeframe="1D", horizon_grid=(1, 2, 3, 5))
         rd = RuleDiscoveryConfig(
             criteria=SelectionCriteria(min_tpm=2.5, partial_min_profit_factor=2.0),
-            scoring=ScoringParams(pf_min_trades=15, pf_min_tpm=2, pf_tpm_target=3),
+            scoring=ScoringParams(pf_min_trades=15, pf_min_tpm=2),
             base_params=BacktestParams(target_h=3, buy_delay_bar=1),
         )
         rep = config_report(disc, alpha, rd, RegistryConfig(), ctx=_ctx())

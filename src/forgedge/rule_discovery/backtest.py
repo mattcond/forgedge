@@ -180,7 +180,9 @@ def run_backtest(
     if params.direction not in ("long", "short"):
         raise ValueError(f"direction must be 'long' or 'short', got {params.direction!r}")
 
-    scoring = scoring or ScoringParams()
+    # Resolved here for the same reason `params` is: the caller may hold
+    # unresolved fields, and this is the one place they become values.
+    scoring = (scoring or ScoringParams()).resolved()
     is_short = params.direction == "short"
 
     prep = _prepared if _prepared is not None else _PreparedCandles(
@@ -420,6 +422,10 @@ def _summarise(
     traded across all test windows, so its concurrency is the concurrency they
     would have had to fund.
     """
+    # The second way into `_summarise_arrays`: the walk-forward hands its
+    # concatenated ledger straight here, never passing through `run_backtest`,
+    # so the sentinel has to be spent on this path too.
+    scoring = scoring.resolved()
     has_geometry = {"fill_rn", "exit_rn", "episode_id"} <= set(trades.columns)
     conc = (
         concurrency(trades["fill_rn"].to_numpy(), trades["exit_rn"].to_numpy())
@@ -491,10 +497,34 @@ def _summarise_arrays(
     sig_trades = 1.0 / (1.0 + math.exp(-_K_TRADES * (n - min_trades_dyn)))
     pf_score = round(max(profit_factor * sig_trades, 0.0), 6)
 
-    if n_months > 0 and scoring.pf_tpm_target > 0 and mu > 0:
-        f_r = min(scoring.pf_tpm_target / mu, 1.0)
-        C = (mu / (sigma + 1.0)) * f_r
-        c_norm = max(0.0, min(1.0, C / scoring.pf_tpm_target))
+    # ── consistency term: excess dispersion only (F3, issue #178) ────────
+    #
+    # `c_norm` used to be level-dependent:
+    #
+    #     f_r = min(target / mu, 1);  C = (mu / (sigma + 1)) * f_r
+    #     c_norm = C / target
+    #
+    # which above the target froze the numerator while `sigma` kept growing.
+    # For a pure Poisson process (`sigma = sqrt(mu)`, index of dispersion 1,
+    # perfect regularity) that scored 0.366 at mu=3, 0.240 at mu=10 and 0.154
+    # at mu=30 — the *same* process, penalised 2.4x for trading more often.
+    # It was measuring frequency dressed up as irregularity, and on 15m data,
+    # where the preset's gate demands 76.8 trades/month, the objective it feeds
+    # preferred the cells that traded *less*: gate and objective pointing in
+    # opposite directions.
+    #
+    # The index of dispersion is scale-free — 1 for Poisson at any rate — so
+    # only variance *in excess* of what the rate necessarily produces is
+    # penalised.  This is the correction M1's ConsistencyGate already applies
+    # via its Poisson chi-squared floor; the same mistake lived one module
+    # downstream.
+    #
+    # `c_norm` now measures one thing.  "Enough trades" is `criteria.min_tpm`
+    # and `_dynamic_min_trades`, which already do it and are also in
+    # `_passes` — so the guard against "three fantastic trades" is not lost.
+    if n_months > 0 and mu > 0:
+        dispersion = (sigma * sigma) / mu
+        c_norm = min(1.0, 1.0 / max(dispersion, 1.0))
     else:
         c_norm = 0.0
 

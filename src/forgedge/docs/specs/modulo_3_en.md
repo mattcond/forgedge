@@ -338,9 +338,9 @@ resp.grid_results        # list[GridResult]
 | `active_months` | Months with at least one trade |
 | `zero_months` | `n_months - active_months` |
 | `tpm_mu`, `tpm_sigma` | Mean and std dev of trades/month |
-| `c_norm` | Normalised monthly consistency |
-| `pf_score`, `pf_score_tpm` | Composite score (with and without frequency penalty) |
-| `exp_score_tpm` | Expectancy-and-frequency based score |
+| `c_norm` | Monthly regularity: `min(1, 1 / max(index_of_dispersion, 1))`. Scale-free — a Poisson process scores 1 at *any* rate, and only variance in excess of Poisson is penalised (#178). |
+| `pf_score`, `pf_score_tpm` | Composite score: `pf × sigmoid(trade count)` and `pf × c_norm` |
+| `exp_score_tpm` | Same regularity penalty applied to expectancy: `expectancy × c_norm` |
 | `sharpe_raw` | Raw Sharpe (not annualised) |
 
 ---

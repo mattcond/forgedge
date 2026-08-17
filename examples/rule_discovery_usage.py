@@ -109,7 +109,7 @@ config = RuleDiscoveryConfig(
         sell_pct=[0.030, 0.040, 0.050],
         target_h=[12, 24, 48],
     ),
-    scoring=ScoringParams(pf_min_trades=15, pf_min_tpm=2, pf_tpm_target=3),
+    scoring=ScoringParams(pf_min_trades=15, pf_min_tpm=2),
     walk_forward=RuleWalkForwardConfig(n_splits=4, min_train_months=6),
     criteria=SelectionCriteria(min_profit_factor=2.0, min_win_rate=0.55),
 )

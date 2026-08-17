@@ -142,23 +142,57 @@ class ScoringParams:
     """Parameters of the composite scoring metrics (``pf_score_tpm`` & co).
 
     Mirrors the exposed knobs of ``backtest_scoring.md``.  The dynamic
-    trade-count threshold is ``max(pf_min_trades, n_months * pf_min_tpm)``;
-    ``pf_tpm_target`` is the target trades-per-month for the consistency term
-    ``C_norm`` and **must be calibrated** against the realised ``tpm_mu``.
+    trade-count threshold is ``max(pf_min_trades, n_months * pf_min_tpm)``.
+
+    These are **not** diagnostics: ``pf_score_tpm`` is what the grid screening
+    maximises and a gate in ``_passes``, so these knobs decide which operating
+    point gets published.
+
+    ``pf_tpm_target`` is gone (issue #178)
+    -------------------------------------
+    It was the target trades-per-month for the consistency term ``c_norm``,
+    and it made that term level-dependent: above the target the numerator
+    froze while the monthly standard deviation kept growing, so a pure Poisson
+    process — perfect regularity — scored 0.366 at 3 trades/month and 0.154 at
+    30.  The metric penalised a rule for the variance its own rate necessarily
+    produces.
+
+    ``c_norm`` is now ``min(1, 1 / max(index_of_dispersion, 1))``, which is
+    scale-free: only variance *in excess* of Poisson is penalised, at any rate.
+    That removes the parameter entirely rather than rescaling it — one of the
+    arrival-rate parameter's materialisations deleted instead of duplicated.
 
     Attributes
     ----------
     pf_min_trades : int
         Absolute floor of the dynamic trade-count threshold.
-    pf_min_tpm : int
-        Minimum trades/month feeding the dynamic threshold.
-    pf_tpm_target : int
-        Target trades/month for the monthly-consistency term ``C_norm``.
+        Session-resolved; default 15.
+    pf_min_tpm : float
+        Minimum trades/month feeding the dynamic threshold.  Session-resolved
+        from ``SelectionCriteria.min_tpm`` — it used to be a fixed 2 while the
+        gate it is supposed to agree with ranged from 0.8 on daily bars to 76.8
+        on 15-minute ones (F3).
     """
 
-    pf_min_trades: int = 15
-    pf_min_tpm: int = 2
-    pf_tpm_target: int = 3
+    pf_min_trades: int = UNSET
+    pf_min_tpm: float = UNSET
+
+    def resolved(self) -> "ScoringParams":
+        """Return a copy with every ``UNSET`` field at its documented default.
+
+        Both fields are session-resolved, so a caller who never went through
+        :func:`forgedge.resolve` — a bare ``ScoringParams()`` handed to
+        :func:`run_backtest` — holds the sentinel, and ``n_months * UNSET``
+        raises by design.  Same chokepoint discipline as
+        :meth:`BacktestParams.resolved`; returns ``self`` when there is
+        nothing to do.
+        """
+        if is_set(self.pf_min_trades) and is_set(self.pf_min_tpm):
+            return self
+        return ScoringParams(
+            pf_min_trades=coalesce(self.pf_min_trades, default=15),
+            pf_min_tpm=coalesce(self.pf_min_tpm, default=2),
+        )
 
 
 @dataclass
@@ -263,7 +297,18 @@ class SelectionCriteria:
         requirement scales with the in-sample length instead of penalising short
         IS periods or under-demanding long ones (spec RD-04).
     min_pf_score_tpm : float
-        Minimum composite ``pf_score_tpm``.
+        Minimum composite ``pf_score_tpm = profit_factor * c_norm``, where
+        ``c_norm = min(1, 1 / max(sigma^2 / mu, 1))`` is the inverse index of
+        dispersion of the monthly trade counts — 1 for a Poisson process at any
+        rate, so only burstiness is penalised, never frequency (#178).
+
+        Because this is a gate in ``_passes`` *alongside* ``min_profit_factor``,
+        it implies a second PF threshold, ``min_pf_score_tpm / c_norm``, which
+        binds wherever it exceeds the declared one.  With the level-dependent
+        ``c_norm`` that hidden threshold had a median of 1.67 on the reference
+        1D fixture and overrode the configured 2.0 for 34.3% of rules; it now
+        sits at a median of 0.47 and binds for 0.8%, so the declared bar is the
+        one that governs.
     min_fill_rate : float
         Minimum fill rate — below it the limit discount is too deep.
 

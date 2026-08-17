@@ -23,8 +23,8 @@ Stages (default: ``rates m1``):
     the OOS tail, as a function of ``train_ratio``.
 ``m3``
     Rule Discovery: reproduces issue #173's early-elimination on this repo's own
-    fixture, and measures the realised trade rate against the fixed
-    ``ScoringParams.pf_tpm_target``.
+    fixture, and measures the realised trade rate against the consistency term
+    that gates the grid's operating point.
 
 The dataset defaults to ``tests/fixtures/ADA_1D_TRAIN.parquet``; override it
 with ``FORGEDGE_PARQUET=/path/to/kpi.parquet``.
@@ -50,6 +50,7 @@ from forgedge import (
 from forgedge.event_discovery.discovery import MIN_FOLD_LAMBDA
 from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 from forgedge.presets import _TFClass, forge_preset
+from forgedge.resolver import PipelineContext, resolve_config
 
 PARQUET = os.environ.get("FORGEDGE_PARQUET", "tests/fixtures/ADA_1D_TRAIN.parquet")
 
@@ -76,6 +77,9 @@ def stage_rates() -> None:
     print("=" * 78)
     for tf in ("1D", "4H", "1H", "15m"):
         disc, _alpha, rd = forge_preset("balanced", tf, asset="X")
+        # Several of these fields are session-resolved now (#173, #178), so the
+        # audit has to read the values that *run*, not the sentinels.
+        rd = resolve_config(rd, "rule_discovery", PipelineContext(timeframe=tf))
         t = _TFClass(tf)
         gate, cr, sc, wf = disc.gate_params, rd.criteria, rd.scoring, rd.walk_forward
         print(f"\n--- forge_preset('balanced', {tf!r}) — {t.bars_per_month:.0f} bars/month ---")
@@ -88,21 +92,27 @@ def stage_rates() -> None:
             print(f"       early-elim floor over {months:>2}mo = max(10, {months}×{cr.min_tpm:.2f})"
                   f" = {floor:6.1f} trades → {floor / months:5.2f} tr/month implied")
         print(f"  M3 ScoringParams.pf_min_trades {sc.pf_min_trades:8d}          [ABSOLUTE — not scaled]")
-        print(f"  M3 ScoringParams.pf_min_tpm    {sc.pf_min_tpm:8d}          [ABSOLUTE — not scaled]")
-        print(f"  M3 ScoringParams.pf_tpm_target {sc.pf_tpm_target:8d}          [ABSOLUTE — not scaled]")
+        print(f"  M3 ScoringParams.pf_min_tpm    {sc.pf_min_tpm:8.2f}          "
+              f"[resolved from criteria.min_tpm — #178]")
         print(f"  M3 criteria.min_oos_trades     {cr.min_oos_trades:8d}          [ABSOLUTE — not scaled]")
 
     print("\n" + "=" * 78)
-    print("  pf_score_tpm = PF × c_norm — the selection objective is a band-pass")
-    print("  centred on pf_tpm_target = 3 trades/month, on EVERY timeframe")
+    print("  pf_score_tpm = PF × c_norm — the selection objective, on a *Poisson*")
+    print("  process (index of dispersion 1, i.e. perfect regularity at any rate)")
     print("=" * 78)
-    print(f"  {'tpm_mu':>8}  {'sigma':>6}  {'c_norm':>7}  {'PF needed for min_pf_score_tpm=0.30':>36}")
+    print(f"  {'tpm_mu':>8}  {'sigma':>6}  {'c_norm old':>10}  {'c_norm new':>10}  "
+          f"{'PF needed old':>13}  {'PF needed new':>13}")
     for mu in (0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0):
         sigma = mu ** 0.5                       # Poisson arrivals
         f_r = min(3.0 / mu, 1.0)
-        c_norm = max(0.0, min(1.0, (mu / (sigma + 1.0)) * f_r / 3.0))
-        need = 0.30 / c_norm if c_norm > 0 else float("inf")
-        print(f"  {mu:8.1f}  {sigma:6.2f}  {c_norm:7.3f}  {need:36.2f}")
+        old = max(0.0, min(1.0, (mu / (sigma + 1.0)) * f_r / 3.0))
+        new = min(1.0, 1.0 / max((sigma * sigma) / mu, 1.0))
+        need_old = 0.30 / old if old > 0 else float("inf")
+        need_new = 0.30 / new if new > 0 else float("inf")
+        print(f"  {mu:8.1f}  {sigma:6.2f}  {old:10.3f}  {new:10.3f}  "
+              f"{need_old:13.2f}  {need_new:13.2f}")
+    print("  the old column is the same process scored 2.4x worse for trading more")
+    print("  often; the new one is flat, as a scale-free measure has to be (F3)")
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +246,7 @@ def stage_m3(kpi: pd.DataFrame) -> None:
     if summaries:
         df = pd.DataFrame({
             "tpm_mu": [s.tpm_mu for s in summaries],
+            "tpm_sigma": [s.tpm_sigma for s in summaries],
             "c_norm": [s.c_norm for s in summaries],
             "pf_score_tpm": [s.pf_score_tpm for s in summaries],
             "n_months": [s.n_months for s in summaries],
@@ -243,9 +254,17 @@ def stage_m3(kpi: pd.DataFrame) -> None:
         print(f"\n  selection-span length: median {df.n_months.median():.0f} months "
               f"(= walk_forward.min_train_months, NOT the in-sample span)")
         print(f"  realised tpm_mu      : median {df.tpm_mu.median():.2f}, "
-              f"p95 {df.tpm_mu.quantile(0.95):.2f}  vs pf_tpm_target=3 (fixed)")
+              f"p95 {df.tpm_mu.quantile(0.95):.2f}")
         print(f"  c_norm               : median {df.c_norm.median():.3f}; "
               f"{(df.c_norm < 0.30).mean():.1%} of rules sit below 0.30")
+        # `min_pf_score_tpm` is a gate in `_passes` alongside `min_profit_factor`,
+        # so `min_pf_score_tpm / c_norm` is a *second*, undeclared PF threshold.
+        # It only matters where it exceeds the declared one (#178, F3).
+        live = df[df.c_norm > 0]
+        hidden = 0.30 / live.c_norm
+        print(f"  hidden PF threshold  : min_pf_score_tpm=0.30 / c_norm → median "
+              f"{hidden.median():.2f}  p90 {hidden.quantile(0.90):.2f}; binding over "
+              f"the declared min_profit_factor=2.0 for {(hidden > 2.0).mean():.1%} of rules")
 
 
 # ---------------------------------------------------------------------------

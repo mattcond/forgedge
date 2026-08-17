@@ -627,10 +627,7 @@ class TestShortDirection:
 class TestScoring:
     def test_pf_score_tpm_in_range(self):
         df = _candle_with_signal(n=4000, signal_every=40, drift_after_signal=0.06)
-        s = run_backtest(
-            df, "__sig__", BacktestParams(buy_drop_pct=0.005),
-            scoring=ScoringParams(pf_tpm_target=3),
-        )
+        s = run_backtest(df, "__sig__", BacktestParams(buy_drop_pct=0.005))
         assert 0.0 <= s.pf_score_tpm <= max(s.profit_factor, 0.0) + 1e-9
         assert 0.0 <= s.c_norm <= 1.0
 
@@ -639,7 +636,6 @@ class TestScoring:
         df = _candle_with_signal(n=6000, signal_every=30, drift_after_signal=0.06)
         s = run_backtest(
             df, "__sig__", BacktestParams(buy_type="market", sell_pct=0.03),
-            scoring=ScoringParams(pf_tpm_target=3),
         )
         assert s.c_norm > 0.0
 
@@ -1967,3 +1963,109 @@ class TestContractSeeding:
         cfg = RuleDiscoveryConfig(criteria=SelectionCriteria(min_sell_pct=0.02))
         params = self._seed(cfg, holding_h=6, sell_pct=0.006)
         assert params.sell_pct == pytest.approx(0.02)
+
+
+class TestConsistencyIsScaleFree:
+    """F3 (#178) — `c_norm` measured regularity, but was contaminated by rate.
+
+    `pf_score_tpm = profit_factor * c_norm` is what the grid screening
+    maximises and a gate in `_passes`, so this term decides which operating
+    point gets published. It is not a diagnostic.
+    """
+
+    @staticmethod
+    def _c_norm(mu, sigma):
+        """The formula as `_summarise_arrays` computes it."""
+        dispersion = (sigma * sigma) / mu
+        return min(1.0, 1.0 / max(dispersion, 1.0))
+
+    def test_a_poisson_process_scores_the_same_at_any_rate(self):
+        """The defect, stated as a test.
+
+        A Poisson process has `sigma = sqrt(mu)`, index of dispersion 1 —
+        perfect regularity at every rate. The old formula scored it 0.366 at
+        mu=3 and 0.154 at mu=30: the *same* process penalised 2.4x for trading
+        more often, because above `pf_tpm_target` the numerator froze while
+        sigma kept growing. It measured frequency dressed up as irregularity.
+        """
+        scores = [self._c_norm(mu, math.sqrt(mu)) for mu in (1, 3, 10, 30, 100)]
+        assert all(s == pytest.approx(1.0) for s in scores)
+
+    def test_excess_dispersion_is_still_penalised(self):
+        """The term must keep doing its actual job: only variance *beyond* what
+        the rate necessarily produces is a defect."""
+        assert self._c_norm(10, 6.0) == pytest.approx(1 / 3.6)     # ID 3.6
+        assert self._c_norm(10, 10.0) == pytest.approx(0.1)        # ID 10
+        assert self._c_norm(10, 2.0) == pytest.approx(1.0)         # sub-Poisson
+
+    def test_it_is_monotone_in_burstiness_and_flat_in_rate(self):
+        rates = (2, 20, 200)
+        for mu in rates:
+            regular = self._c_norm(mu, math.sqrt(mu))
+            bursty = self._c_norm(mu, 3 * math.sqrt(mu))
+            assert regular > bursty
+        # Same burstiness, three rates two orders of magnitude apart.
+        bursty_scores = [self._c_norm(mu, 3 * math.sqrt(mu)) for mu in rates]
+        assert bursty_scores[0] == pytest.approx(bursty_scores[-1])
+
+    def test_on_15m_the_incentive_points_the_same_way_as_the_gate(self):
+        """The preset demands 76.8 trades/month at the M3 gate on 15m bars.
+
+        Under the old term, a rule that *complied* — moving from 3 to 76.8
+        trades/month at unchanged regularity — lost 79% of its `c_norm`, so the
+        objective the grid maximises preferred the cells the gate rejects.  The
+        incentive now has to be non-negative in the rate.
+        """
+        gate_rate, below_gate = 76.8, 3.0
+
+        def old(mu, sigma, target=3.0):
+            f_r = min(target / mu, 1.0)
+            return max(0.0, min(1.0, ((mu / (sigma + 1.0)) * f_r) / target))
+
+        # Same process, same regularity (Poisson), two rates.
+        assert old(gate_rate, math.sqrt(gate_rate)) < old(below_gate, math.sqrt(below_gate))
+        assert self._c_norm(gate_rate, math.sqrt(gate_rate)) >= self._c_norm(
+            below_gate, math.sqrt(below_gate)
+        )
+        # Held at fixed *burstiness* rather than fixed regularity, the same way.
+        for factor in (1.0, 2.0, 5.0):
+            complying = self._c_norm(gate_rate, factor * math.sqrt(gate_rate))
+            lazy = self._c_norm(below_gate, factor * math.sqrt(below_gate))
+            assert complying == pytest.approx(lazy)
+
+    def test_the_engine_agrees_with_the_formula(self):
+        df = _persistent_signal_table(run_len=1, every=20, n=900)
+        s = run_backtest(df, "__sig__",
+                         BacktestParams(buy_type="market", sell_pct=0.05, target_h=3))
+        assert s.c_norm == pytest.approx(
+            self._c_norm(s.tpm_mu, s.tpm_sigma), abs=1e-6
+        )
+        assert 0.0 <= s.c_norm <= 1.0
+
+    def test_the_scoring_knobs_resolve_at_the_boundary(self):
+        """Both `ScoringParams` fields became session-resolved, so a bare
+        instance handed to `run_backtest` carries the sentinel — and
+        `n_months * UNSET` raises by design. Resolved at the chokepoint, as
+        `BacktestParams` already is."""
+        raw = ScoringParams()
+        assert raw.pf_min_trades is UNSET and raw.pf_min_tpm is UNSET
+        assert raw.resolved().pf_min_trades == 15
+        assert raw.resolved().pf_min_tpm == 2
+
+        df = _persistent_signal_table(run_len=1, every=20, n=600)
+        s = run_backtest(df, "__sig__",
+                         BacktestParams(buy_type="market", sell_pct=0.05, target_h=3),
+                         scoring=raw)
+        assert math.isfinite(s.pf_score_tpm) and s.pf_score_tpm >= 0.0
+
+    def test_the_walk_forward_path_resolves_too(self):
+        """`_summarise` is the *second* way into the scoring code.
+
+        The walk-forward hands its concatenated OOS ledger straight to it,
+        never passing through `run_backtest`, so resolving at that one
+        chokepoint is not enough — the sentinel has to be spent here as well.
+        """
+        df = _persistent_signal_table(run_len=4, every=40, n=900)
+        s = _summarise_from_frame(df)          # hands `_summarise` a bare ScoringParams
+        assert math.isfinite(s.pf_score_tpm)
+        assert s.c_norm == pytest.approx(self._c_norm(s.tpm_mu, s.tpm_sigma), abs=1e-6)
