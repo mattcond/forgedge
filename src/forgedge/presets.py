@@ -44,7 +44,7 @@ from typing import Optional, Tuple
 from .alpha_discovery.models import AlphaConfig, PromotionThresholds
 from .event_discovery.discovery import DiscoveryConfig
 from .event_discovery.models import GateParams
-from .resolver import timeframe_minutes
+from .resolver import PipelineContext, resolve_config, timeframe_minutes
 from .rule_discovery.models import RuleDiscoveryConfig, SelectionCriteria
 from .unset import UNSET
 
@@ -365,3 +365,13 @@ def preset_info(preset: Optional[str] = None) -> None:
               f"fdr_q={spec['fdr_q']}  oos_max_p={spec['oos_max_p']}")
         print(f"  M3 gate : rd_min_tpm(episode)={spec['daily_rd_min_tpm_episode']}  "
               f"rd_min_tpm(bar)={spec['daily_rd_min_tpm']}")
+        # The scoring knobs decide which operating point is published, so they
+        # belong next to the gates rather than being invisible (F3, #178).
+        # Resolved for a daily session — they track `criteria.min_tpm`, and
+        # `preset_info()` is timeframe-agnostic, so the row states which.
+        _d, _a, rd = forge_preset(name, "1D")
+        rd = resolve_config(rd, "rule_discovery", PipelineContext(timeframe="1D"))
+        print(f"  M3 score: pf_min_tpm={rd.scoring.pf_min_tpm:g}  "
+              f"pf_min_trades={rd.scoring.pf_min_trades}  "
+              f"min_pf_score_tpm={rd.criteria.min_pf_score_tpm:g}   "
+              f"[resolved for 1D; pf_min_tpm tracks criteria.min_tpm]")

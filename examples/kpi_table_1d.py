@@ -105,7 +105,7 @@ BASE_LIMIT_PARAMS = BacktestParams(
 )
 BASE_MARKET_PARAMS = BASE_LIMIT_PARAMS.merged(buy_type="market")
 
-SCORING = ScoringParams(pf_min_trades=5, pf_min_tpm=1, pf_tpm_target=2)
+SCORING = ScoringParams(pf_min_trades=5, pf_min_tpm=1)
 SIGNAL_COL = "__kpi_signal__"
 
 

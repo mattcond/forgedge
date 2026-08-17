@@ -299,13 +299,14 @@ Parametri dell'esecuzione di un singolo backtest: direzione, tipo di ordine, liv
 
 ### ScoringParams
 
-Pesi e soglie usati dalla funzione di scoring della grid (`pf_score_tpm`) per bilanciare Profit Factor e frequenza di trading.
+Soglie usate dalla funzione di scoring della grid per combinare il Profit Factor con la regolarità degli arrivi dei trade. `pf_score_tpm = profit_factor × c_norm`, dove `c_norm` è l'inverso dell'indice di dispersione (`μ/σ²`, troncato a 1): è scale-free, quindi una regola non viene penalizzata perché opera più spesso, ma solo perché opera a raffiche. "Abbastanza trade" è una domanda separata, presidiata da `criteria.min_tpm` e dal floor dinamico qui sotto.
+
+Entrambi i campi sono **risolti a livello di sessione**: lasciandoli non impostati li riempie `resolve()`, e `config_report()` mostra il valore che verrà eseguito.
 
 | Parametro | Tipo | Default | Descrizione |
 |---|---|---|---|
-| `pf_min_trades` | int | `15` | Numero minimo di trade per includere una configurazione nel ranking. |
-| `pf_min_tpm` | int | `2` | Frequenza minima (trades/mese) perché la frequenza contribuisca positivamente allo score. |
-| `pf_tpm_target` | int | `3` | Frequenza target (trades/mese): raggiunto questo livello lo score di frequenza è massimo. |
+| `pf_min_trades` | int | *(risolto: `15`)* | Floor assoluto del conteggio dinamico `max(pf_min_trades, n_months × pf_min_tpm)` che alimenta `pf_score`. |
+| `pf_min_tpm` | float | *(risolto: `criteria.min_tpm`)* | Floor di frequenza dello stesso conteggio dinamico. Segue la frequenza richiesta dal gate — 0.8/mese su 1D, 76.8 su 15m — invece di un 2 fisso che non coincideva con il gate su nessun timeframe. |
 
 ---
 
@@ -418,7 +419,6 @@ config = RuleDiscoveryConfig(
     ),
     walk_forward=RuleWalkForwardConfig(n_splits=5, min_train_months=8),
     criteria=SelectionCriteria(min_profit_factor=2.0, min_win_rate=0.55),
-    scoring=ScoringParams(pf_tpm_target=4),
 )
 rd = RuleDiscovery(ed.df, contract, cand, config=config)
 resp = rd.run()

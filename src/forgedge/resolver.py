@@ -629,6 +629,23 @@ def _derive_tp_floor(values: Dict[str, Any], ctx: PipelineContext):
     return 0.005, "documented alpha.mfe_floor default 0.005"
 
 
+def _derive_pf_min_tpm(values: Dict[str, Any], ctx: PipelineContext):
+    """The composite score's rate floor follows the gate's, not a fixed 2.
+
+    ``pf_score_tpm`` is what the grid screening maximises and a gate in
+    ``_passes``, so it decides which operating point is published.  It carried
+    ``pf_min_tpm=2`` on every timeframe while the gate it is supposed to agree
+    with ran from 0.8 on daily bars to 76.8 on 15-minute ones (F3) — the score
+    penalising rules the gate admits, or ignoring a floor the gate enforces,
+    depending on which side of 2 the timeframe fell.
+    """
+    rate = values.get("rule_discovery.criteria.min_tpm", _MISSING)
+    if rate is _MISSING or not is_set(rate) or float(rate) <= 0:
+        return 2, "documented scoring.pf_min_tpm default 2"
+    value = float(rate)
+    return value, f"criteria.min_tpm={value:g} — the same rate the gate demands"
+
+
 def _derive_min_train_months(values: Dict[str, Any], ctx: PipelineContext):
     """#173 — the selection window sized to the rate it is about to demand.
 
@@ -697,6 +714,23 @@ CONSTRAINTS: List[Constraint] = [
         free=("alpha.mfe_floor",),
         derived="rule_discovery.criteria.min_sell_pct",
         derive=_derive_tp_floor,
+    ),
+    # ── the scoring knobs follow the gate they are meant to agree with ─
+    Constraint(
+        code="scoring_uncalibrated",
+        level="WARN",
+        stage=PROPAGATION,
+        free=("rule_discovery.criteria.min_tpm",),
+        derived="rule_discovery.scoring.pf_min_tpm",
+        derive=_derive_pf_min_tpm,
+    ),
+    Constraint(
+        code="scoring_uncalibrated",
+        level="WARN",
+        stage=PROPAGATION,
+        free=(),
+        derived="rule_discovery.scoring.pf_min_trades",
+        derive=lambda v, ctx: (15, "documented scoring.pf_min_trades default 15"),
     ),
     # ── #173: the selection window has to fit the rate it demands ─────
     Constraint(
@@ -927,21 +961,12 @@ def _check_scoring(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str
     if got is None:
         return None
     rate, pf_min_tpm = float(got[0]), float(got[1])
-    problems = []
-    if pf_min_tpm > rate:
-        problems.append(
-            f"scoring.pf_min_tpm={pf_min_tpm:g} supera criteria.min_tpm={rate:g}, "
-            f"quindi il punteggio composito penalizza regole che il gate ammette")
-    target = values.get("rule_discovery.scoring.pf_tpm_target", _MISSING)
-    if target is not _MISSING and is_set(target) and float(target) > 0:
-        t = float(target)
-        if not (0.5 * rate <= t <= 2.0 * rate):
-            problems.append(
-                f"scoring.pf_tpm_target={t:g} è fuori dalla banda [{0.5 * rate:.2f}, "
-                f"{2.0 * rate:.2f}] attorno a criteria.min_tpm={rate:g}: c_norm — e "
-                f"quindi pf_score_tpm, che è il criterio di selezione della griglia — "
-                f"è calibrato su una frequenza diversa da quella richiesta dal gate")
-    return "; ".join(problems) or None
+    if pf_min_tpm <= rate:
+        return None
+    return (f"scoring.pf_min_tpm={pf_min_tpm:g} supera criteria.min_tpm={rate:g}, "
+            f"quindi il punteggio composito penalizza regole che il gate ammette. "
+            f"pf_score_tpm è ciò che lo screening di griglia massimizza ed è un gate "
+            f"in _passes: decide quale operating point viene pubblicato.")
 
 
 def _untouched_default(path: str, value: Any) -> bool:
@@ -1142,8 +1167,7 @@ def _statistical_constraints() -> List[Constraint]:
                    check=_check_m3_vs_m1),
         Constraint(code="scoring_uncalibrated", level="WARN", stage=STATISTICAL,
                    free=("rule_discovery.criteria.min_tpm",
-                         "rule_discovery.scoring.pf_min_tpm",
-                         "rule_discovery.scoring.pf_tpm_target"),
+                         "rule_discovery.scoring.pf_min_tpm"),
                    check=_check_scoring),
         Constraint(code="timeframe_mismatch", level="WARN", stage=STATISTICAL,
                    free=("alpha.timeframe", "alpha.horizon_grid",

@@ -132,6 +132,20 @@ _AD_GOLDEN = {
 #
 # Event and Alpha Discovery goldens are untouched: none of this is visible to
 # M1 or M2.
+#
+# ── Step 8 (issue #178, F3): checked, and the pins below do NOT move ────────
+#
+# `c_norm` was rebuilt on the index of dispersion and `scoring.pf_min_tpm` now
+# resolves from `criteria.min_tpm`, both of which feed `pf_score_tpm` — the
+# grid's ranking key *and* a gate in `_passes`.  The issue expected the
+# published operating point to shift.  On this fixture it does not: the golden
+# rule's cell wins under both scorings (its `c_norm` rises 0.2401 -> 0.4253 and
+# its `pf_score_tpm` 0.4020 -> 0.7122, but so does every competitor's, and the
+# ordering survives).  Measured across the fixture the hidden PF threshold
+# `min_pf_score_tpm / c_norm` falls from a median of 1.67 to 0.47, and stops
+# exceeding the declared `min_profit_factor=2.0` for 34.3% -> 0.8% of rules.
+#
+# Left unpinned deliberately: this is the result, not an omission.
 _RD_GOLDEN = {
     "verdict":        "NON-EDGE",
     "profit_factor":  pytest.approx(1.6746, rel=1e-3),

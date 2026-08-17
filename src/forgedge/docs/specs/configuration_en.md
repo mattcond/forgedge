@@ -321,14 +321,20 @@ entry/exit levels, and fee.
 
 ### ScoringParams
 
-Weights and thresholds used by the grid scoring function (`pf_score_tpm`) to
-balance Profit Factor and trading frequency.
+Thresholds used by the grid scoring function to combine Profit Factor with the
+regularity of the trade arrivals. `pf_score_tpm = profit_factor × c_norm`, where
+`c_norm` is the inverse index of dispersion (`μ/σ²`, capped at 1) — scale-free,
+so a rule is not penalised for trading more often, only for trading in bursts.
+"Enough trades" is a separate question, enforced by `criteria.min_tpm` and the
+dynamic trade floor below.
+
+Both fields are **session-resolved**: leave them unset and `resolve()` fills
+them in, `config_report()` shows the value that will run.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `pf_min_trades` | int | `15` | Minimum number of trades for a configuration to be included in the ranking. |
-| `pf_min_tpm` | int | `2` | Minimum trading frequency (trades/month) for frequency to contribute positively to the score. |
-| `pf_tpm_target` | int | `3` | Target trading frequency (trades/month): at this level the frequency score is maximal. |
+| `pf_min_trades` | int | *(resolved: `15`)* | Absolute floor of the dynamic trade count `max(pf_min_trades, n_months × pf_min_tpm)` that feeds `pf_score`. |
+| `pf_min_tpm` | float | *(resolved: `criteria.min_tpm`)* | Rate floor of that dynamic count. Tracks the gate's own rate — 0.8/month on 1D, 76.8 on 15m — instead of a fixed 2 that agreed with the gate on no timeframe. |
 
 ---
 
@@ -445,7 +451,6 @@ config = RuleDiscoveryConfig(
     ),
     walk_forward=RuleWalkForwardConfig(n_splits=5, min_train_months=8),
     criteria=SelectionCriteria(min_profit_factor=2.0, min_win_rate=0.55),
-    scoring=ScoringParams(pf_tpm_target=4),
 )
 rd = RuleDiscovery(ed.df, contract, cand, config=config)
 resp = rd.run()
