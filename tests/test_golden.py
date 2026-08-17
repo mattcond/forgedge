@@ -166,6 +166,27 @@ _AD_GOLDEN = {
 # `buy_delay_bar` does move: across the fixture the published operating points
 # go 37 -> 38, one rule surviving that the six-day order had been failing.
 # The golden rule is not among them.
+#
+# ── Step 10 (issue #180, F6): checked, and the pins below do NOT move ───────
+#
+# `forge()` now builds one temporal axis instead of forwarding whatever the
+# caller passed, and threads it through all three stages. Nothing moves here
+# because the axis it makes explicit is the one the run already had:
+#
+#  - M1 keeps `train_ratio=1.0` (D13 — invariant #1, it never observes the
+#    forward return), so the candidate set is untouched. The budget now
+#    *records* that choice instead of leaving it to be inferred from a split
+#    M1 does not use.
+#  - M2's split and purge are unchanged. The session budget is sized on the
+#    configured grid and M2 widens it when enrichment scans further, so the
+#    purge width is what it always was — widening, never narrowing.
+#  - M3's walk-forward origin is deliberately unchanged (see
+#    `WalkForwardSplit.tests_in_sample`), so its folds are the same folds.
+#
+# What is new is measurable rather than numeric: on this fixture 3 of every
+# rule's 4 walk-forward folds test inside M2's in-sample region — 117 rules out
+# of 117 — which is now reported on `WalkForwardResult.n_splits_in_sample`
+# rather than being invisible.
 _RD_GOLDEN = {
     "verdict":        "NON-EDGE",
     "profit_factor":  pytest.approx(1.6746, rel=1e-3),

@@ -212,7 +212,13 @@ class EventDiscovery:
         # Determine IS boundary — temporal split, never random.  An explicit
         # session TimeBudget wins over the config ratio (single time axis).
         if self.time_budget is not None:
-            split_idx = min(max(int(self.time_budget.split), 1), n)
+            # `event_split_idx`, not `split`: the session axis records M1's own
+            # cut, which under the presets is the whole span by choice — M1
+            # never observes the forward return (invariant #1), so it is the
+            # one module the OOS reserve does not exist to protect (F6, #180).
+            # It falls back to `split` when unset, so a caller-supplied budget
+            # still drives M1 exactly as before.
+            split_idx = min(max(int(self.time_budget.event_split_idx), 1), n)
         else:
             split_idx = max(1, int(n * cfg.train_ratio)) if cfg.train_ratio < 1.0 else n
         self._split_idx = split_idx

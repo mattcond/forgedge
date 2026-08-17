@@ -257,7 +257,14 @@ def forge_preset(
     asset : str
         Asset label forwarded to ``AlphaConfig``.
     train_ratio : float
-        IS/OOS split.  Default 0.70 (70 % training, 30 % OOS).
+        The session's IS/OOS split.  Default 0.70 (70 % training, 30 % OOS).
+
+        It governs **M2 and M3**: Alpha Discovery cuts here, and under
+        :func:`forgedge.forge` the same cut becomes the session's one temporal
+        axis, which Rule Discovery measures its walk-forward folds against
+        (F6, #180).  Event Discovery keeps ``train_ratio=1.0`` — see
+        ``DiscoveryConfig.train_ratio`` below for why that is a decision and
+        not an omission.
     **overrides
         Override any computed parameter by name.  Supported keys:
 
@@ -320,6 +327,20 @@ def forge_preset(
         ),
         timestamp_col=timestamp_col,
         max_and_components=max_and,
+        # Deliberate, and *not* what `train_ratio` above governs (F6, #180).
+        # By the pipeline's first invariant M1 never observes the forward
+        # return: thresholds come from the temporal structure of the
+        # indicators alone. Reserving an OOS tail from it would therefore
+        # protect nothing about returns — what crosses the boundary is
+        # distributional, the percentiles being computed over the whole span,
+        # and that is the weaker form the seventh invariant asks for anyway
+        # (thresholds distributional per asset and period).
+        #
+        # Withholding 30% here costs real structure — the rarest events are
+        # the ones a shorter window fails to see at all — for a guarantee M1
+        # does not need. The session budget records this choice explicitly so
+        # `ForgeResult.time_budget` states M1's axis instead of leaving it to
+        # be inferred from a split M1 does not use.
         train_ratio=1.0,
     )
 

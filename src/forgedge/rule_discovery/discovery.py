@@ -51,7 +51,10 @@ import warnings
 from collections import Counter
 from dataclasses import replace
 from datetime import date
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ..timebudget import TimeBudget
 
 import numpy as np
 import pandas as pd
@@ -167,10 +170,15 @@ class RuleDiscovery:
         alpha_contract: AlphaContract,
         event_candidate: EventCandidate,
         config: Optional[RuleDiscoveryConfig] = None,
+        time_budget: Optional["TimeBudget"] = None,
     ):
         self.config = resolve_config(config or RuleDiscoveryConfig(), "rule_discovery")
         self.contract = alpha_contract
         self.candidate = event_candidate
+        # M3 does *not* take the session split as its walk-forward origin —
+        # see `WalkForwardSplit.tests_in_sample` for why. It uses the budget to
+        # report which folds test inside the span M2 fit the target on.
+        self.time_budget = time_budget
 
         if event_candidate.event_id != alpha_contract.event_candidate_id:
             raise ValueError(
@@ -310,6 +318,7 @@ class RuleDiscovery:
             self._frame, cfg.signal_col, base, grid_spec, cfg.walk_forward,
             scoring=cfg.scoring, criteria=cfg.criteria, timestamp_col=cfg.timestamp_col,
             base_rate=float(self.contract.base_rate or 0.0),
+            time_budget=self.time_budget,
         )
         if wf is None:
             return None
@@ -446,6 +455,7 @@ class RuleDiscovery:
             self._frame, cfg.signal_col, base, grid_spec, cfg.walk_forward,
             scoring=cfg.scoring, criteria=cfg.criteria, timestamp_col=cfg.timestamp_col,
             base_rate=float(self.contract.base_rate or 0.0),
+            time_budget=self.time_budget,
         )
         if wf is None:
             notes.append("walk-forward skipped — data span too short for a split")
@@ -575,6 +585,7 @@ class RuleDiscovery:
             scoring=cfg.scoring, criteria=cfg.criteria,
             timestamp_col=cfg.timestamp_col,
             base_rate=float(self.contract.base_rate or 0.0),
+            time_budget=self.time_budget,
         )
 
     @staticmethod

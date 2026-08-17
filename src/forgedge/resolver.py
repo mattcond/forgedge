@@ -780,6 +780,15 @@ def _derive_ema_bar_hours(values: Dict[str, Any], ctx: PipelineContext):
     return value, f"{ctx.timeframe} = {value:g} ore/barra"
 
 
+def _derive_embargo(values: Dict[str, Any], ctx: PipelineContext):
+    """M3's fold embargo follows M2's session embargo — one quarantine policy."""
+    upstream = values.get("alpha.embargo_bars", _MISSING)
+    if upstream is not _MISSING and is_set(upstream) and int(upstream) > 0:
+        value = int(upstream)
+        return value, f"alpha.embargo_bars={value} — la stessa quarantena"
+    return 0, "documented walk_forward.embargo_bars default 0"
+
+
 def _derive_min_train_months(values: Dict[str, Any], ctx: PipelineContext):
     """#173 — the selection window sized to the rate it is about to demand.
 
@@ -831,6 +840,20 @@ CONSTRAINTS: List[Constraint] = [
         free=(),
         derived="registry.min_cross_pf_retention",
         derive=_from_context("cross_pf_retention"),
+    ),
+    # ── #180 (F6): the quarantine after a boundary is one policy ───────
+    # The boundaries differ — M2 quarantines after the session split, M3
+    # after each walk-forward fold — but "how many bars of serial correlation
+    # to skip" does not.  The *purge* widths are deliberately left
+    # independent: see `RuleWalkForwardConfig.purge_bars` for why they are
+    # different quantities wearing the same name.
+    Constraint(
+        code="split_disagreement",
+        level="WARN",
+        stage=PROPAGATION,
+        free=("alpha.embargo_bars",),
+        derived="rule_discovery.walk_forward.embargo_bars",
+        derive=_derive_embargo,
     ),
     Constraint(
         code="entry_adoption_policy",

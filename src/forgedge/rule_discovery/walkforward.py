@@ -19,9 +19,12 @@ out-of-sample (pure OOS replay, no per-fold optimisation).
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import pandas as pd
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ..timebudget import TimeBudget
 
 from ..unset import coalesce
 from .analysis import excursion_stats
@@ -47,6 +50,25 @@ def _month_bounds(candle: pd.DataFrame, timestamp_col: str):
     # Exclusive upper bound: first day of the month after the last candle.
     end = (dt.max().to_period("M") + 1).to_timestamp()
     return start, end
+
+
+def _split_timestamp(candle: pd.DataFrame, timestamp_col: str, budget) -> Optional[pd.Timestamp]:
+    """The session's IS/OOS boundary as a timestamp on *this* frame.
+
+    ``None`` when there is no budget, when the split covers the whole span
+    (nothing is out-of-sample, so no fold can be "inside" anything), or when
+    the frame is shorter than the budget's index — the boundary would then be
+    a guess, and a guess is worse than admitting there is no measurement.
+    """
+    if budget is None:
+        return None
+    split = int(getattr(budget, "split", 0))
+    if split <= 0 or split >= int(getattr(budget, "n_bars", 0)):
+        return None
+    if split >= len(candle):
+        return None
+    dt = pd.DatetimeIndex(_as_datetime64(candle[coalesce(timestamp_col, default="open_dt")]))
+    return dt[split]
 
 
 def _build_splits(start: pd.Timestamp, end: pd.Timestamp, cfg: RuleWalkForwardConfig):
@@ -105,6 +127,7 @@ def walk_forward(
     criteria: Optional[SelectionCriteria] = None,
     timestamp_col: str = "open_dt",
     base_rate: float = 0.0,
+    time_budget: Optional["TimeBudget"] = None,
 ) -> Optional[WalkForwardResult]:
     """Run the walk-forward validation and return the aggregated OOS result.
 
@@ -133,6 +156,12 @@ def walk_forward(
     close_trades: List[pd.DataFrame] = []
     high_trades: List[pd.DataFrame] = []
     last_train_grid = None
+
+    # The session's IS boundary as a timestamp, so each fold can say whether
+    # its test window scores the contract's target on the span M2 fit that
+    # target on.  `None` without a session axis — never `False`, which would
+    # claim a clean fold on no evidence (F6, #180).
+    is_boundary = _split_timestamp(candle, timestamp_col, time_budget)
 
     for idx, (tr_from, tr_to_eff, te_from_eff, te_to) in enumerate(windows):
         tr_from_s, tr_to_s = _fmt(tr_from), _fmt(tr_to_eff)
@@ -181,6 +210,9 @@ def walk_forward(
                 params=params,
                 train_summary=train_summary,
                 test_summary=test_summary,
+                tests_in_sample=(
+                    None if is_boundary is None else bool(te_from_eff < is_boundary)
+                ),
             )
         )
 
@@ -206,12 +238,17 @@ def walk_forward(
 
     n_profitable = sum(1 for s in splits if s.test_summary.total_net_gain > 0)
     consistency = n_profitable / len(splits) if splits else 0.0
+    n_in_sample = (
+        None if is_boundary is None
+        else sum(1 for s in splits if s.tests_in_sample)
+    )
 
     return WalkForwardResult(
         splits=splits,
         oos_summary=oos_summary,
         n_profitable_splits=n_profitable,
         consistency=round(consistency, 4),
+        n_splits_in_sample=n_in_sample,
         oos_envelope=oos_envelope,
         oos_excursion=oos_excursion,
         oos_validation=oos_validation,
@@ -255,7 +292,10 @@ def selection_windows(
         purge_bars = (
             max(resolved.target_h) + max(resolved.buy_delay_bar) + 1
         )  # +1: the entry acts on the bar after the signal
-    embargo_bars = max(int(getattr(cfg, "embargo_bars", 0)), 0)
+    # Session-resolved from `AlphaConfig.embargo_bars` (#180); 0 is this
+    # module's documented decision for a caller who never went through
+    # `resolve()`.
+    embargo_bars = max(int(coalesce(getattr(cfg, "embargo_bars", 0), default=0)), 0)
     delta = _bar_delta(candle, timestamp_col)
 
     windows = []

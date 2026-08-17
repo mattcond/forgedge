@@ -229,6 +229,18 @@ class AlphaDiscovery:
             horizon_bars=max(all_h),
             embargo_bars=cfg.embargo_bars,
         )
+        # Per-event horizon enrichment can reach past the configured grid, and
+        # the purge exists to remove exactly the rows whose forward window
+        # crosses the split.  A budget handed down from the session is sized on
+        # the grid, so widen it here rather than purge less than the horizon
+        # actually scanned — narrowing is never the safe direction (F6, #180).
+        # The split is untouched: one axis, a purge that covers it.
+        if max(all_h) > budget.horizon_bars and budget.purge_bars > 0:
+            budget = replace(
+                budget,
+                horizon_bars=max(all_h),
+                purge_bars=max(budget.purge_bars, max(all_h)),
+            )
         self._budget = budget
         split = budget.split
         self.split_idx = split

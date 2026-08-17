@@ -990,9 +990,34 @@ print(result.time_budget.describe())
 ```
 
 `TimeBudget.build(n_bars, train_ratio=0.7, horizon_bars=0, purge_bars=None, embargo_bars=0)`
-defaults `purge_bars` to `horizon_bars` when omitted. Passed to `forge()` it is
-threaded into both `EventDiscovery` and `AlphaDiscovery` so they share one
-split; `ForgeResult.time_budget` exposes the effective budget. **Purging is on
+defaults `purge_bars` to `horizon_bars` when omitted. **`forge()` always builds
+one budget**, whether or not you pass one, and threads it through all three
+stages; `ForgeResult.time_budget` exposes it.
+
+The three do not use the axis identically, and `describe()` says so rather than
+leaving it to be inferred (#180):
+
+| module | uses | why |
+|---|---|---|
+| Event Discovery | `event_split` — the whole span under the presets | M1 never observes the forward return (invariant #1), so an OOS reserve protects nothing about returns. What crosses is distributional, which is the weaker form invariant #7 asks for anyway. |
+| Alpha Discovery | `split`, and the purge | The module that reads forward returns — the one the purge exists for. |
+| Rule Discovery | its own walk-forward geometry | The split is **not** its origin. Each fold reports `tests_in_sample`: whether its test window scores the contract's target on the span M2 fit that target on. |
+
+Rule Discovery deliberately keeps its own origin. Starting its walk-forward at
+the session split leaves too little span to form folds — on a 28-month history
+the `balanced` preset drops from four windows to none, removing the very gate
+invariant #5 makes the tradeable verdict depend on. The overlap is measured and
+reported (`WalkForwardResult.n_splits_in_sample`) instead of accommodated.
+
+Note that `RuleWalkForwardConfig.purge_bars` is **not** the same quantity as
+`TimeBudget.purge_bars`, despite the name: the budget's purge is the
+forward-return horizon, the walk-forward's is the worst-case trade span. Two
+different crossings, deliberately left independent. The *embargo* is one policy
+on two boundaries, so `RuleWalkForwardConfig.embargo_bars` is session-resolved
+from `AlphaConfig.embargo_bars` (both `0` by default, so this changes nothing
+until you opt in).
+
+**Purging is on
 by default** for Alpha Discovery (purge width = `max(horizon_grid)`) and for
 Rule Discovery's walk-forward (via `RuleWalkForwardConfig.purge_bars` /
 `embargo_bars`, `None`/`0` by default — `None` also defaults to the horizon
