@@ -20,7 +20,6 @@ import pandas as pd
 from ..timebudget import TimeBudget
 from ..unset import UNSET
 from ..resolver import resolve_config
-from ..unset import coalesce
 from .and_composer import ANDComposer
 from .classifier import TypeClassifier
 from .consistency_gate import ConsistencyGate, _build_month_index, _monthly_counts
@@ -614,7 +613,13 @@ class EventDiscovery:
         """
         wf = cfg.walk_forward
         n_oos = len(oos_df)
-        n_splits = max(int(coalesce(wf.n_splits, default=3)), 1)
+        # Not session-resolved, and deliberately: solving `n_splits` needs the
+        # OOS span (`n_splits = floor(OOS_months x rate / MIN_FOLD_LAMBDA)`),
+        # and the resolver's derive half is blind to the data so that
+        # `config_report()` resolves to exactly what a run will use.  The
+        # config-level check reports the value to set instead; adapting it
+        # automatically belongs here, where the frame is, not there.
+        n_splits = max(int(wf.n_splits), 1)
         fold_size = n_oos // n_splits
         if fold_size < 2:
             return None
