@@ -34,7 +34,12 @@ from forgedge.rule_discovery import (
     walk_forward,
 )
 from forgedge.rule_discovery import excursion_stats, execution_envelope
-from forgedge.rule_discovery.validation import _ttest_1samp_greater, opportunity_sharpe
+from forgedge.rule_discovery.validation import (
+    _effective_sample,
+    _ttest_1samp_greater,
+    opportunity_sharpe,
+    validate,
+)
 from forgedge.resolver import PipelineContext, collect_context, resolve, resolve_config
 from forgedge.unset import UNSET
 
@@ -1757,3 +1762,208 @@ class TestConfig:
         assert r_off.regime_analysis is not None
         assert r_off.walk_forward is not None
         assert r_off.rejection_reasons
+
+
+# ---------------------------------------------------------------------------
+# Nominal economics, effective inference — F16 (#177)
+# ---------------------------------------------------------------------------
+
+class TestEffectiveSample:
+    """`run_backtest` opens a position on every active bar, so a rule's trades
+    overlap on one price path and are not independent observations.
+
+    The entry policy is correct and unchanged — those trades are reproducible
+    in production given the capital (#168's own non-goal). What was wrong is
+    that the *inferential* machinery consumed the nominal count as a sample
+    size.
+    """
+
+    _PARAMS = dict(buy_type="market", sell_pct=0.05, target_h=12)
+
+    def _ledger(self):
+        df = _persistent_signal_table(run_len=5, every=40)
+        return run_backtest(df, "__sig__", BacktestParams(**self._PARAMS),
+                            return_trades=True)
+
+    def test_the_effective_sample_is_measured_from_the_ledger(self):
+        summary, trades = self._ledger()
+        v = validate(trades, base_rate=0.5, n_trials=15,
+                     bars_per_year=365, avg_holding_bars=12)
+
+        assert v.n_effective < summary.total_trades
+        assert v.n_effective == pytest.approx(
+            summary.total_trades / summary.mean_concurrent_positions, rel=1e-3
+        )
+
+    def test_the_t_statistic_is_overstated_by_exactly_root_n_over_n_eff(self):
+        """`t` scales as `sqrt(n)`, so treating overlapping trades as
+        independent inflates it by `sqrt(n / n_eff)` — 1.94x on this ledger.
+
+        `max_ttest_p` is one of the three hard gates producing NON-EDGE, so
+        this was the channel through which rules were admitted on overstated
+        significance.
+        """
+        summary, trades = self._ledger()
+        net = trades["net_pct_gain"].to_numpy()
+        n_eff = _effective_sample(trades)
+
+        t_nominal, _ = _ttest_1samp_greater(net, 0.0)
+        t_effective, _ = _ttest_1samp_greater(net, 0.0, n_eff)
+
+        assert t_nominal / t_effective == pytest.approx(
+            math.sqrt(summary.total_trades / n_eff), rel=1e-9
+        )
+
+    def test_a_larger_p_value_is_the_point(self):
+        summary, trades = self._ledger()
+        net = trades["net_pct_gain"].to_numpy()
+        _t, p_nominal = _ttest_1samp_greater(net, 0.0)
+        _t, p_effective = _ttest_1samp_greater(net, 0.0, _effective_sample(trades))
+        assert p_effective > p_nominal
+
+    def test_the_economics_stay_nominal(self):
+        """The other half of the rule, and the one it would be easy to get
+        wrong: profit factor, expectancy, net gain and the trade count are the
+        *economics*. They are reproducible in production given the capital to
+        fund the concurrent positions, so they are not restated."""
+        df = _persistent_signal_table(run_len=5, every=40)
+        s = run_backtest(df, "__sig__", BacktestParams(**self._PARAMS))
+        _s, trades = run_backtest(df, "__sig__", BacktestParams(**self._PARAMS),
+                                  return_trades=True)
+
+        assert s.total_trades == len(trades)                    # nominal
+        assert s.mean_concurrent_positions > 1.0                # and overlapping
+        assert s.expectancy == pytest.approx(
+            float(trades["net_pct_gain"].mean()), abs=1e-6      # every trade counts
+        )   # abs, not rel: the summary rounds to 6 places
+        assert s.profit_factor > 0
+
+    def test_the_deflated_sharpe_uses_the_effective_count(self):
+        """`n_obs` is the independent evidence behind the Sharpe, not the row
+        count: at n_trials=15 the haircut is measurably harsher on 20
+        observations than on 75."""
+        _summary, trades = self._ledger()
+        n_eff = _effective_sample(trades)
+        sr = 1.5
+        assert deflated_sharpe(sr, 15, int(n_eff)) < deflated_sharpe(sr, 15, len(trades))
+
+    def test_a_ledger_without_geometry_falls_back_to_nominal(self):
+        """An unmeasured overlap is not evidence of no overlap — but inventing
+        a correction would be worse than reporting the uncorrected number and
+        saying so on `n_effective`."""
+        _summary, trades = self._ledger()
+        bare = trades.drop(columns=["fill_rn", "exit_rn"])
+        assert math.isnan(_effective_sample(bare))
+
+        v = validate(bare, base_rate=0.5, n_trials=15)
+        assert math.isnan(v.n_effective)
+        net = bare["net_pct_gain"].to_numpy()
+        assert v.ttest_expectancy_t == pytest.approx(
+            _ttest_1samp_greater(net, 0.0)[0], rel=1e-6
+        )
+
+    def test_a_non_overlapping_ledger_is_unchanged(self):
+        """The correction is inert exactly where it should be: one position at
+        a time means the nominal count already *was* the effective one."""
+        df = _persistent_signal_table(run_len=1, every=40)
+        s, trades = run_backtest(
+            df, "__sig__",
+            BacktestParams(buy_type="market", sell_pct=0.05, target_h=5),
+            return_trades=True,
+        )
+        assert s.mean_concurrent_positions == pytest.approx(1.0)
+        assert _effective_sample(trades) == pytest.approx(s.total_trades, rel=1e-9)
+
+
+class TestWindowIsNotAVerdict:
+    """An unreachable floor is an insufficient window, not a rejected
+    candidate (#173/#177)."""
+
+    def test_a_span_that_cannot_supply_the_floor_is_insufficient_data(self):
+        """The heart of #173: when `n_months x min_tpm` cannot reach the trade
+        floor, *no* candidate can clear it. Blaming the rule for that is
+        blaming it for the configuration."""
+        rd = RuleDiscoveryConfig()
+        rd = resolve_config(rd, "rule_discovery")
+        s = SimpleNamespace(
+            profit_factor=3.0, total_trades=4, n_months=2, zero_months=0,
+            win_rate_pct=0.7, expectancy=0.01,
+        )
+        verdict, reasons = _decide_on(rd, s)
+        assert verdict == "INSUFFICIENT-DATA"
+        assert any("window length, not a verdict" in r for r in reasons)
+
+    def test_under_trading_in_a_window_that_could_have_supplied_it_is_non_edge(self):
+        """The other side: a long enough span at the configured rate *should*
+        have produced the trades. It did not, so the rule really did
+        under-trade and NON-EDGE stands."""
+        rd = resolve_config(RuleDiscoveryConfig(), "rule_discovery")
+        s = SimpleNamespace(
+            profit_factor=3.0, total_trades=4, n_months=24, zero_months=0,
+            win_rate_pct=0.7, expectancy=0.01,
+        )
+        verdict, reasons = _decide_on(rd, s)
+        assert verdict == "NON-EDGE"
+        assert any("total_trades" in r for r in reasons)
+
+
+def _decide_on(cfg, summary):
+    """Drive `_decide` with a synthetic summary, no pipeline run.
+
+    `_decide` reads only the summary, the statistical validation, the
+    walk-forward and the regime breakdown, so a bare object with the fields it
+    touches exercises the branch under test without a 30-second backtest.
+    """
+    rd = RuleDiscovery.__new__(RuleDiscovery)
+    rd.config = cfg
+    return rd._decide(summary, None, None, None)
+
+
+class TestContractSeeding:
+    """What survives the trip from the contract into the operating point."""
+
+    @staticmethod
+    def _seed(cfg, holding_h, sell_pct):
+        """Run `_seed_base_params` against a synthetic derived target."""
+        rd = RuleDiscovery.__new__(RuleDiscovery)
+        rd.config = resolve_config(cfg, "rule_discovery")
+        rd.contract = SimpleNamespace(
+            derived_target=SimpleNamespace(
+                direction="long", holding_period_h=holding_h, sell_pct=sell_pct,
+            ),
+            fee_per_side=0.002,
+        )
+        return rd._seed_base_params([])
+
+    def test_a_derived_zero_horizon_survives(self):
+        """F12 — `h*=0` is a legal derived horizon since #158: a same-session
+        round trip, exiting at the fill bar's own close.  The old guard was
+        `if dt.holding_period_h and ... > 0`, so a derived 0 was falsy and fell
+        through to `base_params.target_h` — the hourly default of 24.  A
+        deliberate 0 became a silent 24."""
+        params = self._seed(RuleDiscoveryConfig(), holding_h=0, sell_pct=0.03)
+        assert params.target_h == 0
+
+    def test_a_missing_horizon_still_falls_back(self):
+        params = self._seed(RuleDiscoveryConfig(), holding_h=None, sell_pct=0.03)
+        assert params.target_h == BacktestParams().target_h
+
+    def test_the_take_profit_floor_is_m2s(self):
+        """F11 — the clamp was a hardcoded `max(0.01, sell_pct)` while
+        `AlphaConfig.mfe_floor` was 0.005, so the binding constraint was the one
+        the caller could not configure.  On intraday bars, where a target on
+        median MFE routinely sits under 1 %, it replaced the *derived* target
+        with a constant — which contradicts the pipeline's third invariant."""
+        cfg = RuleDiscoveryConfig(criteria=SelectionCriteria(min_sell_pct=0.005))
+        params = self._seed(cfg, holding_h=6, sell_pct=0.006)
+        assert params.sell_pct == pytest.approx(0.006)
+
+    def test_the_floor_still_clamps_below_itself(self):
+        cfg = RuleDiscoveryConfig(criteria=SelectionCriteria(min_sell_pct=0.005))
+        params = self._seed(cfg, holding_h=6, sell_pct=0.001)
+        assert params.sell_pct == pytest.approx(0.005)
+
+    def test_an_explicit_floor_is_honoured(self):
+        cfg = RuleDiscoveryConfig(criteria=SelectionCriteria(min_sell_pct=0.02))
+        params = self._seed(cfg, holding_h=6, sell_pct=0.006)
+        assert params.sell_pct == pytest.approx(0.02)

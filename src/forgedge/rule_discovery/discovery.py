@@ -838,7 +838,7 @@ class RuleDiscovery:
             # target on median MFE routinely sits under 1% — it replaced the
             # derived target with a constant, violating the pipeline's third
             # invariant (F11).
-            floor = float(coalesce(cfg.criteria.min_sell_pct, default=0.005))
+            floor = float(coalesce(self.config.criteria.min_sell_pct, default=0.005))
             overrides["sell_pct"] = round(max(floor, float(dt.sell_pct)), 4)
         if overrides:
             notes.append(
