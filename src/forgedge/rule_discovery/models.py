@@ -284,9 +284,23 @@ class RuleWalkForwardConfig:
         the purge automatically from the resolved grid — the largest
         ``target_h`` plus the fill delay.  ``0`` disables purging (the
         pre-TimeBudget behaviour).
+
+        Deliberately **not** unified with ``TimeBudget.purge_bars`` (F6,
+        #180).  They read as the same knob and are not: the budget's purge is
+        the *forward-return* horizon, the width of the window a return at bar
+        ``t`` reads; this one is the worst-case *trade span*, how far a
+        position opened at ``t`` reaches before it exits.  Two different
+        crossings of two different boundaries.  Forcing them equal would make
+        one of them wrong, and it is the kind of false unification this
+        parameter-coherence work exists to remove rather than to add.
     embargo_bars : int
         Extra quarantine at the start of every **test** window, in bars.
         Default ``0`` (the purge already removes the mechanical overlap).
+
+        This one *is* the same policy as ``AlphaConfig.embargo_bars`` — "how
+        many bars of serial correlation to quarantine after a boundary" — so
+        it is session-resolved from it, and a value set here still wins.  The
+        boundary differs (fold versus session split); the policy does not.
     """
 
     n_splits: int = 4
@@ -295,7 +309,7 @@ class RuleWalkForwardConfig:
     min_train_months: int = UNSET
     reoptimise: bool = True
     purge_bars: Optional[int] = None
-    embargo_bars: int = 0
+    embargo_bars: int = UNSET
 
 
 #: Backwards-compatible alias.  Until it was renamed, this class shared the
@@ -788,7 +802,28 @@ class StatisticalValidation:
 
 @dataclass
 class WalkForwardSplit:
-    """One train→test split of the walk-forward validation."""
+    """One train→test split of the walk-forward validation.
+
+    Attributes
+    ----------
+    tests_in_sample : bool or None
+        Whether this fold's **test** window falls inside the session's
+        in-sample region — the span Alpha Discovery derived the contract's
+        target on.  Such a fold is out-of-sample with respect to M3's own
+        parameter selection but *not* with respect to the target it is
+        scoring, so its contribution to the pooled OOS record is weaker
+        evidence than the rest.
+
+        ``None`` when there is no session axis to compare against (standalone
+        use, or a caller who passed no ``time_budget``) — never ``False``,
+        which would claim a clean fold on no evidence.
+
+        Rule Discovery deliberately does **not** move its walk-forward origin
+        to the session split: on the reference 28-month fixture that leaves
+        the ``balanced`` preset with zero folds, removing the gate the fifth
+        invariant makes the tradeable verdict depend on. The overlap is
+        measured and reported instead of being accommodated (F6, #180).
+    """
 
     split_idx: int
     train_from: str
@@ -798,6 +833,7 @@ class WalkForwardSplit:
     params: BacktestParams
     train_summary: BacktestSummary
     test_summary: BacktestSummary
+    tests_in_sample: Optional[bool] = None
 
 
 @dataclass
@@ -827,12 +863,23 @@ class WalkForwardResult:
     oos_trades : pd.DataFrame or None
         The concatenated per-trade ledger of every test window (close
         convention), excluded from ``repr`` to keep logs readable.
+    n_splits_in_sample : int or None
+        How many folds test inside the session's in-sample region — folds
+        whose evidence is out-of-sample for M3's parameter selection but not
+        for the target they score (F6, #180).  ``None`` when there is no
+        session axis to compare against.
+
+        This is a *quality* annotation on the pooled record, not a gate: it
+        says how much of the walk-forward's evidence is weaker than it looks,
+        which is the thing that was invisible before.  On the reference
+        fixture, three of four folds under `forge()`'s defaults.
     """
 
     splits: List[WalkForwardSplit]
     oos_summary: BacktestSummary
     n_profitable_splits: int
     consistency: float
+    n_splits_in_sample: Optional[int] = None
     oos_envelope: Optional["ExecutionEnvelope"] = None
     oos_excursion: Optional["ExcursionStats"] = None
     oos_validation: Optional["StatisticalValidation"] = None

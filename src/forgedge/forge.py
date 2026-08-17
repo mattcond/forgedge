@@ -595,6 +595,28 @@ def forge(
         report.stage("M0 Market Context — skipped (regime already present)")
         enriched = kpi_table
 
+    # ── The session's one temporal axis ───────────────────────────────────
+    # Built here, once, and threaded through all three stages.  It used to be
+    # whatever the caller passed — `None` by default — so each module cut its
+    # own timeline and `ForgeResult.time_budget` reported M2's axis as if it
+    # were the session's: under `forge_preset()` a 70% split announced for a
+    # run in which M1 had used 100% of the span (F6, #180).
+    #
+    # `horizon_bars` seeds the purge from the configured grid; M2 widens it
+    # if per-event horizon enrichment reaches further, since a purge narrower
+    # than the horizon it is protecting would put the look-ahead back.
+    if time_budget is None:
+        time_budget = TimeBudget.build(
+            n_bars=len(kpi_table),
+            train_ratio=cfg.train_ratio,
+            horizon_bars=max(cfg.horizon_grid) if cfg.horizon_grid else 0,
+            embargo_bars=cfg.embargo_bars,
+            event_train_ratio=(
+                None if manual_events is not None
+                else getattr(event_discovery_config, "train_ratio", None)
+            ),
+        )
+
     # ── Modulo 1 — Event Discovery (or manual injection) ──────────────────
     ed: Optional[EventDiscovery] = None
     if manual_events is not None:
@@ -642,7 +664,9 @@ def forge(
     contracts = ad.run()
     promoted = ad.promoted_contracts()
     report.stage(f"M2 Alpha Discovery — {len(promoted)}/{len(contracts)} promoted")
-    effective_budget = ad._budget
+    # M2 may have widened the purge for enriched horizons; the split and M1's
+    # own cut are untouched, so this is still the one session axis.
+    effective_budget = ad._budget if ad._budget is not None else time_budget
     if effective_budget is not None:
         report.stage(effective_budget.describe())
 
@@ -703,7 +727,9 @@ def forge(
         cand = by_id.get(contract.event_candidate_id)
         if cand is None:
             continue
-        rd = RuleDiscovery(alpha_frame, contract, cand, config=rule_discovery_config)
+        rd = RuleDiscovery(alpha_frame, contract, cand,
+                           config=rule_discovery_config,
+                           time_budget=effective_budget)
         response = rd.run()
         rule_responses.append((contract, response))
         if not ledger.m3_grid_cells and response.grid_results:

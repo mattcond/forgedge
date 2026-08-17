@@ -288,3 +288,140 @@ class TestForgeWiring:
         assert res.time_budget is tb
         assert res.alpha_discovery.split_idx == tb.split
         assert res.event_discovery._split_idx == tb.split
+
+
+# ---------------------------------------------------------------------------
+# F6 (#180) — one axis, three modules that use it differently
+# ---------------------------------------------------------------------------
+
+class TestOneAxisReported:
+    """`ForgeResult.time_budget` used to be M2's axis wearing the session's name.
+
+    `forge()` forwarded only what the caller had passed — `None` by default —
+    so each module cut its own timeline and the budget reported for the run
+    was Alpha Discovery's. Under `forge_preset()` that meant announcing a 70%
+    split for a session in which Event Discovery had used 100% of the span.
+    """
+
+    def test_the_budget_is_built_even_when_none_is_passed(self):
+        res = forge(_forge_kpi(), timeframe="4H", run_rule_discovery=False,
+                    fast_null=False, progress=False)
+        assert res.time_budget is not None
+
+    def test_it_states_m1s_axis_instead_of_leaving_it_inferred(self):
+        """M1's whole-span run is a decision (invariant #1: it never observes
+        the forward return), so the budget says so rather than letting the
+        reader deduce it from a split M1 does not use."""
+        kpi = _forge_kpi()
+        res = forge(kpi, timeframe="4H", run_rule_discovery=False,
+                    fast_null=False, progress=False)
+        tb = res.time_budget
+
+        assert tb.event_split == len(kpi)          # DiscoveryConfig default 1.0
+        assert tb.event_split_idx == res.event_discovery._split_idx
+        assert tb.split == res.alpha_discovery.split_idx
+        assert tb.event_split_idx != tb.split      # the two really do differ
+        assert "M1 whole span, by choice" in tb.describe()
+        assert "invariant #1" in tb.describe()
+
+    def test_an_unset_event_split_still_means_follow_the_split(self):
+        """Backwards compatibility: a budget built before this field existed,
+        or handed in by a caller, drives M1 at `split` exactly as before."""
+        tb = TimeBudget.build(1000, 0.6, horizon_bars=8)
+        assert tb.event_split is None
+        assert tb.event_split_idx == tb.split == 600
+        assert "follows the split" in tb.describe()
+
+    def test_a_declared_event_ratio_is_recorded(self):
+        tb = TimeBudget.build(1000, 0.6, event_train_ratio=0.9)
+        assert tb.event_split == 900
+        assert TimeBudget.build(1000, 0.6, event_train_ratio=1.0).event_split == 1000
+
+    def test_the_purge_widens_for_enriched_horizons_and_never_narrows(self):
+        """The session budget is sized on the configured grid, but per-event
+        enrichment can scan further. Purging less than the horizon actually
+        read would put the look-ahead back, so M2 widens rather than obeys."""
+        res = forge(_forge_kpi(), timeframe="4H", run_rule_discovery=False,
+                    fast_null=False, progress=False)
+        tb = res.time_budget
+        scanned = {h for c in res.contracts for h in c.derived_target.t_stat_by_h}
+        assert tb.purge_bars >= max(res.alpha_discovery.config.horizon_grid)
+        assert tb.purge_bars == max(scanned)
+        # Widening the purge must not have moved the axis itself.
+        assert tb.split == res.alpha_discovery.split_idx
+
+
+class TestFoldOverlapIsVisible:
+    """M3's walk-forward folds are OOS for M3's own selection, but a fold whose
+    test window sits inside M2's IS is scoring the contract's target on the
+    span that target was fit on. That was invisible.
+
+    The origin is deliberately *not* moved to the session split: on the
+    reference 28-month fixture that leaves the `balanced` preset with zero
+    folds, removing the gate invariant #5 makes the verdict depend on.
+    """
+
+    def test_folds_report_whether_they_test_in_sample(self):
+        kpi = _forge_kpi()
+        res = forge(kpi, timeframe="4H", fast_null=False, progress=False,
+                    run_registry=False)
+        wfs = [rr.walk_forward for _c, rr in res.rule_responses if rr.walk_forward]
+        assert wfs, "expected at least one rule with a walk-forward"
+        for wf in wfs:
+            flags = [s.tests_in_sample for s in wf.splits]
+            assert all(f is not None for f in flags)
+            assert wf.n_splits_in_sample == sum(1 for f in flags if f)
+            # The early folds are the ones inside; the flag must be monotone.
+            assert flags == sorted(flags, reverse=True)
+
+    def test_without_a_session_axis_it_is_none_never_false(self):
+        """A standalone `RuleDiscovery` has nothing to compare against, and
+        `None` says that. `False` would claim a clean fold on no evidence."""
+        from forgedge.rule_discovery.walkforward import _split_timestamp
+
+        candle = _wf_candle(n=3000)
+        assert _split_timestamp(candle, "open_dt", None) is None
+        # A split covering the whole span leaves nothing out-of-sample.
+        assert _split_timestamp(
+            candle, "open_dt", TimeBudget.build(len(candle), 1.0)
+        ) is None
+
+    def test_the_boundary_is_read_off_the_frame_the_folds_use(self):
+        from forgedge.rule_discovery.walkforward import _split_timestamp
+
+        candle = _wf_candle(n=3000)
+        tb = TimeBudget.build(len(candle), 0.6)
+        assert _split_timestamp(candle, "open_dt", tb) == candle["open_dt"].iloc[1800]
+        # A budget longer than the frame is not extrapolated onto it.
+        assert _split_timestamp(candle.head(100), "open_dt", tb) is None
+
+
+class TestQuarantineIsOnePolicy:
+    """The embargo is one policy on two boundaries; the purges are two
+    quantities wearing one name."""
+
+    def test_the_fold_embargo_follows_the_session_embargo(self):
+        from forgedge import AlphaConfig, RuleDiscoveryConfig, config_report
+        from forgedge.resolver import PipelineContext
+
+        rep = config_report(None, AlphaConfig(embargo_bars=7), RuleDiscoveryConfig(),
+                            ctx=PipelineContext(timeframe="1D"))
+        assert rep.configs["rule_discovery"].walk_forward.embargo_bars == 7
+
+    def test_an_explicit_fold_embargo_still_wins(self):
+        from forgedge import AlphaConfig, RuleDiscoveryConfig, config_report
+        from forgedge.rule_discovery.models import RuleWalkForwardConfig
+        from forgedge.resolver import PipelineContext
+
+        rd = RuleDiscoveryConfig(walk_forward=RuleWalkForwardConfig(embargo_bars=2))
+        rep = config_report(None, AlphaConfig(embargo_bars=7), rd,
+                            ctx=PipelineContext(timeframe="1D"))
+        assert rep.configs["rule_discovery"].walk_forward.embargo_bars == 2
+
+    def test_the_default_stays_zero_so_the_change_is_additive(self):
+        from forgedge import AlphaConfig, RuleDiscoveryConfig, config_report
+        from forgedge.resolver import PipelineContext
+
+        rep = config_report(None, AlphaConfig(), RuleDiscoveryConfig(),
+                            ctx=PipelineContext(timeframe="1D"))
+        assert rep.configs["rule_discovery"].walk_forward.embargo_bars == 0

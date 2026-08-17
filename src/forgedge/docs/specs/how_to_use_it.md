@@ -1108,10 +1108,36 @@ print(result.time_budget.describe())
 ```
 
 `TimeBudget.build(n_bars, train_ratio=0.7, horizon_bars=0, purge_bars=None, embargo_bars=0)`
-imposta `purge_bars` uguale a `horizon_bars` di default quando omesso. Passato
-a `forge()` viene inoltrato sia a `EventDiscovery` sia a `AlphaDiscovery`, così
-condividono un unico split; `ForgeResult.time_budget` espone il budget
-effettivo. **Il purging è attivo di default** per Alpha Discovery (larghezza
+imposta `purge_bars` uguale a `horizon_bars` di default quando omesso.
+**`forge()` costruisce sempre un budget**, che gliene passiate uno o no, e lo
+inoltra a tutti e tre gli stadi; `ForgeResult.time_budget` lo espone.
+
+I tre non usano l'asse allo stesso modo, e `describe()` lo dice invece di
+lasciarlo dedurre (#180):
+
+| modulo | usa | perché |
+|---|---|---|
+| Event Discovery | `event_split` — l'intero span sotto i preset | M1 non osserva mai il forward return (invariante #1), quindi una riserva OOS non protegge nulla *sui rendimenti*. Ciò che attraversa è distribuzionale, che è la forma più debole richiesta comunque dall'invariante #7. |
+| Alpha Discovery | `split`, e il purge | È il modulo che legge i forward return — quello per cui il purge esiste. |
+| Rule Discovery | la propria geometria di walk-forward | Lo split **non** è la sua origine. Ogni fold riporta `tests_in_sample`: se la propria finestra di test valuta il target del contratto sullo span su cui M2 quel target l'ha stimato. |
+
+Rule Discovery tiene deliberatamente la propria origine. Farlo partire dallo
+split di sessione lascia troppo poco span per formare le fold — su 28 mesi di
+storia il preset `balanced` passa da quattro finestre a zero, rimuovendo
+proprio il gate da cui l'invariante #5 fa dipendere il verdetto tradeable. La
+sovrapposizione viene misurata e riportata
+(`WalkForwardResult.n_splits_in_sample`) invece che accomodata.
+
+Attenzione: `RuleWalkForwardConfig.purge_bars` **non** è la stessa grandezza di
+`TimeBudget.purge_bars`, malgrado il nome: il purge del budget è l'orizzonte
+del forward return, quello del walk-forward è la durata peggiore di un trade.
+Due attraversamenti diversi, lasciati indipendenti di proposito. L'*embargo* è
+invece una sola politica su due confini, quindi
+`RuleWalkForwardConfig.embargo_bars` è risolto a livello di sessione da
+`AlphaConfig.embargo_bars` (entrambi `0` di default, quindi non cambia nulla
+finché non lo si attiva).
+
+**Il purging è attivo di default** per Alpha Discovery (larghezza
 di purge = `max(horizon_grid)`) e per il walk-forward di Rule Discovery
 (via `RuleWalkForwardConfig.purge_bars` / `embargo_bars`, `None`/`0` di default —
 `None` usa di default l'orizzonte testato) — questo è un cambiamento numerico
