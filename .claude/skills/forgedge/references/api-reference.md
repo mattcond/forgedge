@@ -399,6 +399,18 @@ StatisticalValidation | None` (`.temporal_stability: "PASS"|"WARN"|"FAIL"`,
 (`.avoid_in`), `excursion: ExcursionStats | None` (MAE/MFE), `grid_results:
 list[GridResult]`.
 
+`StatisticalValidation` — `ttest_winrate_t/p`, `ttest_expectancy_t/p`,
+`deflated_sharpe`, `sharpe_ratio`, `n_trials_tested`, `n_effective`,
+`temporal_stability`, `pf_first_half`, `pf_second_half`.
+
+`n_effective` is `total_trades / mean_concurrent_positions` (#177): overlapping
+trades share a price path and are not independent observations. It corrects the
+t-tests' standard error and degrees of freedom, `deflated_sharpe`'s `n_obs` and
+`expectancy_mde` — **and nothing else**. `total_trades`, profit factor,
+expectancy and net gain stay nominal: that is the economics, reproducible in
+production given the capital. `nan` when the ledger carries no bar geometry, in
+which case the nominal count is used and the field says so.
+
 `BacktestSummary` also carries the **overlap** measurements (issue #168):
 `n_episodes` (activation episodes behind the trades), `mean_concurrent_positions`
 (average open positions over the bars where at least one is open) and

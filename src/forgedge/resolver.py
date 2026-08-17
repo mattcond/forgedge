@@ -614,6 +614,54 @@ def _derive_cross_pf_floor(values: Dict[str, Any], ctx: PipelineContext):
     return 1.5, "documented criteria.partial_min_profit_factor default 1.5"
 
 
+def _derive_tp_floor(values: Dict[str, Any], ctx: PipelineContext):
+    """M3's take-profit floor is M2's floor, not an independent stricter one.
+
+    ``_seed_base_params`` clamped with a hardcoded ``max(0.01, sell_pct)`` while
+    ``AlphaConfig.mfe_floor`` was 0.005 — so the binding constraint was the one
+    the caller could not configure, and on intraday bars it replaced a *derived*
+    target with a constant (F11).
+    """
+    upstream = values.get("alpha.mfe_floor", _MISSING)
+    if upstream is not _MISSING and is_set(upstream):
+        value = float(upstream)
+        return value, f"alpha.mfe_floor={value:g}"
+    return 0.005, "documented alpha.mfe_floor default 0.005"
+
+
+def _derive_min_train_months(values: Dict[str, Any], ctx: PipelineContext):
+    """#173 — the selection window sized to the rate it is about to demand.
+
+    Under ``selection_mode="walk_forward"`` the early-elimination screen runs on
+    the first train window, whose length is ``min_train_months``.  That window
+    then has to produce ``_MIN_TRADES_ABS`` trades at ``criteria.min_tpm``, and
+    nothing related the two: at the stock preset values on daily bars the floor
+    implied 1.67 trades/month against a configured 0.80, so every candidate was
+    eliminated at the first fold regardless of signal quality.
+
+    Sized with a **Poisson 95 % margin**, not the naive ``floor / rate``.  The
+    naive inversion satisfies the constraint in expectation, which is not the
+    same as satisfying it: at floor 10 and rate 0.8 it gives 12.5 months, and
+    fewer than 10 trades arrive about 44 % of the time — #173 in milder form
+    after having been "fixed".
+
+    Never reads the data: the window this asks for is what the test *needs*, and
+    capping it to the history available would hide the mismatch instead of
+    reporting it.  The check half says when the data cannot supply it.
+    """
+    rate = values.get("rule_discovery.criteria.min_tpm", _MISSING)
+    if rate is _MISSING or not is_set(rate) or float(rate) <= 0:
+        return 6, "documented walk_forward.min_train_months default 6"
+    floor = _min_trades_abs()
+    need = poisson_min_window(floor, float(rate))
+    if need == float("inf"):
+        return 6, (f"criteria.min_tpm={float(rate):g} cannot reach the floor of "
+                   f"{floor} at any window; kept the documented default 6")
+    months = max(int(math.ceil(need)), 1)
+    return months, (f"{floor} trades at criteria.min_tpm={float(rate):g} with a "
+                    f"95 % Poisson margin")
+
+
 CONSTRAINTS: List[Constraint] = [
     *_schema_constraints(),
     # ── genericity: floor + retention ────────────────────────────────
@@ -640,6 +688,24 @@ CONSTRAINTS: List[Constraint] = [
         free=(),
         derived="rule_discovery.criteria.min_net_gain_retention",
         derive=_from_context("net_gain_retention"),
+    ),
+    # ── the take-profit floor is M2's, not a second opinion (F11) ─────
+    Constraint(
+        code="tp_floor_conflict",
+        level="WARN",
+        stage=PROPAGATION,
+        free=("alpha.mfe_floor",),
+        derived="rule_discovery.criteria.min_sell_pct",
+        derive=_derive_tp_floor,
+    ),
+    # ── #173: the selection window has to fit the rate it demands ─────
+    Constraint(
+        code="wf_bucket_too_short",
+        level="FAIL",
+        stage=PROPAGATION,
+        free=("rule_discovery.criteria.min_tpm",),
+        derived="rule_discovery.walk_forward.min_train_months",
+        derive=_derive_min_train_months,
     ),
     # ── economics ────────────────────────────────────────────────────
     Constraint(
@@ -746,42 +812,56 @@ def _check_wf_bucket(values: Dict[str, Any], ctx: PipelineContext) -> Optional[s
 
 
 def _check_m1_fold(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
-    """F1 — the OOS fold length versus the absolute episode floor.
+    """F1 — can the walk-forward folds conclude anything at the configured rate?
 
-    ``GateParams`` documents itself as rate/ratio invariant, but
-    ``min_episodes`` is an absolute count and the walk-forward reuses the
-    in-sample instance verbatim on folds whose length comes from two unrelated
-    parameters.
+    Folds are equal-length by construction (``n_oos // n_splits``), so "too
+    short" is never a property of one candidate: it is a property of the
+    configuration, and it should be said once, before running, rather than
+    discovered as 5112 fold failures.
+
+    A fold is testable when its expected episode count ``lambda`` reaches
+    :data:`~forgedge.event_discovery.discovery.MIN_FOLD_LAMBDA` (3.0).  Below
+    it, ``P(empty fold) = e**-lambda`` exceeds the 5 % convention the rest of
+    the plan uses, so an empty fold is compatible with a healthy candidate and
+    the fold is measuring its own brevity.
+
+    This check reads ``span_months``, which is why it is a *check* and not a
+    derivation: ``n_splits`` could be solved from the span, but the resolver's
+    derive half is deliberately blind to the data (see the module docstring) —
+    a derivation that could see the available history would be one that fits
+    the requirement to the data instead of reporting that they disagree.
     """
     got = _need(values,
                 "event_discovery.train_ratio",
                 "event_discovery.walk_forward.n_splits",
-                "event_discovery.gate_params.min_tpm",
-                "event_discovery.gate_params.min_episodes")
+                "event_discovery.gate_params.min_tpm")
     if got is None:
         return None
-    train_ratio, n_splits, rate, min_episodes = (
-        float(got[0]), int(got[1]), float(got[2]), int(got[3]))
+    train_ratio, n_splits, rate = float(got[0]), int(got[1]), float(got[2])
     counting = values.get("event_discovery.gate_params.event_counting", "episode")
-    if counting != "episode" or train_ratio >= 1.0 or n_splits < 1:
+    if counting != "episode" or train_ratio >= 1.0 or n_splits < 1 or rate <= 0:
         return None
     span = ctx.span_months
     if not span:
         return None
 
-    fold_months = span * (1.0 - train_ratio) / n_splits
-    expected = fold_months * rate
-    if expected >= min_episodes:
+    oos_months = span * (1.0 - train_ratio)
+    fold_months = oos_months / n_splits
+    lam = fold_months * rate
+    if lam >= _MIN_FOLD_LAMBDA:
         return None
-    implied = min_episodes / fold_months if fold_months > 0 else float("inf")
-    max_splits = int(span * (1.0 - train_ratio) * rate / min_episodes)
+    max_splits = int(oos_months * rate / _MIN_FOLD_LAMBDA)
     fix = (f"usare n_splits <= {max_splits}" if max_splits >= 1
-           else f"abbassare train_ratio, oppure ridurre gate_params.min_episodes")
+           else (f"a questo tasso nemmeno un fold unico è testabile "
+                 f"({oos_months:.1f} mesi × {rate:g} = {oos_months * rate:.1f} "
+                 f"episodi attesi): abbassare train_ratio o alzare "
+                 f"gate_params.min_tpm"))
     return (f"i fold OOS durano {fold_months:.1f} mesi (train_ratio={train_ratio:g}, "
-            f"n_splits={n_splits}) e a min_tpm={rate:g} ne attendono {expected:.1f} "
-            f"episodi, sotto il floor assoluto min_episodes={min_episodes}: il gate "
-            f"OOS chiede di fatto {implied:.1f} episodi/mese, {implied / rate:.1f}× "
-            f"quello in-sample, quindi nessun candidato risulterà OOS-stabile. {fix}.")
+            f"n_splits={n_splits}) e a min_tpm={rate:g} ne attendono {lam:.1f} "
+            f"episodi, sotto la soglia di testabilità di {_MIN_FOLD_LAMBDA:g}: "
+            f"P(fold vuoto) = {math.exp(-lam):.0%} anche per un candidato sano, "
+            f"quindi ogni fold risulterà INDETERMINATO e il walk-forward non "
+            f"potrà concludere nulla. {fix}.")
 
 
 def _check_oos_span(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
@@ -798,8 +878,20 @@ def _check_oos_span(values: Dict[str, Any], ctx: PipelineContext) -> Optional[st
         return None
     test_months = span - train_months
     if test_months <= 0:
+        # Since #177 this is the usual landing place for the #173 configuration:
+        # the window is no longer a fixed 6 but derived from the rate, so a
+        # permissive `min_tpm` asks for a selection span longer than the data.
+        # That is a more accurate statement of the same problem — an unreachable
+        # floor is an insufficient window, not a rejected candidate — but it is
+        # only useful if it says what to do about it.
+        floor = _min_trades_abs()
+        rate_needed = poisson_min_window(floor, 1.0) / max(span * 0.5, 1e-9)
         return (f"walk_forward.min_train_months={train_months:g} copre l'intero span "
-                f"disponibile ({span:.0f} mesi): non resta nessuna finestra di test.")
+                f"disponibile ({span:.0f} mesi): non resta nessuna finestra di test. "
+                f"La finestra è derivata da criteria.min_tpm={rate:g} — servono "
+                f"{floor} trade con margine di Poisson 95 % (#173). Alzare min_tpm a "
+                f">= {rate_needed:.2f} perché selezione e test stiano entrambi nello "
+                f"span, oppure allungare la storia.")
     expected = test_months * rate
     if expected >= min_oos:
         return None
@@ -968,26 +1060,29 @@ def _check_alpha_drift(values: Dict[str, Any], ctx: PipelineContext) -> Optional
 def _check_tp_floor(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
     """F11 — M3's hardcoded take-profit floor versus M2's own.
 
-    Only reported where it can actually bite.  ``mfe_floor`` (0.005) sits below
-    M3's clamp (0.01) at the *class defaults*, so an unconditional check fires
-    on every run — and a warning that is always on is one users learn to
-    ignore, which is the failure mode F14 was about.  The clamp binds when the
-    derived take-profit is routinely sub-1 %, i.e. on intraday bars; on daily
-    and slower the median-MFE target sits well above it (measured minimum 2.5 %
-    on the reference fixture), so the conflict stays latent and saying so adds
-    nothing.
+    M3's floor is now a configurable field derived from ``mfe_floor`` (#177), so
+    the two agree unless the caller made them disagree — which is the only case
+    left worth reporting.  Until then the clamp was a hardcoded 0.01 against
+    M2's 0.005 and this check had to guess where it bit (intraday only), because
+    firing on every default configuration is the F14 failure mode.
     """
-    got = _need(values, "alpha.mfe_floor")
+    got = _need(values, "alpha.mfe_floor", "rule_discovery.criteria.min_sell_pct")
     if got is None:
         return None
-    mfe_floor = float(got[0])
-    m3_floor = 0.01   # hardcoded in _seed_base_params until #177
-    if mfe_floor >= m3_floor or ctx.bar_minutes >= 1440:
+    mfe_floor, m3_floor = float(got[0]), float(got[1])
+    if m3_floor <= mfe_floor:
         return None
-    return (f"AlphaConfig.mfe_floor={mfe_floor:g} è sotto il floor di take-profit "
-            f"cablato in Rule Discovery ({m3_floor:g}): un target derivato fra i due "
-            f"viene sostituito da una costante, e il floor più severo è quello che "
-            f"non si può configurare.")
+    return (f"criteria.min_sell_pct={m3_floor:g} supera AlphaConfig.mfe_floor="
+            f"{mfe_floor:g}: un target derivato fra i due viene sostituito da una "
+            f"costante in Rule Discovery, e il floor più severo è quello che M2 non "
+            f"ha scelto. Il target economico è derivato per evento (invariante 3), "
+            f"quindi il floor di M3 dovrebbe seguire mfe_floor, non superarlo.")
+
+
+#: Mirror of ``forgedge.event_discovery.discovery.MIN_FOLD_LAMBDA``.  Duplicated
+#: rather than imported: the resolver is imported *by* every module and must not
+#: import them back.  A test pins the two together.
+_MIN_FOLD_LAMBDA: float = 3.0
 
 
 #: `SelectionCriteria.min_fill_rate`'s class default — see `_check_entry_mode_gate`.
@@ -1068,7 +1163,8 @@ def _statistical_constraints() -> List[Constraint]:
                          "rule_discovery.criteria.max_rotation_p"),
                    check=_check_alpha_drift),
         Constraint(code="tp_floor_conflict", level="WARN", stage=STATISTICAL,
-                   free=("alpha.mfe_floor",),
+                   free=("alpha.mfe_floor",
+                         "rule_discovery.criteria.min_sell_pct"),
                    check=_check_tp_floor),
         Constraint(code="entry_mode_inert_gate", level="WARN", stage=STRUCTURAL,
                    free=("rule_discovery.entry_mode",

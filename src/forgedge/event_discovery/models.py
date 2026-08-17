@@ -80,9 +80,23 @@ class ColumnClassification:
 class GateParams:
     """Thresholds that govern the Consistency Gate (Step 4).
 
-    All parameters are rate/ratio invariant, making the same
-    ``GateParams`` instance valid for both in-sample discovery and
-    out-of-sample walk-forward validation without any scaling.
+    ``min_tpm`` and ``max_dispersion`` are rate/ratio invariant, so the same
+    values carry from in-sample discovery to an out-of-sample window without
+    scaling.  **``min_episodes`` is not** — it is an absolute count, and
+    applying it verbatim to a walk-forward fold makes the fold's implicit rate
+    requirement inversely proportional to the fold's length.
+
+    Measured on ``ADA_1D_TRAIN`` at ``min_tpm=1.0, train_ratio=0.80,
+    n_splits=3`` — the configuration ``forge``'s own docstring recommends for
+    production — a 2.0-month fold demanded 5.0 episodes/month against an
+    in-sample requirement of 1.0: **5.1x stricter, by construction**, and 0.7%
+    of fold evaluations passed (F1).  ``min_episodes`` is therefore applied
+    **in-sample only**; folds use a Poisson lower bound at the candidate's own
+    observed rate, which scales with the window as an absolute count cannot.
+
+    (This paragraph used to assert the invariance for *all* parameters, and a
+    ``_scale_gate_params`` helper existed to state it in code.  It was never
+    called; both are gone.)
 
     Counting unit (issue #134)
     --------------------------
@@ -115,7 +129,9 @@ class GateParams:
     min_episodes : int
         Absolute floor on the number of episodes required to pass in
         ``"episode"`` mode (statistical-power guard).  Ignored in ``"bar"``
-        mode.  Default 10.
+        mode, and **applied in-sample only** — on a walk-forward fold an
+        absolute count is a rate requirement in disguise, scaling inversely
+        with the fold's length (F1).  Default 10.
     episode_gap : int
         Maximum gap, in bars, that still belongs to the same episode.  With
         the default 1, a single missing bar inside a run does not start a new
@@ -204,9 +220,10 @@ class EventWalkForwardConfig:
         of 5 (or 2 out of 3) windows must pass.
     oos_gate_params : GateParams or None
         Gate thresholds to use for OOS evaluation.  When ``None`` (default),
-        the IS ``gate_params`` are used unchanged — both ``min_tpm`` and
-        ``max_dispersion`` are rate/ratio invariant and remain valid for
-        any window length.
+        the IS ``gate_params`` are used — ``min_tpm`` and ``max_dispersion``
+        are rate/ratio invariant and remain valid at any window length, while
+        ``min_episodes`` is deliberately *not* applied out of sample (see
+        :class:`GateParams`).
     """
 
     n_splits: int = 3
@@ -236,16 +253,32 @@ class FoldResult:
         Number of bars in this fold.
     gate_result : GateResult
         Full gate evaluation on the fold, including fail_reason when failed.
+    indeterminate : bool
+        ``True`` when the fold is too short to say anything at the candidate's
+        own in-sample rate — its expected episode count ``lambda`` falls below
+        :data:`~forgedge.event_discovery.discovery.MIN_FOLD_LAMBDA`.
+
+        At ``lambda = 3`` an empty fold has probability ``e**-3 = 5%`` under the
+        null "the candidate kept its in-sample rate", so below that a fold that
+        saw nothing is compatible with a healthy candidate more than one time in
+        twenty: absence of evidence is not evidence of absence, and the fold is
+        measuring its own brevity rather than the candidate's stability.  Such
+        folds are **excluded from the denominator** rather than counted as
+        failures (F1, #177).
+    lam : float
+        The fold's expected episode count at the candidate's in-sample rate.
     """
 
     fold_idx: int
     n_rows: int
     gate_result: GateResult
+    indeterminate: bool = False
+    lam: float = float("nan")
 
     @property
     def passed(self) -> bool:
         """True when the gate passed on this fold."""
-        return self.gate_result.passed
+        return self.gate_result.passed and not self.indeterminate
 
 
 @dataclass
@@ -258,19 +291,32 @@ class ValidationResult:
         Total number of OOS folds evaluated.
     n_passed : int
         Number of folds in which the event passed the gate.
+    n_testable : int
+        Folds long enough to say anything — ``n_folds`` minus the
+        indeterminate ones.  This is the denominator of ``pass_rate``.
     pass_rate : float
-        ``n_passed / n_folds``.
-    passed : bool
-        True when ``pass_rate >= EventWalkForwardConfig.min_pass_rate``.
+        ``n_passed / n_testable``.  ``nan`` when nothing was testable.
+    passed : bool or None
+        True when ``pass_rate >= EventWalkForwardConfig.min_pass_rate``;
+        **``None`` when no fold was testable** — inconclusive, not failed.
+
+        The distinction matters downstream: ``forge()``'s
+        ``only_validated_events`` filter narrows the candidate set only when
+        validation actually ran, so that a walk-forward which could not run
+        does not silently drop everything.  ``None`` is falsy, so a filter
+        written as ``if candidate.validation`` would do exactly that (F1,
+        #177).
     fold_results : list[FoldResult]
-        Per-fold detail, ordered chronologically.
+        Per-fold detail, ordered chronologically.  Populated for the
+        indeterminate folds too — they are diagnostics, not absences.
     """
 
     n_folds: int
     n_passed: int
     pass_rate: float
-    passed: bool
+    passed: Optional[bool]
     fold_results: list[FoldResult]
+    n_testable: int = 0
 
 
 @dataclass

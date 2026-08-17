@@ -69,26 +69,28 @@ class TestSameResolverGuarantee:
 
         assert alpha.timestamp_col is UNSET
 
-    def test_the_stock_preset_on_daily_data_is_flagged(self):
-        """`forge_preset("balanced", "1D")` is itself incoherent — and that is
-        the finding, not a bug in the check.
+    def test_the_stock_preset_on_daily_data_is_coherent(self):
+        """The inverse of what this test asserted between steps 3 and 6.
 
-        The audit says so explicitly (F2): at stock preset values the floor
-        `max(10, 6 × 0.80) = 10` implies 1.67 trades/month against a configured
-        `criteria.min_tpm=0.80`, 2.1x the rate the preset asked for, inverting
-        the ordering `presets.py` documents (M3 slightly *looser* than M1). It
-        is why users see mass early-elimination on daily data.
+        `forge_preset("balanced", "1D")` used to be flagged, and that was the
+        finding rather than a bug in the check (F2): at a fixed
+        `min_train_months=6` the floor `max(10, 6 × 0.80) = 10` implied 1.67
+        trades/month against a configured `criteria.min_tpm=0.80` — 2.1x the
+        rate the preset asked for, inverting the ordering `presets.py`
+        documents, and the reason daily-data users saw mass early elimination.
 
-        The preset becomes coherent at step 7 (#177), which derives
-        `min_train_months` from the rate — 20 months at this rate, not 6. Until
-        then this configuration needs `strict=False`, and this test pins that
-        reality rather than asserting the comfortable opposite.
+        Step 7 derives the window from the rate instead: 20 months at this rate,
+        with a 95 % Poisson margin. The naive `10 / 0.80 = 12.5` would satisfy
+        the floor *in expectation* and come up short about 44 % of the time —
+        #173 again, in milder form, after having been "fixed".
         """
         disc, alpha, rd = _preset_triple()
-        assert rd.walk_forward.min_train_months * rd.criteria.min_tpm < 10
-
         rep = config_report(disc, alpha, rd, RegistryConfig(), ctx=_ctx())
-        assert "wf_bucket_too_short" in _codes(rep)
+        resolved = rep.configs["rule_discovery"]
+
+        assert resolved.walk_forward.min_train_months == 20
+        assert resolved.walk_forward.min_train_months * resolved.criteria.min_tpm >= 10
+        assert "wf_bucket_too_short" not in _codes(rep)
 
 
 def _preset_triple():
@@ -106,10 +108,16 @@ class TestFailConstraints:
     incapable of producing a verdict."""
 
     def test_wf_bucket_too_short_is_issue_173(self):
-        """The reported case: a permissive rate upstream and an untouched
-        min_train_months downstream eliminate every candidate at the first
-        fold, silently."""
-        rd = RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=0.20))
+        """The reported case, now reachable only by writing it out.
+
+        Left alone, `min_train_months` is derived from the rate (#177) and the
+        pair cannot disagree. A caller who pins a window *and* a rate that do
+        not fit still gets the FAIL — the check half of the same constraint.
+        """
+        rd = RuleDiscoveryConfig(
+            criteria=SelectionCriteria(min_tpm=0.20),
+            walk_forward=RuleWalkForwardConfig(min_train_months=6),
+        )
         rep = config_report(None, None, rd, ctx=_ctx(span_months=36))
 
         assert "wf_bucket_too_short" in _codes(rep)
@@ -120,12 +128,24 @@ class TestFailConstraints:
         assert "0.28" in msg          # 10 / 36 months of history
         assert "36" in msg
 
-    def test_wf_bucket_is_silent_when_the_rate_supports_the_window(self):
+    def test_the_window_is_derived_from_the_rate(self):
+        """The fix, not the check: an unset window is sized to the rate it is
+        about to demand, with a 95 % Poisson margin rather than the naive
+        `floor / rate` — which is satisfied in expectation and short about
+        44 % of the time."""
+        rd = RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=0.80))
+        rep = config_report(None, None, rd, ctx=_ctx(span_months=36))
+
+        assert rep.configs["rule_discovery"].walk_forward.min_train_months == 20
+        assert "wf_bucket_too_short" not in _codes(rep)
+
+    def test_an_explicit_window_that_fits_is_left_alone(self):
         rd = RuleDiscoveryConfig(
             criteria=SelectionCriteria(min_tpm=2.0),
             walk_forward=RuleWalkForwardConfig(min_train_months=6),
         )
         rep = config_report(None, None, rd, ctx=_ctx())
+        assert rep.configs["rule_discovery"].walk_forward.min_train_months == 6
         assert "wf_bucket_too_short" not in _codes(rep)
 
     def test_wf_bucket_ignores_full_sample_selection(self):
@@ -138,19 +158,39 @@ class TestFailConstraints:
         assert "wf_bucket_too_short" not in _codes(rep)
 
     def test_m1_oos_fold_too_short(self):
-        """F1 — the absolute episode floor against a fold length set by two
-        unrelated parameters."""
+        """F1 — folds that cannot conclude anything at the configured rate.
+
+        The configuration `forge`'s own docstring recommends for production:
+        `train_ratio=0.80, n_splits=3` leaves ~2-month folds, and at 1.0
+        episodes/month an empty fold has probability `e**-2 = 14%` even for a
+        healthy candidate.  Every fold comes back INDETERMINATE and the
+        walk-forward concludes nothing — a property of the configuration, said
+        once before running rather than discovered as thousands of fold
+        failures.
+        """
         disc = DiscoveryConfig(
             train_ratio=0.80,
             walk_forward=EventWalkForwardConfig(n_splits=3),
-            gate_params=GateParams(min_tpm=1.0, min_episodes=10),
+            gate_params=GateParams(min_tpm=1.0),
         )
         rep = config_report(disc, None, None, ctx=_ctx(span_months=29))
 
         assert "m1_oos_fold_too_short" in _codes(rep)
         msg = _message(rep, "m1_oos_fold_too_short")
-        assert "n_splits" in msg
-        assert "×" in msg            # states how much stricter the OOS gate is
+        assert "n_splits" in msg          # names the value to set
+        assert "INDETERMINATO" in msg
+        assert "%" in msg                 # states P(empty fold)
+
+    def test_m1_oos_fold_is_silent_when_the_folds_can_conclude(self):
+        """Fewer splits, longer folds: at 1.0 episodes/month a single fold over
+        a 5.8-month OOS expects 5.8 episodes, comfortably testable."""
+        disc = DiscoveryConfig(
+            train_ratio=0.80,
+            walk_forward=EventWalkForwardConfig(n_splits=1),
+            gate_params=GateParams(min_tpm=1.0),
+        )
+        rep = config_report(disc, None, None, ctx=_ctx(span_months=29))
+        assert "m1_oos_fold_too_short" not in _codes(rep)
 
     def test_m1_oos_fold_is_silent_without_walk_forward(self):
         disc = DiscoveryConfig(gate_params=GateParams(min_tpm=1.0))
@@ -158,12 +198,36 @@ class TestFailConstraints:
         assert "m1_oos_fold_too_short" not in _codes(rep)
 
     def test_oos_span_too_short(self):
-        """F4 — masked by #173 today, because NON-EDGE is never rescued."""
-        rd = RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=0.20))
+        """F4 — masked by #173 until step 7, because NON-EDGE is never rescued.
+
+        The pooled test span cannot supply `min_oos_trades`, so every positive
+        verdict is degraded rather than the candidate being blamed.
+        """
+        rd = RuleDiscoveryConfig(
+            criteria=SelectionCriteria(min_tpm=0.20, min_oos_trades=10),
+            walk_forward=RuleWalkForwardConfig(min_train_months=6),
+        )
         rep = config_report(None, None, rd, ctx=_ctx(span_months=36))
 
         assert "oos_span_too_short" in _codes(rep)
         assert "INSUFFICIENT-DATA" in _message(rep, "oos_span_too_short")
+
+    def test_a_derived_window_longer_than_the_history_says_so(self):
+        """Where the #173 configuration lands once the window is derived: a
+        permissive rate now asks for a *selection span* longer than the data,
+        which is the same problem stated more accurately — an unreachable floor
+        is an insufficient window, not a rejected candidate.
+
+        The message has to carry the way out, like every other one.
+        """
+        rd = RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=0.20))
+        rep = config_report(None, None, rd, ctx=_ctx(span_months=36))
+        msg = _message(rep, "oos_span_too_short")
+
+        assert rep.configs["rule_discovery"].walk_forward.min_train_months > 36
+        assert "nessuna finestra di test" in msg
+        assert "#173" in msg
+        assert "min_tpm" in msg
 
     def test_oos_span_flags_a_train_window_that_eats_the_history(self):
         rd = RuleDiscoveryConfig(
@@ -262,15 +326,27 @@ class TestWarnConstraints:
         rep = config_report(None, alpha, None, ctx=_ctx())
         assert "alpha_level_drift" in _codes(rep)
 
-    def test_tp_floor_conflict_only_where_it_can_bite(self):
-        """A warning that fires on every default configuration is one users
-        learn to ignore — the clamp only binds on intraday bars, where a
-        median-MFE target is routinely sub-1 %."""
+    def test_the_take_profit_floor_follows_m2(self):
+        """M3's clamp was a hardcoded 0.01 against M2's 0.005, so the binding
+        constraint was the one the caller could not configure and — on intraday
+        bars, where a median-MFE target routinely sits under 1 % — it replaced
+        a *derived* target with a constant (F11).  Now it is derived."""
+        alpha = AlphaConfig(mfe_floor=0.004)
+        rep = config_report(None, alpha, RuleDiscoveryConfig(), ctx=_ctx(timeframe="15m"))
+
+        assert rep.configs["rule_discovery"].criteria.min_sell_pct == pytest.approx(0.004)
+        assert "tp_floor_conflict" not in _codes(rep)
+
+    def test_tp_floor_conflict_is_an_explicit_disagreement(self):
+        """The only case left: the caller set M3's floor above M2's, so a
+        derived target between the two is still replaced by a constant."""
         alpha = AlphaConfig(mfe_floor=0.005)
-        assert "tp_floor_conflict" not in _codes(
-            config_report(None, alpha, None, ctx=_ctx(timeframe="1D")))
+        rd = RuleDiscoveryConfig(criteria=SelectionCriteria(min_sell_pct=0.02))
         assert "tp_floor_conflict" in _codes(
-            config_report(None, alpha, None, ctx=_ctx(timeframe="15m")))
+            config_report(None, alpha, rd, ctx=_ctx(timeframe="15m")))
+        # Timeframe no longer decides: the disagreement is the finding.
+        assert "tp_floor_conflict" in _codes(
+            config_report(None, alpha, rd, ctx=_ctx(timeframe="1D")))
 
     def test_entry_mode_inert_gate(self):
         """A fill gate the caller *tuned*, that the entry mode makes inert."""
@@ -344,7 +420,13 @@ class TestRendering:
         assert "CRITICO" in text
 
     def test_one_line_is_compact_and_names_the_codes(self):
-        rd = RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=0.20))
+        # The window is pinned so the #173 constraint is the one reported:
+        # left unset it is derived from the rate, and the FAIL that fires is
+        # `oos_span_too_short` instead (see TestFailConstraints).
+        rd = RuleDiscoveryConfig(
+            criteria=SelectionCriteria(min_tpm=0.20),
+            walk_forward=RuleWalkForwardConfig(min_train_months=6),
+        )
         line = config_report(None, None, rd, ctx=_ctx()).one_line()
         assert "\n" not in line
         assert "wf_bucket_too_short" in line
@@ -394,8 +476,12 @@ class TestForgeStrict:
                 max_and_components=1, gate_params=GateParams(min_tpm=0.30)),
             alpha_config=AlphaConfig(asset="X", timeframe="1D",
                                      horizon_grid=(1, 2, 3)),
+            # `min_train_months` pinned: since #177 an unset window is derived
+            # from the rate, and this helper's job is to produce the *#173*
+            # incoherence — a window and a rate that do not fit each other.
             rule_discovery_config=RuleDiscoveryConfig(
-                criteria=SelectionCriteria(min_tpm=0.25)),
+                criteria=SelectionCriteria(min_tpm=0.25),
+                walk_forward=RuleWalkForwardConfig(min_train_months=6)),
         )
 
     def test_strict_stops_a_run_that_cannot_produce_a_verdict(self):

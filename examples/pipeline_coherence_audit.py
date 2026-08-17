@@ -32,6 +32,7 @@ with ``FORGEDGE_PARQUET=/path/to/kpi.parquet``.
 from __future__ import annotations
 
 import collections
+import math
 import os
 import re
 import sys
@@ -46,6 +47,7 @@ from forgedge import (
     MarketContext,
     forge,
 )
+from forgedge.event_discovery.discovery import MIN_FOLD_LAMBDA
 from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
 from forgedge.presets import _TFClass, forge_preset
 
@@ -109,7 +111,7 @@ def stage_rates() -> None:
 
 def stage_m1(kpi: pd.DataFrame) -> None:
     print("\n" + "=" * 78)
-    print("  M1 — GateParams.min_episodes (absolute) applied to short OOS folds")
+    print("  M1 — walk-forward folds: testable, indeterminate, or neither")
     print("=" * 78)
     enriched = MarketContext(kpi).run()
     n, train_ratio, n_splits = len(enriched), 0.80, 3
@@ -118,11 +120,15 @@ def stage_m1(kpi: pd.DataFrame) -> None:
     gate = GateParams(min_tpm=1.0, max_dispersion=2.0, event_counting="episode")
     print(f"  bars={n}  IS={int(n * train_ratio)}  OOS={n_oos}  "
           f"fold={n_oos // n_splits} bars ≈ {fold_months:.1f} months")
-    print(f"  IS gate requires {gate.min_tpm:.2f} episodes/month;")
-    print(f"  the same GateParams requires {gate.min_episodes} episodes inside a "
-          f"{fold_months:.1f}-month fold")
-    print(f"  → the OOS gate is {gate.min_episodes / fold_months / gate.min_tpm:.1f}× "
-          f"stricter than the IS gate, by construction")
+    print(f"  IS gate requires {gate.min_tpm:.2f} episodes/month")
+    print(f"  before #177 the same GateParams also demanded {gate.min_episodes} "
+          f"episodes inside a {fold_months:.1f}-month fold")
+    print(f"     → an OOS gate {gate.min_episodes / fold_months / gate.min_tpm:.1f}× "
+          f"stricter than the IS one, by construction (F1)")
+    print(f"  now: `min_episodes` is in-sample only, and a fold is *testable*")
+    print(f"     when its expected episode count reaches λ = {MIN_FOLD_LAMBDA:g}")
+    print(f"     (P(empty fold) = e^-λ = {math.exp(-MIN_FOLD_LAMBDA):.0%} for a "
+          f"healthy candidate)")
 
     ed = EventDiscovery(enriched, config=DiscoveryConfig(
         gate_params=gate, train_ratio=train_ratio,
@@ -130,24 +136,33 @@ def stage_m1(kpi: pd.DataFrame) -> None:
     ))
     cands = ed.run()
     reasons: collections.Counter = collections.Counter()
-    n_pass = n_eval = 0
+    n_pass = n_eval = n_indet = 0
     for cand in cands:
         if cand.validation is None:
             continue
         for fold in cand.validation.fold_results:
+            if fold.indeterminate:
+                n_indet += 1
+                continue
             n_eval += 1
             if fold.gate_result.passed:
                 n_pass += 1
             else:
                 reasons[fold.gate_result.fail_reason.split(":")[0]] += 1
     stable = sum(1 for c in cands if c.validation and c.validation.passed)
+    unresolved = sum(1 for c in cands
+                     if c.validation is not None and c.validation.passed is None)
     print(f"\n  candidates passing the IS gate : {len(cands)}")
-    print(f"  OOS fold evaluations           : {n_eval}  passed {n_pass} "
+    print(f"  folds too short to conclude    : {n_indet}  (INDETERMINATE — "
+          f"excluded from the denominator, not counted as failures)")
+    print(f"  testable fold evaluations      : {n_eval}  passed {n_pass} "
           f"({n_pass / max(n_eval, 1):.1%})")
     for key, count in reasons.most_common():
-        print(f"     {key:<20} {count:6d}  ({count / max(n_eval, 1):5.1%} of all fold evaluations)")
+        print(f"     {key:<20} {count:6d}  ({count / max(n_eval, 1):5.1%} of testable folds)")
     print(f"  OOS-stable candidates          : {stable}/{len(cands)} "
           f"({stable / max(len(cands), 1):.1%})")
+    print(f"  inconclusive (passed=None)     : {unresolved}  — kept, not dropped: "
+          f"a window that could not answer is not a candidate that failed")
 
 
 # ---------------------------------------------------------------------------

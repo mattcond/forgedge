@@ -368,7 +368,7 @@ has always resolved to this one).
 | `n_splits` | int | `4` | Number of rolling train+test windows. |
 | `train_span_months` | int \| None | `None` | Training window width in months. When None, computed automatically. |
 | `test_span_months` | int \| None | `None` | Test window width in months. When None, computed automatically. |
-| `min_train_months` | int | `6` | Minimum months required for the training window. |
+| `min_train_months` | int | *derived* *(session-resolved)* | Minimum months required for the training window — the span the early-elimination screen runs on. **Derived from `criteria.min_tpm`** with a 95 % Poisson margin, so the window can actually supply the trade floor it is about to demand (#173): 20 months at `min_tpm=0.80`, not the old fixed 6. The naive `floor / rate` gives 12.5 and comes up short about 44 % of the time. |
 | `reoptimise` | bool | `True` | When True, re-optimises parameters on each training window. When False, uses the fixed IS configuration. |
 
 ---
@@ -385,6 +385,7 @@ NON-EDGE verdicts.
 | `min_tpm` | float | `2.0` | Minimum average trading frequency (trades/month) for EDGE. Also the sole trade-count gate: the minimum executed-trade count is dynamic, `max(10, n_months × min_tpm)`, scaling with the IS length (spec RD-04) instead of a fixed absolute threshold. |
 | `min_pf_score_tpm` | float | `0.30` | Minimum composite PF×TPM score to include a configuration in the selection. |
 | `min_fill_rate` | float | `0.40` | Minimum limit order fill rate: at least 40% of events must result in a trade. |
+| `min_sell_pct` | float | `0.005` *(session-resolved)* | Operational floor on the take-profit seeded from the contract's derived target. Resolved from `AlphaConfig.mfe_floor`; it used to be a hardcoded `max(0.01, …)` inside `_seed_base_params`, so the binding constraint was the one the caller could not configure (F11). |
 | `min_fill_rate_opt` | float | `0.80` | First adoption condition: the limit point may be published only if it still fills at ≥ 80% **out-of-sample**, avoiding the fill-collapse confound. |
 | `min_net_gain_retention` | float | `0.5` *(session-resolved)* | Third adoption condition: the fraction of the market point's OOS net gain the limit point must retain. Deliberately loose — a backstop against a tiny mu with a tiny sigma, which the Sharpe cannot see because it is scale-free in mu. |
 | `partial_min_profit_factor` | float | `1.5` | Minimum IS PF for PARTIAL-EDGE (does not reach EDGE but not NON-EDGE). |

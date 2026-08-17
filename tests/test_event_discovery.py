@@ -1,4 +1,6 @@
 """Tests for the Event Discovery module."""
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -13,6 +15,7 @@ from forgedge.event_discovery import (
 )
 from forgedge.event_discovery.and_composer import ANDComposer
 from forgedge.event_discovery.classifier import TypeClassifier
+from forgedge.event_discovery.discovery import MIN_FOLD_LAMBDA
 from forgedge.event_discovery.consistency_gate import (
     ConsistencyGate,
     _build_month_index,
@@ -1296,7 +1299,14 @@ class TestWalkForward:
                 assert isinstance(fr, FoldResult)
                 assert fr.fold_idx == i
                 assert fr.n_rows > 0
-                assert fr.passed == fr.gate_result.passed
+                # `passed` is the gate's verdict *and* the fold being long
+                # enough to have one (#177): a fold whose expected episode
+                # count falls under MIN_FOLD_LAMBDA cannot distinguish a
+                # healthy candidate from a silent one, so it does not get to
+                # say "passed" either way — it is excluded from the
+                # denominator instead.
+                assert fr.passed == (fr.gate_result.passed and not fr.indeterminate)
+                assert fr.indeterminate == (fr.lam < MIN_FOLD_LAMBDA)
 
     def test_validated_candidates_filters_correctly(self, long_df):
         cfg = DiscoveryConfig(
@@ -2057,3 +2067,98 @@ class TestCustomEvent:
         ev = CustomEvent("close_adj_v2 < 100")
         series = ev.apply(df)
         assert series.iloc[2] == False  # noqa: E712 — NaN < 100 → inactive
+
+
+# ---------------------------------------------------------------------------
+# Folds that cannot conclude — F1 (#177)
+# ---------------------------------------------------------------------------
+
+class TestIndeterminateFolds:
+    """A fold too short to distinguish a healthy candidate from a silent one
+    is not evidence against the candidate.
+
+    `GateParams` used to claim all its parameters were rate/ratio invariant.
+    Two are; `min_episodes` is an absolute count, so applying it verbatim to a
+    walk-forward fold makes the implicit rate requirement inversely
+    proportional to the fold's length — 5.1x stricter than in-sample on the
+    configuration `forge`'s own docstring recommends for production, at which
+    0.7% of fold evaluations passed.
+    """
+
+    @staticmethod
+    def _table(n=1500, seed=2):
+        rng = np.random.default_rng(seed)
+        close = 100 * np.exp(np.cumsum(rng.normal(0.0, 0.005, n)))
+        return pd.DataFrame({
+            "open_dt": pd.date_range("2022-01-01", periods=n, freq="1D"),
+            "open": close, "high": close * 1.01, "low": close * 0.99,
+            "close": close, "volume": np.abs(rng.normal(1e6, 1e5, n)),
+            "feat": rng.uniform(0.0, 1.0, n),
+        })
+
+    def _run(self, n_splits, train_ratio=0.80, min_tpm=1.0, n=1500):
+        cfg = DiscoveryConfig(
+            timestamp_col="open_dt", train_ratio=train_ratio,
+            walk_forward=WalkForwardConfig(n_splits=n_splits),
+            gate_params=GateParams(min_tpm=min_tpm),
+        )
+        ed = EventDiscovery(self._table(n=n), cfg)
+        cands = ed.run()
+        return [c.validation for c in cands if c.validation is not None]
+
+    def test_min_episodes_no_longer_gates_the_folds(self):
+        """The absolute floor is a statistical-power guard for the *discovery*
+        window.  Out of sample the power question is answered by the fold's own
+        expected count, not by a constant that happens to be 10."""
+        vals = self._run(n_splits=1)
+        assert vals
+        # With min_episodes applied out of sample virtually nothing passed;
+        # the folds now decide on rate and dispersion, as documented.
+        assert any(v.passed for v in vals)
+
+    def test_a_short_fold_is_indeterminate_not_failed(self):
+        """Chopped into many splits, each fold expects fewer than
+        MIN_FOLD_LAMBDA episodes — an empty one is then compatible with a
+        healthy candidate more than 5 % of the time."""
+        vals = self._run(n_splits=12)
+        assert vals
+        folds = [f for v in vals for f in v.fold_results]
+        assert any(f.indeterminate for f in folds)
+        for f in folds:
+            assert f.indeterminate == (f.lam < MIN_FOLD_LAMBDA)
+            if f.indeterminate:
+                assert not f.passed          # never counted as a pass either
+
+    def test_indeterminate_folds_leave_the_denominator(self):
+        vals = self._run(n_splits=12)
+        for v in vals:
+            testable = [f for f in v.fold_results if not f.indeterminate]
+            assert v.n_testable == len(testable)
+            if testable:
+                assert v.pass_rate == pytest.approx(v.n_passed / len(testable))
+
+    def test_nothing_testable_is_inconclusive_not_failed(self):
+        """`passed = None`, and the distinction matters downstream: `None` is
+        falsy, so a filter written as `if candidate.validation` would treat
+        "we could not tell" as "it failed" and discard everything."""
+        vals = self._run(n_splits=40, min_tpm=0.2)
+        inconclusive = [v for v in vals if v.n_testable == 0]
+        if not inconclusive:
+            pytest.skip("every fold was testable on this fixture")
+        for v in inconclusive:
+            assert v.passed is None
+            assert v.fold_results            # diagnostics kept, not dropped
+            assert math.isnan(v.pass_rate)
+
+    def test_the_forge_filter_keeps_everything_when_nothing_concluded(self):
+        """`only_validated_events` narrows the set only when validation
+        actually *concluded*.  The pre-#177 test was `validation is not None`,
+        which `passed=None` satisfies — so the filter would have kept zero
+        candidates, exactly what its own comment exists to prevent."""
+        from types import SimpleNamespace
+
+        cands = [SimpleNamespace(validation=SimpleNamespace(passed=None)),
+                 SimpleNamespace(validation=SimpleNamespace(passed=None))]
+        concluded = any(c.validation is not None and c.validation.passed is not None
+                        for c in cands)
+        assert concluded is False

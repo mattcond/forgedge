@@ -87,38 +87,56 @@ _AD_GOLDEN = {
 #
 # ── Re-pinned again with entry_mode="auto" as the default (issue #185) ──────
 #
-# Previous values, under the "limit" default:
+# Values under the "limit" default:
 #     INSUFFICIENT-DATA · PF 1.7337 · 82 trades · expectancy 0.011362
 #
-# These moved because the *measurement* changed, not because the rule did.  In
+# Those moved because the *measurement* changed, not because the rule did.  In
 # "limit" mode the grid varies buy_drop_pct, so the limit entry doubles as an
 # entry-price optimiser: a deeper discount fills only on the paths that came
 # back down to it, and the PF is computed on that favourable subset.  Under
-# "auto" the verdict comes from a market entry (fill 1.00 here, against 0.88),
-# so it measures the signal.
+# "auto" the verdict comes from a market entry (fill 1.00 against 0.88), so it
+# measures the signal.  PF fell, trades rose, and the pooled OOS became able to
+# confirm the effect, lifting the §3.2 power gate's demotion.
 #
-# Hence the direction of each move:
-#   · PF 1.7337 → 1.5818   — the entry discount was part of the old PF
-#   · 82 → 93 trades       — every signal fills at a market entry
-#   · expectancy up        — the surviving trades are the whole population now
-#   · INSUFFICIENT-DATA → PARTIAL-EDGE — 11 more trades and a larger claimed
-#     effect put the pooled OOS above its minimum detectable expectancy, so the
-#     §3.2 power gate no longer demotes it.  The rule is *not* newly good; the
-#     OOS is newly able to confirm it.
+# ── Re-pinned again at step 7 (issue #177) ─────────────────────────────────
 #
-# This golden also exercises Stage 2's adoption path end to end: the limit
-# point clears all three out-of-sample conditions — fill 0.94 ≥ 0.80,
-# opportunity Sharpe 1.4998 ≥ 1.4302, net gain 1.9608 ≥ 0.8830 (50% of the
-# market point's 1.7661) — and is published.  A change that broke the
-# adoption criterion would move these numbers.
+# Values under "auto" before this step:
+#     PARTIAL-EDGE · PF 1.5818 · 93 trades · expectancy 0.016959
 #
-# Event and Alpha Discovery goldens are untouched: entry mechanics are M3's
-# business and M1/M2 never see them.
+# Two changes reach this rule, and the second is the one that flips it.
+#
+# 1. `min_train_months` is derived from the rate now (20 months, not a fixed
+#    6), so the selection span is longer: 93 -> 98 trades, PF 1.58 -> 1.67.
+#
+# 2. The verdict is NON-EDGE on `expectancy not significant (p=0.069)`, and
+#    that is F16 doing exactly what it was built for:
+#
+#        nominal trades          98
+#        mean concurrency         1.88
+#        effective sample        52.09
+#        t  = 2.0623 nominal  ->  1.5035 effective   (ratio sqrt(98/52.09))
+#        p  = below 0.05      ->  0.069438
+#
+#    The rule opens a position on every active bar, so 98 trades are not 98
+#    independent observations — they overlap on one price path.  Counting them
+#    as independent overstated the t statistic by 37%, and `max_ttest_p` is one
+#    of the three hard gates.  This rule was previously admitted on overstated
+#    significance; it is not newly bad, it was never significant.
+#
+#    The economics are untouched and stay nominal: PF 1.6746 and expectancy
+#    0.014758 are computed on all 98 trades, because they are reproducible in
+#    production given the capital to fund the concurrent positions.
+#
+# Across the fixture the same correction moves 9 rules from PARTIAL-EDGE to
+# NON-EDGE (44 -> 35), with NON-EDGE 325 -> 333.
+#
+# Event and Alpha Discovery goldens are untouched: none of this is visible to
+# M1 or M2.
 _RD_GOLDEN = {
-    "verdict":        "PARTIAL-EDGE",
-    "profit_factor":  pytest.approx(1.5818, rel=1e-3),
-    "total_trades":   93,
-    "expectancy":     pytest.approx(0.016959, rel=1e-3),
+    "verdict":        "NON-EDGE",
+    "profit_factor":  pytest.approx(1.6746, rel=1e-3),
+    "total_trades":   98,
+    "expectancy":     pytest.approx(0.014758, rel=1e-3),
 }
 
 # A deterministic *long* contract under the default PROJ_LOG target_mode (issue

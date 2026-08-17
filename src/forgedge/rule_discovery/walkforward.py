@@ -52,7 +52,9 @@ def _month_bounds(candle: pd.DataFrame, timestamp_col: str):
 def _build_splits(start: pd.Timestamp, end: pd.Timestamp, cfg: RuleWalkForwardConfig):
     """Return a list of ``(train_from, train_to, test_from, test_to)`` timestamps."""
     total_months = (end.year - start.year) * 12 + (end.month - start.month)
-    min_train = max(cfg.min_train_months, 1)
+    # Session-resolved (#177): a caller who never went through the resolver
+    # holds the sentinel, and 6 is this module's documented decision.
+    min_train = max(int(coalesce(cfg.min_train_months, default=6)), 1)
     if total_months <= min_train:
         return []
 

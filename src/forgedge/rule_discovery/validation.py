@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from ..alpha_discovery import stats
+from ..episodes import concurrency
 from .models import StatisticalValidation
 
 
@@ -51,7 +52,8 @@ def deflated_sharpe(sr_selected: float, n_trials: int, n_obs: int) -> float:
     return float(sr_selected * math.sqrt(radicand))
 
 
-def expectancy_mde(net: np.ndarray, alpha: float = 0.05) -> float:
+def expectancy_mde(net: np.ndarray, alpha: float = 0.05,
+                   n_eff: Optional[float] = None) -> float:
     """Minimum detectable expectancy of a one-sided one-sample t-test.
 
     Given the executed trades' net gains, returns the smallest true mean
@@ -63,6 +65,11 @@ def expectancy_mde(net: np.ndarray, alpha: float = 0.05) -> float:
     clear, so comparing it to a claimed effect answers "could this sample even
     confirm an effect of that size?").
 
+    ``n_eff`` is the effective sample size (F16): overlapping trades are not
+    independent observations, and the bar an observed mean must clear is set by
+    how much *independent* evidence there is, not by how many rows the ledger
+    has.  ``None`` keeps the nominal count.
+
     Returns ``inf`` when the sample is smaller than 2 (t-test undefined).
     """
     n = int(net.size)
@@ -71,10 +78,11 @@ def expectancy_mde(net: np.ndarray, alpha: float = 0.05) -> float:
     sd = float(np.std(net, ddof=1))
     if not math.isfinite(sd) or sd <= 0:
         return 0.0
-    t_crit = stats.t_ppf_onesided(alpha, float(n - 1))
+    eff = float(n) if n_eff is None or not np.isfinite(n_eff) else max(float(n_eff), 2.0)
+    t_crit = stats.t_ppf_onesided(alpha, eff - 1.0)
     if not math.isfinite(t_crit):
         return float("inf")
-    return float(t_crit * sd / math.sqrt(n))
+    return float(t_crit * sd / math.sqrt(eff))
 
 
 def _profit_factor(net: np.ndarray) -> float:
@@ -129,6 +137,31 @@ def opportunity_sharpe(trades: pd.DataFrame, span_years: float) -> float:
     return (mu / sd) * math.sqrt(max(trades_per_year, 1e-12))
 
 
+def _effective_sample(trades: pd.DataFrame) -> float:
+    """Independent observations behind a trade ledger (F16, #177).
+
+    ``total_trades / mean_concurrent_positions``: a stack of positions opened on
+    consecutive bars and held over the same stretch of price is one path
+    observed once, not N times.  See :mod:`forgedge.episodes` for why
+    concurrency and not episodes — trades from separate episodes still overlap
+    when the horizon outruns the gap between them, and it is the shared *path*
+    that breaks independence.
+
+    Returns ``nan`` when the ledger carries no bar geometry (a hand-built frame,
+    or one that has been through a serialisation that dropped the columns), and
+    the callers then fall back to the nominal count.  Falling back is the honest
+    default: an unmeasured overlap is not evidence of no overlap, but inventing
+    a correction would be worse than reporting the uncorrected number and saying
+    so on ``StatisticalValidation.n_effective``.
+    """
+    if trades is None or len(trades) < 2:
+        return float("nan")
+    if not {"fill_rn", "exit_rn"} <= set(trades.columns):
+        return float("nan")
+    stats_ = concurrency(trades["fill_rn"].to_numpy(), trades["exit_rn"].to_numpy())
+    return stats_.effective_trades
+
+
 def validate(
     trades: pd.DataFrame,
     base_rate: float,
@@ -153,10 +186,19 @@ def validate(
         Average holding length in bars; when given, the Sharpe is annualised by
         the number of *non-overlapping* holding periods per year rather than by
         the raw trade frequency.
+
+    Notes
+    -----
+    The **effective** sample size is measured here, from the ledger's own
+    ``fill_rn``/``exit_rn`` geometry, rather than accepted as an argument: there
+    is then no way to hand this function a number that does not describe the
+    trades it was given.  It corrects the t-tests' precision and the DSR's
+    ``n_obs`` and nothing else — see :class:`StatisticalValidation`.
     """
     net = trades["net_pct_gain"].to_numpy(dtype=float)
     n = net.size
     nan = float("nan")
+    n_eff = _effective_sample(trades)
 
     if n < 2:
         return StatisticalValidation(
@@ -164,15 +206,15 @@ def validate(
             ttest_expectancy_t=nan, ttest_expectancy_p=nan,
             deflated_sharpe=nan, sharpe_ratio=nan,
             n_trials_tested=n_trials, temporal_stability="FAIL",
-            pf_first_half=nan, pf_second_half=nan,
+            pf_first_half=nan, pf_second_half=nan, n_effective=n_eff,
         )
 
     # ── win-rate vs base rate (one-sample → one-sample-style via constant) ──
     wins = (net > 0).astype(float)
-    t_wr, p_wr = _ttest_1samp_greater(wins, base_rate)
+    t_wr, p_wr = _ttest_1samp_greater(wins, base_rate, n_eff)
 
     # ── expectancy vs 0 ──────────────────────────────────────────────────
-    t_exp, p_exp = _ttest_1samp_greater(net, 0.0)
+    t_exp, p_exp = _ttest_1samp_greater(net, 0.0, n_eff)
 
     # ── Sharpe (annualised) and its deflated version ─────────────────────
     mu = float(net.mean())
@@ -186,7 +228,10 @@ def validate(
         sharpe_annual = sharpe_trade * math.sqrt(max(periods_per_year, 1.0))
     else:
         sharpe_annual = nan
-    dsr = deflated_sharpe(sharpe_annual, n_trials, n)
+    # `n_obs` is the independent evidence behind the Sharpe, not the row
+    # count: overlapping trades do not each buy a full observation.
+    dsr = deflated_sharpe(sharpe_annual, n_trials,
+                          int(n_eff) if np.isfinite(n_eff) else n)
 
     # ── temporal stability: PF first vs second half ──────────────────────
     if "fill_dt" in trades.columns:
@@ -209,13 +254,27 @@ def validate(
         temporal_stability=stability,
         pf_first_half=_round(pf1),
         pf_second_half=_round(pf2),
+        n_effective=_round(n_eff),
     )
 
 
-def _ttest_1samp_greater(sample: np.ndarray, popmean: float):
+def _ttest_1samp_greater(sample: np.ndarray, popmean: float,
+                        n_eff: Optional[float] = None):
     """One-sample, one-sided ``mean(sample) > popmean`` t-test (pure numpy).
 
     Built on ``alpha_discovery.stats`` Student-t tail so no SciPy is needed.
+
+    ``n_eff`` is the **effective** sample size: overlapping trades share a price
+    path and are not independent observations, so treating the nominal count as
+    a sample size overstates the precision of the mean by ``sqrt(n/n_eff)``
+    (F16, #177).  The point estimates still use every trade — more observations
+    do sharpen the estimate of the mean; what they do not do is sharpen it as
+    fast as ``sqrt(n)`` when they overlap.  Only the standard error and the
+    degrees of freedom are corrected.
+
+    ``None`` (default) keeps the nominal count, which is correct whenever
+    nothing overlaps and is the honest fallback when concurrency could not be
+    measured.
     """
     a = sample[np.isfinite(sample)]
     n = a.size
@@ -226,9 +285,10 @@ def _ttest_1samp_greater(sample: np.ndarray, popmean: float):
     if sd == 0:
         # Degenerate: all identical. Significant iff strictly above the null.
         return (float("inf"), 0.0) if mean > popmean else (0.0, 1.0)
-    se = sd / math.sqrt(n)
+    eff = float(n) if n_eff is None or not np.isfinite(n_eff) else max(float(n_eff), 2.0)
+    se = sd / math.sqrt(eff)
     t = (mean - popmean) / se
-    df = n - 1
+    df = eff - 1.0
     p_two = stats.student_t_sf_twosided(t, df)
     p_one = p_two / 2.0 if t > 0 else 1.0 - p_two / 2.0
     return float(t), float(p_one)

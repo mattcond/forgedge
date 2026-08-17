@@ -567,6 +567,79 @@ dimensione campionaria che la sovrapposizione sostiene davvero (118 nominali →
 `concurrency` — per chi le vuole direttamente.
 
 
+#### Economia nominale, inferenza effettiva
+
+La sovrapposizione misurata nella sezione precedente ha una conseguenza che va
+oltre il dimensionamento del capitale, ed è quella che cambia i verdetti.
+
+Trade sovrapposti condividono un percorso di prezzo, quindi **non sono
+osservazioni indipendenti**. Ogni quantità che fa un'affermazione di
+*confidenza* consumava il conteggio nominale come se lo fossero (F16):
+
+| quantità | prima | ora |
+|---|---|---|
+| `total_trades`, PF, expectancy, net gain | nominali | **nominali — è l'economia, non si tocca** |
+| errore standard e gradi di libertà del t-test | nominali | **effettivi** |
+| `n_obs` della `deflated_sharpe` | nominali | **effettivi** |
+| `expectancy_mde` / power gate | nominali | **effettivi** |
+
+`StatisticalValidation.n_effective` è `total_trades /
+mean_concurrent_positions`, misurato dalla geometria a barre del ledger stesso
+invece che passato — così non c'è modo di consegnargli un numero che descrive
+altri trade. Nel caso della #168, 118 trade nominali contro ≈32 effettivi:
+
+```
+t-test:  t scala come sqrt(n)  →  sovrastimata di 1.93×
+         t=2.6 (p≈0.005) è in realtà t=1.35 (p≈0.09)
+DSR:     n_obs 118 → 32 a n_trials=15, correzione 0.820 → 0.741
+```
+
+Il t-test è il canale serio: `max_ttest_p` è uno dei tre gate hard che
+producono `NON-EDGE`, quindi la pipeline ammetteva regole su una significatività
+sovrastimata. Le stime puntuali usano ancora ogni trade — più osservazioni
+affinano davvero la stima di una media; quello che non fanno, quando si
+sovrappongono, è affinarla alla velocità di `sqrt(n)`.
+
+Quando il ledger non porta la geometria a barre la correzione non è calcolabile,
+e si usa il conteggio nominale con `n_effective = nan` a dirlo. Una
+sovrapposizione non misurata non è prova di assenza di sovrapposizione, ma
+inventare una correzione sarebbe peggio che riportare il numero non corretto e
+ammetterlo.
+
+#### Un floor irraggiungibile è una finestra, non un verdetto
+
+Tre gate confrontavano un floor assoluto con una finestra la cui lunghezza era
+fissata da parametri indipendenti, mentre il tasso di arrivo era fissato da un
+terzo. Quando `finestra × tasso < floor`, **ogni** candidato fallisce per
+costruzione — e la pipeline lo riportava come un muro di rejection,
+indistinguibile da «il segnale è brutto».
+
+- **Il floor sui trade di M3** (`#173`). `min_train_months` è ora derivato da
+  `criteria.min_tpm` con margine di Poisson al 95 %: 20 mesi al tasso del preset
+  balanced su daily, non un 6 fisso. Il `floor / rate` ingenuo dà 12.5 e resta
+  corto circa il 44 % delle volte — lo stesso bug in forma più mite. Dove la
+  storia non può fornire la finestra derivata, `oos_span_too_short` lo dice e
+  porta il tasso da impostare.
+- **Il verdetto di M3.** Sotto il floor *con uno span che non avrebbe mai potuto
+  fornirlo*, il verdetto è ora `INSUFFICIENT-DATA`, non `NON-EDGE`. Non si sta
+  giudicando la regola: si sta giudicando la finestra.
+- **I fold di M1** (F1). `GateParams.min_episodes` è un conteggio assoluto e
+  veniva applicato tale e quale ai fold del walk-forward, rendendo il requisito
+  implicito di tasso inversamente proporzionale alla lunghezza del fold — 5.1×
+  più severo dell'in-sample sulla configurazione che questo manuale raccomanda
+  per la produzione, alla quale passava lo 0.7 % delle valutazioni di fold. Ora
+  è solo in-sample. Un fold è *testabile* quando il suo conteggio atteso di
+  episodi raggiunge 3, dove un fold vuoto ha probabilità `e^-3 = 5 %` sotto
+  l'ipotesi «il candidato ha mantenuto il suo tasso»; sotto quel valore il fold
+  sta misurando la propria brevità ed è marcato `INDETERMINATE`, escluso dal
+  denominatore invece che contato come fallimento. Quando nessun fold è
+  testabile, `ValidationResult.passed` vale `None` — inconcludente, non fallito.
+
+  Misurato sulla stessa fixture: pass rate dei fold da 0.7 % a 54.2 %, candidati
+  OOS-stabili da 0.5 % a 52.4 %, con i fallimenti residui attribuiti a tasso e
+  dispersione — i criteri che avrebbero sempre dovuto decidere.
+
+
 #### Modalità d'ingresso — cosa misura il verdetto
 
 `entry_mode` ha default **`"auto"`** (era `"limit"` prima della #185), e vale la
