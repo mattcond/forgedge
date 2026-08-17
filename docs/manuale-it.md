@@ -524,6 +524,49 @@ resp = rd.run() -> RuleDiscoveryResponse
 
 L'`event_candidate` che passi deve essere quello a cui `contract.event_candidate_id` effettivamente punta, o il costruttore solleva `ValueError`.
 
+#### Sovrapposizione — quanto capitale costano questi numeri
+
+`run_backtest` apre una posizione su **ogni** barra attiva, senza controllo di
+stato flat. È deliberato e resta così: è una politica legittima che presuppone
+capitale, e l'economia riportata è riproducibile dal vivo *dato abbastanza
+capitale per finanziare le posizioni concorrenti*. Quello che mancava era un
+modo per sapere quanto capitale sia (issue #168) — i report portavano una frase
+fissa sulle «posizioni sovrapposte» senza alcun numero, quindi una regola che
+richiede 1× il capitale di una posizione e una che ne richiede 12× si leggevano
+identiche.
+
+`BacktestSummary` ora lo misura sul ledger che i parametri pubblicati producono
+davvero:
+
+| campo | a quale domanda risponde |
+|---|---|
+| `n_episodes` | quanto spesso *scatta* questo segnale? |
+| `mean_concurrent_positions` | quando lavora, quante posizioni sto finanziando? |
+| `max_concurrent_positions` | posso proprio metterla in produzione sul mio conto? |
+
+`trades` (da `return_trades=True`) porta un `episode_id` per riga, quindi
+`trades.groupby("episode_id").size()` è disponibile senza reimplementare il
+raggruppamento.
+
+**Episodi e concorrenza sono misure diverse e in generale non coincidono.**
+Gli episodi raggruppano per *segnale* — una serie di cinque barre con `RSI < 30`
+è una cosa che accade, non cinque. La concorrenza raggruppa per *percorso di
+prezzo* — e trade di episodi nettamente distinti si sovrappongono comunque
+quando l'orizzonte di holding supera il gap fra loro. Nel caso della #168: 120
+barre di segnale, 76 episodi, e una media di 3.71 posizioni concorrenti.
+
+Quale serva dipende dalla domanda: dimensionare il capitale → concorrenza;
+quanto spesso scatta un segnale → episodi; inferenza statistica → concorrenza,
+perché trade sovrapposti condividono un percorso di prezzo e non sono
+osservazioni indipendenti. `total_trades / mean_concurrent_positions` è la
+dimensione campionaria che la sovrapposizione sostiene davvero (118 nominali →
+≈32 effettivi in quel caso). Le conseguenze inferenziali sono affare della
+#177; questa è la misura che le serve.
+
+`forgedge.episodes` espone le primitive — `episode_starts`, `episode_ids`,
+`concurrency` — per chi le vuole direttamente.
+
+
 #### Modalità d'ingresso — cosa misura il verdetto
 
 `entry_mode` ha default **`"auto"`** (era `"limit"` prima della #185), e vale la

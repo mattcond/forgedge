@@ -66,6 +66,7 @@ from .target_optimizer import TargetOptimizer
 from .presets import forge_preset, preset_info, PRESETS
 from .summary_report import summary_report, DataQualityReport, Finding
 from .config_report import config_report, ConfigReport
+from .episodes import episode_starts, episode_ids, concurrency, ConcurrencyStats
 from .kpi_builder import build_features, lag_features, candle_features, pattern_features
 
 __all__ = [
@@ -128,6 +129,10 @@ __all__ = [
     "summary_report",
     "DataQualityReport",
     "Finding",
+    "episode_starts",
+    "episode_ids",
+    "concurrency",
+    "ConcurrencyStats",
     "build_features",
     "lag_features",
     "candle_features",

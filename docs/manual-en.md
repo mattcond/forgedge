@@ -524,6 +524,48 @@ resp = rd.run() -> RuleDiscoveryResponse
 
 The `event_candidate` you pass must be the one `contract.event_candidate_id` actually points to, or the constructor raises `ValueError`.
 
+#### Overlap — how much capital these numbers take
+
+`run_backtest` opens a position on **every** active bar, with no flat-state
+check. That is deliberate and stays that way: it is a legitimate,
+capital-permitting policy, and the reported economics are reproducible live
+*given enough capital to fund the concurrent positions*. What was missing was
+any way to find out how much capital that is (issue #168) — the reports carried
+a fixed sentence about "overlapping positions" with no number attached, so a
+rule needing 1× the capital of a single position and one needing 12× read
+identically.
+
+`BacktestSummary` now measures it on the ledger the published parameters
+actually produce:
+
+| field | question it answers |
+|---|---|
+| `n_episodes` | how often does this signal *fire*? |
+| `mean_concurrent_positions` | when it is working, how many positions am I funding? |
+| `max_concurrent_positions` | can I deploy this at all on my account? |
+
+`trades` (from `return_trades=True`) carries an `episode_id` per row, so
+`trades.groupby("episode_id").size()` is available without reimplementing the
+grouping.
+
+**Episodes and concurrency are different measures and generally disagree.**
+Episodes group by *signal* — a five-bar `RSI < 30` stretch is one thing
+happening, not five. Concurrency groups by *price path* — and trades from
+clearly separate episodes still overlap whenever the holding period outruns the
+gap between them. On the case in #168: 120 signal bars, 76 episodes, and a mean
+of 3.71 concurrent positions.
+
+Which one you want depends on the question: capital sizing → concurrency; how
+often a signal fires → episodes; statistical inference → concurrency, because
+overlapping trades share a price path and are not independent observations.
+`total_trades / mean_concurrent_positions` is the sample size the overlap
+actually supports (118 nominal → ≈32 effective in that case). The inferential
+consequences are #177's business; this is the measurement it needs.
+
+`forgedge.episodes` exposes the primitives — `episode_starts`, `episode_ids`,
+`concurrency` — for callers who want them directly.
+
+
 #### Entry mode — what the verdict measures
 
 `entry_mode` defaults to **`"auto"`** (it was `"limit"` before #185), and the

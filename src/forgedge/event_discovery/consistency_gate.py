@@ -24,6 +24,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from ..episodes import episode_starts as _episode_starts
 from .models import GateParams, GateResult, RawEvent
 
 
@@ -282,58 +283,6 @@ class ConsistencyGate:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _episode_starts(active: np.ndarray, gap: int = 1) -> np.ndarray:
-    """Mark the first bar of each activation *episode*.
-
-    An *episode* is a stretch of activations in which interruptions of at most
-    ``gap`` bars do not start a new episode.  Collapsing each episode to its
-    first bar lets dispersion be measured per-episode rather than per-bar,
-    removing the inflation that persistent states (a multi-bar ``RSI < 30``
-    stretch) cause in per-bar monthly counts (issue #134).
-
-    With ``gap=1`` (default) a single missing bar inside a run is bridged — on
-    daily data a one-day interruption is not a new event.  ``gap=0`` gives
-    strict consecutive runs.
-
-    Parameters
-    ----------
-    active : np.ndarray
-        Boolean activation array (dtype bool or uint8).
-    gap : int
-        Maximum interruption length (in bars) bridged within an episode.
-
-    Returns
-    -------
-    np.ndarray
-        Boolean array, True only at the first bar of each episode.  The marks
-        are positioned on the original (un-bridged) activations, so a bridged
-        gap bar is never itself marked.
-    """
-    active = active.astype(bool)
-    if active.size == 0:
-        return active
-
-    # Bridge interruptions of <= gap bars between two active stretches.
-    bridged = active.copy()
-    if gap > 0:
-        idx = np.flatnonzero(active)
-        if idx.size > 1:
-            ends = idx[:-1]
-            starts = idx[1:]
-            hole = starts - ends - 1  # inactive bars between consecutive activations
-            fill_mask = (hole > 0) & (hole <= gap)
-            for e, s in zip(ends[fill_mask], starts[fill_mask]):
-                bridged[e + 1: s] = True
-
-    prev = np.empty_like(bridged)
-    prev[0] = False
-    prev[1:] = bridged[:-1]
-    starts_mask = bridged & ~prev
-    # Anchor each episode start on a real activation (a bridged run always
-    # starts on a real activation, so this coincides with starts_mask).
-    return starts_mask & active
-
 
 def _chi2_ppf_095(df: int) -> float:
     """95th-percentile of the chi-square distribution with ``df`` degrees of

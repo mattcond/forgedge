@@ -42,6 +42,11 @@ def text_report(resp: RuleDiscoveryResponse) -> str:
         f"PF={_f(s.profit_factor)}  WR={_pct(s.win_rate_pct)}")
     add(f"  expectancy={_pct(s.expectancy)}  pf_score_tpm={_f(s.pf_score_tpm)}  "
         f"tpm_mu={_f(s.tpm_mu)}  zero_months={s.zero_months}")
+    add(f"  episodes={s.n_episodes}  concurrent positions: "
+        f"avg={_f(s.mean_concurrent_positions)} peak={s.max_concurrent_positions}"
+        + (f"  (≈{s.total_trades / s.mean_concurrent_positions:.0f} effective trades)"
+           if s.mean_concurrent_positions and s.mean_concurrent_positions == s.mean_concurrent_positions
+           and s.mean_concurrent_positions > 0 else ""))
 
     if resp.statistical_validation:
         sv = resp.statistical_validation
@@ -168,6 +173,11 @@ def html_report(resp: RuleDiscoveryResponse) -> str:
         "profit_factor": _f(s.profit_factor), "win_rate": _pct(s.win_rate_pct),
         "expectancy": _pct(s.expectancy), "pf_score_tpm": _f(s.pf_score_tpm),
         "tpm_mu": _f(s.tpm_mu), "zero_months": s.zero_months,
+        # A position opens on every active bar with no flat-state check, so
+        # these say how much capital reproducing the row above actually takes.
+        "episodes": s.n_episodes,
+        "concurrent positions (avg)": _f(s.mean_concurrent_positions),
+        "concurrent positions (peak)": s.max_concurrent_positions,
     }))
 
     if resp.statistical_validation:

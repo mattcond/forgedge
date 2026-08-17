@@ -1,6 +1,8 @@
 """Tests for the rule performance report (forgedge.rule_report)."""
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -15,6 +17,7 @@ from forgedge import (
 from forgedge.event_discovery.models import GateParams
 from forgedge.rule_discovery.models import BacktestParams, GridSpec, WalkForwardConfig
 from forgedge import RuleDiscoveryConfig
+from forgedge.unset import UNSET
 
 
 def _candles(n=700, seed=3, with_regime=False):
@@ -45,6 +48,54 @@ def _spec(df, name="RULE_T1", formula="feat < 0.15", direction="long", **pk):
     defaults.update(pk)
     params = BacktestParams(**defaults)
     return RuleSpec(name=name, candidate=cand, params=params)
+
+
+class TestSpecResolution:
+    def test_a_hand_built_spec_carries_values_not_sentinels(self):
+        """Three `BacktestParams` fields are session-resolved (#181), so a spec
+        assembled by hand holds the sentinel.  `run_backtest` resolves its own
+        copy — but this report *renders* the parameters, and `fee:.2%` on an
+        UNSET raises, so the whole report died on a legal input.
+
+        Resolved at the boundary, as registry ingestion already does.
+        """
+        df = _candles()
+        cand = CustomEvent(name="R", formula="feat < 0.15").to_event_candidate(df)
+        raw = BacktestParams(buy_type="market", sell_pct=0.03, target_h=5)
+        assert raw.fee is UNSET
+
+        spec = RuleSpec(name="R", candidate=cand, params=raw)
+        assert spec.params.fee == pytest.approx(0.002)
+        assert "0.20%" in rule_performance_report([spec], df)
+
+    def test_an_explicit_fee_is_left_alone(self):
+        df = _candles()
+        cand = CustomEvent(name="R", formula="feat < 0.15").to_event_candidate(df)
+        spec = RuleSpec(name="R", candidate=cand,
+                        params=BacktestParams(fee=0.0005, target_h=5))
+        assert spec.params.fee == pytest.approx(0.0005)
+
+
+class TestOverlapInTheReport:
+    """Issue #168 — the overlap warning used to be a fixed sentence."""
+
+    def test_the_footer_carries_the_measured_numbers(self):
+        df = _candles()
+        html = rule_performance_report([_spec(df, "R", "feat < 0.15")], df)
+        assert "positions open on average" in html
+        assert "at once" in html
+
+    def test_the_tile_reports_concurrency_not_utilisation(self):
+        """The tile used to show position-bars over the *whole history* under
+        the label "avg concurrent positions" — a rule idle four fifths of the
+        time reported 0.7 while the trader funds several positions whenever it
+        fires."""
+        df = _candles()
+        html = rule_performance_report([_spec(df, "R", "feat < 0.15")], df)
+        m = re.search(r"<b>([\d.]+) · (\d+)</b><span>concurrent positions", html)
+        assert m, "concurrency tile missing"
+        mean, peak = float(m.group(1)), int(m.group(2))
+        assert peak >= 1 and mean >= 1.0
 
 
 class TestRulePerformanceReport:
