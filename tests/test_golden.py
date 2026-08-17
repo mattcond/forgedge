@@ -146,6 +146,26 @@ _AD_GOLDEN = {
 # exceeding the declared `min_profit_factor=2.0` for 34.3% -> 0.8% of rules.
 #
 # Left unpinned deliberately: this is the result, not an omission.
+#
+# ── Step 9 (issue #179, F5): checked, and the pins below do NOT move ────────
+#
+# Every field meaning "N bars" is now converted at the session's bar duration:
+# on this 1D fixture `buy_delay_bar` 6 -> 1 (six *days* of resting limit order
+# -> one), `target_h`'s class default 24 -> 10, `stable_window` 12 -> 2.  Two
+# reasons the goldens survive it:
+#
+#  - `target_h` is seeded from the contract's `holding_period_h` on every rule
+#    this fixture produces, so its class default reached 0% of them — the
+#    conversion is correctness hygiene there, not a live change.
+#  - `stable_window` changes the `regime_stable` column (31.9% -> 85.7% of
+#    bars marked stable), and that column is read only under
+#    `AlphaConfig.use_stable_regime_only`, which defaults to False.  The
+#    column's *meaning* was wrong on daily data; nothing on the default path
+#    was consuming it.
+#
+# `buy_delay_bar` does move: across the fixture the published operating points
+# go 37 -> 38, one rule surviving that the six-day order had been failing.
+# The golden rule is not among them.
 _RD_GOLDEN = {
     "verdict":        "NON-EDGE",
     "profit_factor":  pytest.approx(1.6746, rel=1e-3),

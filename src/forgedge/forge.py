@@ -79,6 +79,7 @@ from .market_context.models import REGIME_COL, MarketContextConfig
 from .presets import default_horizon_grid
 from .config_report import ConfigReport, config_report
 from .resolver import PipelineContext, ResolutionTrace, collect_context
+from .unset import UNSET, coalesce, is_set
 from .rule_discovery.discovery import RuleDiscovery
 from .rule_discovery.models import RuleDiscoveryConfig, RuleDiscoveryResponse
 from .rule_registry.models import RegistryConfig, RuleSubmission
@@ -320,7 +321,7 @@ def forge(
     *,
     ticker: Optional[str] = None,
     asset: str = "ASSET",
-    timeframe: str = "1H",
+    timeframe: str = UNSET,
     market_context_config: Optional[MarketContextConfig] = None,
     event_discovery_config: Optional[DiscoveryConfig] = None,
     alpha_config: Optional[AlphaConfig] = None,
@@ -362,9 +363,20 @@ def forge(
         Ticker label for the Rule Registry pool and the Alpha Contract metadata
         (e.g. ``"BTCUSDC"``).  When omitted it falls back to ``alpha_config.asset``
         (if given) or ``asset``.
-    asset, timeframe : str
+    asset : str
         Traceability metadata for the Alpha Contracts.  Used only when neither
-        ``ticker`` nor an explicit ``alpha_config`` sets them.
+        ``ticker`` nor an explicit ``alpha_config`` sets it.
+    timeframe : str
+        Bar size, e.g. ``"1D"``, ``"4H"``, ``"15m"``.  The session's single
+        source of bar duration: it picks M2's horizon grid and, since #179,
+        every field that counts bars — ``BacktestParams.buy_delay_bar``,
+        ``MarketContextConfig.stable_window`` and the rest (F5).  Defaults to
+        ``"1H"``.
+
+        Leaving it out is not the same as passing ``"1H"``: an omitted
+        timeframe is an inherited default, so ``config_report()`` will not
+        report it as disagreeing with the table's own timestamp spacing.
+        Declare it and a real disagreement is flagged.
     market_context_config : MarketContextConfig, optional
         Modulo 0 configuration.  Defaults to the production EMA-proxy settings.
     event_discovery_config : DiscoveryConfig, optional
@@ -482,6 +494,13 @@ def forge(
             "Pass one or the other, not both."
         )
 
+    # Whether the caller *chose* a bar size or inherited one.  Only the
+    # declared-versus-measured check cares (F5, #179): a default nobody has
+    # looked at is not a contradiction with the data, so it stays silent —
+    # the same rule the other checks follow.
+    timeframe_declared = is_set(timeframe)
+    timeframe = coalesce(timeframe, default="1H")
+
     # ── Modulo 2 config drives the resolved ticker / metadata ─────────────
     cfg = alpha_config
     if cfg is None:
@@ -509,6 +528,18 @@ def forge(
     # derived from it, and every field that was set is left alone and merely
     # checked.  Resolution never reads the data, only the timeframe, the schema
     # and the configs themselves.
+    #
+    # The configs of the stages that will actually run are materialised
+    # *first*.  A ``None`` resolves to ``None``, so leaving them out meant the
+    # module later built its own default and resolved it against a default
+    # ``PipelineContext`` — i.e. against 1H, whatever the session declared.
+    # That is invisible for a derive reading another config value, and wrong
+    # for every derive reading the timeframe: on a 1D run `buy_delay_bar` came
+    # back 6, the hourly value, for 100% of published rules (F5, #179).
+    #
+    # Gated on the stage flags, so a module that will not run keeps
+    # contributing nothing — neither a derivation nor a check.  A config the
+    # session is not going to execute has no business raising findings.
     _bundle = {
         "market_context": market_context_config,
         "event_discovery": event_discovery_config,
@@ -516,12 +547,22 @@ def forge(
         "rule_discovery": rule_discovery_config,
         "registry": registry_config,
     }
+    if run_market_context:
+        _bundle["market_context"] = market_context_config or MarketContextConfig()
+    if manual_events is None:
+        _bundle["event_discovery"] = event_discovery_config or DiscoveryConfig()
+    if run_rule_discovery:
+        _bundle["rule_discovery"] = rule_discovery_config or RuleDiscoveryConfig()
+    if run_registry:
+        _bundle["registry"] = registry_config or RegistryConfig()
     context = collect_context(
-        _bundle, PipelineContext.from_frame(kpi_table, timeframe=timeframe)
+        _bundle,
+        PipelineContext.from_frame(kpi_table, timeframe=timeframe,
+                                   timeframe_declared=timeframe_declared),
     )
     coherence = config_report(
-        event_discovery_config, cfg, rule_discovery_config, registry_config,
-        market_context_config, ctx=context,
+        _bundle["event_discovery"], _bundle["alpha"], _bundle["rule_discovery"],
+        _bundle["registry"], _bundle["market_context"], ctx=context,
     )
     _bundle = coherence.configs
     market_context_config = _bundle["market_context"]

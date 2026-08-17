@@ -60,30 +60,53 @@ _tf_minutes = timeframe_minutes
 
 
 class _TFClass:
-    """Classify a timeframe into daily / intraday / hft and expose scaling."""
+    """Classify a timeframe into daily / intraday / hft and expose scaling.
+
+    The bar arithmetic itself is **not** reimplemented here: it comes from
+    :class:`~forgedge.resolver.PipelineContext`, which is the session's single
+    source of bar duration (F5).  What this class adds on top is the *class*
+    — daily / intraday / hft — and the calibrations that hang off it, which
+    are genuinely preset knowledge and not arithmetic.
+    """
 
     DAILY = "daily"
     INTRADAY = "intraday"
     HFT = "hft"
 
+    #: Holding-period grids per class.  These are calibrations, not
+    #: conversions: an hourly session scans up to 24 hours, a daily one up to
+    #: 10 days — converting the hourly grid to daily bars would collapse it to
+    #: a single bar, which is not the same question.
+    _HORIZON_GRIDS = {
+        DAILY: (1, 2, 3, 5, 7, 10),
+        INTRADAY: (1, 2, 4, 8, 12, 24),
+        HFT: (1, 2, 5, 10, 20, 50),
+    }
+
     def __init__(self, timeframe: str) -> None:
         self.timeframe = timeframe
+        self.ctx = PipelineContext(timeframe=timeframe)
         mins = _tf_minutes(timeframe)
         if mins >= 1440:
             self.cls = self.DAILY
-            self.bars_per_month = 1440 / mins * 30
-            self.bars_per_day = max(1, round(1440 / mins))
-            self.horizon_grid = (1, 2, 3, 5, 7, 10)
         elif mins >= 60:
             self.cls = self.INTRADAY
-            self.bars_per_month = (1440 / mins) * 30
-            self.bars_per_day = round(1440 / mins)
-            self.horizon_grid = (1, 2, 4, 8, 12, 24)
         else:
             self.cls = self.HFT
-            self.bars_per_month = (1440 / mins) * 30
-            self.bars_per_day = round(1440 / mins)
-            self.horizon_grid = (1, 2, 5, 10, 20, 50)
+        self.horizon_grid = self._HORIZON_GRIDS[self.cls]
+
+    @property
+    def bars_per_month(self) -> float:
+        return self.ctx.bars_per_month
+
+    @property
+    def bars_per_day(self) -> int:
+        """Rounded, and floored at 1.
+
+        The floor only bites on weekly-or-slower bars, where the exact value
+        is below 1 and this is used as a divisor.
+        """
+        return max(1, round(self.ctx.bars_per_day))
 
     def scale_tpm(self, daily_tpm: float) -> float:
         """Scale a daily-calibrated min_tpm to this timeframe."""
@@ -302,7 +325,10 @@ def forge_preset(
 
     # ── M2: AlphaDiscovery ───────────────────────────────────────────────
     horizon_grid = overrides.pop("horizon_grid", tf.horizon_grid)
-    bars_per_day = overrides.pop("bars_per_day", tf.bars_per_day)
+    # Left UNSET by default: the resolver derives it from the same declared
+    # timeframe this preset was built for, so there is no third copy of the
+    # conversion here (F5, #179).  An explicit override still wins.
+    bars_per_day = overrides.pop("bars_per_day", UNSET)
     min_lift = overrides.pop("min_lift", spec["min_lift"])
     min_cohens_d = overrides.pop("min_cohens_d", spec["min_cohens_d"])
     fdr_q = overrides.pop("fdr_q", spec["fdr_q"])
@@ -312,7 +338,7 @@ def forge_preset(
         asset=asset,
         timeframe=timeframe,
         horizon_grid=horizon_grid,
-        bars_per_day=bars_per_day if tf.cls != _TFClass.DAILY else None,
+        bars_per_day=bars_per_day,
         train_ratio=train_ratio,
         thresholds=PromotionThresholds(
             min_lift=min_lift,

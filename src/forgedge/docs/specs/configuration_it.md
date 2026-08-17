@@ -24,7 +24,7 @@ Configura il classificatore EMA-proxy: sorgente dati, calcolo automatico delle f
 | `window_unit` | str | `"day"` | Unità per `window_estimation`/`window_stride`: `"day"` (giorni calendario) o `"bar"` (barre). |
 | `window_estimation` | float | `168` | Ampiezza della finestra di stima delle EMA, nell'unità scelta. 168 giorni = ~24 settimane. |
 | `window_stride` | float | `1` | Passo tra stime successive, nella stessa unità. |
-| `bar_hours` | float \| None | `None` | Durata esplicita della candela in ore (es. `4.0` per 4H). Se None, derivato dal DatetimeIndex. |
+| `bar_hours` | float \| None | *(risolto: da `timeframe`)* | Durata esplicita della candela in ore (es. `4.0` per 4H). Risolto a livello di sessione; senza sessione viene inferito dal DatetimeIndex. |
 | `fast_ratio` | float | `1/2.3 ≈ 0.435` | Rapporto span_veloce/span_lento per la derivazione automatica. |
 | `min_window_estimates` | int | `10` | Numero minimo di stime OU convergenti per fidarsi della derivazione automatica. |
 
@@ -54,7 +54,7 @@ Contenitore di primo livello per la configurazione del Modulo 0. Aggrega la scel
 | `classifier` | str | `"ema_proxy"` | Implementazione del classificatore. In v1.0 solo `"ema_proxy"` è disponibile. |
 | `ema_proxy` | EMAProxyConfig | `EMAProxyConfig()` | Configurazione del classificatore EMA-proxy. |
 | `labels` | list[str] | `["STRONG_BEAR","BEAR","NEUTRAL","BULL","STRONG_BULL"]` | Etichette dei 5 regimi, dal più ribassista al più rialzista. |
-| `stable_window` | int | `12` | Numero di barre consecutive identiche richieste per `regime_stable=True`. |
+| `stable_window` | int | *(risolto: 12h di regime invariato, minimo 2 barre)* | Numero di barre consecutive identiche richieste per `regime_stable=True`. 12 su 1H, 3 su 4H, 2 su 1D, 48 su 15m — un 12 fisso chiedeva dodici *giorni* su candele daily. |
 
 ```python
 from forgedge import MarketContext, MarketContextConfig, EMAProxyConfig
@@ -226,7 +226,7 @@ Configurazione principale del Modulo 2. Controlla la grid degli orizzonti, la de
 | `use_stable_regime_only` | bool | `False` | Se True, esclude le barre con `regime_stable=False` dall'analisi dei regimi. |
 | `min_regime_obs` | int | `10` | Osservazioni minime per regime per calcolare metriche per-regime attendibili. |
 | `rolling_ic_window` | int \| None | `None` | Ampiezza della finestra per il rolling IC. Se None, calcolata automaticamente (≈ n/20). |
-| `bars_per_day` | float \| None | `None` | Barre per giorno per il calcolo del Deflated Sharpe. Se None, derivato dal timestamp. |
+| `bars_per_day` | float \| None | *(risolto: da `timeframe`)* | Barre per giorno, dimensiona la finestra di rolling IC. Risolto a livello di sessione; senza sessione viene inferito dai timestamp. |
 | `score_weights` | tuple[float,...] | `(0.20, 0.25, 0.15, 0.25, 0.15)` | Pesi del composite score (IC, lift, Cohen's d, z, regime breadth). Accetta anche la 4-tupla legacy (IC, lift, Cohen's d, breadth). |
 | `statistically_weak_penalty` | float | `0.6` | Moltiplicatore del composite score quando il target è `statistically_weak`. `1.0` disabilita. |
 | `oos_bonus` | float | `0.05` | Bonus additivo al composite score quando la conferma OOS passa. `0.0` disabilita. |
@@ -286,10 +286,10 @@ Parametri dell'esecuzione di un singolo backtest: direzione, tipo di ordine, liv
 | `direction` | str | `"long"` | Direzione del trade: `"long"` o `"short"`. Di norma derivato dall'AlphaContract. |
 | `buy_type` | str | `"limit"` | Tipo di ordine di ingresso. In v1.0 solo `"limit"`. |
 | `buy_drop_pct` | float | `0.010` | Distanza percentuale sotto il close a cui si piazza il limit order (1%). |
-| `buy_delay_bar` | int | `6` | Numero massimo di barre successive all'evento in cui il limit può essere eseguito. |
+| `buy_delay_bar` | int | *(risolto: 6h di ordine vivo)* | Barre in cui l'ordine limite resta vivo. 6 su 1H, 2 su 4H, 1 su 1D, 24 su 15m — un 6 fisso lasciava l'ordine appeso sei *giorni* su candele daily. |
 | `buy_price_anchor` | str | `"close"` *(risolto dalla sessione)* | Colonna a cui si applica l'offset del limite: `buy_price = anchor × (1 ∓ buy_drop_pct)`. **Qualsiasi colonna numerica è ammessa**, anche un indicatore derivato — `buy_price_anchor="close_sma_3", buy_drop_pct=0.10` significa "un limite al 90% della SMA a 3 barre". Viene riempita da `close_col` perché rinominare la colonna prezzo deve portarsi dietro l'anchor *di default*; un anchor esplicito è un livello di riferimento a sé e **non** ridefinisce la colonna prezzo della sessione. |
 | `sell_pct` | float | `0.040` | Take-profit come percentuale dal fill price (4%). |
-| `target_h` | int | `24` | Orizzonte massimo in barre: se il TP non viene raggiunto entro questo numero di barre, si chiude al close. |
+| `target_h` | int | *(risolto: cima della classe di orizzonti della sessione)* | Orizzonte massimo in barre: se il TP non viene raggiunto entro questo numero di barre, si chiude al close. 24 su orarie, 10 su daily, 50 su sotto-orarie — calibrato per classe come `horizon_grid`, non convertito in wall-clock. Di norma viene seminato dall'`holding_period_h` del contratto prima che questo default si applichi. |
 | `target_col` | str | `"close"` *(risolto dalla sessione)* | Colonna usata per verificare il raggiungimento dello stop a orizzonte. Deve nominare la stessa serie di `close_col`; un disaccordo viene segnalato. |
 | `target_hit_col` | str | `"close"` | Colonna usata per verificare il raggiungimento del take-profit. |
 | `fee` | float | `0.002` *(risolto dalla sessione)* | Commissione per lato (0.2%), derivata da `AlphaConfig.fee_per_side`. |

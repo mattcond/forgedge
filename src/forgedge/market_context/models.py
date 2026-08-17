@@ -9,10 +9,12 @@ in future versions (HMM, KMeans, custom) without touching any downstream module.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional
 
 import pandas as pd
+
+from ..unset import UNSET, is_set
 
 
 # ---------------------------------------------------------------------------
@@ -125,8 +127,15 @@ class EMAProxyConfig:
         ``window_estimation``.
     bar_hours : float or None
         Explicit candle duration in hours, used to convert days↔bars in
-        ``"day"`` mode.  When ``None`` it is inferred from the table's
+        ``"day"`` mode.  When left unset it is inferred from the table's
         DatetimeIndex (or a datetime column).
+
+        Session-resolved from the declared ``timeframe`` when the config goes
+        through :func:`forgedge.forge`, which is what stops M0 from answering
+        "how long is a bar" on its own while three other modules answer it
+        elsewhere (F5, #179).  Standalone use is unchanged: no session, no
+        declared timeframe, so the inference still runs — and ``None`` remains
+        an accepted way to ask for it explicitly.
     fast_ratio : float
         Fast span as a fraction of the slow span when auto-deriving
         (default ``1 / 2.3``).
@@ -152,7 +161,7 @@ class EMAProxyConfig:
     window_unit: str = "day"
     window_estimation: float = 168
     window_stride: float = 1
-    bar_hours: Optional[float] = None
+    bar_hours: Optional[float] = UNSET
     fast_ratio: float = 1 / 2.3
     min_window_estimates: int = 10
 
@@ -181,12 +190,38 @@ class MarketContextConfig:
         Number of consecutive identical bars required for ``regime_stable``
         to be ``True``.  Used downstream to exclude transition bars from
         regime analysis.
+
+        Session-resolved: the default is **12 hours** of an unchanged regime,
+        converted at the session's bar duration and floored at 2 bars — 12 on
+        1H (unchanged), 3 on 4H, 2 on 1D, 48 on 15m.  The floor exists because
+        ``stable_window=1`` marks every bar stable and the field stops meaning
+        anything.  It used to be a flat 12 bars, which on daily candles asked
+        for twelve *days* of unchanged regime and left 31.9% of the reference
+        fixture's bars stable, against 85.7% at the converted value (F5, #179).
     """
 
     classifier: str = "ema_proxy"
     ema_proxy: EMAProxyConfig = field(default_factory=EMAProxyConfig)
     labels: List[str] = field(default_factory=lambda: list(DEFAULT_LABELS))
-    stable_window: int = 12
+    stable_window: int = UNSET
+
+    def resolved(self) -> "MarketContextConfig":
+        """Return a copy with every ``UNSET`` field at its documented default.
+
+        ``MarketContext`` is usable standalone — with no session and therefore
+        no declared timeframe — so the sentinel has to be spent somewhere.
+        Here it falls back to the **hourly** calibration, i.e. exactly the
+        value the field carried before it became session-resolved.  Under
+        :func:`forgedge.forge` the resolver has already written the converted
+        value and this is a no-op.
+
+        ``ema_proxy.bar_hours`` is deliberately *not* filled in: unset there
+        means "measure it from the timestamps", which is a real behaviour and
+        the right one without a declared timeframe.
+        """
+        if is_set(self.stable_window):
+            return self
+        return replace(self, stable_window=12)
 
 
 # ---------------------------------------------------------------------------

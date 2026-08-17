@@ -50,6 +50,13 @@ class BacktestParams:
         ``buy_type == "market"``.
     buy_delay_bar : int
         Number of bars the limit order stays live.  Ignored for market orders.
+
+        Session-resolved, because "how long an order rests" is a wall-clock
+        question and this field states it in bars.  The default is **6 hours**,
+        converted at the session's bar duration: 6 bars on 1H, 2 on 4H, 1 on
+        1D, 24 on 15m.  It used to be a flat 6, so a daily session left every
+        limit order live for six *days* — measured on the reference 1D fixture,
+        that was 100% of the published rules (F5, #179).
     buy_price_anchor : str
         Column the limit offset is applied to:
         ``buy_price = anchor × (1 ∓ buy_drop_pct)``.  **Any numeric column on
@@ -73,6 +80,17 @@ class BacktestParams:
         meaningful value: it exits at the fill bar's own close (a same-session
         round-trip, ``fill_rn == exit_rn``) — it is not a "no horizon"
         placeholder.
+
+        Session-resolved, but *not* by wall-clock conversion: a holding period
+        is class-calibrated, the same way ``AlphaConfig.horizon_grid`` already
+        is.  An hourly session scans up to 24 hours and a daily one up to 10
+        days; converting 24 hours to daily bars would give 1, which is a
+        different question, not the same one restated.  The default is
+        therefore the top of the session's horizon class — 24 on hourly bars
+        (unchanged), 10 on daily, 50 on sub-hourly.  In practice it is seeded
+        from the contract's ``holding_period_h`` before this default is
+        consulted; on the reference 1D fixture the class default reached 0% of
+        the published rules (F5, #179).
     target_col : str
         Price column used for the close-at-horizon exit.  Session-resolved from
         the KPI table's ``close_col``; default ``"close"``.  Its sibling
@@ -99,10 +117,10 @@ class BacktestParams:
     direction: str = "long"
     buy_type: str = "limit"
     buy_drop_pct: float = 0.010
-    buy_delay_bar: int = 6
+    buy_delay_bar: int = UNSET
     buy_price_anchor: str = UNSET
     sell_pct: float = 0.040
-    target_h: int = 24
+    target_h: int = UNSET
     target_col: str = UNSET
     target_hit_col: str = "close"
     fee: float = UNSET
@@ -117,23 +135,34 @@ class BacktestParams:
     def resolved(self) -> "BacktestParams":
         """Return a copy with every ``UNSET`` field at its documented default.
 
-        Three fields (``fee``, ``target_col``, ``buy_price_anchor``) are
-        session-resolved, so a caller who never went through
+        Five fields are session-resolved, so a caller who never went through
         :func:`forgedge.resolve` — a hand-built ``BacktestParams`` handed
         straight to :func:`run_backtest` — holds the sentinel rather than a
         value.  ``UNSET`` means *you decide*, and a function that documents a
         default has already decided; this is where that decision is applied,
         once, instead of being rediscovered at each read site.
 
+        The two bar counts fall back to their **hourly** calibration here,
+        because this method has no timeframe to convert with — that is the
+        resolver's job, and it is the path :func:`forgedge.forge` takes.  A
+        standalone caller who builds a ``BacktestParams`` by hand for daily
+        candles and never mentions a timeframe therefore gets exactly what
+        they got before this change, which is the point: the fallback is the
+        old behaviour, not a second opinion about the session.
+
         Returns ``self`` unchanged when there is nothing to resolve, so the
         grid's ~210 backtests per run do not each pay for a copy.
         """
-        if is_set(self.fee) and is_set(self.target_col) and is_set(self.buy_price_anchor):
+        if (is_set(self.fee) and is_set(self.target_col)
+                and is_set(self.buy_price_anchor) and is_set(self.target_h)
+                and is_set(self.buy_delay_bar)):
             return self
         return self.merged(
             fee=coalesce(self.fee, default=0.002),
             target_col=coalesce(self.target_col, default="close"),
             buy_price_anchor=coalesce(self.buy_price_anchor, default="close"),
+            target_h=coalesce(self.target_h, default=24),
+            buy_delay_bar=coalesce(self.buy_delay_bar, default=6),
         )
 
 

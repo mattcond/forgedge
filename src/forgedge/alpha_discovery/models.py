@@ -410,11 +410,24 @@ class AlphaConfig:
         base ``horizon_grid``.
     thresholds : PromotionThresholds
         Admission / promotion gates.
-    asset, exchange, timeframe : str
+    asset, exchange : str
         **Traceability metadata only** — copied verbatim into the contract's
         SCOPE section (and into the ``alpha_id``) so Rule Discovery and the
         Registry can attribute the alpha.  They have no effect whatsoever on
         any measurement.
+    timeframe : str
+        Bar size, e.g. ``"1H"``, ``"1D"``.  Copied into the contract's SCOPE
+        section like ``asset`` and ``exchange`` — but, unlike them, **not
+        metadata only**, which is what this docstring used to claim.
+        :func:`forgedge.forge` reads it to substitute a daily-calibrated
+        ``horizon_grid``, :func:`forgedge.forge_preset` scales the whole M1/M3
+        frequency ladder off it, and since #179 the session's bar duration
+        drives every field that counts bars (F5).
+
+        It is not the *source* of that duration: the session's own
+        ``timeframe`` — what the caller passed to :func:`forgedge.forge` — is,
+        and ``config_report()`` raises ``timeframe_mismatch`` when the two
+        disagree, rather than letting each scale something different.
     fee_per_side : float
         Recorded in the contract as the assumed cost basis, and — since the
         parameter-coherence work — the cost Rule Discovery actually charges:
@@ -450,7 +463,10 @@ class AlphaConfig:
         ``bars_per_day``.
     bars_per_day : float or None
         Bars per calendar day, used only to size the default rolling-IC window.
-        When ``None`` it is inferred from the timestamp spacing.
+        Session-resolved from the declared ``timeframe``; left unset without a
+        session it is inferred from the timestamp spacing, as before.  M2
+        measuring this for itself while M0 measured its own copy and the
+        preset computed a third is exactly the split F5 names (#179).
     score_weights : tuple of float
         Weights for ``(ic, lift, cohens_d, z, regime_breadth)`` in the composite
         alpha score (Step 6.1) — ``z`` is ``|z_h*|``, the rotation-null
@@ -512,7 +528,7 @@ class AlphaConfig:
     use_stable_regime_only: bool = False
     min_regime_obs: int = 10
     rolling_ic_window: Optional[int] = None
-    bars_per_day: Optional[float] = None
+    bars_per_day: Optional[float] = UNSET
     score_weights: Tuple[float, ...] = (0.20, 0.25, 0.15, 0.25, 0.15)
     statistically_weak_penalty: float = 0.6
     oos_bonus: float = 0.05

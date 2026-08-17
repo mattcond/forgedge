@@ -747,3 +747,62 @@ class TestHurstTooling:
         assert out["suggested_long_period"] > out["suggested_short_period"]
         assert out["suggested_short_period"] >= 1
         assert out["n_estimates"] > 0
+
+
+class TestBarDurationComesFromTheSession:
+    """F5 (#179) — M0 used to answer "how long is a bar" entirely on its own.
+
+    Three modules measured or declared it independently and nothing
+    reconciled them: `forge(timeframe=...)` scaled M2, `EMAProxyConfig
+    .bar_hours` scaled M0's windows, and M0 inferred the value from the
+    timestamp spacing when that was unset. Declaring `"1D"` over hourly
+    candles produced no warning at all.
+    """
+
+    def test_standalone_use_is_unchanged(self):
+        """The non-regression the issue asks for: no session, no declared
+        timeframe, so the inference still runs and `stable_window` still
+        falls back to the hourly 12."""
+        kpi = _make_kpi_table(n=1500)
+        mc = MarketContext(kpi)
+        assert mc.config.stable_window == 12
+        out = mc.run()
+        assert "regime_stable" in out.columns
+        assert mc.window_resolution["bar_hours"] == pytest.approx(1.0)
+
+    def test_an_explicit_bar_hours_still_wins(self):
+        kpi = _make_kpi_table(n=1500)
+        cfg = MarketContextConfig(ema_proxy=EMAProxyConfig(bar_hours=4.0))
+        mc = MarketContext(kpi, config=cfg)
+        mc.run()
+        assert mc.window_resolution["bar_hours"] == pytest.approx(4.0)
+
+    def test_the_session_writes_it_when_there_is_one(self):
+        """Under `forge()` the resolver fills both fields from the declared
+        timeframe, so M0 stops measuring and starts being told."""
+        from forgedge.resolver import PipelineContext, resolve_config
+
+        cfg = resolve_config(MarketContextConfig(), "market_context",
+                             PipelineContext(timeframe="1D"))
+        assert cfg.ema_proxy.bar_hours == pytest.approx(24.0)
+        assert cfg.stable_window == 2
+
+    def test_stable_window_means_a_duration_not_a_bar_count(self):
+        """12 bars of unchanged regime is 12 hours on 1H and twelve *days* on
+        1D. Measured on the reference fixture, the flat 12 left 31.9% of daily
+        bars stable against 85.7% at the converted value.
+
+        Floored at 2: at 1 every bar is stable and the field stops meaning
+        anything.
+        """
+        from forgedge.resolver import PipelineContext, resolve_config
+
+        def window(tf):
+            return resolve_config(MarketContextConfig(), "market_context",
+                                  PipelineContext(timeframe=tf)).stable_window
+
+        assert window("1H") == 12
+        assert window("4H") == 3
+        assert window("1D") == 2
+        assert window("15m") == 48
+        assert window("1W") == 2      # the floor, not 0
