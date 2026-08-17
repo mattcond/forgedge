@@ -153,9 +153,9 @@ BASE_CONFIG = {
     'buy_type':         'limit',
     'buy_price_anchor': 'close',
     'buy_drop_pct':     0.010,
-    'buy_delay_bar':    6,
+    'buy_delay_bar':    6,   # risolto: 6h di ordine vivo (1 su 1D) — #179
     'sell_pct':         0.040,
-    'target_h':         24,
+    'target_h':         24,  # risolto: cima della classe di orizzonti (10 su 1D) — #179
     'fee':              0.002,
     'early_stopping':   True,
     'pf_min_trades':    15,

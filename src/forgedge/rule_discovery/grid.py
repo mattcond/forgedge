@@ -28,7 +28,12 @@ def build_grid(spec: GridSpec, base: BacktestParams) -> GridSpec:
 
     A swept axis left as ``None`` is replaced by a small symmetric fan around
     the base value; ``buy_delay_bar`` defaults to the single base value.
+
+    ``base`` is resolved first: the fan is *arithmetic on* the base values, so
+    a caller holding session-resolved sentinels would otherwise build a grid
+    out of them (F5 put ``target_h`` and ``buy_delay_bar`` in that category).
     """
+    base = base.resolved()
     drop = spec.buy_drop_pct
     sell = spec.sell_pct
     th = spec.target_h

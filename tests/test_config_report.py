@@ -16,6 +16,7 @@ from forgedge import (
     AlphaConfig,
     ConfigReport,
     DiscoveryConfig,
+    MarketContextConfig,
     PipelineContext,
     RegistryConfig,
     RuleDiscoveryConfig,
@@ -286,23 +287,70 @@ class TestWarnConstraints:
         rep = config_report(None, alpha, None, ctx=_ctx(timeframe="1D"))
         assert "timeframe_mismatch" in _codes(rep)
 
-    def test_timeframe_mismatch_catches_hourly_bar_counts_on_daily_data(self):
-        """The footgun already fixed for horizon_grid, left unfixed one module
-        later: target_h=24 means 24 *days* on 1D bars.
+    def test_the_m3_bar_counts_are_converted_not_warned_about(self):
+        """#179 turned this warning into a derive.
 
-        Only the untouched default is flagged — a caller who wrote a bar count
-        deliberately does not need telling."""
+        `target_h=24` used to mean 24 *days* on daily bars and the report said
+        so; now the session's bar duration decides the value and there is
+        nothing left to warn about. A converted value is not a mismatch.
+        """
         alpha = AlphaConfig(timeframe="1D", horizon_grid=(1, 2, 3))
         rep = config_report(None, alpha, RuleDiscoveryConfig(),
                             ctx=_ctx(timeframe="1D"))
-        msg = _message(rep, "timeframe_mismatch")
-        assert "target_h" in msg and "giorni" in msg
+        assert "timeframe_mismatch" not in _codes(rep)
 
-        # Chosen values are the caller's business.
+        bp = rep.configs["rule_discovery"].base_params
+        assert bp.target_h == 10        # top of the daily horizon class
+        assert bp.buy_delay_bar == 1    # 6 hours of live limit order, in days
+
+        # Chosen values are still the caller's business.
         chosen = RuleDiscoveryConfig(
-            base_params=BacktestParams(target_h=3, buy_delay_bar=1))
+            base_params=BacktestParams(target_h=3, buy_delay_bar=2))
+        out = config_report(None, alpha, chosen, ctx=_ctx(timeframe="1D"))
+        assert out.configs["rule_discovery"].base_params.target_h == 3
+        assert out.configs["rule_discovery"].base_params.buy_delay_bar == 2
+
+    def test_hourly_sessions_keep_the_values_they_always_had(self):
+        """The conversion is calibrated *on* 1H, so an hourly session is a
+        no-op — which is what makes the change safe to land."""
+        rep = config_report(None, AlphaConfig(timeframe="1H"),
+                            RuleDiscoveryConfig(),
+                            market_context=MarketContextConfig(),
+                            ctx=_ctx(timeframe="1H"))
+        bp = rep.configs["rule_discovery"].base_params
+        assert (bp.target_h, bp.buy_delay_bar) == (24, 6)
+        assert rep.configs["market_context"].stable_window == 12
+        assert rep.configs["alpha"].bars_per_day == pytest.approx(24.0)
+
+    def test_declared_timeframe_versus_measured_spacing(self):
+        """The third disagreement F5 names: the label says one thing and the
+        timestamps say another, with M2 scaling on the label and M0 on the
+        spacing."""
+        rep = config_report(None, None, None,
+                            ctx=_ctx(timeframe="1D", inferred_bar_hours=1.0))
+        msg = _message(rep, "timeframe_mismatch")
+        assert "24" in msg and "1h" in msg.lower()
+
+        # Agreement is silent, and so is a spacing that merely wobbles.
         assert "timeframe_mismatch" not in _codes(
-            config_report(None, alpha, chosen, ctx=_ctx(timeframe="1D")))
+            config_report(None, None, None,
+                          ctx=_ctx(timeframe="1D", inferred_bar_hours=24.0)))
+        assert "timeframe_mismatch" not in _codes(
+            config_report(None, None, None,
+                          ctx=_ctx(timeframe="1D", inferred_bar_hours=24.4)))
+
+    def test_an_undeclared_timeframe_is_not_a_contradiction(self):
+        """`forge(kpi)` with no timeframe inherits `"1H"`. Reporting that
+        against the data would be flagging a default nobody chose — the same
+        rule `_untouched_default` applies to the bar counts."""
+        assert "timeframe_mismatch" not in _codes(
+            config_report(None, None, None,
+                          ctx=_ctx(timeframe="1H", inferred_bar_hours=4.0,
+                                   timeframe_declared=False)))
+        # Declared, and it still disagrees: that is worth saying.
+        assert "timeframe_mismatch" in _codes(
+            config_report(None, None, None,
+                          ctx=_ctx(timeframe="1H", inferred_bar_hours=4.0)))
 
     def test_split_disagreement(self):
         disc = DiscoveryConfig(train_ratio=0.8)
@@ -516,3 +564,50 @@ class TestForgeStrict:
                            run_registry=False, fast_null=False, progress=False,
                            **self._incoherent())
         assert result.coherence.has_critical
+
+
+class TestBarDurationHasOneSource:
+    """F5 (#179) — the conversion and the measurement, one each."""
+
+    def test_the_conversion_is_not_reimplemented_by_the_presets(self):
+        """`_TFClass` used to carry its own `bars_per_month` / `bars_per_day`
+        arithmetic next to the context's."""
+        from forgedge.presets import _TFClass
+
+        for tf in ("1D", "4H", "1H", "15m"):
+            ctx = PipelineContext(timeframe=tf)
+            t = _TFClass(tf)
+            assert t.bars_per_month == pytest.approx(ctx.bars_per_month)
+            assert t.bars_per_day == max(1, round(ctx.bars_per_day))
+
+    def test_the_measurement_is_shared_by_the_modules_that_need_it(self):
+        """M0 and M2 each measured the spacing themselves, with the context
+        making a third copy. They now call the same function."""
+        import pandas as pd
+        from forgedge.resolver import measure_bar_hours
+
+        for freq, hours in (("1h", 1.0), ("4h", 4.0), ("D", 24.0), ("15min", 0.25)):
+            df = pd.DataFrame({
+                "open_dt": pd.date_range("2024-01-01", periods=50, freq=freq),
+                "close": range(50),
+            })
+            assert measure_bar_hours(df) == pytest.approx(hours)
+            # ...and off a DatetimeIndex, which is the other accepted shape.
+            assert measure_bar_hours(df.set_index("open_dt")) == pytest.approx(hours)
+
+    def test_no_measurement_reads_as_none_never_as_zero(self):
+        import pandas as pd
+        from forgedge.resolver import measure_bar_hours
+
+        assert measure_bar_hours(pd.DataFrame({"close": [1, 2, 3]})) is None
+        assert measure_bar_hours(pd.DataFrame({"open_dt": pd.to_datetime(["2024-01-01"])})) is None
+
+    def test_a_gap_does_not_move_the_measurement(self):
+        """Median, not mean: exchange downtime leaves the answer alone."""
+        import pandas as pd
+        from forgedge.resolver import measure_bar_hours
+
+        stamps = list(pd.date_range("2024-01-01", periods=40, freq="1h"))
+        stamps += list(pd.date_range("2024-02-01", periods=40, freq="1h"))
+        df = pd.DataFrame({"open_dt": stamps, "close": range(80)})
+        assert measure_bar_hours(df) == pytest.approx(1.0)

@@ -264,7 +264,7 @@ print(cfg["classifier"]["resolved_thresholds"])
 | `window_unit` | `"day"` | Unità per finestra/stride di stima OU (`"day"` o `"bar"`) |
 | `window_estimation` | `168.0` | Ampiezza della finestra di stima OU |
 | `window_stride` | `1.0` | Passo tra stime successive |
-| `bar_hours` | `None` | Durata candela in ore (override esplicito; se None, inferita da DatetimeIndex) |
+| `bar_hours` | *risolto da `timeframe`* | Durata candela in ore. Risolto a livello di sessione; senza sessione viene inferita dal DatetimeIndex (#179) |
 | `fast_ratio` | `1/2.3` | Rapporto span veloce/lento per derivazione auto |
 | `min_window_estimates` | `10` | Stime OU convergenti minime richieste per considerare valida la derivazione |
 
@@ -275,7 +275,7 @@ print(cfg["classifier"]["resolved_thresholds"])
 | `classifier` | `"ema_proxy"` | Implementazione del classificatore (solo `"ema_proxy"` disponibile in v0.1.0) |
 | `ema_proxy` | `EMAProxyConfig()` | Parametri per `EMAProxyClassifier` |
 | `labels` | `DEFAULT_LABELS` | Etichette di regime ordinate (da più bearish a più bullish) |
-| `stable_window` | `12` | Barre consecutive richieste per `regime_stable=True` |
+| `stable_window` | *risolto: 12h, minimo 2 barre* | Barre consecutive richieste per `regime_stable=True`. 12 su 1H, 3 su 4H, 2 su 1D, 48 su 15m — un 12 fisso chiedeva dodici *giorni* su candele daily (#179) |
 
 ---
 

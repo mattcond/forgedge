@@ -30,7 +30,7 @@ regime thresholds, and adaptive calibration.
 | `window_unit` | str | `"day"` | Unit for `window_estimation`/`window_stride`: `"day"` (calendar days) or `"bar"` (candles). |
 | `window_estimation` | float | `168` | Width of the EMA derivation window in the selected unit. 168 days ≈ 24 weeks. |
 | `window_stride` | float | `1` | Step between successive estimates, in the same unit. |
-| `bar_hours` | float \| None | `None` | Explicit candle duration in hours (e.g. `4.0` for 4H bars). Inferred from DatetimeIndex when None. |
+| `bar_hours` | float \| None | *(resolved: from `timeframe`)* | Explicit candle duration in hours (e.g. `4.0` for 4H bars). Session-resolved; left unset without a session it is inferred from the DatetimeIndex. |
 | `fast_ratio` | float | `1/2.3 ≈ 0.435` | Fast-to-slow span ratio for automatic derivation. |
 | `min_window_estimates` | int | `10` | Minimum number of converging OU estimates to trust the automatic derivation. |
 
@@ -64,7 +64,7 @@ Top-level configuration container for Module 0.
 | `classifier` | str | `"ema_proxy"` | Classifier implementation. In v1.0 only `"ema_proxy"` is available. |
 | `ema_proxy` | EMAProxyConfig | `EMAProxyConfig()` | EMA-proxy classifier configuration. |
 | `labels` | list[str] | `["STRONG_BEAR","BEAR","NEUTRAL","BULL","STRONG_BULL"]` | Regime labels ordered from most bearish to most bullish. |
-| `stable_window` | int | `12` | Number of consecutive identical bars required for `regime_stable=True`. |
+| `stable_window` | int | *(resolved: 12h of unchanged regime, min 2 bars)* | Number of consecutive identical bars required for `regime_stable=True`. 12 on 1H, 3 on 4H, 2 on 1D, 48 on 15m — a flat 12 asked for twelve *days* on daily candles. |
 
 ```python
 from forgedge import MarketContext, MarketContextConfig, EMAProxyConfig
@@ -243,7 +243,7 @@ IS/OOS split, and traceability metadata.
 | `use_stable_regime_only` | bool | `False` | When True, excludes bars with `regime_stable=False` from per-regime analysis. |
 | `min_regime_obs` | int | `10` | Minimum observations per regime to compute reliable per-regime metrics. |
 | `rolling_ic_window` | int \| None | `None` | Rolling IC window size. When None, computed automatically (≈ n/20). |
-| `bars_per_day` | float \| None | `None` | Bars per day for Deflated Sharpe computation. When None, derived from the timestamp. |
+| `bars_per_day` | float \| None | *(resolved: from `timeframe`)* | Bars per day, sizing the default rolling-IC window. Session-resolved; left unset without a session it is inferred from the timestamps. |
 | `score_weights` | tuple[float,...] | `(0.20, 0.25, 0.15, 0.25, 0.15)` | Composite score weights (IC, lift, Cohen's d, z, regime breadth). A legacy 4-tuple (IC, lift, Cohen's d, breadth) is also accepted. |
 | `statistically_weak_penalty` | float | `0.6` | Composite-score multiplier when the target is `statistically_weak`. `1.0` disables it. |
 | `oos_bonus` | float | `0.05` | Additive composite-score bonus when the OOS confirmation passes. `0.0` disables it. |
@@ -308,10 +308,10 @@ entry/exit levels, and fee.
 | `direction` | str | `"long"` | Trade direction: `"long"` or `"short"`. Normally derived from the AlphaContract. |
 | `buy_type` | str | `"limit"` | Entry order type. In v1.0 only `"limit"` is supported. |
 | `buy_drop_pct` | float | `0.010` | Percentage drop below close at which the limit order is placed (1%). |
-| `buy_delay_bar` | int | `6` | Maximum number of bars after the event signal in which the limit can be filled. |
+| `buy_delay_bar` | int | *(resolved: 6h of live order)* | Bars the limit order stays live. 6 on 1H, 2 on 4H, 1 on 1D, 24 on 15m — a flat 6 left the order resting six *days* on daily candles. |
 | `buy_price_anchor` | str | `"close"` *(session-resolved)* | Column the limit offset is applied to: `buy_price = anchor × (1 ∓ buy_drop_pct)`. **Any numeric column is legal**, including a derived indicator — `buy_price_anchor="close_sma_3", buy_drop_pct=0.10` means "a limit at 90% of the 3-bar SMA". Filled in from `close_col` so that renaming the price column carries the *default* anchor along; an explicit anchor is a reference level of its own and does **not** redefine the session's price column. |
 | `sell_pct` | float | `0.040` | Take-profit as percentage from fill price (4%). |
-| `target_h` | int | `24` | Horizon stop in bars: if take-profit is not reached within this number of bars, close at that bar's close. |
+| `target_h` | int | *(resolved: top of the session's horizon class)* | Horizon stop in bars: if take-profit is not reached within this number of bars, close at that bar's close. 24 on hourly, 10 on daily, 50 on sub-hourly — class-calibrated like `horizon_grid`, not wall-clock converted. Normally seeded from the contract's `holding_period_h` before this applies. |
 | `target_col` | str | `"close"` *(session-resolved)* | Column used to check horizon stop. Must name the same series `close_col` does; a disagreement is reported. |
 | `target_hit_col` | str | `"close"` | Column used to check take-profit hit. |
 | `fee` | float | `0.002` *(session-resolved)* | Per-side fee (0.2%), derived from `AlphaConfig.fee_per_side`. |

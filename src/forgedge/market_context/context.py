@@ -19,6 +19,8 @@ from typing import Optional
 
 import pandas as pd
 
+from ..resolver import measure_bar_hours
+from ..unset import is_set
 from .ema_proxy import EMAProxyClassifier
 from .hurst import derive_ema_windows
 from .models import (
@@ -79,7 +81,8 @@ class MarketContext:
         classifier: Optional[RegimeClassifier] = None,
     ):
         self.df = kpi_table
-        self.config = config or MarketContextConfig()
+        # The one chokepoint where M0's session-resolved fields become values.
+        self.config = (config or MarketContextConfig()).resolved()
         self.classifier = classifier or build_classifier(self.config)
         self._result: Optional[pd.DataFrame] = None
         # Populated by run() when the EMA windows are resolved from the data.
@@ -249,23 +252,16 @@ class MarketContext:
         ValueError
             If the duration cannot be determined and was not provided.
         """
-        if ema_cfg.bar_hours is not None:
+        # `is_set` rather than `is not None`: the field carries UNSET by
+        # default now, and both it and an explicit None mean "measure it".
+        if is_set(ema_cfg.bar_hours) and ema_cfg.bar_hours is not None:
             return float(ema_cfg.bar_hours)
 
-        idx = self.df.index
-        candidates = []
-        if isinstance(idx, pd.DatetimeIndex):
-            candidates.append(pd.Series(idx))
-        else:
-            for col in self.df.columns:
-                if pd.api.types.is_datetime64_any_dtype(self.df[col]):
-                    candidates.append(self.df[col])
-                    break
-
-        for ts in candidates:
-            delta = ts.diff().dt.total_seconds().median()
-            if delta and delta > 0:
-                return float(delta) / 3600.0
+        # One measurement, shared with the session context and Alpha
+        # Discovery, rather than a third private copy (F5, #179).
+        measured = measure_bar_hours(self.df)
+        if measured is not None:
+            return measured
 
         raise ValueError(
             "window_unit='day' needs the candle duration: provide a "

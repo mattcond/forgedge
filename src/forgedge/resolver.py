@@ -83,6 +83,7 @@ __all__ = [
     "resolve_config",
     "collect_context",
     "timeframe_minutes",
+    "measure_bar_hours",
     "poisson_min_window",
 ]
 
@@ -99,6 +100,42 @@ _UNIT_MINUTES = {
     "d": 1440, "D": 1440,
     "w": 10080, "W": 10080,
 }
+
+
+def measure_bar_hours(frame, timestamp_col: str = "open_dt") -> Optional[float]:
+    """Measure the candle duration in hours from a frame's own timestamps.
+
+    The counterpart to :func:`timeframe_minutes`: that one reads the
+    *declared* bar size, this one the observed one.  Both live here so the
+    two questions have one answer each, instead of M0, M2 and the session
+    context each measuring their own (F5, #179).
+
+    Uses the **median** spacing — a gap (exchange downtime, a missing candle)
+    moves a mean and leaves a median alone.  Returns ``None`` when the frame
+    carries no usable timestamps, which callers read as "no measurement",
+    never as "zero".
+    """
+    import pandas as pd
+
+    stamps = None
+    if isinstance(getattr(frame, "index", None), pd.DatetimeIndex):
+        stamps = pd.Series(frame.index)
+    elif timestamp_col in getattr(frame, "columns", ()):
+        stamps = pd.to_datetime(frame[timestamp_col], errors="coerce")
+    else:
+        for col in getattr(frame, "columns", ()):
+            if pd.api.types.is_datetime64_any_dtype(frame[col]):
+                stamps = frame[col]
+                break
+    if stamps is None:
+        return None
+    stamps = stamps.dropna()
+    if len(stamps) < 2:
+        return None
+    delta = stamps.diff().dt.total_seconds().median()
+    if not delta or delta <= 0:
+        return None
+    return float(delta) / 3600.0
 
 
 def timeframe_minutes(timeframe: str) -> int:
@@ -201,6 +238,15 @@ class PipelineContext:
     timeframe : str
         Bar size, e.g. ``"1D"``, ``"4H"``, ``"15m"``.  The single declared
         source of bar duration for the session.
+    timeframe_declared : bool
+        Whether ``timeframe`` was chosen by the caller or inherited from a
+        default.  Constructing a context by hand *is* a declaration, so this
+        is ``True`` here; :func:`forgedge.forge` sets it ``False`` when its
+        own ``timeframe`` argument was omitted.  Only the declared-versus-
+        measured check reads it: an inherited default that disagrees with the
+        data is not a contradiction, it is a default nobody has looked at yet,
+        and the same "flag what was moved, not what was inherited" rule the
+        other checks follow applies (F5, #179).
     timestamp_col, close_col, regime_col, regime_stable_col : str
         The KPI table's schema, propagated to every module that needs it.
     fee_per_side : float
@@ -225,9 +271,18 @@ class PipelineContext:
         here for the same reason.
     n_bars, span_months : int, float
         Data facts.  **Read by check mode only.**
+    inferred_bar_hours : float or None
+        Bar duration measured from the timestamp spacing, when the frame
+        carried timestamps.  A data fact like the two above, and readable on
+        the same terms: derive mode uses ``timeframe`` — the *declared* fact —
+        so that :func:`resolve` stays total without data, and check mode
+        compares the two and reports a disagreement (F5).  ``None`` when the
+        context was not built from a frame, or the frame had no usable
+        timestamps.
     """
 
     timeframe: str = "1H"
+    timeframe_declared: bool = True
     # schema
     timestamp_col: str = "open_dt"
     close_col: str = "close"
@@ -244,6 +299,7 @@ class PipelineContext:
     # data facts — check mode only
     n_bars: int = 0
     span_months: float = 0.0
+    inferred_bar_hours: Optional[float] = None
 
     # -- bar arithmetic ------------------------------------------------
 
@@ -278,14 +334,23 @@ class PipelineContext:
         """Build a context from a KPI table, filling the data facts.
 
         Reads the timestamp source once — a ``DatetimeIndex`` or the
-        ``timestamp_col`` column — to populate ``n_bars`` and ``span_months``.
-        Every other field comes from ``overrides`` or the class default.
+        ``timestamp_col`` column — to populate ``n_bars``, ``span_months`` and
+        ``inferred_bar_hours``.  Every other field comes from ``overrides`` or
+        the class default.
+
+        The bar duration is measured here rather than left to each module
+        because it is a session fact, and because three modules were inferring
+        it independently with no one reconciling the answers (F5).  Measuring
+        it does not make it authoritative: ``timeframe`` stays the declared
+        source that derivation reads, and the measurement exists so a
+        disagreement can be *reported*.
         """
         import pandas as pd
 
         timestamp_col = overrides.get("timestamp_col", cls.timestamp_col)
         n_bars = int(len(frame))
         span_months = 0.0
+        inferred_bar_hours = None
         stamps = None
         if isinstance(getattr(frame, "index", None), pd.DatetimeIndex):
             stamps = pd.Series(frame.index)
@@ -295,8 +360,9 @@ class PipelineContext:
             s = stamps.dropna()
             span_days = (s.iloc[-1] - s.iloc[0]).total_seconds() / 86400.0
             span_months = max(span_days / 30.0, 0.0)
+            inferred_bar_hours = measure_bar_hours(frame, timestamp_col)
         return cls(timeframe=timeframe, n_bars=n_bars, span_months=span_months,
-                   **overrides)
+                   inferred_bar_hours=inferred_bar_hours, **overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +712,74 @@ def _derive_pf_min_tpm(values: Dict[str, Any], ctx: PipelineContext):
     return value, f"criteria.min_tpm={value:g} — the same rate the gate demands"
 
 
+# ── F5 (#179): fields that mean "N bars" follow the session's bar ──────
+#
+# Three of these carried a count calibrated on ~hourly candles and nothing
+# converted it, so on daily data `buy_delay_bar=6` left a limit order resting
+# for six *days* and `stable_window=12` demanded twelve days of unchanged
+# regime.  Measured on the reference 1D fixture: 100% of published rules on
+# the first, 31.9% of bars marked stable on the second.
+#
+# Two conversions, deliberately different, because the questions are:
+#
+#   wall-clock  — an order rests for a duration, a regime persists for a
+#                 duration.  Convert the hours and floor at a bar.
+#   class       — a *holding period* is calibrated per class, which is what
+#                 `AlphaConfig.horizon_grid` already does: hourly sessions
+#                 scan to 24 hours, daily ones to 10 days.  Converting 24
+#                 hours into daily bars gives 1, which asks something else.
+
+def _hourly_bars_to_session(hourly_bars: float, ctx: PipelineContext,
+                            *, floor: int = 1) -> int:
+    """Reinterpret a count calibrated on 1H candles at this session's bar."""
+    return max(floor, int(round(hourly_bars / ctx.bar_hours)))
+
+
+def _derive_buy_delay_bar(values: Dict[str, Any], ctx: PipelineContext):
+    """How long the limit order rests — 6 hours, in this session's bars."""
+    value = _hourly_bars_to_session(6, ctx)
+    return value, (f"6 ore di ordine limite vive, che a {ctx.timeframe} valgono "
+                   f"{value} barr{'a' if value == 1 else 'e'}")
+
+
+def _derive_target_h(values: Dict[str, Any], ctx: PipelineContext):
+    """The holding horizon — top of the session's horizon class.
+
+    Normally overwritten by ``_seed_base_params`` from the contract's
+    ``holding_period_h``; this is the value that applies when there is no
+    contract target to seed from.
+    """
+    from .presets import _TFClass
+
+    grid = _TFClass(ctx.timeframe).horizon_grid
+    value = int(max(grid))
+    return value, (f"cima della griglia di orizzonti per {ctx.timeframe} "
+                   f"({grid}) — la stessa calibrazione di alpha.horizon_grid")
+
+
+def _derive_stable_window(values: Dict[str, Any], ctx: PipelineContext):
+    """Bars of unchanged regime — 12 hours, floored at 2.
+
+    At 1 bar every bar is stable and the field stops meaning anything, so the
+    floor is 2 rather than 1.
+    """
+    value = _hourly_bars_to_session(12, ctx, floor=2)
+    return value, (f"12 ore di regime invariato, che a {ctx.timeframe} valgono "
+                   f"{value} barre (minimo 2: a 1 ogni barra è stabile)")
+
+
+def _derive_bars_per_day(values: Dict[str, Any], ctx: PipelineContext):
+    """M2 sized its rolling-IC window from spacing it measured itself."""
+    value = float(ctx.bars_per_day)
+    return value, f"{ctx.timeframe} = {value:g} barre/giorno"
+
+
+def _derive_ema_bar_hours(values: Dict[str, Any], ctx: PipelineContext):
+    """M0 read the candle duration off the timestamps, alone, every run."""
+    value = float(ctx.bar_hours)
+    return value, f"{ctx.timeframe} = {value:g} ore/barra"
+
+
 def _derive_min_train_months(values: Dict[str, Any], ctx: PipelineContext):
     """#173 — the selection window sized to the rate it is about to demand.
 
@@ -731,6 +865,47 @@ CONSTRAINTS: List[Constraint] = [
         free=(),
         derived="rule_discovery.scoring.pf_min_trades",
         derive=lambda v, ctx: (15, "documented scoring.pf_min_trades default 15"),
+    ),
+    # ── #179 (F5): every "N bars" field follows the session's bar ──────
+    Constraint(
+        code="timeframe_mismatch",
+        level="WARN",
+        stage=PROPAGATION,
+        free=(),
+        derived="rule_discovery.base_params.buy_delay_bar",
+        derive=_derive_buy_delay_bar,
+    ),
+    Constraint(
+        code="timeframe_mismatch",
+        level="WARN",
+        stage=PROPAGATION,
+        free=(),
+        derived="rule_discovery.base_params.target_h",
+        derive=_derive_target_h,
+    ),
+    Constraint(
+        code="timeframe_mismatch",
+        level="WARN",
+        stage=PROPAGATION,
+        free=(),
+        derived="market_context.stable_window",
+        derive=_derive_stable_window,
+    ),
+    Constraint(
+        code="timeframe_mismatch",
+        level="WARN",
+        stage=PROPAGATION,
+        free=(),
+        derived="market_context.ema_proxy.bar_hours",
+        derive=_derive_ema_bar_hours,
+    ),
+    Constraint(
+        code="timeframe_mismatch",
+        level="WARN",
+        stage=PROPAGATION,
+        free=(),
+        derived="alpha.bars_per_day",
+        derive=_derive_bars_per_day,
     ),
     # ── #173: the selection window has to fit the rate it demands ─────
     Constraint(
@@ -978,8 +1153,6 @@ def _untouched_default(path: str, value: Any) -> bool:
     than ``UNSET``, so the class is the only place to read them from.
     """
     lazy = {
-        "rule_discovery.base_params.target_h": ("rule_discovery.models", "BacktestParams", "target_h"),
-        "rule_discovery.base_params.buy_delay_bar": ("rule_discovery.models", "BacktestParams", "buy_delay_bar"),
         "alpha.horizon_grid": ("alpha_discovery.models", "AlphaConfig", "horizon_grid"),
     }
     spec = lazy.get(path)
@@ -993,13 +1166,23 @@ def _untouched_default(path: str, value: Any) -> bool:
 
 
 def _check_timeframe(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
-    """F5 — the declared timeframe versus the bar counts configured against it.
+    """F5 — the declared bar duration versus everything measured against it.
 
-    Bar-count fields are only flagged when they still hold their **hourly**
-    class default on a slower timeframe: ``target_h=24`` means 24 hours on 1H
-    and 24 *days* on 1D, and a caller who wrote 24 deliberately does not need
-    telling.  This is the check ``forge()`` already performs for
-    ``horizon_grid``, generalised to the two M3 fields that never got it.
+    Three things can disagree about how long a bar is, and this reports all
+    three (#179):
+
+    * the session's ``timeframe`` and ``AlphaConfig.timeframe``, which used to
+      be documented as traceability metadata while both ``forge()`` and
+      ``forge_preset()`` scaled real parameters off it;
+    * the declared ``timeframe`` and the spacing actually **measured** on the
+      table — a data fact, hence check mode only.  Declaring ``"1D"`` over
+      hourly candles silently made M2 scale on the declaration and M0 on the
+      measurement, with nothing comparing the two;
+    * an hourly-calibrated ``horizon_grid`` default reaching daily data.
+
+    The two M3 bar counts used to be flagged here too.  They are derived from
+    the session now, so there is nothing left to warn about: a converted value
+    is not a mismatch.
     """
     problems = []
     declared = values.get("alpha.timeframe", _MISSING)
@@ -1008,18 +1191,19 @@ def _check_timeframe(values: Dict[str, Any], ctx: PipelineContext) -> Optional[s
             f"AlphaConfig.timeframe={declared!r} ma la sessione dichiara "
             f"{ctx.timeframe!r}: i due scalano parametri diversi")
 
+    measured = ctx.inferred_bar_hours
+    if ctx.timeframe_declared and measured is not None and measured > 0:
+        # 5% — comfortably inside DST shifts and a missing candle or two,
+        # far outside a genuine 1H-vs-1D confusion.
+        if abs(measured - ctx.bar_hours) > 0.05 * ctx.bar_hours:
+            problems.append(
+                f"timeframe={ctx.timeframe!r} dichiara barre da "
+                f"{ctx.bar_hours:g}h ma la spaziatura dei timestamp misura "
+                f"{measured:.4g}h: i conteggi in barre sono scalati sul "
+                f"dichiarato e i dati sono un'altra cosa")
+
     if ctx.bar_minutes > 60:
         bars_per_day = ctx.bars_per_day
-        for path, label in (
-            ("rule_discovery.base_params.target_h", "BacktestParams.target_h"),
-            ("rule_discovery.base_params.buy_delay_bar", "BacktestParams.buy_delay_bar"),
-        ):
-            v = values.get(path, _MISSING)
-            if v is _MISSING or not is_set(v) or not _untouched_default(path, v):
-                continue
-            problems.append(
-                f"{label}={v:g} è il default tarato su barre orarie, e a "
-                f"{ctx.timeframe} vale {float(v) / bars_per_day:.0f} giorni")
         grid = values.get("alpha.horizon_grid", _MISSING)
         if (grid is not _MISSING and is_set(grid) and len(grid)
                 and _untouched_default("alpha.horizon_grid", grid)):

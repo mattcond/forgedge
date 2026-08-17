@@ -1941,8 +1941,24 @@ class TestContractSeeding:
         assert params.target_h == 0
 
     def test_a_missing_horizon_still_falls_back(self):
+        """No contract horizon to seed from, so the config's own value stands.
+
+        `target_h` is session-resolved since #179, so the class default is the
+        sentinel; a config that never went through `resolve()` falls back to
+        the hourly calibration at the `.resolved()` chokepoint, which is what
+        this path used to hold unconditionally.
+        """
         params = self._seed(RuleDiscoveryConfig(), holding_h=None, sell_pct=0.03)
-        assert params.target_h == BacktestParams().target_h
+        assert params.target_h == BacktestParams().resolved().target_h == 24
+
+    def test_the_horizon_falls_back_to_the_session_when_there_is_one(self):
+        """Under `forge()` the resolver has already written the converted
+        value, so the fallback is the session's, not the hourly one."""
+        cfg = resolve_config(RuleDiscoveryConfig(), "rule_discovery",
+                             PipelineContext(timeframe="1D"))
+        params = self._seed(cfg, holding_h=None, sell_pct=0.03)
+        assert params.target_h == 10          # top of the daily horizon class
+        assert params.buy_delay_bar == 1      # 6 hours of live order, in days
 
     def test_the_take_profit_floor_is_m2s(self):
         """F11 — the clamp was a hardcoded `max(0.01, sell_pct)` while
@@ -2069,3 +2085,69 @@ class TestConsistencyIsScaleFree:
         s = _summarise_from_frame(df)          # hands `_summarise` a bare ScoringParams
         assert math.isfinite(s.pf_score_tpm)
         assert s.c_norm == pytest.approx(self._c_norm(s.tpm_mu, s.tpm_sigma), abs=1e-6)
+
+
+class TestBarCountsFollowTheSession:
+    """F5 (#179) — a field that means "N bars" has to know how long a bar is.
+
+    `buy_delay_bar=6` and `target_h=24` were calibrated on hourly candles and
+    nothing converted them, so a daily session left every limit order resting
+    for six *days*. Measured on the reference 1D fixture before the fix: 100%
+    of the published rules.
+    """
+
+    @staticmethod
+    def _params(timeframe):
+        cfg = resolve_config(RuleDiscoveryConfig(), "rule_discovery",
+                             PipelineContext(timeframe=timeframe))
+        return cfg.base_params
+
+    def test_the_order_rests_for_a_duration_not_a_bar_count(self):
+        """Six hours of live limit order, whatever a bar happens to be."""
+        assert self._params("1H").buy_delay_bar == 6
+        assert self._params("4H").buy_delay_bar == 2
+        assert self._params("1D").buy_delay_bar == 1
+        assert self._params("15m").buy_delay_bar == 24
+
+    def test_the_holding_horizon_is_class_calibrated_not_converted(self):
+        """The other half of F5, and deliberately a *different* rule.
+
+        Converting "24 hours" into daily bars gives 1, which asks a different
+        question — an hourly session scans up to 24 hours and a daily one up
+        to 10 days. This is the calibration `AlphaConfig.horizon_grid` already
+        uses, so the fallback agrees with the source it normally comes from.
+        """
+        assert self._params("1H").target_h == 24
+        assert self._params("1D").target_h == 10
+        assert self._params("15m").target_h == 50
+        # ...which is the top of the grid M2 scans at the same timeframe.
+        from forgedge.presets import _TFClass
+        for tf in ("1H", "1D", "15m"):
+            assert self._params(tf).target_h == max(_TFClass(tf).horizon_grid)
+
+    def test_an_hourly_session_is_unchanged(self):
+        """The calibration point. Nothing moves on 1H, which is what makes
+        this safe to land on top of eight previous steps."""
+        p = self._params("1H")
+        assert (p.target_h, p.buy_delay_bar) == (24, 6)
+
+    def test_the_sentinel_is_spent_at_the_backtest_boundary(self):
+        """A hand-built `BacktestParams` never sees the resolver, so
+        `fill_rn + UNSET` would raise. `.resolved()` falls back to the hourly
+        calibration — the old behaviour, not a second opinion about a session
+        that was never declared."""
+        raw = BacktestParams(buy_type="market", sell_pct=0.05)
+        assert raw.target_h is UNSET and raw.buy_delay_bar is UNSET
+        assert raw.resolved().target_h == 24
+        assert raw.resolved().buy_delay_bar == 6
+
+        df = _candle_with_signal(n=1200, signal_every=40, drift_after_signal=0.05)
+        s = run_backtest(df, "__sig__", raw)
+        assert s.total_trades > 0
+
+    def test_the_grid_fan_resolves_its_base(self):
+        """`build_grid` does arithmetic on the base values, so it is the other
+        place the sentinel has to be spent."""
+        spec = build_grid(GridSpec(), BacktestParams())
+        assert spec.target_h and all(isinstance(h, int) for h in spec.target_h)
+        assert spec.buy_delay_bar == [6]

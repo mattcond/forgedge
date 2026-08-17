@@ -76,7 +76,7 @@ from .models import (
     RegimeStat,
 )
 from ..timebudget import TimeBudget
-from ..resolver import resolve_config
+from ..resolver import measure_bar_hours, resolve_config
 from .target import (
     forward_log_returns,
     forward_returns,
@@ -1459,13 +1459,15 @@ class AlphaDiscovery:
         return max(2, int(round(60 * bpd)))
 
     def _infer_bars_per_day(self) -> float:
-        """Infer bars-per-day from the median index spacing (fallback 24)."""
-        idx = self._frame.index
-        if isinstance(idx, pd.DatetimeIndex) and len(idx) > 1:
-            delta = pd.Series(idx).diff().dt.total_seconds().median()
-            if delta and delta > 0:
-                return 86400.0 / float(delta)
-        return 24.0
+        """Infer bars-per-day from the median timestamp spacing (fallback 24).
+
+        Only reached without a session: under :func:`forgedge.forge` the
+        resolver has already written ``config.bars_per_day`` from the declared
+        timeframe.  The measurement itself is the shared one, not a third
+        private copy (F5, #179).
+        """
+        measured = measure_bar_hours(self._frame, self.config.timestamp_col)
+        return 24.0 / measured if measured else 24.0
 
     def _alpha_id(self, idx: int) -> str:
         cfg = self.config

@@ -49,8 +49,10 @@ from forgedge import (
 )
 from forgedge.event_discovery.discovery import MIN_FOLD_LAMBDA
 from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
+from forgedge.market_context.models import MarketContextConfig
 from forgedge.presets import _TFClass, forge_preset
 from forgedge.resolver import PipelineContext, resolve_config
+from forgedge.rule_discovery.models import RuleDiscoveryConfig
 
 PARQUET = os.environ.get("FORGEDGE_PARQUET", "tests/fixtures/ADA_1D_TRAIN.parquet")
 
@@ -95,6 +97,21 @@ def stage_rates() -> None:
         print(f"  M3 ScoringParams.pf_min_tpm    {sc.pf_min_tpm:8.2f}          "
               f"[resolved from criteria.min_tpm — #178]")
         print(f"  M3 criteria.min_oos_trades     {cr.min_oos_trades:8d}          [ABSOLUTE — not scaled]")
+
+    print("\n" + "=" * 78)
+    print("  LATENT PARAMETER: bar duration — the fields that mean \"N bars\"")
+    print("=" * 78)
+    print(f"  {'timeframe':>9}  {'bar_hours':>9}  {'buy_delay_bar':>13}  "
+          f"{'target_h':>9}  {'stable_window':>13}  {'bars_per_day':>12}")
+    for tf in ("1D", "4H", "1H", "15m"):
+        ctx = PipelineContext(timeframe=tf)
+        rd = resolve_config(RuleDiscoveryConfig(), "rule_discovery", ctx)
+        mc = resolve_config(MarketContextConfig(), "market_context", ctx)
+        print(f"  {tf:>9}  {ctx.bar_hours:9.2f}  {rd.base_params.buy_delay_bar:13d}  "
+              f"{rd.base_params.target_h:9d}  {mc.stable_window:13d}  "
+              f"{ctx.bars_per_day:12.2f}")
+    print("  before #179 every column but the first was frozen at its 1H value,")
+    print("  so a daily session rested its limit orders for six *days* (F5)")
 
     print("\n" + "=" * 78)
     print("  pf_score_tpm = PF × c_norm — the selection objective, on a *Poisson*")

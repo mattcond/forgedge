@@ -569,15 +569,19 @@ class TestForgeResolution:
     """
 
     def test_result_carries_the_context_and_the_trace(self):
+        # `_ohlc_kpi_table` is 4H-spaced, and since #179 declaring anything
+        # else here would (correctly) raise `timeframe_mismatch`.
         kpi = _ohlc_kpi_table(n=900, seed=3)
         result = forge(
-            kpi, ticker="X", timeframe="1D",
+            kpi, ticker="X", timeframe="4H",
             event_discovery_config=_FAST_ED_CONFIG,
             run_rule_discovery=False, run_registry=False,
             fast_null=False, progress=False,
         )
         assert result.context is not None
-        assert result.context.timeframe == "1D"
+        assert result.context.timeframe == "4H"
+        assert result.context.timeframe_declared
+        assert result.context.inferred_bar_hours == pytest.approx(4.0)
         assert result.context.n_bars == len(kpi)
         assert result.context.span_months > 0
         assert result.resolution is not None

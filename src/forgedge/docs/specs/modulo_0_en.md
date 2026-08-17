@@ -260,7 +260,7 @@ print(cfg["classifier"]["resolved_thresholds"])
 | `window_unit` | `"day"` | Unit for OU estimation window/stride (`"day"` or `"bar"`) |
 | `window_estimation` | `168.0` | Width of the OU estimation window |
 | `window_stride` | `1.0` | Step between successive estimates |
-| `bar_hours` | `None` | Candle duration in hours (explicit override; if None, inferred from DatetimeIndex) |
+| `bar_hours` | *resolved from `timeframe`* | Candle duration in hours. Session-resolved; without a session it is inferred from the DatetimeIndex (#179) |
 | `fast_ratio` | `1/2.3` | Fast/slow span ratio for auto-derivation |
 | `min_window_estimates` | `10` | Minimum converging OU estimates required to trust the derivation |
 
@@ -271,7 +271,7 @@ print(cfg["classifier"]["resolved_thresholds"])
 | `classifier` | `"ema_proxy"` | Classifier implementation (only `"ema_proxy"` available in v0.1.0) |
 | `ema_proxy` | `EMAProxyConfig()` | Parameters for `EMAProxyClassifier` |
 | `labels` | `DEFAULT_LABELS` | Ordered regime labels (most bearish to most bullish) |
-| `stable_window` | `12` | Consecutive bars required for `regime_stable=True` |
+| `stable_window` | *resolved: 12h, min 2 bars* | Consecutive bars required for `regime_stable=True`. 12 on 1H, 3 on 4H, 2 on 1D, 48 on 15m — a flat 12 asked for twelve *days* on daily candles (#179) |
 
 ---
 
