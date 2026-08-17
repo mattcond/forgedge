@@ -566,6 +566,78 @@ consequences are #177's business; this is the measurement it needs.
 `concurrency` — for callers who want them directly.
 
 
+#### Nominal economics, effective inference
+
+The overlap the previous section measures has a consequence beyond capital
+sizing, and it is the one that changes verdicts.
+
+Overlapping trades share a price path, so they are **not independent
+observations**. Every quantity that makes a *confidence* statement was
+consuming the nominal trade count as if they were (F16):
+
+| quantity | before | now |
+|---|---|---|
+| `total_trades`, PF, expectancy, net gain | nominal | **nominal — this is the economics, untouched** |
+| t-test standard error and degrees of freedom | nominal | **effective** |
+| `deflated_sharpe`'s `n_obs` | nominal | **effective** |
+| `expectancy_mde` / the power gate | nominal | **effective** |
+
+`StatisticalValidation.n_effective` is `total_trades /
+mean_concurrent_positions`, measured from the ledger's own bar geometry rather
+than passed in — there is then no way to hand it a number describing a
+different set of trades. On the case in #168, 118 nominal trades against ≈32
+effective:
+
+```
+t-test:  t scales as sqrt(n)  →  overstated 1.93x
+         t=2.6 (p≈0.005) is really t=1.35 (p≈0.09)
+DSR:     n_obs 118 → 32 at n_trials=15, correction 0.820 → 0.741
+```
+
+The t-test is the serious channel: `max_ttest_p` is one of the three hard gates
+producing `NON-EDGE`, so the pipeline was admitting rules on overstated
+significance. The point estimates still use every trade — more observations do
+sharpen the estimate of a mean; what they do not do, when they overlap, is
+sharpen it as fast as `sqrt(n)`.
+
+When the ledger carries no bar geometry the correction cannot be computed, and
+the nominal count is used with `n_effective = nan` saying so. An unmeasured
+overlap is not evidence of no overlap, but inventing a correction would be
+worse than reporting the uncorrected number and admitting it.
+
+#### An unreachable floor is a window, not a verdict
+
+Three gates compared an absolute floor against a window whose length was fixed
+by unrelated parameters, while the arrival rate was fixed by a third. When
+`window x rate < floor`, **every** candidate fails by construction — and the
+pipeline reported that as a wall of rejections, indistinguishable from "the
+signal is bad".
+
+- **M3's trade floor** (`#173`). `min_train_months` is now derived from
+  `criteria.min_tpm` with a 95% Poisson margin: 20 months at the balanced
+  preset's daily rate, not a fixed 6. The naive `floor / rate` gives 12.5 and
+  comes up short about 44% of the time — the same bug in milder form. Where the
+  history cannot supply the derived window, `oos_span_too_short` says so and
+  carries the rate to set.
+- **M3's verdict**. Below the floor *with a span that could never have supplied
+  it*, the verdict is now `INSUFFICIENT-DATA`, not `NON-EDGE`. The rule is not
+  being judged; the window is.
+- **M1's folds** (F1). `GateParams.min_episodes` is an absolute count and was
+  applied verbatim to walk-forward folds, making the implicit rate requirement
+  inversely proportional to the fold's length — 5.1x stricter than in-sample on
+  the configuration this manual recommends for production, at which 0.7% of
+  fold evaluations passed. It is now in-sample only. A fold is *testable* when
+  its expected episode count reaches 3, where an empty fold has probability
+  `e^-3 = 5%` under "the candidate kept its rate"; below that the fold is
+  measuring its own brevity and is marked `INDETERMINATE`, excluded from the
+  denominator rather than counted as a failure. When no fold is testable,
+  `ValidationResult.passed` is `None` — inconclusive, not failed.
+
+  Measured on the same fixture: fold pass rate 0.7% → 54.2%, OOS-stable
+  candidates 0.5% → 52.4%, with the remaining failures attributed to rate and
+  dispersion — the criteria that were always meant to decide.
+
+
 #### Entry mode — what the verdict measures
 
 `entry_mode` defaults to **`"auto"`** (it was `"limit"` before #185), and the

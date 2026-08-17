@@ -342,7 +342,7 @@ Configura la validazione walk-forward OOS del Modulo 3. Prima si chiamava `WalkF
 | `n_splits` | int | `4` | Numero di finestre rolling train+test. |
 | `train_span_months` | int \| None | `None` | Ampiezza della finestra di training in mesi. Se None, calcolato automaticamente. |
 | `test_span_months` | int \| None | `None` | Ampiezza della finestra di test in mesi. Se None, calcolato automaticamente. |
-| `min_train_months` | int | `6` | Mesi minimi richiesti per la finestra di training. |
+| `min_train_months` | int | *derivato* *(risolto dalla sessione)* | Mesi minimi per la finestra di training — lo span su cui gira lo screen di early elimination. **Derivato da `criteria.min_tpm`** con margine di Poisson al 95 %, così la finestra può davvero fornire il floor di trade che sta per pretendere (#173): 20 mesi a `min_tpm=0.80`, non il vecchio 6 fisso. Il `floor / rate` ingenuo dà 12.5 e resta corto circa il 44 % delle volte. |
 | `reoptimise` | bool | `True` | Se True, riottimizza i parametri su ogni finestra di training. Se False, usa la configurazione IS fissa. |
 
 ---
@@ -358,6 +358,7 @@ Gate di promozione del Modulo 3. Definisce le condizioni per i verdetti `EDGE`, 
 | `min_tpm` | float | `2.0` | Frequenza media minima (trades/mese) per EDGE. È anche l'unico gate sul numero di trade: la soglia minima di trade eseguiti è dinamica, `max(10, n_months × min_tpm)`, e scala con la lunghezza dell'IS (spec RD-04) invece di una soglia assoluta fissa. |
 | `min_pf_score_tpm` | float | `0.30` | Score composito minimo PF×TPM per includere una configurazione nella selezione. |
 | `min_fill_rate` | float | `0.40` | Fill rate minimo del limit order: almeno il 40% degli eventi deve tradursi in un trade. |
+| `min_sell_pct` | float | `0.005` *(risolto dalla sessione)* | Floor operativo sul take-profit seminato dal target derivato del contratto. Risolto da `AlphaConfig.mfe_floor`; era un `max(0.01, …)` cablato dentro `_seed_base_params`, quindi il vincolo che legava era quello che il chiamante non poteva configurare (F11). |
 | `min_fill_rate_opt` | float | `0.80` | Prima condizione di adozione: il punto limite può essere pubblicato solo se fila ancora a ≥ 80% **fuori campione**, evitando il confound del fill-collasso. |
 | `min_net_gain_retention` | float | `0.5` *(risolto dalla sessione)* | Terza condizione di adozione: frazione del net gain OOS del punto market che il limite deve mantenere. Deliberatamente larga — è un backstop contro il caso di μ minuscolo e σ minuscolo, che lo Sharpe non vede perché è scale-free in μ. |
 | `partial_min_profit_factor` | float | `1.5` | PF IS minimo per PARTIAL-EDGE (non raggiunge EDGE ma non è NON-EDGE). |
