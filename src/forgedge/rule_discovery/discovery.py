@@ -47,7 +47,6 @@ Usage
 from __future__ import annotations
 
 import math
-import math
 import warnings
 from collections import Counter
 from dataclasses import replace
@@ -75,7 +74,12 @@ from .models import (
 )
 from ..resolver import resolve_config
 from ..unset import UNSET, coalesce, is_set
-from .validation import expectancy_mde, opportunity_sharpe, validate
+from .validation import (
+    _effective_sample,
+    expectancy_mde,
+    opportunity_sharpe,
+    validate,
+)
 from .walkforward import _fmt as _fmt_ts, selection_windows, walk_forward
 
 # RD-04 — the minimum executed-trade count is scaled to the in-sample length
@@ -817,12 +821,25 @@ class RuleDiscovery:
         overrides = {}
         if dt.direction in ("long", "short"):
             overrides["direction"] = dt.direction
-        if dt.holding_period_h and dt.holding_period_h > 0:
+        # `is not None`, not truthiness: `h*=0` is a legal derived horizon since
+        # #158 — a same-session round trip, exiting at the fill bar's own close
+        # — and the old guard dropped it onto `base_params.target_h`, the hourly
+        # default of 24.  A derived 0 became a silent 24 (F12).
+        if dt.holding_period_h is not None and dt.holding_period_h >= 0:
             overrides["target_h"] = int(dt.holding_period_h)
         if dt.sell_pct and np.isfinite(dt.sell_pct) and dt.sell_pct > 0:
             # The derived sell_pct is a mean-advantage baseline; clamp to a
             # sane operational floor so the target is reachable intrabar.
-            overrides["sell_pct"] = round(max(0.01, float(dt.sell_pct)), 4)
+            #
+            # The floor is `criteria.min_sell_pct`, resolved from
+            # `AlphaConfig.mfe_floor`.  It used to be a hardcoded `max(0.01, …)`
+            # while M2's own floor was 0.005: the stricter of the two was the
+            # one the user could not reach, and on intraday bars — where a
+            # target on median MFE routinely sits under 1% — it replaced the
+            # derived target with a constant, violating the pipeline's third
+            # invariant (F11).
+            floor = float(coalesce(cfg.criteria.min_sell_pct, default=0.005))
+            overrides["sell_pct"] = round(max(floor, float(dt.sell_pct)), 4)
         if overrides:
             notes.append(
                 f"seeded from contract target: "
@@ -984,18 +1001,39 @@ class RuleDiscovery:
         """
         cr = self.config.criteria
         reasons: List[str] = []
+        # Gates that failed because the *window* could not support the test, not
+        # because the rule did badly.  These produce INSUFFICIENT-DATA, never
+        # NON-EDGE (see the trade-floor block below).
+        underpowered: List[str] = []
 
         # Hard NON-EDGE gates — the rule is simply not operable / not real.
         if not (np.isfinite(s.profit_factor) and s.profit_factor >= cr.partial_min_profit_factor):
             reasons.append(
                 f"in-sample PF {s.profit_factor:.2f} < {cr.partial_min_profit_factor}"
             )
+        # The trade floor is a *window* statement, not a verdict on the rule.
+        #
+        # When `n_months × min_tpm` cannot reach the floor, no candidate can
+        # clear it — the selection span is simply too short to support the test,
+        # and calling that NON-EDGE blames the rule for the configuration
+        # (#173/#177).  M3 already has the honest answer for "the evidence
+        # cannot support a verdict": INSUFFICIENT-DATA.  Below the floor with a
+        # window that *could* have supplied it, the rule really did under-trade
+        # and NON-EDGE stands.
         min_trades = _dynamic_min_trades(s.n_months, cr.min_tpm)
+        window_too_short = s.n_months * cr.min_tpm < min_trades
         if s.total_trades < min_trades:
-            reasons.append(
-                f"total_trades {s.total_trades} < {min_trades} "
-                f"({s.n_months}mo × {cr.min_tpm} tpm)"
-            )
+            detail = (f"total_trades {s.total_trades} < {min_trades} "
+                      f"({s.n_months}mo × {cr.min_tpm} tpm)")
+            if window_too_short:
+                underpowered.append(
+                    detail + f" — the {s.n_months}-month selection span cannot "
+                    f"supply {min_trades} trades at criteria.min_tpm="
+                    f"{cr.min_tpm:g} however good the rule is; this is a window "
+                    f"length, not a verdict (#173)"
+                )
+            else:
+                reasons.append(detail)
         if stat_val is not None and not (
             np.isfinite(stat_val.ttest_expectancy_p)
             and stat_val.ttest_expectancy_p < cr.max_ttest_p
@@ -1012,6 +1050,8 @@ class RuleDiscovery:
 
         if reasons:
             return "NON-EDGE", reasons
+        if underpowered:
+            return "INSUFFICIENT-DATA", underpowered
 
         # Full-EDGE requirements.
         edge_block: List[str] = []
@@ -1100,7 +1140,11 @@ class RuleDiscovery:
                 "individual windows are never gated)"
             ]
         net = oos["net_pct_gain"].to_numpy(dtype=float)
-        mde = expectancy_mde(net)
+        # The bar an observed mean must clear is set by how much *independent*
+        # evidence there is, not by how many rows the ledger has: overlapping
+        # positions share a price path (F16).  The count gate above stays
+        # nominal — `min_oos_trades` is about having a track record at all.
+        mde = expectancy_mde(net, n_eff=_effective_sample(oos))
         claimed = s.expectancy
         if np.isfinite(mde) and np.isfinite(claimed) and mde > max(claimed, 0.0):
             return [

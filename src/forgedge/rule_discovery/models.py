@@ -229,7 +229,7 @@ class RuleWalkForwardConfig:
     n_splits: int = 4
     train_span_months: Optional[int] = None
     test_span_months: Optional[int] = None
-    min_train_months: int = 6
+    min_train_months: int = UNSET
     reoptimise: bool = True
     purge_bars: Optional[int] = None
     embargo_bars: int = 0
@@ -293,6 +293,18 @@ class SelectionCriteria:
 
         Session-resolved.  Same shape as ``RegistryConfig.min_cross_pf_retention``
         (#181): absolute condition plus relative retention.
+    min_sell_pct : float
+        Operational floor on the take-profit seeded from the contract's derived
+        target, so a target that is unreachable intrabar is not published.
+
+        Session-resolved from ``AlphaConfig.mfe_floor`` (default ``0.005``).
+        It used to be a hardcoded ``max(0.01, sell_pct)`` inside
+        ``_seed_base_params``, while M2's own floor was half that — so the
+        binding constraint was the one the user could not configure, and on
+        intraday bars, where a target on median MFE routinely sits below 1%, it
+        replaced the *derived* target with a constant.  That contradicts the
+        pipeline's third invariant, which says the economic target is derived
+        per event and never assumed (F11).
     partial_min_profit_factor : float
         Lower PF bound for a ``PARTIAL-EDGE`` (between this and
         ``min_profit_factor``).
@@ -360,6 +372,7 @@ class SelectionCriteria:
     min_fill_rate: float = 0.40
     min_fill_rate_opt: float = 0.80
     min_net_gain_retention: float = UNSET
+    min_sell_pct: float = UNSET
     partial_min_profit_factor: float = 1.5
     min_active_month_rate: float = 0.80
     max_regime_dependency: float = 0.30
@@ -637,7 +650,51 @@ class GridResult:
 
 @dataclass
 class StatisticalValidation:
-    """Statistical validation of the selected configuration (Step 4)."""
+    """Statistical validation of the selected configuration (Step 4).
+
+    Nominal and effective samples
+    -----------------------------
+    ``run_backtest`` opens a position on every active bar, so a rule's trades
+    overlap on the same price path and are **not** independent observations.
+    The economics are unaffected — profit factor, expectancy and net gain are
+    reproducible in production given the capital, which is why they stay
+    nominal — but every quantity here that makes a *confidence* statement was
+    consuming the nominal count as if it were a sample size (F16).
+
+    On the case measured in #168 — 118 nominal trades, mean concurrency 3.71,
+    so ≈32 effective — the overstatement is not marginal::
+
+        t-test:  t scales as sqrt(n) → 1.93x overstated
+                 t=2.6 (p≈0.005) is really t=1.35 (p≈0.09)
+        DSR:     n_obs 118 → 32 at n_trials=15, correction 0.820 → 0.741
+
+    The t-test is the serious channel: ``max_ttest_p`` is one of the three hard
+    gates producing ``NON-EDGE``, so the pipeline was admitting rules on
+    overstated significance.
+
+    Attributes
+    ----------
+    ttest_winrate_t, ttest_winrate_p, ttest_expectancy_t, ttest_expectancy_p : float
+        One-sided t-tests.  The point estimates (mean, dispersion) use every
+        trade; the **standard error and degrees of freedom** use ``n_effective``.
+        More observations do improve the estimate of the mean — what they do not
+        do, when they overlap, is improve its precision as fast as ``sqrt(n)``.
+    deflated_sharpe : float
+        Selection haircut, with ``n_obs = n_effective``.
+    sharpe_ratio : float
+        Annualised Sharpe — a point estimate, left nominal.
+    n_trials_tested : int
+        Configurations the published point was selected over.
+    n_effective : float
+        ``total_trades / mean_concurrent_positions`` (see
+        :mod:`forgedge.episodes`).  Equal to the trade count when nothing
+        overlaps; ``nan`` when it could not be measured, in which case the
+        nominal count is used and this field says so.
+    temporal_stability : str
+        ``"PASS"`` | ``"WARN"`` | ``"FAIL"``.
+    pf_first_half, pf_second_half : float
+        Profit factor over the two halves of the ledger.
+    """
 
     ttest_winrate_t: float
     ttest_winrate_p: float
@@ -649,6 +706,7 @@ class StatisticalValidation:
     temporal_stability: str  # "PASS" | "WARN" | "FAIL"
     pf_first_half: float
     pf_second_half: float
+    n_effective: float = float("nan")
 
     def to_dict(self) -> dict:
         return asdict(self)

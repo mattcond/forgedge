@@ -10,6 +10,8 @@ Usage
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -18,6 +20,7 @@ import pandas as pd
 from ..timebudget import TimeBudget
 from ..unset import UNSET
 from ..resolver import resolve_config
+from ..unset import coalesce
 from .and_composer import ANDComposer
 from .classifier import TypeClassifier
 from .consistency_gate import ConsistencyGate, _build_month_index, _monthly_counts
@@ -611,16 +614,30 @@ class EventDiscovery:
         """
         wf = cfg.walk_forward
         n_oos = len(oos_df)
-        fold_size = n_oos // wf.n_splits
+        n_splits = max(int(coalesce(wf.n_splits, default=3)), 1)
+        fold_size = n_oos // n_splits
         if fold_size < 2:
             return None
 
-        gate = ConsistencyGate(cfg.gate_params)  # reused; params overridden per fold
+        # The candidate's own in-sample rate is the null this is measured
+        # against — it varies per candidate, unlike the *configured* rate the
+        # config-level check uses.  "Does this candidate keep doing what it was
+        # discovered doing" is the question; its own rate is the reference.
+        is_rate = float(getattr(cand.activation_stats, "mean_tpm", 0.0) or 0.0)
+
+        # `min_episodes` is an absolute count and does not survive being
+        # applied to a shorter window: on a 2.0-month fold the class default of
+        # 10 demands 5.0 episodes/month against an in-sample requirement of 1.0
+        # (F1).  It is a statistical-power guard for the discovery window; out
+        # of sample the power question is answered by `indeterminate` below.
+        base_params = wf.oos_gate_params or cfg.gate_params
+        oos_params = replace(base_params, min_episodes=0)
+
         fold_results: list[FoldResult] = []
 
-        for i in range(wf.n_splits):
+        for i in range(n_splits):
             start = i * fold_size
-            end = start + fold_size if i < wf.n_splits - 1 else n_oos
+            end = start + fold_size if i < n_splits - 1 else n_oos
 
             # Prepend IS context for rolling warmup, then take fold rows only
             fold_with_ctx = pd.concat([is_context, oos_df.iloc[start:end]])
@@ -628,19 +645,33 @@ class EventDiscovery:
             fold_series = full_series.iloc[len(is_context):].reset_index(drop=True)
             fold_ts = oos_ts.iloc[start:end].reset_index(drop=True)
 
-            # Both gate parameters are rate/ratio invariant — no scaling needed
-            oos_params = wf.oos_gate_params or cfg.gate_params
             month_index, n_months = _build_month_index(fold_ts)
             gate_result = ConsistencyGate(oos_params).evaluate_series(
                 fold_series, month_index, n_months
             )
-            fold_results.append(FoldResult(fold_idx=i, n_rows=end - start, gate_result=gate_result))
+            lam = is_rate * float(n_months)
+            fold_results.append(FoldResult(
+                fold_idx=i, n_rows=end - start, gate_result=gate_result,
+                indeterminate=bool(lam < MIN_FOLD_LAMBDA), lam=round(lam, 4),
+            ))
 
-        n_passed = sum(f.passed for f in fold_results)
-        pass_rate = n_passed / len(fold_results)
+        testable = [f for f in fold_results if not f.indeterminate]
+        n_passed = sum(f.passed for f in testable)
+        if not testable:
+            # Inconclusive, not failed.  Every fold is the same length by
+            # construction (`n_oos // n_splits`), so "too short" is never a
+            # property of one candidate's fold — it is a property of the
+            # configuration, and blaming the candidate for it would turn a
+            # window problem into a verdict.
+            return ValidationResult(
+                n_folds=len(fold_results), n_passed=0, n_testable=0,
+                pass_rate=float("nan"), passed=None, fold_results=fold_results,
+            )
+        pass_rate = n_passed / len(testable)
         return ValidationResult(
             n_folds=len(fold_results),
             n_passed=n_passed,
+            n_testable=len(testable),
             pass_rate=pass_rate,
             passed=pass_rate >= wf.min_pass_rate,
             fold_results=fold_results,
@@ -650,6 +681,16 @@ class EventDiscovery:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+#: Smallest expected episode count that makes a walk-forward fold *testable*.
+#:
+#: Under the null "the candidate keeps its in-sample rate", the probability of
+#: an empty fold is ``e**-lambda``; at ``lambda = 3`` that is 5 %.  Below it, a
+#: fold that saw nothing is compatible with a healthy candidate more often than
+#: the 5 % convention the rest of the plan uses — so the fold is measuring its
+#: own brevity, not the candidate's stability, and it is excluded from the
+#: denominator instead of counted as a failure (F1, #177).
+MIN_FOLD_LAMBDA: float = 3.0
 
 # Maximum rolling window across all transforms; used as IS context size for
 # OOS apply() calls to avoid warmup NaN at the start of each fold.
@@ -753,8 +794,3 @@ def _make_event_id(components: list[EventComponent], idx: int) -> str:
     transform_str = "x".join(parts)
     return f"EVT-{feature}-{transform_str}-{idx:04d}"
 
-
-def _scale_gate_params(is_params: GateParams, n_oos_bars: int, n_is_bars: int) -> GateParams:
-    """Both gate parameters (min_tpm, max_dispersion) are rate/ratio invariant.
-    Return IS params unchanged — no scaling needed for OOS windows."""
-    return is_params

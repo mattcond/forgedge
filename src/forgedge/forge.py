@@ -574,12 +574,25 @@ def forge(
         validated = [
             c for c in candidates if c.validation is not None and c.validation.passed
         ]
-        # Only narrow the set when validation actually ran; otherwise keep all
-        # candidates so the pipeline does not silently drop everything.
-        if any(c.validation is not None for c in candidates):
+        # Only narrow the set when validation actually *concluded*; otherwise
+        # keep all candidates so the pipeline does not silently drop everything.
+        #
+        # `passed` is now tri-state: `None` means every fold was too short to
+        # say anything at the candidate's own rate, which is a property of the
+        # configuration rather than of the candidate (#177). `None` is falsy, so
+        # the original `c.validation is not None` test would have found
+        # validation "ran", narrowed to `validated`, and discarded the entire
+        # candidate set — precisely what the comment above exists to prevent.
+        if any(c.validation is not None and c.validation.passed is not None
+               for c in candidates):
             alpha_candidates = validated
             report.stage(
                 f"M1 Event Discovery — {len(validated)} walk-forward-validated candidate(s) kept"
+            )
+        elif any(c.validation is not None for c in candidates):
+            report.stage(
+                "M1 Event Discovery — walk-forward inconclusive on every candidate "
+                "(folds too short at their own rate); keeping all candidates"
             )
 
     # ── Modulo 2 — Alpha Discovery ────────────────────────────────────────
