@@ -257,9 +257,52 @@ class PipelineContext:
     min_sample : int
         Minimum observation count below which a statistic is not credible.
     target_rate_tpm : float or None
-        The session's arrival rate.  Note the direction: this is an *output* of
-        the preset (its most characterising choice), collected into the context
-        — not an input to it.
+        The session's arrival rate, in **episodes per month**, as Event
+        Discovery was told to demand it.  Note the direction: this is an
+        *output* of the preset (its most characterising choice), collected into
+        the context — not an input to it.
+
+        ``None`` when nobody declared a rate — a class default is not a
+        declaration, the same distinction ``timeframe_declared`` draws (#179).
+        That matters here more than elsewhere: ``GateParams.min_tpm`` defaults
+        to 0.5 and ``SelectionCriteria.min_tpm`` to 2.0, two class defaults
+        that were never designed to relate (they disagree by 4x, which
+        ``m3_stricter_than_m1`` already reports).  Deriving one from the other
+        unconditionally would not reconcile them, it would propagate the wrong
+        one: on the bare defaults it drops M3's floor to 0.4 and inflates
+        ``min_train_months`` from 8 to 40 — more than a 29-month history can
+        supply, so the walk-forward would vanish entirely (#200).
+    rate_retention : float
+        Fraction of the session's episode rate that Rule Discovery demands as
+        a *trade* rate.  Policy rather than data, like ``cross_pf_retention``
+        and ``net_gain_retention`` beside it.
+
+        **1.0, deliberately**, and this is the one number in #200 that
+        measurement decided rather than argument.  The tempting value is 0.8 —
+        M1 counts episodes, M3 counts filled trades, not every episode fills,
+        so a margin looks free.  It is not: lowering M3's floor costs history
+        *twice over*.  ``min_train_months`` is sized from it with a Poisson
+        margin, so a lower rate lengthens the training window; and the pooled
+        out-of-sample trade count is ``test_months × min_tpm``, so a lower
+        rate shrinks it.  Both move the wrong way at once::
+
+            min_tpm   min_train   minimum span the session needs
+               2.0         8 mo        13.0 months
+               1.6        10 mo        16.2 months
+
+        A 25 % cut in the floor demands 25 % more history.  A session with
+        14 months — comfortable at 2.0 — stops being able to produce a verdict
+        at all, which is the failure this whole plan exists to remove.
+
+        So the resolver propagates the declared rate **unchanged**: the
+        minimal, non-surprising reading, and one that never quietly demands
+        more data than the caller's own declaration implies.  Equality keeps
+        ``m3_stricter_than_m1`` silent (it fires on ``m3 > m1``).
+
+        The fill margin is a *profile* judgement, not a session-wide law, and
+        it lives where such judgements belong — in ``forge_preset``'s specs,
+        which disagree about it on purpose: 1.00 on ``sniper`` and ``sweep``,
+        0.80 on ``balanced`` and ``burst``.
     cross_pf_retention : float
         Fraction of a rule's home profit factor it must retain elsewhere to
         count as transferring (M4, F8).  Policy rather than data, which is why
@@ -294,6 +337,7 @@ class PipelineContext:
     alpha: float = 0.05
     min_sample: int = 10
     target_rate_tpm: Optional[float] = None
+    rate_retention: float = 1.0
     cross_pf_retention: float = 0.8
     net_gain_retention: float = 0.5
     # data facts — check mode only
@@ -838,6 +882,42 @@ def _derive_embargo(values: Dict[str, Any], ctx: PipelineContext):
     return 0, "documented walk_forward.embargo_bars default 0"
 
 
+def _derive_m3_rate(values: Dict[str, Any], ctx: PipelineContext):
+    """M3's trade-rate floor follows the session's episode rate (#200).
+
+    ``criteria.min_tpm`` is the root of a chain, not an isolated threshold:
+    ``min_train_months`` is sized from it with a Poisson margin (#177) and
+    ``scoring.pf_min_tpm`` tracks it (#178).  When only M1's rate moved, the
+    walk-forward stayed sized for the rate the session no longer had — on the
+    reference fixture, ``forge_preset("balanced", "1D", min_tpm=2)`` kept a
+    20-month training window built for 0.8 trades/month, leaving 9 months of
+    out-of-sample span where 19 were available.  Raising the session's rate
+    *degraded* the walk-forward instead of tightening it.
+
+    The retention factor defaults to 1.0 — the declared rate, unchanged.  A
+    margin below 1 is tempting (M1 counts episodes, M3 counts filled trades)
+    but measurably expensive: it lengthens ``min_train_months`` *and* shrinks
+    the pooled OOS trade count, so a 25 % cut demands 25 % more history.  See
+    ``PipelineContext.rate_retention``.  The margin is a profile judgement and
+    lives in ``forge_preset``'s specs instead.
+
+    Silent when no rate was declared: see ``PipelineContext.target_rate_tpm``
+    for why an inherited class default must not propagate here.
+    """
+    if ctx.target_rate_tpm is None or float(ctx.target_rate_tpm) <= 0:
+        return 2.0, "documented criteria.min_tpm default 2.0"
+    rate = float(ctx.target_rate_tpm)
+    retention = float(ctx.rate_retention)
+    value = round(rate * retention, 4)
+    if retention == 1.0:
+        return value, (f"gate_params.min_tpm={rate:g} episodi/mese — la stessa "
+                       f"frequenza che la sessione dichiara, propagata invariata "
+                       f"(rate_retention=1)")
+    return value, (f"gate_params.min_tpm={rate:g} episodi/mese "
+                   f"x rate_retention={retention:g} — M3 conta trade, "
+                   f"non episodi, e non ogni episodio si riempie")
+
+
 def _derive_min_train_months(values: Dict[str, Any], ctx: PipelineContext):
     """#173 — the selection window sized to the rate it is about to demand.
 
@@ -1006,6 +1086,15 @@ CONSTRAINTS: List[Constraint] = [
         free=(),
         derived="alpha.bars_per_day",
         derive=_derive_bars_per_day,
+    ),
+    # ── #200: the session's arrival rate reaches M3 too ───────────────
+    Constraint(
+        code="m3_stricter_than_m1",
+        level="WARN",
+        stage=PROPAGATION,
+        free=("event_discovery.gate_params.min_tpm",),
+        derived="rule_discovery.criteria.min_tpm",
+        derive=_derive_m3_rate,
     ),
     # ── #173: the selection window has to fit the rate it demands ─────
     Constraint(
@@ -1659,6 +1748,31 @@ _CONTEXT_SOURCES: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def _declared_rate(bundle: Dict[str, Any]) -> Optional[float]:
+    """Event Discovery's rate floor, but only when somebody *chose* it.
+
+    ``GateParams.min_tpm`` carries a class default (0.5) rather than the
+    ``UNSET`` sentinel, so "set" and "inherited" are not distinguishable from
+    the value alone — the same limitation ``_check_timeframe`` documents for
+    its own fields.  Comparing against the class is the only way to tell, and
+    telling matters: the M1 and M3 class defaults disagree by 4x and were
+    never designed to relate, so propagating an *inherited* one would make a
+    session worse rather than more coherent (#200).
+
+    The cost of reading it from the class is the usual one: a caller who
+    deliberately sets 0.5 back gets silence.  That is the accepted trade
+    everywhere else this technique is used.
+    """
+    value = _get_path(bundle, "event_discovery.gate_params.min_tpm")
+    if value is _MISSING or not is_set(value) or value is None:
+        return None
+    from .event_discovery.models import GateParams
+
+    if float(value) == float(GateParams.__dataclass_fields__["min_tpm"].default):
+        return None
+    return float(value)
+
+
 def collect_context(
     bundle: Dict[str, Any],
     base: Optional[PipelineContext] = None,
@@ -1689,6 +1803,13 @@ def collect_context(
             if value is not _MISSING and is_set(value) and value is not None:
                 collected[attr] = value
                 break
+    # The arrival rate is collected on its own terms: only a *declared* M1 rate
+    # counts (#200), which the generic loop above cannot express because
+    # `GateParams.min_tpm` has a class default rather than a sentinel.
+    if "target_rate_tpm" not in overrides and base.target_rate_tpm is None:
+        rate = _declared_rate(bundle)
+        if rate is not None and rate > 0:
+            collected["target_rate_tpm"] = rate
     return replace(base, **{**collected, **overrides})
 
 

@@ -104,6 +104,27 @@ def stage_rates() -> None:
               f"[resolved from criteria.min_tpm — #178]")
         print(f"  M3 criteria.min_oos_trades     {cr.min_oos_trades:8d}          [ABSOLUTE — not scaled]")
 
+    print("\n  #200 — the declared rate now reaches M3, and the walk-forward with it:")
+    print(f"  {'declared min_tpm':>16}  {'M1':>6}  {'M3':>6}  {'min_train_months':>16}  "
+          f"{'OOS span on 29 months':>22}")
+    for override in (0.5, 1.0, 2.0, 4.0):
+        disc, _a, rd = forge_preset("balanced", "1D", asset="X", min_tpm=override)
+        rd = resolve_config(rd, "rule_discovery", PipelineContext(timeframe="1D"))
+        oos = 29 - rd.walk_forward.min_train_months
+        span = f"{oos:d} mo" if oos > 0 else "no verdict possible"
+        print(f"  {override:16.2f}  {disc.gate_params.min_tpm:6.2f}  "
+              f"{rd.criteria.min_tpm:6.2f}  {rd.walk_forward.min_train_months:16d}  "
+              f"{span:>22}")
+    print("  before #200 the M3 column stayed at 0.80 whatever M1 was told, so")
+    print("  min_train_months stayed at 20 and the OOS span at 9 months — raising")
+    print("  the session's rate *degraded* the walk-forward instead of tightening it.")
+    print("  the rate propagates unchanged (rate_retention=1.0): a margin below 1")
+    print("  costs history twice — it lengthens min_train_months via the Poisson")
+    print("  margin AND shrinks the pooled OOS count (test_months × min_tpm), so a")
+    print("  25% cut in the floor demands 25% more data (13.0 → 16.2 months).")
+    print("  the fill margin is a preset judgement instead: 1.00 on sniper/sweep,")
+    print("  0.80 on balanced/burst, each spec's own ratio carried through.")
+
     print("\n" + "=" * 78)
     print("  LATENT PARAMETER: bar duration — the fields that mean \"N bars\"")
     print("=" * 78)

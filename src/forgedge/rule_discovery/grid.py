@@ -128,6 +128,10 @@ def select_best(
     if criteria is None:
         return results[0]
 
+    # `criteria.min_tpm` is session-resolved (#200) and compared as a number
+    # below, so the sentinel is spent here — the grid is an entry point that
+    # callers reach without going through `resolve_config`.
+    criteria = criteria.resolved()
     qualified = [r for r in results if _passes(r.summary, criteria)]
     pool = qualified or results
     return max(pool, key=lambda r: _sort_key(r.summary.pf_score_tpm))

@@ -564,3 +564,44 @@ configuration from being built again.
 **Governing principle:** one PR per issue, and every golden-value re-pin attributable to a
 single cause. Steps 5 and 7–11 each move `tests/test_golden.py`; batching them would make
 it impossible to write *why* in the re-pin comment, which is the repo's convention.
+
+### Tails found in use, after the eleven steps closed
+
+Two latent parameters survived the plan and surfaced only once the resolved pipeline was
+actually run. Both are the same shape as the eleven — one meaning, several fields — and
+both were found by asking a question of a *working* session rather than by reading code,
+which is why the plan could not have contained them.
+
+| tail | issue | what was still independent |
+|---|---|---|
+| of F5 | [#196](https://github.com/mattcond/forgedge/issues/196) | `AlphaConfig.horizon_grid` followed the session only when `forge()` built the config itself; an explicit config on daily candles still scanned up to 48 *days* |
+| of F2/F4 | [#200](https://github.com/mattcond/forgedge/issues/200) | `SelectionCriteria.min_tpm` did not follow the rate Event Discovery was told to demand, so `min_train_months` (#177) and `pf_min_tpm` (#178) stayed sized for a rate the session no longer had |
+
+\#200 is the more instructive of the two, because the fix is *smaller* than it first looks.
+The obvious reading — M1 counts episodes, M3 counts filled trades, so M3 should ask for
+somewhat less — is wrong at the session level, and measurement is what says so. Lowering
+M3's floor costs history twice: `min_train_months` is sized from the floor with a Poisson
+margin, so a lower floor *lengthens* the training window; and the pooled out-of-sample
+trade count is `test_months × min_tpm`, so a lower floor *shrinks* it. Both move the wrong
+way at once:
+
+| `criteria.min_tpm` | `min_train_months` | minimum span for a verdict |
+|---|---|---|
+| 2.0 | 8 | 13.0 months |
+| 1.6 | 10 | 16.2 months |
+
+A 25 % cut in the floor demands 25 % more data. A 14-month session that could produce a
+verdict at 2.0 cannot at 1.6 — which is precisely the failure the whole plan exists to
+remove. So the resolver propagates the declared rate **unchanged** (`rate_retention=1.0`),
+and the fill margin stays where such judgements belong: in `forge_preset`'s specs, which
+disagree about it on purpose (1.00 on `sniper` and `sweep`, 0.80 on `balanced` and
+`burst`).
+
+The second lesson is one #179 had already taught and #200 had to re-learn: **an inherited
+class default is not a declaration.** `GateParams.min_tpm` defaults to 0.5 and
+`SelectionCriteria.min_tpm` to 2.0 — two numbers that disagree by 4x and were never
+designed to relate. Propagating the inherited one would not have reconciled them, it would
+have propagated the wrong one: M3's floor to 0.4, `min_train_months` from 8 to 40, more
+than the reference history can supply, and the walk-forward gone entirely. The resolver
+therefore stays silent unless somebody actually chose a rate — the same distinction
+`timeframe_declared` draws.
