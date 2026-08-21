@@ -218,6 +218,12 @@ class EventWalkForwardConfig:
         Minimum fraction of OOS windows in which an event must pass the gate
         to be considered OOS-stable (0–1).  Default 0.6 means at least 3 out
         of 5 (or 2 out of 3) windows must pass.
+
+        Not a significance level and **not** tied to ``PipelineContext.alpha``
+        (F9, #182).  It reads like a probability because it is a number
+        between 0 and 1, but it is a *vote*: how many folds have to agree.
+        Nothing about it is a false-positive rate, so there is nothing for an
+        alpha to say about it.
     oos_gate_params : GateParams or None
         Gate thresholds to use for OOS evaluation.  When ``None`` (default),
         the IS ``gate_params`` are used — ``min_tpm`` and ``max_dispersion``

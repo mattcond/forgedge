@@ -190,14 +190,14 @@ promotion (except in extreme cases) — they inform the grade.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `ic_min_abs` | float | `0.02` | Minimum absolute IC (Spearman). Below this threshold the IC metric is recorded in `AlphaContract.diagnostics` (non-blocking). |
-| `ic_max_p` | float | `0.05` | Maximum p-value for IC significance. |
+| `ic_max_p` | float | *(resolved: `ctx.alpha` = 0.05)* | Maximum p-value for IC significance. One of the five per-hypothesis alphas, session-resolved (#182). Feeds a non-blocking diagnostic that only weighs on the grade. |
 | `min_lift` | float | `0.08` | Minimum lift (win_rate − base_rate). |
 | `min_cohens_d` | float | `0.15` | Minimum Cohen's d (distribution separation between active and inactive bars). |
-| `max_p_value` | float | `0.05` | Maximum t-test p-value on the mean advantage. |
+| `max_p_value` | float | *(resolved: `ctx.alpha` = 0.05)* | Maximum t-test p-value on the mean advantage. Session-resolved (#182), but **reachable only with `use_fdr=False`** — every preset and the class default set `use_fdr=True`, so under any preset this field is inert. |
 | `min_activations` | int | `30` | Minimum IS activations for a contract to be promoted. |
 | `use_fdr` | bool | `True` | Apply Benjamini-Hochberg FDR correction across the test family. |
-| `fdr_q` | float | `0.10` | Target FDR level (q). |
-| `oos_max_p` | float | `0.10` | Maximum OOS confirmation p-value. |
+| `fdr_q` | float | `0.10` | Target FDR level (q). **Not** tied to `ctx.alpha`: a `q` is a false-discovery rate over a family, an alpha is a per-test error rate. Chosen by the preset, because the right `q` depends on how wide the search is (#182). |
+| `oos_max_p` | float | `0.10` | Maximum OOS confirmation p-value. **Not** tied to `ctx.alpha`, and legitimately looser: a confirmation level for an already-selected hypothesis — one pre-specified test, no multiplicity, on a small sample by construction (#182). |
 | `min_oos_activations` | int | `10` | Minimum OOS activations to treat OOS confirmation as reliable. |
 | `min_direction_t` | float | `0.5` | Minimum `\|z_h*\|` (rotation-standardised excess) to assign a direction; below it → `undetermined`. |
 | `require_significant_direction` | bool | `True` | When True, a direction is assigned only if `h*` clears Benjamini-Hochberg (not `statistically_weak`); otherwise → `undetermined`. False = legacy non-blocking behaviour. |
@@ -399,7 +399,7 @@ NON-EDGE verdicts.
 | `max_zero_months_partial` | int | `4` | Maximum zero-or-negative months allowed for PARTIAL-EDGE. |
 | `max_regime_dependency` | float | `0.30` | Maximum regime dependency: if > 30% of trades are concentrated in a single regime, this triggers as a soft gate. |
 | `min_dsr` | float | `1.0` | Minimum Deflated Sharpe Ratio (corrected for the number of configurations tested). |
-| `max_ttest_p` | float | `0.05` | Maximum t-test p-value on mean net gain. |
+| `max_ttest_p` | float | *(resolved: `ctx.alpha` = 0.05)* | Maximum t-test p-value on mean net gain. Session-resolved (#182). The pipeline's **only hard per-hypothesis gate** — it produces `NON-EDGE` in `_decide`. |
 | `early_elimination` | bool | `True` | When True (default), immediately rejects configurations that fail the fast IS screen (< 20 trades, PF < 1, insufficient fill rate) without running the walk-forward — saves compute. When False, the full pipeline always runs — useful for uniform diagnostics on NON-EDGE rules. |
 
 ```python

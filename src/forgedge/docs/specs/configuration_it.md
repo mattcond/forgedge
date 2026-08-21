@@ -174,14 +174,14 @@ Soglie statistiche IS che contribuiscono al grade A–D. Non bloccano la promozi
 | Parametro | Tipo | Default | Descrizione |
 |---|---|---|---|
 | `ic_min_abs` | float | `0.02` | IC (Spearman) minimo in valore assoluto. Sotto questa soglia la metrica IC viene registrata in `AlphaContract.diagnostics` (non bloccante). |
-| `ic_max_p` | float | `0.05` | P-value massimo per l'IC. |
+| `ic_max_p` | float | *(risolto: `ctx.alpha` = 0.05)* | P-value massimo per l'IC. Uno dei cinque alpha per-ipotesi, risolto a livello di sessione (#182). Alimenta una diagnostica non bloccante che pesa solo sul grade. |
 | `min_lift` | float | `0.08` | Lift minimo (win_rate − base_rate). |
 | `min_cohens_d` | float | `0.15` | Cohen's d minimo (separazione tra distribuzioni active/inactive). |
-| `max_p_value` | float | `0.05` | P-value massimo del t-test sul vantaggio medio. |
+| `max_p_value` | float | *(risolto: `ctx.alpha` = 0.05)* | P-value massimo del t-test sul vantaggio medio. Risolto a livello di sessione (#182), ma **raggiungibile solo con `use_fdr=False`** — ogni preset e il default di classe impostano `use_fdr=True`, quindi sotto qualunque preset è inerte. |
 | `min_activations` | int | `30` | Attivazioni IS minime perché il contratto sia promosso. |
 | `use_fdr` | bool | `True` | Applica correzione FDR Benjamini-Hochberg sulla famiglia di test. |
-| `fdr_q` | float | `0.10` | Livello FDR (q) target. |
-| `oos_max_p` | float | `0.10` | P-value massimo per la conferma OOS. |
+| `fdr_q` | float | `0.10` | Livello FDR (q) target. **Non** legato a `ctx.alpha`: un `q` è un tasso di falsa scoperta su una famiglia, un alpha è un tasso di errore per singolo test. Lo sceglie il preset, perché il `q` giusto dipende da quanto è ampia la ricerca (#182). |
+| `oos_max_p` | float | `0.10` | P-value massimo per la conferma OOS. **Non** legato a `ctx.alpha`, e legittimamente più lasco: è un livello di *conferma* di un'ipotesi già selezionata — un test singolo pre-specificato, senza molteplicità, su un campione piccolo per costruzione (#182). |
 | `min_oos_activations` | int | `10` | Attivazioni OOS minime per considerare la conferma OOS attendibile. |
 | `min_direction_t` | float | `0.5` | `\|z_h*\|` minimo (excess standardizzato dalla rotazione) per assegnare una direzione; sotto → `undetermined`. |
 | `require_significant_direction` | bool | `True` | Se True, la direzione è assegnata solo se `h*` supera Benjamini-Hochberg (non `statistically_weak`); altrimenti → `undetermined`. False = comportamento legacy non-bloccante. |
@@ -367,7 +367,7 @@ Gate di promozione del Modulo 3. Definisce le condizioni per i verdetti `EDGE`, 
 | `max_zero_months_partial` | int | `4` | Mesi a zero o negativi massimi ammessi per PARTIAL-EDGE. |
 | `max_regime_dependency` | float | `0.30` | Dipendenza di regime massima ammessa: se > 30% dei trade è concentrato in un singolo regime, scatta come gate soft. |
 | `min_dsr` | float | `1.0` | Deflated Sharpe Ratio minimo (corretto per il numero di configurazioni testate). |
-| `max_ttest_p` | float | `0.05` | P-value massimo del t-test sul net gain medio. |
+| `max_ttest_p` | float | *(risolto: `ctx.alpha` = 0.05)* | P-value massimo del t-test sul net gain medio. Risolto a livello di sessione (#182). È l'**unico gate per-ipotesi hard** della pipeline — produce `NON-EDGE` in `_decide`. |
 | `early_elimination` | bool | `True` | Se True (default), scarta velocemente le configurazioni che non passano i fast screen IS (< 20 trade, PF < 1, fill rate insufficiente) senza eseguire il walk-forward. Se False, la pipeline completa è sempre eseguita (utile per diagnostica uniforme su regole NON-EDGE). |
 
 ```python

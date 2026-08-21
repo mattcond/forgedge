@@ -780,6 +780,32 @@ def _derive_ema_bar_hours(values: Dict[str, Any], ctx: PipelineContext):
     return value, f"{ctx.timeframe} = {value:g} ore/barra"
 
 
+def _derive_alpha(values: Dict[str, Any], ctx: PipelineContext):
+    """One per-hypothesis significance level for the whole session (F9, #182).
+
+    Five thresholds *are* an alpha — "on this single test I accept a 5% false
+    positive" — and they were five independent literals that agreed by
+    coincidence.  Nothing related them, so they could drift apart by
+    inattention, and a caller who wanted a different regime had to find all
+    five.
+
+    Two neighbours deliberately do **not** derive from here, because they are
+    not the same quantity:
+
+    * ``fdr_q`` is a false *discovery rate* over a family — "I accept that 10%
+      of promotions are false" — not a per-test error.  Tying it to alpha
+      would be a category error, and it is the preset's business anyway, since
+      it depends on how wide the search is.
+    * ``min_pass_rate`` is a vote, not a probability at all.
+
+    ``oos_max_p`` also stays with the preset: it is a *confirmation* level for
+    an already-selected hypothesis — a single pre-specified test, no
+    multiplicity, on a sample that is small by construction — so it can
+    legitimately be looser than a discovery alpha.
+    """
+    return ctx.alpha, f"ctx.alpha={ctx.alpha:g} — un solo livello per-ipotesi"
+
+
 def _derive_embargo(values: Dict[str, Any], ctx: PipelineContext):
     """M3's fold embargo follows M2's session embargo — one quarantine policy."""
     upstream = values.get("alpha.embargo_bars", _MISSING)
@@ -841,6 +867,26 @@ CONSTRAINTS: List[Constraint] = [
         derived="registry.min_cross_pf_retention",
         derive=_from_context("cross_pf_retention"),
     ),
+    # ── #182 (F9): the five per-hypothesis levels are one level ────────
+    # No behavioural change at the defaults — all five were already 0.05 —
+    # but from here they cannot drift apart by inattention, and a different
+    # regime is one number rather than five.
+    *[
+        Constraint(
+            code="alpha_level_drift",
+            level="WARN",
+            stage=PROPAGATION,
+            free=(),
+            derived=path,
+            derive=_derive_alpha,
+        )
+        for path in (
+            "alpha.thresholds.max_p_value",
+            "alpha.thresholds.ic_max_p",
+            "rule_discovery.criteria.max_ttest_p",
+            "rule_discovery.criteria.max_rotation_p",
+        )
+    ],
     # ── #180 (F6): the quarantine after a boundary is one policy ───────
     # The boundaries differ — M2 quarantines after the session split, M3
     # after each walk-forward fold — but "how many bars of serial correlation
@@ -1271,7 +1317,13 @@ def _check_registry_pf(values: Dict[str, Any], ctx: PipelineContext) -> Optional
 
 
 def _check_alpha_drift(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
-    """F9 — the per-hypothesis thresholds versus the session's alpha."""
+    """F9 — the per-hypothesis thresholds versus the session's alpha.
+
+    Left alone they are *derived* from ``ctx.alpha`` (#182), so this fires
+    only when a caller pinned one of them by hand at a different level.  That
+    is legal — it is their session — but it means the pipeline is running two
+    per-hypothesis error rates, which is worth saying out loud.
+    """
     drifted = []
     for path in ("alpha.thresholds.max_p_value", "alpha.thresholds.ic_max_p",
                  "rule_discovery.criteria.max_ttest_p",

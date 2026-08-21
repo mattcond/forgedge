@@ -683,6 +683,10 @@ def forge(
     # The full calibrator (explicit K draws) supersedes the fast exact null.
     cal_report: Optional[CalibrationReport] = None
     if rotation_calibration is not None and promoted:
+        # `RotationConfig` is an argument to `forge()`, not a module config, so
+        # it is not in the resolver's bundle — the session's per-hypothesis
+        # level reaches it here instead (F9, #182).
+        rotation_calibration = rotation_calibration.resolved(context.alpha)
         report.stage(
             f"Rotation Calibrator — K={rotation_calibration.k} draws "
             f"(alpha={rotation_calibration.alpha})…"
@@ -699,7 +703,7 @@ def forge(
         report.stage("Fast rotation null — exact search-level null (all offsets)…")
         cal_report = FastRotationNull(
             alpha_frame, alpha_candidates, cfg, time_budget=time_budget
-        ).run(promoted)
+        ).run(promoted, alpha=context.alpha)
         report.stage(
             f"Fast rotation null — search p={cal_report.tippett_p:.4f}, "
             f"{len(cal_report.survivors)}/{len(promoted)} above null bar"

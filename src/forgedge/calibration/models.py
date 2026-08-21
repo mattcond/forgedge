@@ -1,8 +1,10 @@
 """Models for the search-level rotation null calibration (issue #116)."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+
+from ..unset import UNSET, coalesce, is_set
 
 if TYPE_CHECKING:
     from ..alpha_discovery.models import AlphaContract
@@ -24,6 +26,12 @@ class RotationConfig:
         K=40 is usable for a quick sanity check.
     alpha : float
         Type-I error target used to set the null q(1-alpha) bar.  Default 0.05.
+
+        One of the five per-hypothesis significance levels in the pipeline, and
+        session-resolved from ``PipelineContext.alpha`` like the other four
+        (F9, #182).  They were five independent 0.05s that agreed by
+        coincidence; a caller who wants a different regime now changes one
+        number instead of finding all five.
     seed : int
         RNG seed for reproducible rotation offsets.
     in_sample_stats : tuple of str
@@ -33,9 +41,22 @@ class RotationConfig:
     """
 
     k: int = 100
-    alpha: float = 0.05
+    alpha: float = UNSET
     seed: int = 20260624
     in_sample_stats: Tuple[str, ...] = IN_SAMPLE_STATS
+
+    def resolved(self, alpha: float = 0.05) -> "RotationConfig":
+        """Return a copy with ``alpha`` filled in from the session level.
+
+        ``RotationConfig`` is not part of the resolver's config bundle — it is
+        an argument to :func:`forgedge.forge`, not a module config — so the
+        session level reaches it here instead.  Standalone use with no session
+        falls back to the documented 0.05, which is the value the field held
+        before it became resolved.
+        """
+        if is_set(self.alpha):
+            return self
+        return replace(self, alpha=coalesce(self.alpha, default=alpha))
 
 
 @dataclass

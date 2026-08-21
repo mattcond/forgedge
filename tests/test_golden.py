@@ -187,6 +187,19 @@ _AD_GOLDEN = {
 # rule's 4 walk-forward folds test inside M2's in-sample region — 117 rules out
 # of 117 — which is now reported on `WalkForwardResult.n_splits_in_sample`
 # rather than being invisible.
+#
+# ── Step 11 (issue #182, F9): checked, and the pins below do NOT move ───────
+#
+# The five per-hypothesis significance levels — `max_p_value`, `ic_max_p`,
+# `max_ttest_p`, `max_rotation_p`, `RotationConfig.alpha` — now derive from
+# `PipelineContext.alpha` instead of being five independent literals. They
+# were all already 0.05, agreeing by coincidence rather than by construction,
+# so this buys coherence and changes no number: the same five values reach the
+# same gates. D16 predicted exactly that, and it holds.
+#
+# `fdr_q`, `oos_max_p` and `min_pass_rate` are deliberately not tied to alpha
+# (a false-discovery rate, a confirmation level, and a vote), so they could not
+# have moved either.
 _RD_GOLDEN = {
     "verdict":        "NON-EDGE",
     "profit_factor":  pytest.approx(1.6746, rel=1e-3),
