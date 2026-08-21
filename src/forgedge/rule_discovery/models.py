@@ -414,6 +414,15 @@ class SelectionCriteria:
         Sharpe is not credible") also blocks a full ``EDGE``.
     max_ttest_p : float
         Maximum p-value for the win-rate / expectancy significance tests.
+
+        A per-hypothesis alpha, so session-resolved from
+        ``PipelineContext.alpha`` (F9, #182); default 0.05.
+
+        Worth knowing what this one carries: it is the pipeline's **only hard
+        per-hypothesis gate** — it produces ``NON-EDGE`` in ``_decide`` — and
+        no preset has ever touched it.  The other four either feed a
+        non-blocking diagnostic, are inert under FDR, or price the search
+        surface rather than the hypothesis.
     max_rotation_p : float
         Maximum search-level rotation-null p-value (``AlphaContract.rotation_p``,
         annotated by ``FastRotationNull`` / ``RotationCalibrator``) for a full
@@ -423,6 +432,17 @@ class SelectionCriteria:
         rules that merely won the multiple-testing lottery at ``PARTIAL-EDGE``.
         Inert when the contract carries no annotation (standalone Rule
         Discovery, or ``forge(fast_null=False)``).
+
+        A per-hypothesis alpha against a *different null*, so session-resolved
+        from ``PipelineContext.alpha`` (F9, #182); default 0.05.
+
+        A strict value here under the ``"sweep"`` preset is **intended, not
+        drift**.  ``"sweep"`` is permissive upstream (``fdr_q=0.25``) precisely
+        because it is documented to be paired with
+        ``RotationConfig(k>=100)``: its upstream permissiveness is *predicated*
+        on this null filtering downstream.  Loosening it to "match" the preset
+        would break the pairing and let the search-level lottery through, which
+        is the one thing ``"sweep"`` relies on this gate to catch.
     power_gate : bool
         §3.2 — power-aware verdicts.  When ``True`` (default) a verdict that
         would be ``EDGE`` / ``PARTIAL-EDGE`` is degraded to
@@ -465,8 +485,8 @@ class SelectionCriteria:
     min_active_month_rate: float = 0.80
     max_regime_dependency: float = 0.30
     min_dsr: float = 1.0
-    max_ttest_p: float = 0.05
-    max_rotation_p: float = 0.05
+    max_ttest_p: float = UNSET
+    max_rotation_p: float = UNSET
     power_gate: bool = True
     min_oos_trades: int = 10
     early_elimination: bool = True

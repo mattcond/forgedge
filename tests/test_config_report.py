@@ -611,3 +611,76 @@ class TestBarDurationHasOneSource:
         stamps += list(pd.date_range("2024-02-01", periods=40, freq="1h"))
         df = pd.DataFrame({"open_dt": stamps, "close": range(80)})
         assert measure_bar_hours(df) == pytest.approx(1.0)
+
+
+class TestOneSignificanceLevel:
+    """F9 (#182) — seven thresholds, and only five of them are an alpha.
+
+    They were five independent `0.05` literals that agreed by coincidence:
+    nothing related them, so they could drift apart by inattention, and a
+    caller wanting a different regime had to find all five.
+    """
+
+    _ALPHA_PATHS = (
+        ("alpha", "thresholds", "max_p_value"),
+        ("alpha", "thresholds", "ic_max_p"),
+        ("rule_discovery", "criteria", "max_ttest_p"),
+        ("rule_discovery", "criteria", "max_rotation_p"),
+    )
+
+    @staticmethod
+    def _resolve(**ctx_kw):
+        return config_report(None, AlphaConfig(), RuleDiscoveryConfig(),
+                             ctx=_ctx(**ctx_kw))
+
+    def _values(self, rep):
+        out = []
+        for kind, group, field in self._ALPHA_PATHS:
+            out.append(getattr(getattr(rep.configs[kind], group), field))
+        return out
+
+    def test_the_defaults_do_not_move(self):
+        """The whole point: no behavioural change. All five were already
+        0.05, so this step buys coherence, not a different pipeline."""
+        assert self._values(self._resolve()) == [0.05] * 4
+
+    def test_one_number_moves_all_of_them(self):
+        rep = self._resolve(alpha=0.01)
+        assert self._values(rep) == [0.01] * 4
+
+    def test_a_pinned_threshold_wins_and_is_reported(self):
+        """Legal — it is the caller's session — but it means two
+        per-hypothesis error rates are running, which is worth saying."""
+        from forgedge.alpha_discovery.models import PromotionThresholds
+
+        alpha = AlphaConfig(thresholds=PromotionThresholds(max_p_value=0.20))
+        rep = config_report(None, alpha, RuleDiscoveryConfig(), ctx=_ctx())
+        assert rep.configs["alpha"].thresholds.max_p_value == 0.20
+        assert "alpha_level_drift" in _codes(rep)
+        assert "max_p_value" in _message(rep, "alpha_level_drift")
+
+    def test_the_two_that_are_not_an_alpha_stay_put(self):
+        """`fdr_q` is a false-discovery rate over a family and `oos_max_p` a
+        confirmation level; tying either to a per-test alpha is a category
+        error, not a tidy-up."""
+        rep = self._resolve(alpha=0.01)
+        th = rep.configs["alpha"].thresholds
+        assert th.fdr_q == 0.10
+        assert th.oos_max_p == 0.10
+
+    def test_min_pass_rate_is_a_vote_not_a_probability(self):
+        disc = DiscoveryConfig(
+            train_ratio=0.8, walk_forward=EventWalkForwardConfig(n_splits=3))
+        rep = config_report(disc, AlphaConfig(), RuleDiscoveryConfig(),
+                            ctx=_ctx(alpha=0.01))
+        assert rep.configs["event_discovery"].walk_forward.min_pass_rate == 0.6
+
+    def test_the_rotation_config_follows_the_same_level(self):
+        """Not a module config, so it is resolved at its own chokepoint."""
+        from forgedge.calibration.models import RotationConfig
+        from forgedge import UNSET
+
+        assert RotationConfig().alpha is UNSET
+        assert RotationConfig().resolved().alpha == 0.05
+        assert RotationConfig().resolved(0.01).alpha == 0.01
+        assert RotationConfig(alpha=0.2).resolved(0.01).alpha == 0.2

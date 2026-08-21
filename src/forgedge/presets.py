@@ -416,9 +416,26 @@ def preset_info(preset: Optional[str] = None) -> None:
         # belong next to the gates rather than being invisible (F3, #178).
         # Resolved for a daily session — they track `criteria.min_tpm`, and
         # `preset_info()` is timeframe-agnostic, so the row states which.
-        _d, _a, rd = forge_preset(name, "1D")
-        rd = resolve_config(rd, "rule_discovery", PipelineContext(timeframe="1D"))
+        _d, alpha_cfg, rd = forge_preset(name, "1D")
+        _ctx = PipelineContext(timeframe="1D")
+        rd = resolve_config(rd, "rule_discovery", _ctx)
+        alpha_cfg = resolve_config(alpha_cfg, "alpha", _ctx)
         print(f"  M3 score: pf_min_tpm={rd.scoring.pf_min_tpm:g}  "
               f"pf_min_trades={rd.scoring.pf_min_trades}  "
               f"min_pf_score_tpm={rd.criteria.min_pf_score_tpm:g}   "
               f"[resolved for 1D; pf_min_tpm tracks criteria.min_tpm]")
+        # Every significance threshold, resolved — not only the two that
+        # happened to be in the preset spec (F9, #182).  The five that *are*
+        # a per-hypothesis alpha come from one place; the two that are not
+        # are printed next to them saying so, since the whole confusion this
+        # fixes was reading seven numbers as one quantity.
+        th = alpha_cfg.thresholds
+        print(f"  alpha   : max_p_value={th.max_p_value:g}  "
+              f"ic_max_p={th.ic_max_p:g}  "
+              f"max_ttest_p={rd.criteria.max_ttest_p:g}  "
+              f"max_rotation_p={rd.criteria.max_rotation_p:g}   "
+              f"[all from ctx.alpha]")
+        print(f"  not-α   : fdr_q={th.fdr_q:g} (false-discovery rate over a "
+              f"family)  oos_max_p={th.oos_max_p:g} (confirmation, not "
+              f"discovery)  min_pass_rate={spec.get('min_pass_rate', 0.6):g} "
+              f"(a vote, not a probability)")

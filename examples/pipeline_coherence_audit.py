@@ -21,6 +21,10 @@ Stages (default: ``rates m1``):
 ``m2``
     Alpha Discovery: how often the absolute ``_MIN_STATS_CASES`` floor fires on
     the OOS tail, as a function of ``train_ratio``.
+``alpha``
+    Pure arithmetic, no data.  The seven significance thresholds side by side:
+    which five are a per-hypothesis alpha and now derive from one, and which
+    two are a different quantity and deliberately do not.
 ``m3``
     Rule Discovery: reproduces issue #173's early-elimination on this repo's own
     fixture, and measures the realised trade rate against the consistency term
@@ -49,6 +53,8 @@ from forgedge import (
 )
 from forgedge.event_discovery.discovery import MIN_FOLD_LAMBDA
 from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
+from forgedge.alpha_discovery.models import AlphaConfig
+from forgedge.calibration.models import RotationConfig
 from forgedge.market_context.models import MarketContextConfig
 from forgedge.presets import _TFClass, forge_preset
 from forgedge.resolver import PipelineContext, resolve_config
@@ -286,7 +292,61 @@ def stage_m3(kpi: pd.DataFrame) -> None:
 
 # ---------------------------------------------------------------------------
 
-_STAGES = {"rates": None, "m1": stage_m1, "m2": stage_m2, "m3": stage_m3}
+def stage_alpha() -> None:
+    """F9 — the seven thresholds, and which of them are actually one thing."""
+    print("\n" + "=" * 78)
+    print("  LATENT PARAMETER: significance — seven thresholds, five of them alpha")
+    print("=" * 78)
+    ctx = PipelineContext(timeframe="1D")
+    alpha_cfg = resolve_config(AlphaConfig(), "alpha", ctx)
+    rd = resolve_config(RuleDiscoveryConfig(), "rule_discovery", ctx)
+    th = alpha_cfg.thresholds
+
+    print(f"  {'threshold':<18} {'module':<8} {'value':>7}  what it gates")
+    rows = [
+        ("max_p_value", "M2", th.max_p_value,
+         "t-test on the excess return — INERT under use_fdr=True"),
+        ("ic_max_p", "M2", th.ic_max_p,
+         "feature IC — non-blocking, weighs on the grade only"),
+        ("max_ttest_p", "M3", rd.criteria.max_ttest_p,
+         "expectancy on the ledger — the ONLY hard per-hypothesis gate"),
+        ("max_rotation_p", "M3", rd.criteria.max_rotation_p,
+         "the search surface — a different null, still an alpha"),
+        ("RotationConfig.alpha", "calib", RotationConfig().resolved(ctx.alpha).alpha,
+         "the survivor bar"),
+    ]
+    for name, mod, val, what in rows:
+        print(f"  {name:<18} {mod:<8} {val:>7.3f}  {what}")
+    print("  ^ all five now derive from ctx.alpha — one number, not five (#182)")
+
+    print()
+    for name, mod, val, what in [
+        ("fdr_q", "M2", th.fdr_q,
+         "false DISCOVERY RATE over the horizon family — not an alpha"),
+        ("oos_max_p", "M2", th.oos_max_p,
+         "CONFIRMATION of a selected hypothesis — no multiplicity, small n"),
+        ("min_pass_rate", "M1", 0.6,
+         "a VOTE: how many folds must agree — not a probability at all"),
+    ]:
+        print(f"  {name:<18} {mod:<8} {val:>7.3f}  {what}")
+    print("  ^ deliberately NOT tied to alpha: tying them would be a category error")
+
+    print()
+    print("  a different regime is now one number:")
+    for a in (0.10, 0.05, 0.01):
+        c = PipelineContext(timeframe="1D", alpha=a)
+        r = resolve_config(RuleDiscoveryConfig(), "rule_discovery", c)
+        t = resolve_config(AlphaConfig(), "alpha", c).thresholds
+        print(f"    ctx.alpha={a:<5} -> max_p_value={t.max_p_value:g} "
+              f"ic_max_p={t.ic_max_p:g} max_ttest_p={r.criteria.max_ttest_p:g} "
+              f"max_rotation_p={r.criteria.max_rotation_p:g}  "
+              f"(fdr_q stays {t.fdr_q:g}, oos_max_p stays {t.oos_max_p:g})")
+
+
+# ---------------------------------------------------------------------------
+
+_STAGES = {"rates": None, "alpha": None, "m1": stage_m1, "m2": stage_m2,
+           "m3": stage_m3}
 
 
 def main(argv: list) -> None:
@@ -295,10 +355,13 @@ def main(argv: list) -> None:
     unknown = [s for s in stages if s not in _STAGES]
     if unknown:
         raise SystemExit(f"unknown stage(s) {unknown}; choose from {list(_STAGES)}")
-    kpi = _load() if any(s != "rates" for s in stages) else None
+    dataless = {"rates", "alpha"}
+    kpi = _load() if any(s not in dataless for s in stages) else None
     for stage in stages:
         if stage == "rates":
             stage_rates()
+        elif stage == "alpha":
+            stage_alpha()
         else:
             _STAGES[stage](kpi)
 

@@ -181,22 +181,50 @@ class PromotionThresholds:
         admitted when ``|IC| >= ic_min_abs`` **or** ``p_ic < ic_max_p`` is not
         required on its own — see :meth:`AlphaDiscovery` for the exact rule
         (the doc discards only when *both* are weak).
+
+        A per-hypothesis alpha, so **session-resolved** from
+        ``PipelineContext.alpha`` (F9, #182); default 0.05.  It feeds a
+        non-blocking diagnostic that only weighs on the grade, so it is the
+        gentlest of the five.
     min_lift : float
         Minimum win-rate lift over the base rate (Step 4.3), e.g. ``0.08``.
     min_cohens_d : float
         Minimum Cohen's d effect size (Step 4.3).
     max_p_value : float
-        Maximum t-test p-value when FDR control is disabled.
+        Maximum t-test p-value **when FDR control is disabled**.
+
+        A per-hypothesis alpha, so session-resolved from
+        ``PipelineContext.alpha`` (F9, #182); default 0.05.
+
+        Reachable only with ``use_fdr=False``.  Every preset — and this class's
+        own default — sets ``use_fdr=True``, so under any preset this field is
+        **inert**.  It is kept rather than removed because the non-FDR path is
+        legitimate, but tuning it while FDR is on has no effect, and that is
+        worth knowing before you spend an afternoon on it.
     use_fdr : bool
         When ``True`` (default), promotion uses Benjamini-Hochberg across all
         evaluated candidates instead of the raw ``max_p_value`` threshold.
     fdr_q : float
         Target false-discovery rate for Benjamini-Hochberg (Section 13).
+
+        **Not** tied to ``PipelineContext.alpha``, and deliberately so: a
+        ``q`` is a false *discovery rate* over a family — "I accept that 10% of
+        promotions are false" — while an alpha is a per-test error rate.
+        Deriving one from the other would be a category error.  It stays chosen
+        by the preset, because the right ``q`` depends on how wide the search
+        is, and calibrating the search is what a preset is for (F9, #182).
     oos_max_p : float
         Maximum one-sided p-value for the out-of-sample confirmation of the
         derived target.  When the p-value clears this threshold with a positive
         mean advantage, ``oos_validation.passed`` is ``True``.  No minimum
         activation count is imposed — the p-value already encodes sample size.
+
+        **Not** tied to ``PipelineContext.alpha``, and legitimately looser than
+        it (0.10 against 0.05).  This is a *confirmation* level for a
+        hypothesis that has already been selected: one pre-specified test, no
+        multiplicity to correct for, on a sample that is small by construction
+        (the held-out tail).  A discovery alpha answers a different question
+        and would make the confirmation the binding constraint (F9, #182).
         A non-parametrizable floor of 10 activations triggers a diagnostic
         warning about low statistical reliability (see ``AlphaDiscovery``).
     min_direction_t : float
@@ -218,10 +246,10 @@ class PromotionThresholds:
     """
 
     ic_min_abs: float = 0.02
-    ic_max_p: float = 0.05
+    ic_max_p: float = UNSET
     min_lift: float = 0.08
     min_cohens_d: float = 0.15
-    max_p_value: float = 0.05
+    max_p_value: float = UNSET
     use_fdr: bool = True
     fdr_q: float = 0.10
     oos_max_p: float = 0.10
