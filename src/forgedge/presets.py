@@ -20,7 +20,7 @@ Scaling dei parametri per timeframe
   grandi numeri stabilizza i conteggi mensili all'aumentare delle barre,
   quindi lo stesso ID naturale dei "buoni" eventi è più basso su intraday/HFT
   rispetto al daily.
-* ``horizon_grid`` e ``bars_per_day`` sono scalati al timeframe.
+* ``horizon_grid`` e ``bars_per_day`` sono risolti dal timeframe (#179, #196).
 
 Utilizzo
 ---------
@@ -125,13 +125,13 @@ class _TFClass:
 def default_horizon_grid(timeframe: str) -> Optional[Tuple[int, ...]]:
     """Timeframe-calibrated horizon grid for ``forge()``'s default AlphaConfig.
 
-    ``AlphaConfig.horizon_grid`` defaults to a grid calibrated on ~hourly bars
-    (up to 48 bars ≈ 48 hours).  On a daily-or-slower timeframe the same grid
-    silently means holding periods of up to 48 *days* — the "silent footgun"
-    documented in ``docs/analysis/lowfreq_robustness.md``.  This helper returns
-    the presets' class-calibrated grid when the bar duration is one day or
-    longer, and ``None`` otherwise (including unparseable timeframes), meaning
-    "keep the AlphaConfig default".
+    Kept as a public helper, but no longer the mechanism: since #196
+    ``AlphaConfig.horizon_grid`` is session-resolved from the same
+    ``_TFClass`` table, on every path rather than only when ``forge()`` built
+    the config itself.  This returns the daily class grid when the bar
+    duration is one day or longer and ``None`` otherwise (including
+    unparseable timeframes) — a question about *classes*, useful for a caller
+    deciding whether a timeframe is in the slow class at all.
     """
     try:
         tf = _TFClass(timeframe)
@@ -345,7 +345,11 @@ def forge_preset(
     )
 
     # ── M2: AlphaDiscovery ───────────────────────────────────────────────
-    horizon_grid = overrides.pop("horizon_grid", tf.horizon_grid)
+    # Left UNSET by default: the resolver derives it from the same declared
+    # timeframe this preset was built for, from the same `_TFClass` table, so
+    # there is no second copy of the calibration here (#196 — the same move
+    # `bars_per_day` made in #179).  An explicit override still wins.
+    horizon_grid = overrides.pop("horizon_grid", UNSET)
     # Left UNSET by default: the resolver derives it from the same declared
     # timeframe this preset was built for, so there is no third copy of the
     # conversion here (F5, #179).  An explicit override still wins.

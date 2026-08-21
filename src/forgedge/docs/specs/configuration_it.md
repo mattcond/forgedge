@@ -210,7 +210,7 @@ Configurazione principale del Modulo 2. Controlla la grid degli orizzonti, la de
 
 | Parametro | Tipo | Default | Descrizione |
 |---|---|---|---|
-| `horizon_grid` | tuple[int,...] | `(1,2,3,4,6,8,12,16,24,36,48)` | Grid di orizzonti (in barre) scansionata per derivare `h*`. |
+| `horizon_grid` | tuple[int,...] | *(risolto: la classe di orizzonti della sessione)* | Grid di orizzonti (in barre) scansionata per derivare `h*`. `(1,2,4,8,12,24)` su orarie e 4H, `(1,2,3,5,7,10)` su daily e più lente, `(1,2,5,10,20,50)` su sotto-orarie — calibrato per classe come `BacktestParams.target_h`, non convertito in wall-clock (#196). Prima veniva sostituito solo quando non si passava alcun `AlphaConfig`, quindi una config esplicita su candele daily scandagliava fino a 48 *giorni*. |
 | `mfe_quantile` | float | `0.5` | Quantile della distribuzione MFE delle barre attive usato come `sell_pct` di base. |
 | `mfe_floor` | float | `0.005` | Floor per `sell_pct`: il take-profit non può essere < 0.5% indipendentemente dal MFE. |
 | `train_ratio` | float | `0.7` | Frazione IS per la misurazione statistica. Il restante `1 - train_ratio` è l'OOS tail. |

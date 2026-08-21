@@ -14,10 +14,10 @@ the Event Candidate exactly as received and only adds statistical measures.
 from __future__ import annotations
 
 import warnings
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Dict, List, Literal, Optional, Tuple
 
-from ..unset import UNSET
+from ..unset import UNSET, coalesce, is_set
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +392,32 @@ class AlphaConfig:
         derivation (Step 1).  For every Event Candidate the horizon that
         maximises ``|T_h|`` (the excess log-return t-statistic) is selected as
         ``h*``.
+
+        Session-resolved, **class-calibrated** rather than wall-clock
+        converted (#196), the same way ``BacktestParams.target_h`` is: an
+        hourly session scans up to 24 hours and a daily one up to 10 days,
+        because converting the hourly grid into daily bars would collapse it
+        to ``(1, 1, 1, 1, 1, 1)`` — a different question, not the same one
+        restated.
+
+        ============  ==========================================
+        timeframe     resolved grid
+        ============  ==========================================
+        1H, 4H        ``(1, 2, 4, 8, 12, 24)``
+        1D and up     ``(1, 2, 3, 5, 7, 10)``
+        sub-hourly    ``(1, 2, 5, 10, 20, 50)``
+        ============  ==========================================
+
+        It used to carry an hourly class default that :func:`forgedge.forge`
+        substituted **only** when no ``AlphaConfig`` was passed at all; a
+        caller who built one to change something else entirely kept the hourly
+        grid and got a warning, which on daily candles meant scanning holding
+        periods of up to 48 *days*.
+
+        This is a single resolved grid, not a constructed search space: how
+        search spaces should be built is a broader question, and when it is
+        taken up it will be an extension of the resolver rather than a second
+        mechanism beside it.
     mfe_quantile : float
         Quantile of the Maximum Favorable Excursion distribution (over active
         IS bars at ``h*``) used to set ``sell_pct``.  Default ``0.5``
@@ -537,7 +563,7 @@ class AlphaConfig:
         auto-scales across timeframes; the PROJ warmup is ``(trend_sma_mult+1)·h``.
     """
 
-    horizon_grid: Tuple[int, ...] = (1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48)
+    horizon_grid: Tuple[int, ...] = UNSET
     mfe_quantile: float = 0.5
     mfe_floor: float = 0.005
     train_ratio: float = 0.7
@@ -567,9 +593,13 @@ class AlphaConfig:
     trend_sma_mult: float = 2.0
 
     def __post_init__(self):
-        if not self.horizon_grid or any(int(h) <= 0 for h in self.horizon_grid):
-            raise ValueError("horizon_grid must contain positive horizons (bars).")
-        self.horizon_grid = tuple(sorted({int(h) for h in self.horizon_grid}))
+        # Unset is not "empty": it means the session has not decided yet, and
+        # `resolved()` (or the resolver) fills it in.  Validating it here would
+        # reject the sentinel as an empty grid.
+        if is_set(self.horizon_grid):
+            if not self.horizon_grid or any(int(h) <= 0 for h in self.horizon_grid):
+                raise ValueError("horizon_grid must contain positive horizons (bars).")
+            self.horizon_grid = tuple(sorted({int(h) for h in self.horizon_grid}))
         if not (0.0 < self.train_ratio <= 1.0):
             raise ValueError(f"train_ratio must be in (0, 1], got {self.train_ratio}.")
         if not (0.0 < self.mfe_quantile <= 1.0):
@@ -596,6 +626,22 @@ class AlphaConfig:
             )
         self.score_weights = w
 
+    def resolved(self) -> "AlphaConfig":
+        """Return a copy with every ``UNSET`` field at its documented default.
+
+        Only ``horizon_grid`` needs it today: the other session-resolved fields
+        on this config are read through ``coalesce`` at their use sites, but the
+        grid is iterated and ``max()``-ed in several places, so the sentinel has
+        to become a value once rather than be guarded at each read.
+
+        The fallback is the **hourly** calibration — exactly the grid this field
+        carried before it became session-resolved — because this method has no
+        timeframe to calibrate with.  Choosing the class is the resolver's job,
+        and it is the path :func:`forgedge.forge` takes.
+        """
+        if is_set(self.horizon_grid):
+            return self
+        return replace(self, horizon_grid=(1, 2, 4, 8, 12, 24))
 
 # ---------------------------------------------------------------------------
 # Measurement results

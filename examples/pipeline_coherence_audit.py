@@ -108,16 +108,22 @@ def stage_rates() -> None:
     print("  LATENT PARAMETER: bar duration — the fields that mean \"N bars\"")
     print("=" * 78)
     print(f"  {'timeframe':>9}  {'bar_hours':>9}  {'buy_delay_bar':>13}  "
-          f"{'target_h':>9}  {'stable_window':>13}  {'bars_per_day':>12}")
+          f"{'target_h':>9}  {'stable_window':>13}  {'bars/day':>9}  "
+          f"{'horizon_grid':>22}")
     for tf in ("1D", "4H", "1H", "15m"):
         ctx = PipelineContext(timeframe=tf)
         rd = resolve_config(RuleDiscoveryConfig(), "rule_discovery", ctx)
         mc = resolve_config(MarketContextConfig(), "market_context", ctx)
+        al = resolve_config(AlphaConfig(timeframe=tf), "alpha", ctx)
         print(f"  {tf:>9}  {ctx.bar_hours:9.2f}  {rd.base_params.buy_delay_bar:13d}  "
               f"{rd.base_params.target_h:9d}  {mc.stable_window:13d}  "
-              f"{ctx.bars_per_day:12.2f}")
+              f"{ctx.bars_per_day:9.2f}  {str(al.horizon_grid):>22}")
     print("  before #179 every column but the first was frozen at its 1H value,")
-    print("  so a daily session rested its limit orders for six *days* (F5)")
+    print("  so a daily session rested its limit orders for six *days* (F5).")
+    print("  `horizon_grid` was the last to follow (#196): until then it was")
+    print("  converted only when forge() built the AlphaConfig itself, so an")
+    print("  explicit config on daily candles still scanned up to 48 *days*.")
+    print("  note target_h == max(horizon_grid) — one calibration, two readers")
 
     print("\n" + "=" * 78)
     print("  pf_score_tpm = PF × c_norm — the selection objective, on a *Poisson*")
