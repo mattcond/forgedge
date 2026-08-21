@@ -684,3 +684,80 @@ class TestOneSignificanceLevel:
         assert RotationConfig().resolved().alpha == 0.05
         assert RotationConfig().resolved(0.01).alpha == 0.01
         assert RotationConfig(alpha=0.2).resolved(0.01).alpha == 0.2
+
+
+class TestTheHorizonGridFollowsTheSession:
+    """#196 — the tail of F5: the last "N bars" field on the old mechanism.
+
+    `horizon_grid` was substituted by `forge()` *only* when no `AlphaConfig`
+    was passed at all; a caller who built one to change something else kept
+    the hourly grid and got a warning instead of a conversion. On daily
+    candles that meant scanning holding periods of up to 48 days.
+    """
+
+    @staticmethod
+    def _grid(timeframe, alpha=None):
+        rep = config_report(None, alpha or AlphaConfig(timeframe=timeframe), None,
+                            ctx=_ctx(timeframe=timeframe))
+        return rep.configs["alpha"].horizon_grid
+
+    def test_it_is_class_calibrated_like_target_h(self):
+        """Not wall-clock converted: 24 hours in daily bars is 1, which asks a
+        different question. An hourly session scans to 24 hours, a daily one to
+        10 days."""
+        assert self._grid("1H") == (1, 2, 4, 8, 12, 24)
+        assert self._grid("4H") == (1, 2, 4, 8, 12, 24)
+        assert self._grid("1D") == (1, 2, 3, 5, 7, 10)
+        assert self._grid("15m") == (1, 2, 5, 10, 20, 50)
+
+    def test_it_agrees_with_the_horizon_that_m3_falls_back_to(self):
+        """One calibration, read by both — `target_h`'s class default is the
+        top of this grid, and that is not a coincidence to be maintained by
+        hand."""
+        for tf in ("1H", "1D", "15m"):
+            rep = config_report(None, AlphaConfig(timeframe=tf), RuleDiscoveryConfig(),
+                                ctx=_ctx(timeframe=tf))
+            grid = rep.configs["alpha"].horizon_grid
+            assert rep.configs["rule_discovery"].base_params.target_h == max(grid)
+
+    def test_the_case_the_issue_was_opened_for(self):
+        """An `AlphaConfig` built to change `train_ratio` — nothing to do with
+        horizons — used to keep the hourly grid on daily candles."""
+        grid = self._grid("1D", AlphaConfig(timeframe="1D", train_ratio=0.8))
+        assert max(grid) == 10          # days, not 48
+        assert "timeframe_mismatch" not in _codes(
+            config_report(None, AlphaConfig(timeframe="1D", train_ratio=0.8), None,
+                          ctx=_ctx(timeframe="1D")))
+
+    def test_an_explicit_grid_is_still_the_callers_business(self):
+        assert self._grid("1D", AlphaConfig(timeframe="1D",
+                                            horizon_grid=(3, 9, 27))) == (3, 9, 27)
+
+    def test_an_hourly_session_is_unchanged_where_it_matters(self):
+        """The calibration point. The *literal* default changed — the old one
+        reached 48 bars — but what an hourly session scans is the hourly class
+        grid, which is what `forge()` already substituted on that path."""
+        from forgedge.presets import _TFClass
+
+        assert self._grid("1H") == _TFClass("1H").horizon_grid
+
+    def test_the_sentinel_is_spent_at_the_standalone_chokepoint(self):
+        """No session, no declared timeframe: `resolved()` falls back to the
+        hourly calibration rather than leaving a sentinel to be iterated."""
+        from forgedge import UNSET
+
+        raw = AlphaConfig()
+        assert raw.horizon_grid is UNSET
+        assert raw.resolved().horizon_grid == (1, 2, 4, 8, 12, 24)
+        # ...and the rest of __post_init__ still ran on the copy.
+        assert raw.resolved().target_mode == "proj"
+        assert len(raw.resolved().score_weights) == 5
+
+    def test_unset_is_not_an_empty_grid(self):
+        """`__post_init__` validates the grid; the sentinel must not be read as
+        an empty one and rejected."""
+        AlphaConfig()                                  # must not raise
+        with pytest.raises(ValueError, match="positive horizons"):
+            AlphaConfig(horizon_grid=())
+        with pytest.raises(ValueError, match="positive horizons"):
+            AlphaConfig(horizon_grid=(1, 0, 3))

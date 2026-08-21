@@ -393,18 +393,31 @@ passa la tabella originale, le feature vengono ricalcolate deterministicamente
 dai parametri salvati nei componenti — il risultato è identico ma leggermente
 più lento.
 
-**Il default di `horizon_grid` è scalato sul timeframe.** Quando
-`AlphaConfig.horizon_grid` non è impostato, `forge()` (non il default della
-classe `AlphaConfig` stessa) lo risolve da `timeframe`: i timeframe
-giornalieri-o-più-lenti (`"1D"`, `"3D"`, `"1W"`, …) ricevono
-`(1, 2, 3, 5, 7, 10)` barre; i timeframe intraday mantengono il default
-calibrato orario `(1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48)`. Costruendo
-`AlphaDiscovery` direttamente (bypassando `forge()`) si ottiene comunque il
-default calibrato intraday indipendentemente da `timeframe` — passa
-`horizon_grid` esplicitamente per dati giornalieri-o-più-lenti in quel caso. Se
-passi un `AlphaConfig` esplicito che porta ancora il default orario non
-modificato su un `timeframe` giornaliero-o-più-lento, `forge()` emette uno
-`UserWarning` (una grid custom impostata da te viene rispettata silenziosamente).
+**`horizon_grid` è risolto a livello di sessione.** Lasciato non impostato,
+viene derivato dal `timeframe` della sessione — su *ogni* percorso, che tu
+passi un `AlphaConfig` o no:
+
+| timeframe | grid |
+|---|---|
+| sotto-orari | `(1, 2, 5, 10, 20, 50)` |
+| 1H, 4H | `(1, 2, 4, 8, 12, 24)` |
+| 1D e più lenti | `(1, 2, 3, 5, 7, 10)` |
+
+Calibrato per classe, non convertito in wall-clock: una sessione oraria
+scandaglia fino a 24 ore e una daily fino a 10 giorni, perché convertire la
+griglia oraria in barre daily la ridurrebbe a una sola barra — che è una
+domanda diversa.
+
+Fino alla #196 la sostituzione avveniva solo quando non si passava alcun
+`AlphaConfig`. Passarne uno per cambiare `train_ratio` — o qualunque altra
+cosa — manteneva la griglia oraria e produceva uno `UserWarning` invece di una
+conversione, il che su candele daily significava scandagliare holding period
+fino a 48 *giorni*. Sia la sostituzione sia l'avviso sono stati rimossi: due
+meccanismi per un solo valore sono il modo in cui il buco si era aperto.
+
+Costruire `AlphaDiscovery` direttamente risolve comunque la griglia, contro una
+sessione oraria di default; in quel caso passa `horizon_grid` (o un
+`PipelineContext`) esplicitamente per dati giornalieri-o-più-lenti.
 
 ### Configurazione avanzata con grid custom
 

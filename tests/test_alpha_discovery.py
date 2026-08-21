@@ -1222,7 +1222,7 @@ class TestFixedTarget:
         """A horizon absent from horizon_grid is added to the forward-return
         grid so all downstream measures can be read at it."""
         contracts = self._run(base, horizon=7, min_return=0.03, side="long")
-        assert 7 not in AlphaConfig().horizon_grid
+        assert 7 not in AlphaConfig().resolved().horizon_grid
         assert all(c.derived_target.holding_period_h == 7 for c in contracts)
 
     def test_downstream_measures_run(self, base):

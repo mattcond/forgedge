@@ -386,16 +386,30 @@ contains the derived features (ratio, spread) computed during Event Discovery;
 passing the original table works but is slightly slower as features are
 recomputed deterministically from the stored component parameters.
 
-**Default `horizon_grid` is timeframe-scaled.** When `AlphaConfig.horizon_grid`
-is left unset, `forge()` (not the `AlphaConfig` class default itself) resolves
-it from `timeframe`: daily-or-slower timeframes (`"1D"`, `"3D"`, `"1W"`, …) get
-`(1, 2, 3, 5, 7, 10)` bars; intraday timeframes keep the hourly-calibrated
-`(1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48)`. Building `AlphaDiscovery` directly
-(bypassing `forge()`) still gets the intraday-calibrated class default
-regardless of `timeframe` — pass `horizon_grid` explicitly for daily-or-slower
-data in that case. If you pass an explicit `AlphaConfig` that still carries the
-untouched hourly default on a daily-or-slower `timeframe`, `forge()` emits a
-`UserWarning` (any custom grid you set is respected silently).
+**`horizon_grid` is session-resolved.** Left unset, it is derived from the
+session's `timeframe` — on *every* path, whether or not you pass an
+`AlphaConfig`:
+
+| timeframe | grid |
+|---|---|
+| sub-hourly | `(1, 2, 5, 10, 20, 50)` |
+| 1H, 4H | `(1, 2, 4, 8, 12, 24)` |
+| 1D and slower | `(1, 2, 3, 5, 7, 10)` |
+
+Class-calibrated, not wall-clock converted: an hourly session scans up to 24
+hours and a daily one up to 10 days, because converting the hourly grid into
+daily bars would collapse it to a single bar — a different question.
+
+Until #196 the substitution happened only when no `AlphaConfig` was passed at
+all. Passing one to change `train_ratio` — anything, really — kept the hourly
+grid and produced a `UserWarning` instead of a conversion, which on daily
+candles meant scanning holding periods of up to 48 *days*. Both the
+substitution and the warning are gone: two mechanisms for one value is how the
+gap opened.
+
+Building `AlphaDiscovery` directly still resolves the grid, against a default
+hourly session; pass `horizon_grid` (or a `PipelineContext`) explicitly for
+daily-or-slower data in that case.
 
 ### Advanced configuration with custom grid
 

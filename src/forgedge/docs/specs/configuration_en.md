@@ -227,7 +227,7 @@ IS/OOS split, and traceability metadata.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `horizon_grid` | tuple[int,...] | `(1,2,3,4,6,8,12,16,24,36,48)` | Horizon grid (in bars) scanned to derive `h*`. |
+| `horizon_grid` | tuple[int,...] | *(resolved: the session's horizon class)* | Horizon grid (in bars) scanned to derive `h*`. `(1,2,4,8,12,24)` on hourly and 4H, `(1,2,3,5,7,10)` on daily and slower, `(1,2,5,10,20,50)` on sub-hourly — class-calibrated like `BacktestParams.target_h`, not wall-clock converted (#196). It used to be substituted only when no `AlphaConfig` was passed at all, so an explicit config on daily candles scanned up to 48 *days*. |
 | `mfe_quantile` | float | `0.5` | Quantile of the MFE distribution of active bars used as baseline `sell_pct`. |
 | `mfe_floor` | float | `0.005` | Floor for `sell_pct`: take-profit cannot be < 0.5% regardless of MFE. |
 | `train_ratio` | float | `0.7` | IS fraction for statistical measurement. The remaining `1 - train_ratio` is the OOS tail. |

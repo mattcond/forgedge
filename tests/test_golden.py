@@ -200,6 +200,19 @@ _AD_GOLDEN = {
 # `fdr_q`, `oos_max_p` and `min_pass_rate` are deliberately not tied to alpha
 # (a false-discovery rate, a confirmation level, and a vote), so they could not
 # have moved either.
+#
+# ── #196 (tail of F5): checked, and the pins below do NOT move ──────────────
+#
+# `AlphaConfig.horizon_grid` is session-resolved now, on every path rather than
+# only when `forge()` built the config itself.  This fixture runs `forge()`
+# without an `alpha_config`, which is precisely the path that already got the
+# substituted daily grid `(1, 2, 3, 5, 7, 10)` — so the value reaching M2 is
+# identical and every downstream pin with it.
+#
+# The gap this closes is the *other* path: an explicit `AlphaConfig` on daily
+# candles used to keep the hourly grid and scan up to 48 days.  No golden
+# exercises that path, which is why nothing here moves and why the coverage
+# for it is in `TestTheHorizonGridFollowsTheSession` instead.
 _RD_GOLDEN = {
     "verdict":        "NON-EDGE",
     "profit_factor":  pytest.approx(1.6746, rel=1e-3),

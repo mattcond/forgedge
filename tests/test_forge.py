@@ -169,20 +169,25 @@ class TestForge:
         assert result.alpha_discovery.config.timeframe == "4H"
 
     def test_explicit_alpha_config_is_respected(self, kpi):
-        cfg = AlphaConfig(asset="EXPLICIT", timeframe="1D")
-        # An explicit config keeping the hourly default horizon grid on a 1D
-        # timeframe is respected verbatim, but warns about the unscaled grid.
-        with pytest.warns(UserWarning, match="horizon_grid"):
-            result = forge(
-                kpi,
-                asset="IGNORED",
-                alpha_config=cfg,
-                event_discovery_config=_FAST_ED_CONFIG,
-                run_rule_discovery=False,
-            )
+        # 4H matches the fixture's own spacing — the timeframe is incidental
+        # to what this test checks, and declaring it honestly keeps the
+        # declared-vs-measured check (#179) quiet.
+        cfg = AlphaConfig(asset="EXPLICIT", timeframe="4H")
+        # What the caller *set* is respected verbatim; what they left unset is
+        # resolved from the session. Before #196 an explicit config on a slow
+        # timeframe kept the hourly grid and merely warned — the config was
+        # respected a little too literally.
+        result = forge(
+            kpi,
+            asset="IGNORED",
+            timeframe="4H",          # declared, and matching cfg.timeframe
+            alpha_config=cfg,
+            event_discovery_config=_FAST_ED_CONFIG,
+            run_rule_discovery=False,
+        )
         assert result.alpha_discovery.config.asset == "EXPLICIT"
-        assert result.alpha_discovery.config.timeframe == "1D"
-        assert result.alpha_discovery.config.horizon_grid == AlphaConfig().horizon_grid
+        assert result.alpha_discovery.config.timeframe == "4H"
+        assert result.alpha_discovery.config.horizon_grid == (1, 2, 4, 8, 12, 24)
 
     def test_edges_and_validated_rules_are_consistent(self, full_result):
         for contract, response in full_result.edges():
@@ -192,13 +197,14 @@ class TestForge:
 
 
 class TestForgeTimeframeScaledHorizons:
-    """forge()'s default AlphaConfig scales the horizon grid to the timeframe.
+    """The horizon grid is calibrated to the session's bar class.
 
-    The AlphaConfig default grid is calibrated on ~hourly bars; using it
-    verbatim on daily data means holding periods of up to 48 days (the
-    "silent footgun" of docs/analysis/lowfreq_robustness.md).  When no
-    explicit alpha_config is passed, forge() substitutes the class-calibrated
-    daily grid for daily-or-slower timeframes and leaves intraday untouched.
+    The old class default was calibrated on ~hourly bars; using it verbatim on
+    daily data means holding periods of up to 48 days (the "silent footgun" of
+    docs/analysis/lowfreq_robustness.md).  `forge()` used to substitute the
+    daily grid only when no explicit `alpha_config` was passed; since #196 the
+    resolver derives it on every path, so the substitution — and the warning
+    that stood in for it on the other path — are both gone.
     """
 
     @staticmethod
@@ -221,7 +227,12 @@ class TestForgeTimeframeScaledHorizons:
         assert grid == default_horizon_grid("1D")
         assert max(grid) <= 10  # days, not the 48-bar hourly default
 
-    def test_default_config_on_intraday_keeps_default_grid(self):
+    def test_intraday_gets_the_intraday_class_grid(self):
+        """4H is in the same class as 1H, so it scans the same horizons — up to
+        24 bars. That used to be "the default, left untouched"; it is now the
+        class grid, derived rather than inherited."""
+        from forgedge.presets import _TFClass
+
         result = forge(
             _ohlc_kpi_table(),
             ticker="INTRA",
@@ -229,7 +240,8 @@ class TestForgeTimeframeScaledHorizons:
             event_discovery_config=_FAST_ED_CONFIG,
             run_rule_discovery=False,
         )
-        assert result.alpha_discovery.config.horizon_grid == AlphaConfig().horizon_grid
+        grid = result.alpha_discovery.config.horizon_grid
+        assert grid == _TFClass("4H").horizon_grid == (1, 2, 4, 8, 12, 24)
 
     def test_explicit_custom_grid_on_daily_does_not_warn(self):
         import warnings as _warnings

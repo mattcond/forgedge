@@ -742,6 +742,29 @@ def _derive_buy_delay_bar(values: Dict[str, Any], ctx: PipelineContext):
                    f"{value} barr{'a' if value == 1 else 'e'}")
 
 
+def _derive_horizon_grid(values: Dict[str, Any], ctx: PipelineContext):
+    """M2's search horizons — the same class calibration as ``target_h``.
+
+    #196, the tail of F5.  Every other field meaning "N bars" became
+    session-resolved in #179; this one stayed on the older mechanism, where
+    ``forge()`` substituted the class grid *only* when no ``AlphaConfig`` was
+    passed and otherwise merely warned.  A caller who built one to change
+    ``train_ratio`` kept the hourly grid, and on daily candles that scanned
+    holding periods of up to 48 days.
+
+    Class-calibrated, not wall-clock converted, for the reason ``target_h``
+    already is: 24 hours expressed in daily bars is 1, which asks a different
+    question.  This resolves *one grid*; constructing a search space is a
+    wider question, and when it is taken up it belongs here as an extension
+    rather than as a second mechanism alongside.
+    """
+    from .presets import _TFClass
+
+    grid = _TFClass(ctx.timeframe).horizon_grid
+    return grid, (f"griglia di orizzonti calibrata per {ctx.timeframe} — la "
+                  f"stessa classe che sceglie base_params.target_h")
+
+
 def _derive_target_h(values: Dict[str, Any], ctx: PipelineContext):
     """The holding horizon — top of the session's horizon class.
 
@@ -951,6 +974,14 @@ CONSTRAINTS: List[Constraint] = [
         free=(),
         derived="rule_discovery.base_params.target_h",
         derive=_derive_target_h,
+    ),
+    Constraint(
+        code="timeframe_mismatch",
+        level="WARN",
+        stage=PROPAGATION,
+        free=(),
+        derived="alpha.horizon_grid",
+        derive=_derive_horizon_grid,
     ),
     Constraint(
         code="timeframe_mismatch",
@@ -1213,27 +1244,6 @@ def _check_scoring(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str
             f"in _passes: decide quale operating point viene pubblicato.")
 
 
-def _untouched_default(path: str, value: Any) -> bool:
-    """``True`` when the field still holds its class default.
-
-    The same question ``_warn_if_hourly_grid_on_slow_timeframe`` asks: a value
-    the caller chose is their business, but an hourly-calibrated default that
-    reached daily data is the footgun.  These fields are plain defaults rather
-    than ``UNSET``, so the class is the only place to read them from.
-    """
-    lazy = {
-        "alpha.horizon_grid": ("alpha_discovery.models", "AlphaConfig", "horizon_grid"),
-    }
-    spec = lazy.get(path)
-    if spec is None:
-        return False
-    import importlib
-
-    mod = importlib.import_module(f".{spec[0]}", package="forgedge")
-    cls = getattr(mod, spec[1])
-    return cls.__dataclass_fields__[spec[2]].default == value
-
-
 def _check_timeframe(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
     """F5 — the declared bar duration versus everything measured against it.
 
@@ -1247,11 +1257,11 @@ def _check_timeframe(values: Dict[str, Any], ctx: PipelineContext) -> Optional[s
       table — a data fact, hence check mode only.  Declaring ``"1D"`` over
       hourly candles silently made M2 scale on the declaration and M0 on the
       measurement, with nothing comparing the two;
-    * an hourly-calibrated ``horizon_grid`` default reaching daily data.
-
-    The two M3 bar counts used to be flagged here too.  They are derived from
-    the session now, so there is nothing left to warn about: a converted value
-    is not a mismatch.
+    The bar-count fields used to be flagged here too — the two M3 counts, and
+    ``horizon_grid`` last of all (#196).  Every one of them is derived from the
+    session now, so there is nothing left to warn about: a converted value is
+    not a mismatch, and this check is down to the two questions that survive
+    conversion, both of them about the *declaration* rather than the values.
     """
     problems = []
     declared = values.get("alpha.timeframe", _MISSING)
@@ -1271,14 +1281,6 @@ def _check_timeframe(values: Dict[str, Any], ctx: PipelineContext) -> Optional[s
                 f"{measured:.4g}h: i conteggi in barre sono scalati sul "
                 f"dichiarato e i dati sono un'altra cosa")
 
-    if ctx.bar_minutes > 60:
-        bars_per_day = ctx.bars_per_day
-        grid = values.get("alpha.horizon_grid", _MISSING)
-        if (grid is not _MISSING and is_set(grid) and len(grid)
-                and _untouched_default("alpha.horizon_grid", grid)):
-            problems.append(
-                f"max(horizon_grid)={max(grid)} è il default orario e a "
-                f"{ctx.timeframe} vale {max(grid) / bars_per_day:.0f} giorni")
     return "; ".join(problems) or None
 
 

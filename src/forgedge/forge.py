@@ -76,7 +76,6 @@ from .event_discovery.models import (
 )
 from .market_context.context import MarketContext
 from .market_context.models import REGIME_COL, MarketContextConfig
-from .presets import default_horizon_grid
 from .config_report import ConfigReport, config_report
 from .resolver import PipelineContext, ResolutionTrace, collect_context
 from .unset import UNSET, coalesce, is_set
@@ -384,12 +383,15 @@ def forge(
         for production pass ``train_ratio < 1`` with a ``walk_forward`` block.
     alpha_config : AlphaConfig, optional
         Modulo 2 configuration.  When omitted, a default is built carrying the
-        resolved ticker as ``asset`` and ``timeframe``; on a daily-or-slower
-        ``timeframe`` the default ``horizon_grid`` (calibrated on ~hourly bars)
-        is replaced by the timeframe-scaled grid from
-        :func:`forgedge.presets.default_horizon_grid`.  When an explicit config
-        keeps the hourly default grid on such a timeframe a ``UserWarning`` is
-        emitted (the grid would scan holding periods of 48+ days).
+        resolved ticker as ``asset`` and ``timeframe``.
+
+        ``horizon_grid`` is session-resolved (#196), so it is calibrated to the
+        session's bar class whether you pass a config or not: 1-24 bars on
+        hourly, 1-10 on daily, 1-50 on sub-hourly.  It used to be substituted
+        only on the "no config" path, so passing an ``AlphaConfig`` to change
+        something else entirely kept the hourly grid — which on daily candles
+        scanned holding periods of up to 48 *days* — and produced a warning
+        instead of a conversion.
     rotation_calibration : RotationConfig, optional
         When set, run the search-level rotation null calibrator inline after
         Alpha Discovery.  Rotates only the ``close`` column K times and re-runs
@@ -505,19 +507,15 @@ def forge(
     cfg = alpha_config
     if cfg is None:
         resolved_ticker = ticker or asset
-        # The AlphaConfig default horizon grid is calibrated on ~hourly bars;
-        # on a daily-or-slower timeframe substitute the class-calibrated grid
-        # so holding periods stay sane (48 bars would mean 48+ days).
-        scaled_grid = default_horizon_grid(timeframe)
-        if scaled_grid is not None:
-            cfg = AlphaConfig(
-                asset=resolved_ticker, timeframe=timeframe, horizon_grid=scaled_grid
-            )
-        else:
-            cfg = AlphaConfig(asset=resolved_ticker, timeframe=timeframe)
+        cfg = AlphaConfig(asset=resolved_ticker, timeframe=timeframe)
     else:
         resolved_ticker = ticker or cfg.asset
-        _warn_if_hourly_grid_on_slow_timeframe(cfg)
+    # `horizon_grid` used to be substituted here — but only on this first
+    # branch, so a caller who passed an `AlphaConfig` to change something else
+    # entirely kept the hourly grid and got a warning instead of a conversion
+    # (#196).  The resolver derives it now, on every path, which is also why
+    # the substitution is gone rather than merely duplicated: two mechanisms
+    # for one value is how the gap opened.
 
     report = _Reporter(progress, label=resolved_ticker)
     report.stage(f"start — {len(kpi_table)} bars")
@@ -772,31 +770,6 @@ def forge(
 
     report.stage("done")
     return result
-
-
-def _warn_if_hourly_grid_on_slow_timeframe(cfg: AlphaConfig) -> None:
-    """Warn when an explicit config keeps the hourly-calibrated default grid
-    on a daily-or-slower timeframe.
-
-    Only the untouched class default triggers the warning: a user who set any
-    custom ``horizon_grid`` made a deliberate choice and is left alone.
-    """
-    default_grid = AlphaConfig.__dataclass_fields__["horizon_grid"].default
-    if cfg.horizon_grid != default_grid:
-        return
-    scaled = default_horizon_grid(cfg.timeframe)
-    if scaled is None:
-        return
-    warnings.warn(
-        f"AlphaConfig.horizon_grid is the hourly-calibrated default "
-        f"{default_grid} but timeframe={cfg.timeframe!r} means each bar is a "
-        f"day or longer, so the grid scans holding periods of up to "
-        f"{max(default_grid)} bars ({max(default_grid)} {cfg.timeframe} "
-        f"periods). Pass an explicit horizon_grid (e.g. {scaled}) or use "
-        f"forgedge.presets.forge_preset to scale it automatically.",
-        UserWarning,
-        stacklevel=3,
-    )
 
 
 def _contract_grade(contract: AlphaContract) -> Optional[str]:

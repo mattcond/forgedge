@@ -98,7 +98,11 @@ class TestEnrichmentIntegration:
         cfg = AlphaConfig(asset="SYN", timeframe="1H")
         ad = AlphaDiscovery(ed.df, cands, cfg)
         contracts = ad.run()
-        base = set(cfg.horizon_grid)
+        # The grid that *ran*: `horizon_grid` is session-resolved (#196) and
+        # `resolve_config` returns a copy, so the caller's `cfg` still holds
+        # the sentinel — deliberately, since inspecting a config must not
+        # mutate it.
+        base = set(ad.config.horizon_grid)
         enriched = [
             c for c in contracts
             if set(c.derived_target.t_stat_by_h) > base
@@ -119,6 +123,7 @@ class TestEnrichmentIntegration:
         cfg = AlphaConfig(asset="SYN", timeframe="1H", horizon_enrichment=None)
         ad = AlphaDiscovery(ed.df, cands, cfg)
         contracts = ad.run()
+        base = ad.config.horizon_grid          # resolved, see above
         for c in contracts:
-            assert set(c.derived_target.t_stat_by_h) == set(cfg.horizon_grid)
-        assert ad.n_return_tests == len(contracts) * len(cfg.horizon_grid)
+            assert set(c.derived_target.t_stat_by_h) == set(base)
+        assert ad.n_return_tests == len(contracts) * len(base)
