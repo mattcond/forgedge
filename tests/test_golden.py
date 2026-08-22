@@ -213,6 +213,25 @@ _AD_GOLDEN = {
 # candles used to keep the hourly grid and scan up to 48 days.  No golden
 # exercises that path, which is why nothing here moves and why the coverage
 # for it is in `TestTheHorizonGridFollowsTheSession` instead.
+# ── #200 (tail of the rate chain): checked, and the pins below do NOT move ──
+#
+# `SelectionCriteria.min_tpm` is session-resolved now: it follows the rate
+# Event Discovery was *told* to demand, and `min_train_months` (#177) and
+# `scoring.pf_min_tpm` (#178) follow it in turn.  This fixture calls `forge()`
+# with no `discovery_config`, so `GateParams.min_tpm` carries its class default
+# rather than a declaration — and an inherited default is not a declaration
+# (the same line `timeframe_declared` draws).  M3 therefore keeps its own
+# documented 2.0 and the whole chain below it is byte-identical.
+#
+# That silence is the design, not an accident of this fixture: the two class
+# defaults (0.5 and 2.0) disagree by 4x and were never built to relate, so
+# propagating the inherited one would have dropped M3's floor to 0.4 and pushed
+# `min_train_months` from 8 to 40 — more than this 29-month history can supply,
+# and the walk-forward would have vanished outright.
+#
+# The path that does move is a *declared* rate — `forge_preset(min_tpm=2)` and
+# `GateParams(min_tpm=...)`, covered in `TestTheSessionRateReachesM3` and
+# `TestThePresetScalesBothRates`.
 _RD_GOLDEN = {
     "verdict":        "NON-EDGE",
     "profit_factor":  pytest.approx(1.6746, rel=1e-3),

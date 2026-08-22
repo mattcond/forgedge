@@ -383,9 +383,23 @@ def forge_preset(
         daily_rd_tpm_key = "daily_rd_min_tpm_episode"
     else:
         daily_rd_tpm_key = "daily_rd_min_tpm"
-    rd_min_tpm = overrides.pop(
-        "rd_min_tpm", tf.scale_tpm(spec[daily_rd_tpm_key])
-    )
+    # M3's rate follows M1's at *this preset's* ratio, not at a flat default
+    # (#200).  Overriding `min_tpm` alone used to move M1 and leave M3 on the
+    # spec value, which silently mis-sized the walk-forward: `min_train_months`
+    # is derived from `criteria.min_tpm` with a Poisson margin (#177), so on the
+    # reference fixture `forge_preset("balanced", "1D", min_tpm=2)` kept a
+    # 20-month training window built for 0.8 trades/month and left 9 months of
+    # OOS span where 19 were available.
+    #
+    # The ratio is read from the spec rather than from the context's flat
+    # `rate_retention` because the presets disagree about it — 1.00 on sniper
+    # and sweep, 0.80 on balanced and burst — and flattening them would either
+    # loosen two profiles or make the other two demand as many trades as
+    # episodes, which `m3_stricter_than_m1` exists to prevent.  An explicit
+    # `rd_min_tpm` still wins, and with neither override the value is
+    # bit-for-bit what it was.
+    _spec_ratio = spec[daily_rd_tpm_key] / spec[daily_tpm_key]
+    rd_min_tpm = overrides.pop("rd_min_tpm", round(min_tpm * _spec_ratio, 4))
 
     if overrides:
         raise TypeError(f"Unexpected override keys: {list(overrides)}")

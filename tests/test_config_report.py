@@ -761,3 +761,113 @@ class TestTheHorizonGridFollowsTheSession:
             AlphaConfig(horizon_grid=())
         with pytest.raises(ValueError, match="positive horizons"):
             AlphaConfig(horizon_grid=(1, 0, 3))
+
+
+class TestTheSessionRateReachesM3:
+    """#200 — `criteria.min_tpm` is the root of a chain, not a lone threshold.
+
+    `min_train_months` is sized from it with a Poisson margin (#177) and
+    `scoring.pf_min_tpm` tracks it (#178). When only M1's rate moved, the
+    walk-forward stayed sized for the rate the session no longer had — raising
+    the session's rate *degraded* the walk-forward instead of tightening it.
+    """
+
+    @staticmethod
+    def _run(m1_rate=None, rd=None):
+        disc = DiscoveryConfig()
+        if m1_rate is not None:
+            disc = DiscoveryConfig(gate_params=GateParams(min_tpm=m1_rate))
+        return config_report(disc, None, rd or RuleDiscoveryConfig(), timeframe="1D")
+
+    def test_a_declared_rate_reaches_m3(self):
+        rep = self._run(1.0)
+        rd = rep.configs["rule_discovery"]
+        assert rd.criteria.min_tpm == pytest.approx(1.0)     # the declared rate
+        assert "m3_stricter_than_m1" not in _codes(rep)
+
+    def test_the_whole_chain_follows(self):
+        """The point of the fix: one declaration, three coherent values."""
+        rd = self._run(4.0).configs["rule_discovery"]
+        assert rd.criteria.min_tpm == pytest.approx(4.0)
+        assert rd.scoring.pf_min_tpm == pytest.approx(4.0)   # #178 tracks it
+        assert rd.walk_forward.min_train_months == 4         # #177 sizes from it
+
+    def test_the_rate_is_propagated_unchanged_and_that_was_measured(self):
+        """`rate_retention` is 1.0 because a margin below 1 costs history
+        twice: it lengthens `min_train_months` (Poisson margin) *and* shrinks
+        the pooled OOS trade count (`test_months × min_tpm`). At 2.0 a session
+        needs 13 months to produce a verdict; at 1.6 it needs 16.2 — so a 25%
+        cut in the floor demands 25% more data, and a 14-month session that
+        worked stops working."""
+        from forgedge.resolver import poisson_min_window
+
+        def span_needed(rate):
+            return poisson_min_window(10, rate) + 10 / rate
+
+        assert span_needed(2.0) == pytest.approx(13.0, abs=0.1)
+        assert span_needed(1.6) == pytest.approx(16.2, abs=0.1)
+        # ...which is why the resolver does not apply one.
+        assert self._run(2.0).configs["rule_discovery"].criteria.min_tpm == 2.0
+
+    def test_an_inherited_default_is_not_a_declaration(self):
+        """The measurement that shaped this: `GateParams.min_tpm` defaults to
+        0.5 and `SelectionCriteria.min_tpm` to 2.0 — two class defaults that
+        disagree by 4x and were never designed to relate. Propagating the
+        inherited one would drop M3's floor to 0.4 and inflate
+        `min_train_months` from 8 to 40, more than a 29-month history can
+        supply: the walk-forward would vanish entirely."""
+        rd = self._run(None).configs["rule_discovery"]
+        assert rd.criteria.min_tpm == 2.0                    # documented default
+        assert rd.walk_forward.min_train_months == 8
+
+    def test_an_explicit_m3_rate_still_wins(self):
+        from forgedge.rule_discovery.models import SelectionCriteria
+
+        rep = self._run(2.0, RuleDiscoveryConfig(
+            criteria=SelectionCriteria(min_tpm=1.9)))
+        assert rep.configs["rule_discovery"].criteria.min_tpm == pytest.approx(1.9)
+
+    def test_m3_never_ends_up_stricter_than_m1(self):
+        """Equality keeps `m3_stricter_than_m1` silent — it fires on `m3 > m1`
+        — so propagating the rate unchanged is safe in the direction that
+        matters: nothing M1 admits is rejected by M3 for frequency."""
+        for rate in (1.0, 2.0, 5.0):
+            rep = self._run(rate)
+            assert rep.configs["rule_discovery"].criteria.min_tpm <= rate
+            assert "m3_stricter_than_m1" not in _codes(rep)
+
+
+class TestThePresetScalesBothRates:
+    """The reported case: `forge_preset(min_tpm=2)` moved M1 and left M3."""
+
+    @staticmethod
+    def _rates(preset="balanced", **kw):
+        from forgedge.presets import forge_preset
+
+        d, _a, r = forge_preset(preset, "1D", asset="X", **kw)
+        return d.gate_params.min_tpm, r.criteria.min_tpm
+
+    def test_overriding_the_rate_moves_both(self):
+        from forgedge.resolver import poisson_min_window
+
+        m1, m3 = self._rates(min_tpm=2)
+        assert (m1, m3) == (2, pytest.approx(1.6))
+        assert poisson_min_window(10, m3) == 10      # was 20, built for 0.8
+
+    def test_the_untouched_presets_are_bit_for_bit_unchanged(self):
+        """The ratio is read from each spec, not flattened to one number —
+        the presets disagree about it (1.00 on sniper/sweep, 0.80 on
+        balanced/burst) and flattening would move two of them."""
+        assert self._rates("sniper") == (0.3, pytest.approx(0.3))
+        assert self._rates("balanced") == (1.0, pytest.approx(0.8))
+        assert self._rates("sweep") == (0.3, pytest.approx(0.3))
+        assert self._rates("burst") == (1.5, pytest.approx(1.2))
+
+    def test_an_explicit_rd_rate_still_wins(self):
+        assert self._rates(min_tpm=2, rd_min_tpm=1.9) == (2, pytest.approx(1.9))
+
+    def test_the_ratio_is_preserved_across_presets(self):
+        for preset, ratio in (("sniper", 1.0), ("balanced", 0.8),
+                              ("sweep", 1.0), ("burst", 0.8)):
+            m1, m3 = self._rates(preset, min_tpm=3)
+            assert m3 == pytest.approx(3 * ratio), preset

@@ -339,6 +339,19 @@ class SelectionCriteria:
         as ``max(10, n_months * min_tpm)`` (see ``_dynamic_min_trades``), so the
         requirement scales with the in-sample length instead of penalising short
         IS periods or under-demanding long ones (spec RD-04).
+
+        **The root of a chain, not an isolated threshold** — which is why it is
+        session-resolved (#200).  ``walk_forward.min_train_months`` is sized
+        from it with a Poisson margin (#177) and ``scoring.pf_min_tpm`` tracks
+        it (#178), so a value that does not match the session's actual arrival
+        rate mis-sizes the walk-forward and mis-calibrates the grid's objective
+        at the same time.
+
+        Resolved from ``PipelineContext.target_rate_tpm × rate_retention``
+        when Event Discovery's rate was **declared**; otherwise the documented
+        default 2.0 stands.  The retention exists because the two count
+        different things: M1 counts episodes, M3 counts filled trades, and not
+        every episode fills.
     min_pf_score_tpm : float
         Minimum composite ``pf_score_tpm = profit_factor * c_norm``, where
         ``c_norm = min(1, 1 / max(sigma^2 / mu, 1))`` is the inverse index of
@@ -475,7 +488,7 @@ class SelectionCriteria:
 
     min_profit_factor: float = 2.0
     min_win_rate: float = 0.55
-    min_tpm: float = 2.0
+    min_tpm: float = UNSET
     min_pf_score_tpm: float = 0.30
     min_fill_rate: float = 0.40
     min_fill_rate_opt: float = 0.80
@@ -490,6 +503,27 @@ class SelectionCriteria:
     power_gate: bool = True
     min_oos_trades: int = 10
     early_elimination: bool = True
+
+    def resolved(self) -> "SelectionCriteria":
+        """Return a copy with every ``UNSET`` field at its documented default.
+
+        ``min_tpm`` is session-resolved (#200) and is read as a *number* in
+        several places — the dynamic trade floor, the grid's ``_passes``, the
+        verdict's window check — so a caller who never went through
+        :func:`forgedge.resolve` would hit ``tpm_mu >= UNSET``.  Same
+        chokepoint discipline as :meth:`BacktestParams.resolved`.
+        """
+        if is_set(self.min_tpm) and is_set(self.min_net_gain_retention) \
+                and is_set(self.min_sell_pct):
+            return self
+        from dataclasses import replace as _replace
+
+        return _replace(
+            self,
+            min_tpm=coalesce(self.min_tpm, default=2.0),
+            min_net_gain_retention=coalesce(self.min_net_gain_retention, default=0.5),
+            min_sell_pct=coalesce(self.min_sell_pct, default=0.005),
+        )
 
 
 @dataclass
