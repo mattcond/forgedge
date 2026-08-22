@@ -232,6 +232,22 @@ _AD_GOLDEN = {
 # The path that does move is a *declared* rate — `forge_preset(min_tpm=2)` and
 # `GateParams(min_tpm=...)`, covered in `TestTheSessionRateReachesM3` and
 # `TestThePresetScalesBothRates`.
+#
+# ── #204 (tail of #200): checked, and the pins below do NOT move ────────────
+#
+# `_derive_m3_rate` now converts a *declared episode* rate to the bar rate M3
+# actually counts (`bars_per_episode`, ~1.76) before applying the fill ratio —
+# M3 has no notion of episodes, it opens a trade on every active bar.  This
+# fixture's undeclared `GateParams.min_tpm` means `target_rate_tpm` is still
+# `None`, so the new factor is never reached: the derive short-circuits to the
+# documented 2.0 before `bars_per_episode` enters the computation at all.
+#
+# `forge_preset`'s own M3 numbers *do* move — its default `event_counting`
+# ("episode") used to apply the fill ratio straight to the episode rate,
+# understating M3's floor by ~1.8x.  Covered by
+# `TestM3CountsBarsNotEpisodes` and the re-pin in
+# `TestSameResolverGuarantee.test_the_stock_preset_on_daily_data_is_coherent`
+# (20 months → 11, `forge_preset("balanced", "1D")`'s own `min_train_months`).
 _RD_GOLDEN = {
     "verdict":        "NON-EDGE",
     "profit_factor":  pytest.approx(1.6746, rel=1e-3),

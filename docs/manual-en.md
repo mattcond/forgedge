@@ -623,7 +623,7 @@ pipeline reported that as a wall of rejections, indistinguishable from "the
 signal is bad".
 
 - **M3's trade floor** (`#173`). `min_train_months` is now derived from
-  `criteria.min_tpm` with a 95% Poisson margin: 20 months at the balanced
+  `criteria.min_tpm` with a 95% Poisson margin: 11 months at the balanced
   preset's daily rate, not a fixed 6. The naive `floor / rate` gives 12.5 and
   comes up short about 44% of the time — the same bug in milder form. Where the
   history cannot supply the derived window, `oos_span_too_short` says so and

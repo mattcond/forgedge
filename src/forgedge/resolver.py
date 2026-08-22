@@ -303,6 +303,33 @@ class PipelineContext:
         it lives where such judgements belong — in ``forge_preset``'s specs,
         which disagree about it on purpose: 1.00 on ``sniper`` and ``sweep``,
         0.80 on ``balanced`` and ``burst``.
+    bars_per_episode : float
+        Median episode length, in bars, at ``event_counting="episode"``.
+        Rule Discovery has no notion of episodes — it "opens a trade on every
+        active bar, with no flat-state check" — so a declared *episode* rate
+        understates the *bar* rate M3 will actually see by exactly this
+        factor, and unlike ``rate_retention`` this direction of error is not
+        conservative: it makes M3's floor too *low*, which inflates
+        ``min_train_months`` for no reason (#204, the same shape as the
+        fill-margin mistake #200 measured, one factor over).
+
+        **1.76, measured** — median bars/episode on ``ADA_1D_TRAIN`` across
+        3664 candidates at the default ``episode_gap=1`` (mean 1.99, p90
+        3.36).  A single session-wide constant, not scaled by timeframe or
+        preset: the four presets' own implied ratios (3.33 on ``sniper``/
+        ``sweep``, 3.00 on ``balanced``, 1.67 on ``burst``) turned out to
+        disagree only because they were never independently derived — two of
+        four shared the identical value by copy, which is evidence against
+        the ratio being a real per-preset judgement rather than for it.
+        Timeframe-dependence is plausible (an indicator's episode length is
+        governed by its own lookback, which is bar-relative, not wall-clock)
+        but unmeasured, so this stays a flat default until measured — the
+        same "for the moment" scope #196 drew around ``horizon_grid``'s
+        search-space construction.
+
+        Applied only when ``event_counting="episode"`` — in ``"bar"`` mode
+        M1 and M3 already count the same unit, so the factor is 1 and this
+        field is unread.
     cross_pf_retention : float
         Fraction of a rule's home profit factor it must retain elsewhere to
         count as transferring (M4, F8).  Policy rather than data, which is why
@@ -338,6 +365,7 @@ class PipelineContext:
     min_sample: int = 10
     target_rate_tpm: Optional[float] = None
     rate_retention: float = 1.0
+    bars_per_episode: float = 1.76
     cross_pf_retention: float = 0.8
     net_gain_retention: float = 0.5
     # data facts — check mode only
@@ -901,21 +929,34 @@ def _derive_m3_rate(values: Dict[str, Any], ctx: PipelineContext):
     ``PipelineContext.rate_retention``.  The margin is a profile judgement and
     lives in ``forge_preset``'s specs instead.
 
+    When the declared rate counts *episodes* (``event_counting="episode"``,
+    the default), it is first converted to the *bar* rate M3 actually counts
+    via ``PipelineContext.bars_per_episode`` — episodes are runs of bars, not
+    single trades, and skipping this step is #204: it understates M3's floor,
+    which inflates ``min_train_months`` for no reason, the same shape of
+    mistake #200 fixed for the fill margin, one factor upstream of it.  In
+    ``"bar"`` mode M1 and M3 already share a unit, so the factor is 1.
+
     Silent when no rate was declared: see ``PipelineContext.target_rate_tpm``
     for why an inherited class default must not propagate here.
     """
     if ctx.target_rate_tpm is None or float(ctx.target_rate_tpm) <= 0:
         return 2.0, "documented criteria.min_tpm default 2.0"
     rate = float(ctx.target_rate_tpm)
+    counting = values.get("event_discovery.gate_params.event_counting", "episode")
+    bars_per_episode = float(ctx.bars_per_episode) if counting == "episode" else 1.0
     retention = float(ctx.rate_retention)
-    value = round(rate * retention, 4)
+    value = round(rate * bars_per_episode * retention, 4)
+    unit = "episodi/mese" if counting == "episode" else "barre/mese"
+    bits = [f"gate_params.min_tpm={rate:g} {unit}"]
+    if bars_per_episode != 1.0:
+        bits.append(f"x bars_per_episode={bars_per_episode:g} — M3 conta trade "
+                    f"per barra, non episodi")
     if retention == 1.0:
-        return value, (f"gate_params.min_tpm={rate:g} episodi/mese — la stessa "
-                       f"frequenza che la sessione dichiara, propagata invariata "
-                       f"(rate_retention=1)")
-    return value, (f"gate_params.min_tpm={rate:g} episodi/mese "
-                   f"x rate_retention={retention:g} — M3 conta trade, "
-                   f"non episodi, e non ogni episodio si riempie")
+        bits.append("propagato invariato (rate_retention=1)")
+    else:
+        bits.append(f"x rate_retention={retention:g} — non ogni episodio si riempie")
+    return value, " ".join(bits)
 
 
 def _derive_min_train_months(values: Dict[str, Any], ctx: PipelineContext):
@@ -1087,12 +1128,13 @@ CONSTRAINTS: List[Constraint] = [
         derived="alpha.bars_per_day",
         derive=_derive_bars_per_day,
     ),
-    # ── #200: the session's arrival rate reaches M3 too ───────────────
+    # ── #200/#204: the session's arrival rate reaches M3 too, in M3's unit ──
     Constraint(
         code="m3_stricter_than_m1",
         level="WARN",
         stage=PROPAGATION,
-        free=("event_discovery.gate_params.min_tpm",),
+        free=("event_discovery.gate_params.min_tpm",
+              "event_discovery.gate_params.event_counting"),
         derived="rule_discovery.criteria.min_tpm",
         derive=_derive_m3_rate,
     ),
@@ -1301,20 +1343,41 @@ def _check_oos_span(values: Dict[str, Any], ctx: PipelineContext) -> Optional[st
 
 
 def _check_m3_vs_m1(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
-    """F2 — M3 must not demand a higher rate than M1 admitted."""
+    """F2 — M3 must not demand a higher rate than M1 admitted, same unit (#204).
+
+    M1's rate can be in episodes or bars (``event_counting``); M3's is always
+    bars (it opens a trade on every active bar, no episode concept).
+    Comparing them raw treats an episode as if it were a single bar, which
+    understates what M1 actually admits — a declared episode rate of 1.0/mo
+    can legitimately produce ~1.76 bar-trades/mo (``bars_per_episode``), so a
+    derived M3 floor of 1.47 is *not* stricter than M1, it is the same
+    admission restated in M3's unit.  Converting M1 to M3's unit before
+    comparing is what keeps this check silent on exactly the output
+    ``forge_preset()`` derives (see ``_derive_m3_rate``), and reserves the
+    warning for cases that are actually stricter once the unit matches.
+    """
     got = _need(values,
                 "event_discovery.gate_params.min_tpm",
                 "rule_discovery.criteria.min_tpm")
     if got is None:
         return None
     m1, m3 = float(got[0]), float(got[1])
-    if m3 <= m1:
+    counting = values.get("event_discovery.gate_params.event_counting", "episode")
+    bars_per_episode = float(ctx.bars_per_episode) if counting == "episode" else 1.0
+    m1_bar_equiv = m1 * bars_per_episode
+    # `forge_preset()` rounds its derived rate to 4 decimals; comparing the
+    # rounded M3 value against the unrounded conversion above can otherwise
+    # flag float dust (~1e-16) as M3 being "stricter".
+    if m3 <= m1_bar_equiv + 1e-9:
         return None
-    return (f"criteria.min_tpm={m3:g} (M3) supera gate_params.min_tpm={m1:g} (M1): "
-            f"gli eventi ammessi da Event Discovery vengono rifiutati da Rule "
-            f"Discovery per una frequenza che nessuno ha mai richiesto a monte. "
-            f"forge_preset() tiene M3 leggermente più permissivo di M1 proprio per "
-            f"evitarlo.")
+    detail = (f" (={m1:g} episodi/mese x bars_per_episode={bars_per_episode:g})"
+              if bars_per_episode != 1.0 else "")
+    return (f"criteria.min_tpm={m3:g} (M3, barre/mese) supera "
+            f"gate_params.min_tpm={m1_bar_equiv:g} (M1, barre/mese equivalenti)"
+            f"{detail}: gli eventi ammessi da Event Discovery vengono rifiutati "
+            f"da Rule Discovery per una frequenza che nessuno ha mai richiesto "
+            f"a monte. forge_preset() tiene M3 leggermente più permissivo di "
+            f"M1 proprio per evitarlo.")
 
 
 def _check_scoring(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
@@ -1513,6 +1576,7 @@ def _statistical_constraints() -> List[Constraint]:
                    check=_check_oos_span),
         Constraint(code="m3_stricter_than_m1", level="WARN", stage=STRUCTURAL,
                    free=("event_discovery.gate_params.min_tpm",
+                         "event_discovery.gate_params.event_counting",
                          "rule_discovery.criteria.min_tpm"),
                    check=_check_m3_vs_m1),
         Constraint(code="scoring_uncalibrated", level="WARN", stage=STATISTICAL,

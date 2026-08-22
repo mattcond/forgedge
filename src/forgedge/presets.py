@@ -152,11 +152,21 @@ def default_horizon_grid(timeframe: str) -> Optional[Tuple[int, ...]]:
 # episodio ha 0.57 episodi/mese ma 1.70 barre/mese.
 #
 # Altri campi:
-#   daily_rd_min_tpm(_episode) — gate M3 (stesso conteggio del gate M1)
-#   daily_max_dispersion        — gate M1 (uguale in entrambe le modalità;
-#                                 il Poisson-floor nel ConsistencyGate protegge
-#                                 già dalla dispersione artificiale in episode mode)
-#   parametri alpha             — gate M2 (AlphaDiscovery)
+#   daily_rd_min_tpm     — gate M3, calibrato in barre/mese (M3 non ha nozione
+#                          di episodi: apre un trade su ogni barra attiva).
+#                          `daily_rd_min_tpm / daily_min_tpm` è il fill ratio
+#                          del preset; in modalità "episode" quel rapporto va
+#                          applicato al tasso in barre, non a quello in
+#                          episodi — la conversione episodi→barre è
+#                          PipelineContext.bars_per_episode, non un'altra
+#                          coppia di chiavi qui (#204: la coppia
+#                          `daily_rd_min_tpm_episode` che c'era prima
+#                          applicava il fill ratio senza convertire l'unità,
+#                          sottostimando il floor di M3 di ~1.8x).
+#   daily_max_dispersion — gate M1 (uguale in entrambe le modalità;
+#                          il Poisson-floor nel ConsistencyGate protegge
+#                          già dalla dispersione artificiale in episode mode)
+#   parametri alpha      — gate M2 (AlphaDiscovery)
 _PRESET_SPECS: dict = {
     "sniper": {
         "description": (
@@ -167,7 +177,6 @@ _PRESET_SPECS: dict = {
         "daily_min_tpm": 1.0,
         "daily_min_tpm_episode": 0.3,   # ≈1 episodio ogni 3 mesi
         "daily_rd_min_tpm": 1.0,
-        "daily_rd_min_tpm_episode": 0.3,
         "daily_max_dispersion": 1.0,
         "min_lift": 0.10,
         "min_cohens_d": 0.15,
@@ -183,7 +192,6 @@ _PRESET_SPECS: dict = {
         "daily_min_tpm": 3.0,
         "daily_min_tpm_episode": 1.0,   # ≈1 episodio/mese (trade/mese minimo)
         "daily_rd_min_tpm": 2.5,
-        "daily_rd_min_tpm_episode": 0.8,
         "daily_max_dispersion": 2.0,
         "min_lift": 0.06,
         "min_cohens_d": 0.10,
@@ -201,7 +209,6 @@ _PRESET_SPECS: dict = {
         "daily_min_tpm": 1.0,
         "daily_min_tpm_episode": 0.3,   # molto permissivo: il filtro è il RotationCalibrator
         "daily_rd_min_tpm": 1.0,
-        "daily_rd_min_tpm_episode": 0.3,
         "daily_max_dispersion": 2.5,
         "min_lift": 0.05,
         "min_cohens_d": 0.05,
@@ -218,7 +225,6 @@ _PRESET_SPECS: dict = {
         "daily_min_tpm": 2.5,
         "daily_min_tpm_episode": 1.5,   # episodi frequenti per natura del burst
         "daily_rd_min_tpm": 2.0,
-        "daily_rd_min_tpm_episode": 1.2,
         "daily_max_dispersion": 5.0,
         "min_lift": 0.08,
         "min_cohens_d": 0.12,
@@ -378,11 +384,8 @@ def forge_preset(
     # rd_min_tpm è leggermente più largo di min_tpm M1: non tutti i segnali
     # prodotti da AlphaDiscovery si traducono in trade eseguiti (fill rate,
     # overlap delle regole), quindi il gate M3 può essere appena più permissivo
-    # senza creare incoerenza.  Usa la stessa unità (bar/episode) del gate M1.
-    if event_counting == "episode":
-        daily_rd_tpm_key = "daily_rd_min_tpm_episode"
-    else:
-        daily_rd_tpm_key = "daily_rd_min_tpm"
+    # senza creare incoerenza.
+    #
     # M3's rate follows M1's at *this preset's* ratio, not at a flat default
     # (#200).  Overriding `min_tpm` alone used to move M1 and leave M3 on the
     # spec value, which silently mis-sized the walk-forward: `min_train_months`
@@ -391,6 +394,15 @@ def forge_preset(
     # 20-month training window built for 0.8 trades/month and left 9 months of
     # OOS span where 19 were available.
     #
+    # The ratio is read from the spec's bar-mode pair — `daily_rd_min_tpm /
+    # daily_min_tpm` — because that is a pure fill ratio (same unit on both
+    # sides).  M3 has no notion of episodes (it opens a trade on every active
+    # bar), so a *declared episode* rate is converted to the bar rate M3 will
+    # actually see via `PipelineContext.bars_per_episode` before the fill
+    # ratio is applied — applying the fill ratio directly to the episode rate
+    # was #204: it understated M3's floor by the same factor, which inflated
+    # `min_train_months` for no reason.
+    #
     # The ratio is read from the spec rather than from the context's flat
     # `rate_retention` because the presets disagree about it — 1.00 on sniper
     # and sweep, 0.80 on balanced and burst — and flattening them would either
@@ -398,8 +410,11 @@ def forge_preset(
     # episodes, which `m3_stricter_than_m1` exists to prevent.  An explicit
     # `rd_min_tpm` still wins, and with neither override the value is
     # bit-for-bit what it was.
-    _spec_ratio = spec[daily_rd_tpm_key] / spec[daily_tpm_key]
-    rd_min_tpm = overrides.pop("rd_min_tpm", round(min_tpm * _spec_ratio, 4))
+    _fill_ratio = spec["daily_rd_min_tpm"] / spec["daily_min_tpm"]
+    _bars_per_episode = tf.ctx.bars_per_episode if event_counting == "episode" else 1.0
+    rd_min_tpm = overrides.pop(
+        "rd_min_tpm", round(min_tpm * _bars_per_episode * _fill_ratio, 4)
+    )
 
     if overrides:
         raise TypeError(f"Unexpected override keys: {list(overrides)}")
@@ -428,7 +443,16 @@ def preset_info(preset: Optional[str] = None) -> None:
         print(f"  M2 alpha: min_lift={spec['min_lift']}  "
               f"cohens_d={spec['min_cohens_d']}  "
               f"fdr_q={spec['fdr_q']}  oos_max_p={spec['oos_max_p']}")
-        print(f"  M3 gate : rd_min_tpm(episode)={spec['daily_rd_min_tpm_episode']}  "
+        # No `daily_rd_min_tpm_episode` key any more (#204) — the episode-mode
+        # value is *computed*, the same way `forge_preset` computes it: M1's
+        # episode rate converted to M3's bar rate via `bars_per_episode`, then
+        # the spec's own bar-mode fill ratio.
+        _fill_ratio = spec["daily_rd_min_tpm"] / spec["daily_min_tpm"]
+        _rd_min_tpm_episode = round(
+            spec["daily_min_tpm_episode"] * PipelineContext().bars_per_episode
+            * _fill_ratio, 4,
+        )
+        print(f"  M3 gate : rd_min_tpm(episode)={_rd_min_tpm_episode}  "
               f"rd_min_tpm(bar)={spec['daily_rd_min_tpm']}")
         # The scoring knobs decide which operating point is published, so they
         # belong next to the gates rather than being invisible (F3, #178).

@@ -204,6 +204,7 @@ PipelineContext(
     fee_per_side: float = 0.002,
     alpha: float = 0.05, min_sample: int = 10,
     target_rate_tpm: float | None = None, rate_retention: float = 1.0,
+    bars_per_episode: float = 1.76,
     cross_pf_retention: float = 0.8, net_gain_retention: float = 0.5,
     n_bars: int = 0, span_months: float = 0.0,
     inferred_bar_hours: float | None = None,
@@ -224,7 +225,11 @@ matters when using presets). `rate_retention` (default `1.0`) is
 deliberately *not* a shrinkage margin — see the module's own docstring for
 the measured reason a naive `<1.0` value costs history twice over
 (#200: it lengthens `min_train_months` *and* shrinks the pooled OOS trade
-count at once).
+count at once). `bars_per_episode` (default `1.76`, measured median on
+`ADA_1D_TRAIN`) converts a *declared* `event_counting="episode"` rate to the
+bar rate M3 actually counts — it opens a trade on every active bar, no
+episode concept — before `rate_retention` applies; unread in `"bar"` mode,
+where M1 and M3 already share a unit (#204).
 
 ```
 Derivation(order: int, field: str, default: Any, resolved: Any, rule: str,
@@ -636,7 +641,7 @@ produces.
 — see M1 above) — `n_splits: int = 4`, `train_span_months: int | None =
 None` (`None` = anchored/expanding train window), `test_span_months: int |
 None = None`, `min_train_months: int = UNSET` (**no standalone fallback** —
-sized with a 95% Poisson margin from `criteria.min_tpm`, e.g. 20 months at
+sized with a 95% Poisson margin from `criteria.min_tpm`, e.g. 11 months at
 the `"balanced"` preset's daily rate, not the historical flat `6`; the naive
 `floor / rate` inversion under-supplies about 44% of the time, which is why
 it's a margin and not a division), `reoptimise: bool = True`, `purge_bars:
@@ -650,8 +655,10 @@ resolves to this class, not the M1 one.
 
 `SelectionCriteria` — `min_profit_factor: float = 2.0`, `min_win_rate: float
 = 0.55`, `min_tpm: float = UNSET` (**the root of a chain** — resolved from
-`PipelineContext.target_rate_tpm × rate_retention` when M1's rate was
-*declared*, else the documented default `2.0` stands; `min_train_months` and
+`PipelineContext.target_rate_tpm × bars_per_episode × rate_retention` when
+M1's rate was *declared* and counted in episodes (`bars_per_episode` is 1 in
+`"bar"` mode — M1 and M3 already share a unit there, #204), else the
+documented default `2.0` stands; `min_train_months` and
 `scoring.pf_min_tpm` both derive from this, so pinning it manually
 disconnects them, see `SKILL.md` pitfall #8), `min_pf_score_tpm: float =
 0.30`, `min_fill_rate: float = 0.40` (inert under the default
