@@ -109,6 +109,22 @@ by hand. `forge()` also runs the default fast rotation null (`fast_null=True`)
 that prices the search's multiple-testing surface; a contract that only wins
 that lottery is capped at `PARTIAL-EDGE` even if every other gate passes.
 
+**Breaking change to know before upgrading.** `forge()` now resolves the
+whole config bundle through a central resolver and checks it for internal
+coherence via `config_report()` (`summary_report`'s sibling — that validates
+*data*, this validates *configuration*) before running anything.
+`strict=True` is the default: a `FAIL`-level finding (a configuration that
+makes a stage structurally incapable of producing a verdict — issue #173's
+original case) raises `ValueError` immediately instead of letting the run
+degrade into an uninterpretable wall of rejections. This is real and
+reproducible: even `forge_preset("balanced", "1D")` triggers it on this
+repo's own `tests/fixtures/ADA_1D_TRAIN.parquet`. Pass `strict=False` to
+degrade every finding to a `UserWarning` and run anyway; `WARN`-level
+findings never raise regardless. `ForgeResult.coherence` (a `ConfigReport`)
+carries the resolution trace and finding list from the actual run. See
+`docs/manual-en.md` §7/§9/§15 for the full mechanics (`resolve()`,
+`PipelineContext`, `UNSET`).
+
 ### 2. Presets instead of hand-tuned gates
 
 ```python
@@ -264,6 +280,16 @@ html = rule_performance_report(result, fresh_candles)
    baselines (pctrank, z-score) lost the history they need, not because the
    edge disappeared. Fix: `pd.concat([train_df, new_bars])`, never `new_bars`
    alone.
+10. **`forge()` now raises on an incoherent configuration by default.**
+    `strict=True` turns a `config_report()` `FAIL` finding into `ValueError`
+    before discovery even runs (see the breaking-change note under pattern
+    1). If code that worked before an upgrade now raises, read the message —
+    it names the exact field to change — or pass `strict=False` to keep the
+    old behaviour while you fix it.
+11. **`RuleDiscoveryConfig.entry_mode` defaults to `"auto"`, not `"limit"`**
+    (issue #185). Every `RuleDiscoveryResponse.entry_optimization` is `None`
+    unless `entry_mode="auto"` *and* the Stage-1 market-mode verdict is
+    `EDGE`/`PARTIAL-EDGE` — don't assume it's always populated.
 
 ## Best practices
 
@@ -306,6 +332,10 @@ src/forgedge/
 ├── target_optimizer.py    TargetOptimizer (target-first alternative workflow)
 ├── rule_report.py          RuleSpec, rule_performance_report
 ├── summary_report.py       data-quality diagnostics
+├── episodes.py              episode_ids/episode_starts, concurrency/ConcurrencyStats (#168)
+├── resolver.py              central parameter resolver: PipelineContext, UNSET, resolve()
+├── config_report.py         config_report() — coherence report, forge(strict=True)'s backing
+├── unset.py                 the UNSET sentinel ("chosen" vs "class default")
 └── docs/                   packaged module + spec docs (see below)
 ```
 

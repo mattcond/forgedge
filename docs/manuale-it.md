@@ -298,12 +298,12 @@ tradabili (edges()): 54
 - **5241 candidati evento** hanno superato il Consistency Gate di Event Discovery — ricorda, nessuno di questi è stato ancora verificato contro un rendimento forward.
 - **370 di essi sono stati promossi** da Alpha Discovery a oggetti `AlphaContract` con stato "HYPOTHESIS" — cioè ciascuno ha una direzione determinata (long o short) e un periodo di detenzione/take-profit derivato.
 - **370 risposte di regola** — ogni contratto promosso è passato attraverso il backtest realistico e la validazione walk-forward di Rule Discovery (questo fixture ha `run_rule_discovery=True` di default).
-- **54 sono tradabili** (`result.edges()` — verdetto `EDGE` o `PARTIAL-EDGE`). Su questo specifico dataset con impostazioni di default, scavando un livello più a fondo si scopre che *tutti e 54* sono `PARTIAL-EDGE`, non `EDGE` pieno:
+- **32 sono tradabili** (`result.edges()` — verdetto `EDGE` o `PARTIAL-EDGE`). Su questo specifico dataset con impostazioni di default, scavando un livello più a fondo si scopre che *tutti e 32* sono `PARTIAL-EDGE`, non `EDGE` pieno, e altri 6 contratti sono stati esplicitamente declassati a `INSUFFICIENT-DATA` invece di essere riportati silenziosamente come qualcosa di più forte di quanto l'evidenza OOS potesse sostenere:
 
 ```python
 from collections import Counter
 print(Counter(r.verdict for _, r in result.rule_responses))
-# Counter({'NON-EDGE': 314, 'PARTIAL-EDGE': 54, 'INSUFFICIENT-DATA': 2})
+# Counter({'NON-EDGE': 332, 'PARTIAL-EDGE': 32, 'INSUFFICIENT-DATA': 6})
 ```
 
 Zero verdetti `EDGE` pieni non è un bug e non è un segno che la libreria "non funzioni" — è il gate della rotation null di default (§14-15) che fa esattamente ciò per cui è progettato. Guarda il singolo miglior candidato `PARTIAL-EDGE` su questi dati:
@@ -316,33 +316,38 @@ print(c.event_expression, "|", c.direction)
 print(r.in_sample_summary.profit_factor, r.in_sample_summary.total_trades)
 print(r.walk_forward.consistency, r.walk_forward.oos_summary.profit_factor)
 print(r.rejection_reasons)
+print(r.entry_optimization.selected_entry, r.entry_optimization.adopted)
 ```
 
 Output verificato:
 
 ```
-delta_diffnorm_close_vol12_vol24_6 < -0.899244 | short
-16.882 46
-1.0 9.721
-['active_months 11/20 = 55% < 80%', 'search-level rotation null not cleared (rotation_p=1.0000 > 0.05)']
+pr_diffnorm_close_vol12_vol24_48 < 0.104167 | short
+17.166 60
+0.75 3.487
+['active_months 13/23 = 57% < 80%', 'search-level rotation null not cleared (rotation_p=1.0000 > 0.05)']
+limit True
 ```
 
-Questa regola ha un profit factor in-sample eccezionale (16.9), un walk-forward *positivo nel 100% delle finestre di test*, e un profit factor OOS di 9.7 — ed è comunque limitata a `PARTIAL-EDGE`. Le `rejection_reasons` dicono esattamente perché: è attiva solo nel 55% dei mesi della sua finestra (sotto la soglia di copertura dell'80%), e — la ragione più importante — il suo p-value della rotation null a livello di ricerca è 1.0, cioè il test null di rotazione randomizzata proprio di FORGE (§14) ha scoperto che una versione ruotata e disaccoppiata dall'esito della stessa ricerca fa altrettanto bene o meglio. Questo è la libreria che è onesta sulla dimensione del proprio spazio di ricerca, non un falso negativo.
+Questa regola ha un profit factor in-sample eccezionale (17.2), un walk-forward positivo nel 75% delle finestre di test, e un profit factor OOS di 3.5 — ed è comunque limitata a `PARTIAL-EDGE`. Le `rejection_reasons` dicono esattamente perché: è attiva solo nel 57% dei mesi della sua finestra (sotto la soglia di copertura dell'80%), e — la ragione più importante — il suo p-value della rotation null a livello di ricerca è 1.0, cioè il test null di rotazione randomizzata proprio di FORGE (§14) ha scoperto che una versione ruotata e disaccoppiata dall'esito della stessa ricerca fa altrettanto bene o meglio. La riga `entry_optimization` mostra il default `entry_mode="auto"` (§9, §15) al lavoro: ha valutato questa regola a un ingresso a mercato per primo, poi ha provato un ingresso a limite e lo ha *adottato* perché il punto limite ha retto out-of-sample. Questo è la libreria che è onesta sulla dimensione del proprio spazio di ricerca, non un falso negativo.
 
 ### Cosa ha fatto `forge()`, che non le hai chiesto esplicitamente
 
 Questo è importante, ed è la prima cosa che sorprende i nuovi utilizzatori. `forge(kpi, ticker="ADAUSDC", timeframe="1D")` senza ulteriore configurazione ha fatto silenziosamente tutto quanto segue:
 
-1. Eseguito il Modulo 0 (Market Context) perché non hai passato `run_market_context=False` e la tabella non aveva già una colonna `regime`.
-2. Sostituito una `horizon_grid` **calibrata sul giornaliero**, per Alpha Discovery, perché `timeframe="1D"` è giornaliero-o-più-lento e non hai passato un `AlphaConfig` esplicito — la griglia di default della classe `(1,2,3,4,6,8,12,16,24,36,48)` è calibrata per barre approssimativamente orarie, e usarla invariata su dati giornalieri scansionerebbe periodi di detenzione fino a 48 *giorni*.
-3. **Arricchito** la griglia di orizzonti di ogni evento con punti aggiuntivi attorno a 0.5×/1×/2× la finestra dell'indicatore dominante di quell'evento (`AlphaConfig.horizon_enrichment`, attivo di default) — un'unione con la griglia base, mai una restrizione.
-4. Eseguito la **rotation null veloce a livello di ricerca** (`fast_null=True` di default) e annotato `rotation_p`/`rotation_threshold` su ogni contratto promosso — questo è esattamente ciò che ha prodotto il tetto `PARTIAL-EDGE` appena visto.
-5. Costruito un `TimeBudget` condiviso e **purgato** per Event/Alpha Discovery (§15) anche se non hai passato alcun argomento `time_budget=`.
-6. Registrato un `HypothesisLedger` su `result.ledger`, contando quanto fosse effettivamente ampia la superficie di ricerca della sessione.
-7. Eseguito Rule Discovery su tutti i 370 contratti promossi con `selection_mode="walk_forward"` (il default) — cioè i parametri operativi pubblicati provengono solo dall'interno delle finestre di train walk-forward, mai da uno sguardo alla finestra di test finale.
-8. Saltato il Modulo 4 (Rule Registry) — non perché tu l'abbia disabilitato, ma perché `RuleRegistry.from_forge_results` ha bisogno di più ticker per dire qualcosa sulla generalizzazione cross-ticker; con una chiamata `forge()` a singolo ticker viene comunque eseguito e produce un registry, ma ogni regola è classificata `ISOLATED` (§9).
+1. Risolto l'intero bundle di configurazione tramite il **resolver** centrale dei parametri e verificato la sua coerenza interna via `config_report()` — loggato a livello `INFO`, e salvato su `ForgeResult.coherence` — prima di eseguire qualunque cosa. Con `strict=True` (il default) un finding di livello `FAIL` solleva immediatamente `ValueError` invece di lasciare che la run produca un muro di rigetti non interpretabili (§9, §15).
+2. Eseguito il Modulo 0 (Market Context) perché non hai passato `run_market_context=False` e la tabella non aveva già una colonna `regime`.
+3. Sostituito una `horizon_grid` **calibrata sul giornaliero**, per Alpha Discovery, su ogni percorso di codice, non solo su quello "nessun `AlphaConfig` esplicito" (la issue #196 ha chiuso quel divario) — `AlphaConfig.horizon_grid` stessa ora ha default `UNSET` ed è risolta dal `timeframe` dichiarato dalla sessione, quindi passare un `AlphaConfig` per cambiare qualcos'altro non tiene più silenziosamente la griglia calibrata sull'orario.
+4. **Arricchito** la griglia di orizzonti di ogni evento con punti aggiuntivi attorno a 0.5×/1×/2× la finestra dell'indicatore dominante di quell'evento (`AlphaConfig.horizon_enrichment`, attivo di default) — un'unione con la griglia base, mai una restrizione.
+5. Eseguito la **rotation null veloce a livello di ricerca** (`fast_null=True` di default) e annotato `rotation_p`/`rotation_threshold` su ogni contratto promosso — questo è esattamente ciò che ha prodotto il tetto `PARTIAL-EDGE` appena visto.
+6. Costruito un `TimeBudget` condiviso e **purgato** per Event/Alpha Discovery (§15) anche se non hai passato alcun argomento `time_budget=`.
+7. Registrato un `HypothesisLedger` su `result.ledger`, contando quanto fosse effettivamente ampia la superficie di ricerca della sessione.
+8. Eseguito Rule Discovery su tutti i 370 contratti promossi con `selection_mode="walk_forward"` (il default) — cioè i parametri operativi pubblicati provengono solo dall'interno delle finestre di train walk-forward, mai da uno sguardo alla finestra di test finale.
+9. Valutato ogni regola con `entry_mode="auto"` (il default dalla issue #185, in sostituzione di `"limit"`) — un verdetto a ingresso di mercato è autoritativo, e un ingresso a limite viene pubblicato solo quando supera tre condizioni out-of-sample (§9, §15).
+10. Misurato il conteggio di episodi e la **concurrency** dei trade per ogni backtest (`resp.in_sample_summary.n_episodes` / `.mean_concurrent_positions` / `.max_concurrent_positions`, issue #168) — `run_backtest` apre un trade su ogni barra attiva senza controllo di stato flat, quindi le posizioni possono sovrapporsi e lo fanno; questi campi sono ciò che permette di distinguere un conteggio di trade nominale da quello effettivo, rilevante per il capitale (§9).
+11. Saltato il Modulo 4 (Rule Registry) — non perché tu l'abbia disabilitato, ma perché `RuleRegistry.from_forge_results` ha bisogno di più ticker per dire qualcosa sulla generalizzazione cross-ticker; con una chiamata `forge()` a singolo ticker viene comunque eseguito e produce un registry, ma ogni regola è classificata `ISOLATED` (§9).
 
-Nessuno dei punti 2-7 è qualcosa che hai configurato tu. Sono tutti default scelti dagli autori della libreria specificamente affinché il percorso "quick start" e il percorso "configurato a mano" non divergano silenziosamente in onestà. §14-15 spiegano ciascuno di questi in profondità, incluso quali puoi disattivare e cosa costa farlo.
+Nessuno dei punti 3-10 è qualcosa che hai configurato tu. Sono tutti default scelti dagli autori della libreria specificamente affinché il percorso "quick start" e il percorso "configurato a mano" non divergano silenziosamente in onestà. §14-15 spiegano ciascuno di questi in profondità, incluso quali puoi disattivare e cosa costa farlo.
 
 ---
 
@@ -388,7 +393,8 @@ Data la lista di candidati dal Modulo 1, e *per la prima volta nella pipeline*, 
 3. **Misurazione del potere predittivo (IS):** Information Coefficient (correlazione di Spearman tra la feature grezza e il rendimento forward, calcolata una volta e messa in cache per `(feature, orizzonte)`), win rate/lift sopra il base rate, Cohen's d, un t-test a una coda.
 4. **Conferma OOS** (quando `train_ratio < 1.0`, default 0.7): lo stesso target derivato viene replicato sulla coda tenuta fuori, e passa se ha abbastanza attivazioni, un vantaggio orientato positivo, e un p-value abbastanza basso. Fallire qui è un **diagnostico non bloccante**, non un rigetto.
 5. **Sensibilità al regime** — IC per regime e win rate, con una classificazione `dependency_type` (`agnostic`/`conditional`/`specific`/`broken`/`unknown`).
-6. **Scoring composito** — una combinazione pesata delle metriche sopra in un `composite_score` 0-1, mappato su un voto in lettere da A (≥0.75) a D (<0.25).
+6. **Scoring composito** — la formula esatta attuale (`AlphaConfig.score_weights`, default `(0.20, 0.25, 0.15, 0.25, 0.15)` per `(ic, lift, cohens_d, z, breadth)`):
+   `composite = (w_ic·ic_norm + w_lift·lift_norm + w_d·d_norm + w_z·z_norm + w_breadth·breadth) / Σw`, dove `ic_norm = clamp01(|IC|/0.10)`, `lift_norm = clamp01(lift/0.30)`, `d_norm = clamp(cohens_d/0.80, -1, 1)` (**con segno** — un effetto avverso trascina in basso il punteggio invece di essere clippato a zero), `z_norm = clamp01(|z*|/3.0)` (`z*` è l'eccesso standardizzato sulla rotation-null a `h*`, cioè il rapporto edge-rumore), e `breadth` è il termine di ampiezza di regime, scartato (rinormalizzando i pesi restanti) quando non c'è informazione di regime disponibile. Seguono due aggiustamenti: un target `statistically_weak` — `h*` selezionato fuori dall'insieme di orizzonti BH-significativi — moltiplica il composito per `statistically_weak_penalty` (default `0.6`), e una conferma OOS positiva aggiunge `oos_bonus` (default `0.05`). Il risultato è clippato in `[0,1]` e mappato su un voto in lettere da A (≥0.75) a D (<0.25).
 7. **Compilazione del contratto.** Tutti i candidati con una direzione determinata diventano oggetti `AlphaContract` con `status="HYPOTHESIS"`; ogni altra metrica sopra aggiunge solo una stringa a `diagnostics` — non blocca mai la promozione, e `rejection_reasons` resta vuoto su un contratto promosso. Questo è dichiarato come un principio di design deliberato: le debolezze statistiche "alimentano il voto, non scartano — Rule Discovery è l'unico giudice economico" (`src/forgedge/docs/README.md`).
 
 ### Modulo 3 — Rule Discovery
@@ -707,7 +713,7 @@ per lo Stage 2.
 limite *è* la strategia, non un raffinamento dell'esecuzione.
 
 
-Gli attributi importanti di una `RuleDiscoveryResponse`: `verdict` (`"EDGE"|"PARTIAL-EDGE"|"NON-EDGE"|"INSUFFICIENT-DATA"`), `is_edge` (vero per i primi due), `rejection_reasons`, `validated_rule` (porta `.params`, un `BacktestParams`), `in_sample_summary` (`total_trades`, `profit_factor`, `win_rate_pct`, `expectancy`, `tpm_mu`), `execution_envelope` (`.conservative`/`.optimistic` — vedi §17), `walk_forward` (`.oos_summary`, `.consistency`), `statistical_validation` (`.temporal_stability`, `.deflated_sharpe`), `regime_analysis`, `excursion` (MAE/MFE), `entry_optimization` (popolato solo quando `entry_mode="auto"`, §15).
+Gli attributi importanti di una `RuleDiscoveryResponse`: `verdict` (`"EDGE"|"PARTIAL-EDGE"|"NON-EDGE"|"INSUFFICIENT-DATA"`), `is_edge` (vero per i primi due), `rejection_reasons`, `validated_rule` (porta `.params`, un `BacktestParams`), `in_sample_summary` (`total_trades`, `profit_factor`, `win_rate_pct`, `expectancy`, `tpm_mu`, `n_episodes`, `mean_concurrent_positions`, `max_concurrent_positions` — campi di overlap dei trade, §15), `execution_envelope` (`.conservative`/`.optimistic` — vedi §17), `walk_forward` (`.oos_summary`, `.consistency`), `statistical_validation` (`.temporal_stability`, `.deflated_sharpe`), `regime_analysis`, `excursion` (MAE/MFE), `entry_optimization` (popolato solo sotto `entry_mode="auto"` — il default — e solo una volta che il verdetto Stage-1 a mercato è `EDGE`/`PARTIAL-EDGE`; `None` sotto `"market"`/`"limit"` e sotto una run `"auto"` il cui verdetto a mercato è `NON-EDGE`, §15).
 
 `from forgedge.rule_discovery import text_report, html_report` costruiscono report human-readable/HTML da una response; `resp.to_dict()` dà una forma serializzabile in JSON.
 
