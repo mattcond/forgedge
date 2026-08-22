@@ -463,6 +463,9 @@ forge(
 | `calibration` | `CalibrationReport \| None` | il report della rotation null |
 | `ledger` | `HypothesisLedger \| None` | contabilità della superficie di ricerca |
 | `time_budget` | `TimeBudget \| None` | lo split IS/OOS effettivo usato |
+| `context` | `PipelineContext` | i fatti di sessione risolti (timeframe, schema, policy statistica) usati dalla run |
+| `resolution` | `ResolutionTrace` | ogni campo di config che il resolver ha derivato — `default → risolto`, con la regola che si è attivata e gli input letti; `.describe()` per un riassunto in una riga |
+| `coherence` | `ConfigReport` | il controllo di coerenza con cui la run è stata eseguita (il supporto di `strict=True`) — `.findings`, `.has_critical`, `.trace` (stesso oggetto di `.resolution`) |
 | `market_context`, `event_discovery`, `alpha_discovery` | istanze modulo | oggetti live per drill-down (`.distribution()`, `.summary()`, …) |
 
 Metodi: `.edges()` → coppie `(contract, response)` dove `response.is_edge` è vero; `.validated_rules()`; `.submissions()`; `.summary()` (un `pd.DataFrame`, una riga per candidato, arricchito con `rule_verdict`).

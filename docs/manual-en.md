@@ -463,6 +463,9 @@ forge(
 | `calibration` | `CalibrationReport \| None` | the rotation-null report |
 | `ledger` | `HypothesisLedger \| None` | search-surface bookkeeping |
 | `time_budget` | `TimeBudget \| None` | the effective IS/OOS split used |
+| `context` | `PipelineContext` | the resolved session facts (timeframe, schema, statistical policy) the run used |
+| `resolution` | `ResolutionTrace` | every config field the resolver derived — `default → resolved`, with the rule that fired and the inputs it read; `.describe()` for a one-line summary |
+| `coherence` | `ConfigReport` | the coherence check the run executed with (`strict=True`'s backing) — `.findings`, `.has_critical`, `.trace` (same object as `.resolution`) |
 | `market_context`, `event_discovery`, `alpha_discovery` | module instances | live objects for drill-down (`.distribution()`, `.summary()`, …) |
 
 Methods: `.edges()` → `(contract, response)` pairs where `response.is_edge` is true; `.validated_rules()`; `.submissions()`; `.summary()` (a `pd.DataFrame`, one row per candidate, augmented with `rule_verdict`).
