@@ -301,30 +301,36 @@ class TestThresholdMode:
 # ---------------------------------------------------------------------------
 
 class TestMarketContext:
-    def test_run_adds_two_columns(self):
-        df = _make_kpi_table()
-        out = MarketContext(df).run()
+    @pytest.fixture(scope="class")
+    def df_default(self):
+        """MarketContext never mutates its input — test_input_not_mutated
+        below is exactly the regression guard for that — so the raw table is
+        safe to share across the single-use constructions in this class."""
+        return _make_kpi_table()
+
+    def test_run_adds_two_columns(self, df_default):
+        out = MarketContext(df_default).run()
         assert "regime" in out.columns
         assert "regime_stable" in out.columns
         assert out["regime_stable"].dtype == bool
 
-    def test_input_not_mutated(self):
-        df = _make_kpi_table()
-        cols_before = list(df.columns)
-        MarketContext(df).run()
-        assert list(df.columns) == cols_before
+    def test_input_not_mutated(self, df_default):
+        cols_before = list(df_default.columns)
+        MarketContext(df_default).run()
+        assert list(df_default.columns) == cols_before
 
-    def test_no_intermediate_ema_columns_leak(self):
-        """Inline EMAs used for the ratio must not be written to the table."""
-        df = _make_kpi_table(with_ema=False)
-        out = MarketContext(df).run()
+    def test_no_intermediate_ema_columns_leak(self, df_default):
+        """Inline EMAs used for the ratio must not be written to the table.
+        ``with_ema=False`` is _make_kpi_table's own default, so df_default
+        already matches this test's data shape."""
+        out = MarketContext(df_default).run()
         assert "close_ema_09" not in out.columns
         assert "close_ema_25" not in out.columns
         # Only regime + regime_stable are new
-        assert set(out.columns) - set(df.columns) == {"regime", "regime_stable"}
+        assert set(out.columns) - set(df_default.columns) == {"regime", "regime_stable"}
 
-    def test_index_preserved(self):
-        df = _make_kpi_table().set_index("open_dt")
+    def test_index_preserved(self, df_default):
+        df = df_default.set_index("open_dt")
         out = MarketContext(df).run()
         assert out.index.equals(df.index)
         assert out["regime"].notna().any()
@@ -339,12 +345,12 @@ class TestMarketContext:
         assert abs(dist["share"].sum() - 1.0) < 1e-3  # share is rounded to 4dp
         assert list(dist.index) == mc.classifier.get_labels()
 
-    def test_distribution_before_run_raises(self):
+    def test_distribution_before_run_raises(self, df_default):
         with pytest.raises(RuntimeError):
-            MarketContext(_make_kpi_table()).distribution()
+            MarketContext(df_default).distribution()
 
-    def test_get_config_traceability(self):
-        cfg = MarketContext(_make_kpi_table()).get_config()
+    def test_get_config_traceability(self, df_default):
+        cfg = MarketContext(df_default).get_config()
         assert cfg["classifier"]["classifier"] == "ema_proxy"
         assert cfg["stable_window"] == 12
 
@@ -389,11 +395,11 @@ class TestMarketContext:
             check_names=False,
         )
 
-    def test_unknown_classifier_raises(self):
+    def test_unknown_classifier_raises(self, df_default):
         with pytest.raises(ValueError):
-            MarketContext(_make_kpi_table(), MarketContextConfig(classifier="hmm"))
+            MarketContext(df_default, MarketContextConfig(classifier="hmm"))
 
-    def test_custom_classifier_injection(self):
+    def test_custom_classifier_injection(self, df_default):
         class AllBull(RegimeClassifier):
             def classify(self, kpi_table):
                 return pd.Series(["BULL"] * len(kpi_table), index=kpi_table.index)
@@ -404,8 +410,7 @@ class TestMarketContext:
             def get_config(self):
                 return {"classifier": "all_bull"}
 
-        df = _make_kpi_table()
-        out = MarketContext(df, classifier=AllBull()).run()
+        out = MarketContext(df_default, classifier=AllBull()).run()
         assert (out["regime"] == "BULL").all()
 
 
@@ -414,8 +419,16 @@ class TestMarketContext:
 # ---------------------------------------------------------------------------
 
 class TestRegimeTable:
-    def test_columns_and_length_from_datetime_column(self):
-        df = _make_kpi_table()  # has open_dt column, RangeIndex
+    @pytest.fixture(scope="class")
+    def df_default(self):
+        """MarketContext never mutates its input (see
+        TestMarketContext.test_input_not_mutated), and every use below is
+        read-only or goes through a pandas op that returns a new frame
+        (set_index/merge/rename) — sharing the raw table is safe."""
+        return _make_kpi_table()
+
+    def test_columns_and_length_from_datetime_column(self, df_default):
+        df = df_default  # has open_dt column, RangeIndex
         mc = MarketContext(df)
         mc.run()
         rt = mc.regime_table()
@@ -425,8 +438,8 @@ class TestRegimeTable:
         assert rt["regime"].cat.ordered
         assert rt["regime_stable"].dtype == bool
 
-    def test_uses_datetimeindex(self):
-        df = _make_kpi_table().set_index("open_dt")
+    def test_uses_datetimeindex(self, df_default):
+        df = df_default.set_index("open_dt")
         mc = MarketContext(df)
         mc.run()
         rt = mc.regime_table()
@@ -434,8 +447,8 @@ class TestRegimeTable:
         assert pd.api.types.is_datetime64_any_dtype(rt["open_dt"])
         assert len(rt) == len(df)
 
-    def test_joins_back_onto_source(self):
-        df = _make_kpi_table()
+    def test_joins_back_onto_source(self, df_default):
+        df = df_default
         mc = MarketContext(df)
         mc.run()
         joined = df.merge(mc.regime_table(), on="open_dt", how="left")
@@ -446,21 +459,20 @@ class TestRegimeTable:
         # The join must align row-for-row with run()'s in-place output.
         assert (joined["regime"].astype(str) == mc._result["regime"].astype(str)).all()
 
-    def test_custom_timestamp_col_name(self):
-        df = _make_kpi_table().rename(columns={"open_dt": "ts"})
+    def test_custom_timestamp_col_name(self, df_default):
+        df = df_default.rename(columns={"open_dt": "ts"})
         mc = MarketContext(df, MarketContextConfig(
             ema_proxy=EMAProxyConfig(window_unit="bar")))
         mc.run()
         rt = mc.regime_table(timestamp_col="ts")
         assert list(rt.columns) == ["ts", "regime", "regime_stable"]
 
-    def test_before_run_raises(self):
+    def test_before_run_raises(self, df_default):
         with pytest.raises(RuntimeError):
-            MarketContext(_make_kpi_table()).regime_table()
+            MarketContext(df_default).regime_table()
 
-    def test_unknown_timestamp_col_raises(self):
-        df = _make_kpi_table()
-        mc = MarketContext(df)
+    def test_unknown_timestamp_col_raises(self, df_default):
+        mc = MarketContext(df_default)
         mc.run()
         with pytest.raises(KeyError):
             mc.regime_table(timestamp_col="does_not_exist")

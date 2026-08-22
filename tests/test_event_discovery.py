@@ -1084,10 +1084,21 @@ class TestConsistencyGate:
 
 
 class TestEventDiscoveryE2E:
-    def test_run_returns_candidates(self):
-        df = _make_kpi_table(n=2000)
+    @pytest.fixture(scope="class")
+    def df_2000(self):
+        """EventDiscovery defensively copies its input (``self.df =
+        kpi_table.copy()`` in ``__init__``), so sharing the raw table across
+        the differently-configured runs below is safe.  No test below mutates
+        the frame it receives — ``.sample()``/``.set_index()`` return copies."""
+        return _make_kpi_table(n=2000)
+
+    @pytest.fixture(scope="class")
+    def df_default(self):
+        return _make_kpi_table()
+
+    def test_run_returns_candidates(self, df_2000):
         ed = EventDiscovery(
-            df,
+            df_2000,
             config=DiscoveryConfig(
                 gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0),
                 max_and_components=2,
@@ -1096,10 +1107,9 @@ class TestEventDiscoveryE2E:
         candidates = ed.run()
         assert len(candidates) > 0
 
-    def test_all_candidates_have_passed_gate(self):
-        df = _make_kpi_table(n=2000)
+    def test_all_candidates_have_passed_gate(self, df_2000):
         ed = EventDiscovery(
-            df,
+            df_2000,
             config=DiscoveryConfig(
                 gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0)
             ),
@@ -1108,18 +1118,16 @@ class TestEventDiscoveryE2E:
         for c in candidates:
             assert c.consistency_gate.passed, f"{c.event_id} gate not passed"
 
-    def test_candidates_have_expressions(self):
-        df = _make_kpi_table(n=2000)
-        ed = EventDiscovery(df)
+    def test_candidates_have_expressions(self, df_2000):
+        ed = EventDiscovery(df_2000)
         candidates = ed.run()
         for c in candidates:
             assert c.expression
             assert len(c.components) >= 1
 
-    def test_summary_dataframe_shape(self):
-        df = _make_kpi_table()
+    def test_summary_dataframe_shape(self, df_default):
         ed = EventDiscovery(
-            df,
+            df_default,
             config=DiscoveryConfig(
                 gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0)
             ),
@@ -1146,17 +1154,15 @@ class TestEventDiscoveryE2E:
         assert len(summary) == 0
         assert "event_id" in summary.columns
 
-    def test_classifications_available_after_run(self):
-        df = _make_kpi_table()
-        ed = EventDiscovery(df)
+    def test_classifications_available_after_run(self, df_default):
+        ed = EventDiscovery(df_default)
         ed.run()
         cls = ed.get_classifications()
         assert cls is not None
         assert "close_rsi_14" in cls
 
-    def test_datetimeindex_input(self):
-        df = _make_kpi_table()
-        df = df.set_index("open_dt")
+    def test_datetimeindex_input(self, df_default):
+        df = df_default.set_index("open_dt")
         ed = EventDiscovery(
             df,
             config=DiscoveryConfig(
@@ -1168,9 +1174,9 @@ class TestEventDiscoveryE2E:
         assert len(candidates) > 0
 
 
-    def test_unsorted_input_produces_same_results_as_sorted(self):
+    def test_unsorted_input_produces_same_results_as_sorted(self, df_2000):
         """Rolling windows must be computed in chronological order regardless of input row order."""
-        df_sorted = _make_kpi_table(n=2000)
+        df_sorted = df_2000
         # Shuffle the input rows (preserves all data, breaks row order)
         df_shuffled = df_sorted.sample(frac=1, random_state=0).reset_index(drop=True)
 
@@ -1187,9 +1193,9 @@ class TestEventDiscoveryE2E:
             f"missed {ids_shuffled - ids_sorted} compared to shuffled input"
         )
 
-    def test_unsorted_datetimeindex_input_is_sorted(self):
+    def test_unsorted_datetimeindex_input_is_sorted(self, df_2000):
         """DatetimeIndex path also sorts rows before rolling calculations."""
-        df = _make_kpi_table(n=2000)
+        df = df_2000
         df_sorted = df.set_index("open_dt")
         df_shuffled = df_sorted.sample(frac=1, random_state=0)
 
@@ -1212,6 +1218,7 @@ class TestEventDiscoveryE2E:
 
 class TestWalkForward:
     """Tests for train/test split and walk-forward OOS validation."""
+    pytestmark = pytest.mark.slow
 
     @pytest.fixture(scope="class")
     @classmethod
@@ -1533,38 +1540,45 @@ class TestBugRegressions:
         result = ANDComposer(gate).compose(events, ts, max_components=1)
         assert result == []
 
-    def test_max_components_1_via_discovery_config(self):
+    @pytest.fixture(scope="class")
+    def big_table(self):
+        """EventDiscovery defensively copies its input (``self.df =
+        kpi_table.copy()`` in ``__init__``), so sharing the raw table across
+        the differently-configured runs below is safe."""
+        return _make_kpi_table(n=8760)
+
+    def test_max_components_1_via_discovery_config(self, big_table):
         """DiscoveryConfig(max_and_components=1) produces only single-component candidates."""
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_tpm=0.5, max_dispersion=15.0),
             max_and_components=1,
         )
-        ed = EventDiscovery(_make_kpi_table(n=8760), cfg)
+        ed = EventDiscovery(big_table, cfg)
         cands = ed.run()
         assert all(len(c.components) == 1 for c in cands), (
             "max_and_components=1 must not produce 2- or 3-component candidates"
         )
 
-    def test_max_components_2_produces_only_pairs(self):
+    def test_max_components_2_produces_only_pairs(self, big_table):
         """max_and_components=2 produces single+pair candidates, no triples."""
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_tpm=0.5, max_dispersion=15.0),
             max_and_components=2,
         )
-        ed = EventDiscovery(_make_kpi_table(n=8760), cfg)
+        ed = EventDiscovery(big_table, cfg)
         cands = ed.run()
         assert all(len(c.components) <= 2 for c in cands), (
             "max_and_components=2 must not produce 3-component candidates"
         )
 
-    def test_triples_not_starved_by_pair_cap(self):
+    def test_triples_not_starved_by_pair_cap(self, big_table):
         """With max_and_components=3, triples are generated even when pairs cap is hit."""
         from forgedge.event_discovery.and_composer import _MAX_PAIRS
         cfg = DiscoveryConfig(
             gate_params=GateParams(min_tpm=0.5, max_dispersion=15.0),
             max_and_components=3,
         )
-        ed = EventDiscovery(_make_kpi_table(n=8760), cfg)
+        ed = EventDiscovery(big_table, cfg)
         cands = ed.run()
         pairs = [c for c in cands if len(c.components) == 2]
         triples = [c for c in cands if len(c.components) == 3]
@@ -2084,6 +2098,7 @@ class TestIndeterminateFolds:
     configuration `forge`'s own docstring recommends for production, at which
     0.7% of fold evaluations passed.
     """
+    pytestmark = pytest.mark.slow
 
     @staticmethod
     def _table(n=1500, seed=2):

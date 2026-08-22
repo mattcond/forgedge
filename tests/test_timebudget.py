@@ -254,6 +254,7 @@ def _forge_kpi(n=2600, seed=7):
 
 
 class TestForgeWiring:
+    pytestmark = pytest.mark.slow
     def test_effective_budget_exposed_by_default(self):
         res = forge(
             _forge_kpi(),
@@ -302,19 +303,27 @@ class TestOneAxisReported:
     was Alpha Discovery's. Under `forge_preset()` that meant announcing a 70%
     split for a session in which Event Discovery had used 100% of the span.
     """
+    pytestmark = pytest.mark.slow
 
-    def test_the_budget_is_built_even_when_none_is_passed(self):
-        res = forge(_forge_kpi(), timeframe="4H", run_rule_discovery=False,
-                    fast_null=False, progress=False)
-        assert res.time_budget is not None
-
-    def test_it_states_m1s_axis_instead_of_leaving_it_inferred(self):
-        """M1's whole-span run is a decision (invariant #1: it never observes
-        the forward return), so the budget says so rather than letting the
-        reader deduce it from a split M1 does not use."""
+    @pytest.fixture(scope="class")
+    def result(self):
+        """forge() is a pure function of its inputs, and the three tests below
+        that read a full run all call it with identical arguments — cache the
+        one run (mirrors test_golden.py's session-scoped forge_result)."""
         kpi = _forge_kpi()
         res = forge(kpi, timeframe="4H", run_rule_discovery=False,
                     fast_null=False, progress=False)
+        return kpi, res
+
+    def test_the_budget_is_built_even_when_none_is_passed(self, result):
+        _, res = result
+        assert res.time_budget is not None
+
+    def test_it_states_m1s_axis_instead_of_leaving_it_inferred(self, result):
+        """M1's whole-span run is a decision (invariant #1: it never observes
+        the forward return), so the budget says so rather than letting the
+        reader deduce it from a split M1 does not use."""
+        kpi, res = result
         tb = res.time_budget
 
         assert tb.event_split == len(kpi)          # DiscoveryConfig default 1.0
@@ -337,12 +346,11 @@ class TestOneAxisReported:
         assert tb.event_split == 900
         assert TimeBudget.build(1000, 0.6, event_train_ratio=1.0).event_split == 1000
 
-    def test_the_purge_widens_for_enriched_horizons_and_never_narrows(self):
+    def test_the_purge_widens_for_enriched_horizons_and_never_narrows(self, result):
         """The session budget is sized on the configured grid, but per-event
         enrichment can scan further. Purging less than the horizon actually
         read would put the look-ahead back, so M2 widens rather than obeys."""
-        res = forge(_forge_kpi(), timeframe="4H", run_rule_discovery=False,
-                    fast_null=False, progress=False)
+        _, res = result
         tb = res.time_budget
         scanned = {h for c in res.contracts for h in c.derived_target.t_stat_by_h}
         assert tb.purge_bars >= max(res.alpha_discovery.config.horizon_grid)
@@ -360,6 +368,7 @@ class TestFoldOverlapIsVisible:
     reference 28-month fixture that leaves the `balanced` preset with zero
     folds, removing the gate invariant #5 makes the verdict depend on.
     """
+    pytestmark = pytest.mark.slow
 
     def test_folds_report_whether_they_test_in_sample(self):
         kpi = _forge_kpi()

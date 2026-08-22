@@ -101,6 +101,7 @@ class TestLiftScore:
 
 
 class TestTargetOptimizerRun:
+    pytestmark = pytest.mark.slow
     @pytest.fixture(scope="class")
     @classmethod
     def opt_and_results(cls):
@@ -147,6 +148,7 @@ class TestTargetOptimizerRun:
 
 class TestTargetOptimizerLiftSplit:
     """min_lift_atoms / min_lift_result decouple AND discovery from result filtering (issue #107)."""
+    pytestmark = pytest.mark.slow
 
     def test_atoms_floor_preserves_emergent_and(self):
         # Same final lift floor (1.4), two different atom floors.
@@ -262,6 +264,7 @@ class TestTargetOptimizerEmpty:
 
 
 class TestTargetOptimizerAlphaHandoff:
+    pytestmark = pytest.mark.slow
     def test_discover_alpha_uses_fixed_target(self):
         df = _ohlc_table()
         opt = TargetOptimizer(

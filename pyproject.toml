@@ -25,10 +25,14 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "pytest-xdist>=3.0", "pyarrow>=10.0"]
 
 [project.urls]
 Homepage = "https://github.com/mattcond/forgedge"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-n auto"
+markers = [
+    "slow: full-grid Rule Discovery / large-dataset (>=4000 bars) pipeline tests. Dominate suite runtime; deselect with -m 'not slow' for the fast dev loop, run the full suite (this default) before pushing.",
+]
