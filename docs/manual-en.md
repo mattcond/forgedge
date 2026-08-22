@@ -298,12 +298,12 @@ tradeable (edges()): 54
 - **5241 event candidates** survived Event Discovery's Consistency Gate — remember, none of these have been checked against a forward return yet.
 - **370 of them were promoted** by Alpha Discovery to `AlphaContract` "HYPOTHESIS" status — meaning each has a determined direction (long or short) and a derived holding period / take-profit.
 - **370 rule responses** — every promoted contract was run through Rule Discovery's realistic backtest and walk-forward validation (this fixture has `run_rule_discovery=True` by default).
-- **54 are tradeable** (`result.edges()` — verdict `EDGE` or `PARTIAL-EDGE`). On this specific dataset with default settings, digging one level deeper shows *all 54* are `PARTIAL-EDGE`, not full `EDGE`:
+- **32 are tradeable** (`result.edges()` — verdict `EDGE` or `PARTIAL-EDGE`). On this specific dataset with default settings, digging one level deeper shows *all 32* are `PARTIAL-EDGE`, not full `EDGE`, and 6 more contracts were explicitly demoted to `INSUFFICIENT-DATA` rather than silently reported as something stronger than the OOS evidence could support:
 
 ```python
 from collections import Counter
 print(Counter(r.verdict for _, r in result.rule_responses))
-# Counter({'NON-EDGE': 314, 'PARTIAL-EDGE': 54, 'INSUFFICIENT-DATA': 2})
+# Counter({'NON-EDGE': 332, 'PARTIAL-EDGE': 32, 'INSUFFICIENT-DATA': 6})
 ```
 
 Zero full `EDGE` verdicts is not a bug and not a sign the library "isn't working" — it is the default rotation-null gate (§14–15) doing exactly what it's designed to do. Look at the single best `PARTIAL-EDGE` candidate on this data:
@@ -316,33 +316,38 @@ print(c.event_expression, "|", c.direction)
 print(r.in_sample_summary.profit_factor, r.in_sample_summary.total_trades)
 print(r.walk_forward.consistency, r.walk_forward.oos_summary.profit_factor)
 print(r.rejection_reasons)
+print(r.entry_optimization.selected_entry, r.entry_optimization.adopted)
 ```
 
 Verified output:
 
 ```
-delta_diffnorm_close_vol12_vol24_6 < -0.899244 | short
-16.882 46
-1.0 9.721
-['active_months 11/20 = 55% < 80%', 'search-level rotation null not cleared (rotation_p=1.0000 > 0.05)']
+pr_diffnorm_close_vol12_vol24_48 < 0.104167 | short
+17.166 60
+0.75 3.487
+['active_months 13/23 = 57% < 80%', 'search-level rotation null not cleared (rotation_p=1.0000 > 0.05)']
+limit True
 ```
 
-This rule has an outstanding in-sample profit factor (16.9), a walk-forward that is *positive in 100% of test windows*, and an OOS profit factor of 9.7 — and it is still capped at `PARTIAL-EDGE`. The `rejection_reasons` tell you exactly why: it's only active in 55% of the months in its window (below the 80% coverage bar), and — the more important reason — its search-level rotation-null p-value is 1.0, meaning FORGE's own randomized-rotation null test (§14) found that a purely rotated, outcome-decoupled version of the search does just as well or better. This is the library being honest about the size of its own search space, not a false negative.
+This rule has an outstanding in-sample profit factor (17.2), a walk-forward that is positive in 75% of test windows, and an OOS profit factor of 3.5 — and it is still capped at `PARTIAL-EDGE`. The `rejection_reasons` tell you exactly why: it's only active in 57% of the months in its window (below the 80% coverage bar), and — the more important reason — its search-level rotation-null p-value is 1.0, meaning FORGE's own randomized-rotation null test (§14) found that a purely rotated, outcome-decoupled version of the search does just as well or better. The `entry_optimization` line shows the default `entry_mode="auto"` (§9, §15) at work: it evaluated this rule at a market entry first, then tried a limit entry and *adopted* it because the limit point held up out-of-sample. This is the library being honest about the size of its own search space, not a false negative.
 
 ### What `forge()` did, that you didn't ask it to do explicitly
 
 This is important, and it's the first thing that surprises new users. `forge(kpi, ticker="ADAUSDC", timeframe="1D")` with no further config silently did all of the following:
 
-1. Ran Module 0 (Market Context) since you didn't pass `run_market_context=False` and the table had no `regime` column already.
-2. Substituted a **daily-calibrated** `horizon_grid` for Alpha Discovery, because `timeframe="1D"` is daily-or-slower and you passed no explicit `AlphaConfig` — the class's own default grid `(1,2,3,4,6,8,12,16,24,36,48)` is calibrated for roughly-hourly bars, and using it verbatim on daily data would scan holding periods up to 48 *days*.
-3. **Enriched** each event's horizon grid with additional points around 0.5×/1×/2× that event's own dominant indicator window (`AlphaConfig.horizon_enrichment`, on by default) — a union with the base grid, never a restriction.
-4. Ran the **fast search-level rotation null** (`fast_null=True` by default) and annotated `rotation_p`/`rotation_threshold` on every promoted contract — this is exactly what produced the `PARTIAL-EDGE` cap you just saw.
-5. Built a shared, **purged** `TimeBudget` for Event/Alpha Discovery (§15) even though you passed no `time_budget=` argument.
-6. Recorded a `HypothesisLedger` on `result.ledger`, tallying how large the session's search surface actually was.
-7. Ran Rule Discovery on all 370 promoted contracts with `selection_mode="walk_forward"` (the default) — meaning the published operating parameters came from inside walk-forward train windows only, never from a peek at the final test window.
-8. Skipped Module 4 (Rule Registry) — not because you disabled it, but because `RuleRegistry.from_forge_results` needs multiple tickers to say anything about cross-ticker generalisation; with a single-ticker `forge()` call it still runs and produces a registry, but every rule is classified `ISOLATED` (§9).
+1. Resolved the whole configuration bundle through the central parameter **resolver** and checked it for internal coherence via `config_report()` — logged as `INFO`, and stored on `ForgeResult.coherence` — before running anything. With `strict=True` (the default) a `FAIL`-level finding raises `ValueError` immediately instead of letting the run produce a wall of uninterpretable rejections (§9, §15).
+2. Ran Module 0 (Market Context) since you didn't pass `run_market_context=False` and the table had no `regime` column already.
+3. Substituted a **daily-calibrated** `horizon_grid` for Alpha Discovery on every code path, not only the "no explicit `AlphaConfig`" one (issue #196 closed that gap) — `AlphaConfig.horizon_grid` itself now defaults to `UNSET` and is resolved from the session's declared `timeframe`, so passing an `AlphaConfig` to change something unrelated no longer silently keeps the hourly-calibrated grid.
+4. **Enriched** each event's horizon grid with additional points around 0.5×/1×/2× that event's own dominant indicator window (`AlphaConfig.horizon_enrichment`, on by default) — a union with the base grid, never a restriction.
+5. Ran the **fast search-level rotation null** (`fast_null=True` by default) and annotated `rotation_p`/`rotation_threshold` on every promoted contract — this is exactly what produced the `PARTIAL-EDGE` cap you just saw.
+6. Built a shared, **purged** `TimeBudget` for Event/Alpha Discovery (§15) even though you passed no `time_budget=` argument.
+7. Recorded a `HypothesisLedger` on `result.ledger`, tallying how large the session's search surface actually was.
+8. Ran Rule Discovery on all 370 promoted contracts with `selection_mode="walk_forward"` (the default) — meaning the published operating parameters came from inside walk-forward train windows only, never from a peek at the final test window.
+9. Evaluated every rule with `entry_mode="auto"` (the default since issue #185, replacing `"limit"`) — a market-entry verdict is authoritative, and a limit entry is published only when it clears three out-of-sample conditions (§9, §15).
+10. Measured episode count and trade **concurrency** for every backtest (`resp.in_sample_summary.n_episodes` / `.mean_concurrent_positions` / `.max_concurrent_positions`, issue #168) — `run_backtest` opens a trade on every active bar with no flat-state check, so positions can and do overlap; these fields are what let you tell a nominal trade count from the effective, capital-relevant one (§9).
+11. Skipped Module 4 (Rule Registry) — not because you disabled it, but because `RuleRegistry.from_forge_results` needs multiple tickers to say anything about cross-ticker generalisation; with a single-ticker `forge()` call it still runs and produces a registry, but every rule is classified `ISOLATED` (§9).
 
-None of items 2–7 are things you configured. They are all defaults chosen by the library's authors specifically so that the "quick start" path and the "hand-tuned" path don't silently diverge in honesty. §14–15 explain each of these in depth, including which ones you can turn off and what it costs you to do so.
+None of items 3–10 are things you configured. They are all defaults chosen by the library's authors specifically so that the "quick start" path and the "hand-tuned" path don't silently diverge in honesty. §14–15 explain each of these in depth, including which ones you can turn off and what it costs you to do so.
 
 ---
 
@@ -388,7 +393,8 @@ Given the candidate list from Module 1, and *for the first time in the pipeline*
 3. **Predictive-power measurement (IS):** Information Coefficient (Spearman correlation between the raw feature and the forward return, computed once and cached per `(feature, horizon)`), win rate / lift over base rate, Cohen's d, a one-sided t-test.
 4. **OOS confirmation** (when `train_ratio < 1.0`, default is 0.7): the same derived target is replayed on the held-out tail, and passes if it has enough activations, a positive oriented advantage, and a low enough p-value. Failing this is a **non-blocking diagnostic**, not a rejection.
 5. **Regime sensitivity** — per-regime IC and win rate, with a `dependency_type` classification (`agnostic`/`conditional`/`specific`/`broken`/`unknown`).
-6. **Composite scoring** — a weighted combination of the above metrics into a 0–1 `composite_score`, mapped to a letter grade A (≥0.75) through D (<0.25).
+6. **Composite scoring** — the exact current formula (`AlphaConfig.score_weights`, default `(0.20, 0.25, 0.15, 0.25, 0.15)` for `(ic, lift, cohens_d, z, breadth)`):
+   `composite = (w_ic·ic_norm + w_lift·lift_norm + w_d·d_norm + w_z·z_norm + w_breadth·breadth) / Σw`, where `ic_norm = clamp01(|IC|/0.10)`, `lift_norm = clamp01(lift/0.30)`, `d_norm = clamp(cohens_d/0.80, -1, 1)` (**signed** — an adverse effect drags the score down rather than clipping to zero), `z_norm = clamp01(|z*|/3.0)` (`z*` is the rotation-null-standardised excess at `h*`, i.e. the edge-to-noise ratio), and `breadth` is the regime breadth term, dropped (with the remaining weights renormalised) when no regime information is available. Two adjustments follow: a `statistically_weak` target — `h*` selected outside the BH-significant horizon set — multiplies the composite by `statistically_weak_penalty` (default `0.6`), and a passing OOS confirmation adds `oos_bonus` (default `0.05`). The result is clamped to `[0,1]` and mapped to a letter grade A (≥0.75) through D (<0.25).
 7. **Contract compilation.** All candidates with a determined direction become `AlphaContract` objects with `status="HYPOTHESIS"`; every other metric above only ever appends a string to `diagnostics` — it never blocks promotion, and `rejection_reasons` stays empty on a promoted contract. This is stated as a deliberate design principle: statistical weaknesses "feed the grade, they don't gate/reject — Rule Discovery is the sole economic judge" (`src/forgedge/docs/README.md`, translated).
 
 ### Module 3 — Rule Discovery
@@ -457,6 +463,9 @@ forge(
 | `calibration` | `CalibrationReport \| None` | the rotation-null report |
 | `ledger` | `HypothesisLedger \| None` | search-surface bookkeeping |
 | `time_budget` | `TimeBudget \| None` | the effective IS/OOS split used |
+| `context` | `PipelineContext` | the resolved session facts (timeframe, schema, statistical policy) the run used |
+| `resolution` | `ResolutionTrace` | every config field the resolver derived — `default → resolved`, with the rule that fired and the inputs it read; `.describe()` for a one-line summary |
+| `coherence` | `ConfigReport` | the coherence check the run executed with (`strict=True`'s backing) — `.findings`, `.has_critical`, `.trace` (same object as `.resolution`) |
 | `market_context`, `event_discovery`, `alpha_discovery` | module instances | live objects for drill-down (`.distribution()`, `.summary()`, …) |
 
 Methods: `.edges()` → `(contract, response)` pairs where `response.is_edge` is true; `.validated_rules()`; `.submissions()`; `.summary()` (a `pd.DataFrame`, one row per candidate, augmented with `rule_verdict`).
@@ -701,7 +710,7 @@ market point's — the verdict never pays for Stage 2.
 *is* the strategy rather than an execution refinement.
 
 
-A `RuleDiscoveryResponse`'s important attributes: `verdict` (`"EDGE"|"PARTIAL-EDGE"|"NON-EDGE"|"INSUFFICIENT-DATA"`), `is_edge` (true for the first two), `rejection_reasons`, `validated_rule` (carries `.params`, a `BacktestParams`), `in_sample_summary` (`total_trades`, `profit_factor`, `win_rate_pct`, `expectancy`, `tpm_mu`), `execution_envelope` (`.conservative`/`.optimistic` — see §17), `walk_forward` (`.oos_summary`, `.consistency`), `statistical_validation` (`.temporal_stability`, `.deflated_sharpe`), `regime_analysis`, `excursion` (MAE/MFE), `entry_optimization` (only populated when `entry_mode="auto"`, §15).
+A `RuleDiscoveryResponse`'s important attributes: `verdict` (`"EDGE"|"PARTIAL-EDGE"|"NON-EDGE"|"INSUFFICIENT-DATA"`), `is_edge` (true for the first two), `rejection_reasons`, `validated_rule` (carries `.params`, a `BacktestParams`), `in_sample_summary` (`total_trades`, `profit_factor`, `win_rate_pct`, `expectancy`, `tpm_mu`, `n_episodes`, `mean_concurrent_positions`, `max_concurrent_positions` — trade-overlap fields, §15), `execution_envelope` (`.conservative`/`.optimistic` — see §17), `walk_forward` (`.oos_summary`, `.consistency`), `statistical_validation` (`.temporal_stability`, `.deflated_sharpe`), `regime_analysis`, `excursion` (MAE/MFE), `entry_optimization` (only populated under `entry_mode="auto"` — the default — and only once the Stage-1 market-mode verdict is `EDGE`/`PARTIAL-EDGE`; `None` under `"market"`/`"limit"` and under a `"auto"` run whose market verdict is `NON-EDGE`, §15).
 
 `from forgedge.rule_discovery import text_report, html_report` build human-readable/HTML reports from a response; `resp.to_dict()` gives a JSON-serializable form.
 

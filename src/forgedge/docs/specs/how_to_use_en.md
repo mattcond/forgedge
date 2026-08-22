@@ -558,40 +558,55 @@ print(text_report(resp))
 
 ### Selecting an entry mode (`entry_mode`)
 
-`RuleDiscoveryConfig.entry_mode` (default `"limit"`) controls how the entry
-order is evaluated during backtesting:
+`RuleDiscoveryConfig.entry_mode` controls how the entry order is evaluated
+during backtesting. **Default changed to `"auto"` in issue #185** (it was
+`"limit"` before):
 
 ```python
 from forgedge import RuleDiscovery, RuleDiscoveryConfig
 
-config = RuleDiscoveryConfig(entry_mode="auto")
+config = RuleDiscoveryConfig(entry_mode="limit")   # opt back into the old default
 rd = RuleDiscovery(ed.df, contract, cand, config=config)
 resp = rd.run()
 ```
 
-- `"limit"` (default) — the original behaviour: the entry is a limit order at
+- `"market"` — baseline at next-open fill (≈100% fill rate), no entry
+  optimiser. Isolates the signal's edge from the entry mechanism.
+- `"limit"` — the pre-#185 default: the entry is a limit order at
   `anchor * (1 ∓ buy_drop_pct)`, and the grid optimises `buy_drop_pct` as an
   entry-price lever. Can suffer from the "fill confound" — a deep, low-fill
   limit can show a high profit factor on a rare, non-representative subset of
-  trades.
-- `"market"` — pure baseline at next-open fill (≈100% fill rate), no entry
-  optimiser. Isolates the signal's edge from the entry mechanism.
-- `"auto"` — two-stage: Stage 1 evaluates in market mode and that verdict
-  (plus walk-forward, regime and envelope evidence) is authoritative. Stage 2
-  runs the limit optimiser only on EDGE/PARTIAL-EDGE survivors, adopting the
-  improved entry only if it still fills at `>= criteria.min_fill_rate_opt`
-  (default `0.80`). The optimiser can refine but never fabricate an edge from
-  a market-mode NON-EDGE.
+  trades. Passing it explicitly opts back into that risk for a rule whose
+  edge genuinely *is* the limit order itself.
+- `"auto"` (**default**) — two-stage: Stage 1 evaluates at a market entry and
+  that verdict (walk-forward, regime, envelope) is **authoritative** — Stage 2
+  can never turn a NON-EDGE into an edge, only choose which parameters get
+  published. Stage 2 sweeps `buy_drop_pct` on the survivor and adopts the
+  limit point only if it clears all three conditions **out-of-sample**:
+  fill rate `>= criteria.min_fill_rate_opt` (default `0.80`); risk-adjusted
+  return per unit of time (`opportunity_sharpe`) at least the market point's;
+  and net gain at least `min_net_gain_retention × market's` (default `0.5`) —
+  a backstop against a tiny mean with a tiny variance that the Sharpe ratio
+  can't see.
 
-When `entry_mode="auto"`, `resp.entry_optimization` (an `EntryOptimization`)
-records the decision:
+`resp.entry_optimization` (an `EntryOptimization`) is populated only under
+`entry_mode="auto"` (the default), and only once the Stage-1 market verdict
+is `EDGE`/`PARTIAL-EDGE` — `None` under `"market"`/`"limit"`, and `None` under
+`"auto"` too when the market-mode verdict is `NON-EDGE` (the limit optimiser
+never runs in that case):
 
 ```python
 eo = resp.entry_optimization
-print(eo.selected_entry)   # "market" | "limit" — the adopted mode
-print(eo.adopted)          # True if the limit optimiser improved on market
-print(eo.reason)           # human-readable explanation
-print(f"market PF={eo.market_profit_factor:.2f} fill={eo.market_fill_rate:.0%}")
+print(eo.selected_entry)      # "market" | "limit" — the published mode
+print(eo.authoritative)       # always "market" — where the verdict came from
+print(eo.adopted)             # True if the limit point cleared all three conditions
+print(eo.failed_condition)    # "fill" | "sharpe" | "net_gain" | None — which one stopped it
+print(eo.reason)               # human-readable explanation
+
+# Both operating points are carried as full artefacts, not just three
+# scalars each — you can inspect what you'd actually be trading:
+print(eo.market_rule, eo.limit_rule)         # ValidatedRule | None, each
+print(eo.market_summary, eo.limit_summary)   # BacktestSummary | None, OOS, same test windows
 ```
 
 ### Generating HTML reports for review
@@ -621,8 +636,13 @@ insufficient fill rate) is rejected immediately without running the walk-forward
 and diagnostics — saving compute. The trade-count floor is **not** a fixed
 absolute: it scales with the in-sample length as
 `max(10, n_months * min_tpm)` (spec RD-04), so the requirement is neither too
-strict on short IS periods nor too lax on long ones. `min_tpm` (default `2.0`)
-on `SelectionCriteria` is the sole frequency gate that drives it. With
+strict on short IS periods nor too lax on long ones. `min_tpm` on
+`SelectionCriteria` is the sole frequency gate that drives it — like most
+statistical-policy fields it now defaults to `UNSET` and is filled in by the
+resolver (§ *Configuration coherence* above), resolving to `2.0` under a bare
+context, but following the session's declared M1 rate when one was set
+(`GateParams.min_tpm`, via `forge_preset` or an explicit config) rather than
+staying at a class default that may disagree with it. With
 `early_elimination=False` the full
 pipeline runs regardless: the verdict is still `NON-EDGE`, but walk-forward,
 regime analysis, and MAE/MFE are all populated — useful for uniform reporting
@@ -759,6 +779,70 @@ for contract, response in result.edges():    # EDGE / PARTIAL-EDGE only
 print(result.registry.summary())             # Module 4 — catalogued rules
 ```
 
+### Configuration coherence: `strict` and `config_report`
+
+**This is a breaking behaviour change worth reading before upgrading.**
+`forge()` now resolves the whole configuration bundle through a central
+resolver before running anything, and checks it for internal coherence via
+`config_report()` — the same idea as `summary_report()`, but for
+*configuration* instead of *data*. A configuration where two individually
+reasonable settings are jointly impossible (issue #173's original case: an
+M1 event-rate floor low enough to admit an event, paired with an M3
+walk-forward window too short to ever accumulate enough trades from it) used
+to surface only as an opaque wall of rejections — indistinguishable from "the
+signal is bad". Now it's caught up front.
+
+`forge(..., strict=True)` **is the default**. A `FAIL`-level finding — a
+configuration that makes a stage *structurally incapable* of producing a
+verdict — raises `ValueError` immediately, before any discovery runs:
+
+```python
+from forgedge import forge, forge_preset
+
+disc, alpha, rd = forge_preset("balanced", timeframe="1D", asset="ADAUSDC")
+forge(kpi, ticker="ADAUSDC", timeframe="1D",
+      event_discovery_config=disc, alpha_config=alpha, rule_discovery_config=rd)
+# ValueError: forge(): the configuration cannot produce a verdict — every
+# candidate would be eliminated for configuration reasons, not for signal
+# quality. Fix the values below, or pass strict=False to run anyway.
+# [FAIL] oos_span_too_short: le finestre di test aggregate coprono 9 mesi e a
+# criteria.min_tpm=0.8 producono 7.5 trade attesi, sotto
+# criteria.min_oos_trades=10: ogni verdetto positivo verrà degradato a
+# INSUFFICIENT-DATA. Alzare min_tpm a >= 1.07, o abbassare min_oos_trades.
+```
+
+This is a real, reproducible example on this repository's own fixture — even
+`forge_preset("balanced", "1D")` triggers it on `tests/fixtures/ADA_1D_TRAIN.parquet`
+today. Pass `strict=False` to degrade every finding to a `UserWarning` and run
+anyway (non-critical `WARN`-level findings are always warnings, never
+errors, regardless of `strict`):
+
+```python
+result = forge(kpi, ticker="ADAUSDC", timeframe="1D",
+                event_discovery_config=disc, alpha_config=alpha,
+                rule_discovery_config=rd, strict=False)
+```
+
+Check coherence up front, without running the pipeline, with `config_report()`
+directly — the same resolver `forge()` uses, so what it reports is exactly
+what would run:
+
+```python
+from forgedge import config_report
+
+rep = config_report(event_discovery=disc, alpha=alpha, rule_discovery=rd,
+                     kpi=kpi, timeframe="1D")
+print(rep.to_text())          # resolution trace + coherence findings
+if rep.has_critical:
+    raise ValueError(rep.one_line())
+```
+
+`ForgeResult.coherence` carries the same `ConfigReport` from the actual run —
+`result.coherence.trace` is the resolution trace (every field the resolver
+derived, `default → resolved`, with the rule that fired), and
+`result.coherence.findings` is the finding list, so a persisted run can
+explain itself afterwards without re-deriving anything.
+
 ### Quick start with presets: `forge_preset`
 
 Rather than hand-tuning every gate, `forge_preset` returns a ready-made
@@ -851,6 +935,9 @@ Useful switches:
   purged/embargoed IS/OOS time axis across Event Discovery and Alpha Discovery instead of each
   module cutting the timeline independently (see *Purging and embargo* below). Default `None`
   builds one automatically from `train_ratio` and the resolved horizon grid.
+- `strict=False` — degrade a `FAIL`-level configuration-coherence finding to a `UserWarning`
+  and run anyway, instead of raising (`strict=True` by default — see *Configuration coherence*
+  above). `WARN`-level findings never raise regardless of this flag.
 - `progress=True` — print per-stage status and a Rule Discovery progress bar to `stderr`
   (useful for long runs). Independently of the flag, every milestone is logged at `INFO`
   on the `forgedge.forge` logger, so `logging.basicConfig(level=logging.INFO)` surfaces the
