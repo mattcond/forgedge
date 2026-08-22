@@ -624,7 +624,7 @@ costruzione — e la pipeline lo riportava come un muro di rejection,
 indistinguibile da «il segnale è brutto».
 
 - **Il floor sui trade di M3** (`#173`). `min_train_months` è ora derivato da
-  `criteria.min_tpm` con margine di Poisson al 95 %: 20 mesi al tasso del preset
+  `criteria.min_tpm` con margine di Poisson al 95 %: 11 mesi al tasso del preset
   balanced su daily, non un 6 fisso. Il `floor / rate` ingenuo dà 12.5 e resta
   corto circa il 44 % delle volte — lo stesso bug in forma più mite. Dove la
   storia non può fornire la finestra derivata, `oos_span_too_short` lo dice e

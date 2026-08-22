@@ -84,12 +84,20 @@ class TestSameResolverGuarantee:
         with a 95 % Poisson margin. The naive `10 / 0.80 = 12.5` would satisfy
         the floor *in expectation* and come up short about 44 % of the time —
         #173 again, in milder form, after having been "fixed".
+
+        Re-pinned again by #204: `criteria.min_tpm` was 0.80 above because the
+        preset's own `_episode`-suffixed M3 spec key applied a fill ratio
+        straight to M1's *episode* rate, which M3 does not count in — M3 opens
+        a trade on every active bar, so a declared episode rate has to be
+        converted to bars first (`bars_per_episode`, ~1.76 measured). The
+        stock preset's M3 rate is now 1.4667, not 0.80, so the window this
+        test pins moved from 20 months to 11.
         """
         disc, alpha, rd = _preset_triple()
         rep = config_report(disc, alpha, rd, RegistryConfig(), ctx=_ctx())
         resolved = rep.configs["rule_discovery"]
 
-        assert resolved.walk_forward.min_train_months == 20
+        assert resolved.walk_forward.min_train_months == 11
         assert resolved.walk_forward.min_train_months * resolved.criteria.min_tpm >= 10
         assert "wf_bucket_too_short" not in _codes(rep)
 
@@ -773,21 +781,27 @@ class TestTheSessionRateReachesM3:
     """
 
     @staticmethod
-    def _run(m1_rate=None, rd=None):
+    def _run(m1_rate=None, rd=None, event_counting="episode"):
         disc = DiscoveryConfig()
         if m1_rate is not None:
-            disc = DiscoveryConfig(gate_params=GateParams(min_tpm=m1_rate))
+            disc = DiscoveryConfig(
+                gate_params=GateParams(min_tpm=m1_rate, event_counting=event_counting)
+            )
         return config_report(disc, None, rd or RuleDiscoveryConfig(), timeframe="1D")
 
     def test_a_declared_rate_reaches_m3(self):
-        rep = self._run(1.0)
+        """In *bar* mode M1 and M3 already share a unit, so the declared rate
+        reaches M3 unconverted — the isolated `rate_retention` case, kept free
+        of the episode→bar factor #204 adds (see `TestM3CountsBarsNotEpisodes`
+        for that one)."""
+        rep = self._run(1.0, event_counting="bar")
         rd = rep.configs["rule_discovery"]
         assert rd.criteria.min_tpm == pytest.approx(1.0)     # the declared rate
         assert "m3_stricter_than_m1" not in _codes(rep)
 
     def test_the_whole_chain_follows(self):
         """The point of the fix: one declaration, three coherent values."""
-        rd = self._run(4.0).configs["rule_discovery"]
+        rd = self._run(4.0, event_counting="bar").configs["rule_discovery"]
         assert rd.criteria.min_tpm == pytest.approx(4.0)
         assert rd.scoring.pf_min_tpm == pytest.approx(4.0)   # #178 tracks it
         assert rd.walk_forward.min_train_months == 4         # #177 sizes from it
@@ -798,7 +812,10 @@ class TestTheSessionRateReachesM3:
         the pooled OOS trade count (`test_months × min_tpm`). At 2.0 a session
         needs 13 months to produce a verdict; at 1.6 it needs 16.2 — so a 25%
         cut in the floor demands 25% more data, and a 14-month session that
-        worked stops working."""
+        worked stops working.
+
+        Checked in *bar* mode: episode mode has its own, separate factor
+        (`bars_per_episode`, #204) that is not what this test is about."""
         from forgedge.resolver import poisson_min_window
 
         def span_needed(rate):
@@ -807,7 +824,8 @@ class TestTheSessionRateReachesM3:
         assert span_needed(2.0) == pytest.approx(13.0, abs=0.1)
         assert span_needed(1.6) == pytest.approx(16.2, abs=0.1)
         # ...which is why the resolver does not apply one.
-        assert self._run(2.0).configs["rule_discovery"].criteria.min_tpm == 2.0
+        rd = self._run(2.0, event_counting="bar").configs["rule_discovery"]
+        assert rd.criteria.min_tpm == 2.0
 
     def test_an_inherited_default_is_not_a_declaration(self):
         """The measurement that shaped this: `GateParams.min_tpm` defaults to
@@ -828,22 +846,30 @@ class TestTheSessionRateReachesM3:
         assert rep.configs["rule_discovery"].criteria.min_tpm == pytest.approx(1.9)
 
     def test_m3_never_ends_up_stricter_than_m1(self):
-        """Equality keeps `m3_stricter_than_m1` silent — it fires on `m3 > m1`
-        — so propagating the rate unchanged is safe in the direction that
-        matters: nothing M1 admits is rejected by M3 for frequency."""
+        """`m3_stricter_than_m1` compares the two rates in the *same* unit
+        (#204) — M1's declared rate converted to bars via `bars_per_episode`
+        when it counts episodes — so it stays silent in both counting modes,
+        not just the bar-mode case where no conversion is needed."""
         for rate in (1.0, 2.0, 5.0):
-            rep = self._run(rate)
-            assert rep.configs["rule_discovery"].criteria.min_tpm <= rate
-            assert "m3_stricter_than_m1" not in _codes(rep)
+            for counting in ("bar", "episode"):
+                rep = self._run(rate, event_counting=counting)
+                assert "m3_stricter_than_m1" not in _codes(rep), counting
 
 
 class TestThePresetScalesBothRates:
-    """The reported case: `forge_preset(min_tpm=2)` moved M1 and left M3."""
+    """The reported case: `forge_preset(min_tpm=2)` moved M1 and left M3.
+
+    Checked in *bar* mode — M1 and M3 already share a unit there, so this
+    isolates the #200 property (M3 follows M1 at the preset's own fill
+    ratio) from the episode→bar conversion #204 adds on top of it.  See
+    `TestM3CountsBarsNotEpisodes` for the episode-mode numbers.
+    """
 
     @staticmethod
     def _rates(preset="balanced", **kw):
         from forgedge.presets import forge_preset
 
+        kw.setdefault("event_counting", "bar")
         d, _a, r = forge_preset(preset, "1D", asset="X", **kw)
         return d.gate_params.min_tpm, r.criteria.min_tpm
 
@@ -851,23 +877,87 @@ class TestThePresetScalesBothRates:
         from forgedge.resolver import poisson_min_window
 
         m1, m3 = self._rates(min_tpm=2)
-        assert (m1, m3) == (2, pytest.approx(1.6))
-        assert poisson_min_window(10, m3) == 10      # was 20, built for 0.8
+        assert (m1, m3) == (2, pytest.approx(1.6667, rel=1e-3))
+        assert poisson_min_window(10, m3) == pytest.approx(9.6, abs=0.1)
 
     def test_the_untouched_presets_are_bit_for_bit_unchanged(self):
         """The ratio is read from each spec, not flattened to one number —
-        the presets disagree about it (1.00 on sniper/sweep, 0.80 on
-        balanced/burst) and flattening would move two of them."""
-        assert self._rates("sniper") == (0.3, pytest.approx(0.3))
-        assert self._rates("balanced") == (1.0, pytest.approx(0.8))
-        assert self._rates("sweep") == (0.3, pytest.approx(0.3))
-        assert self._rates("burst") == (1.5, pytest.approx(1.2))
+        the presets disagree about it (1.00 on sniper/sweep, 0.83 on
+        balanced, 0.80 on burst) and flattening would move them."""
+        assert self._rates("sniper") == (1.0, pytest.approx(1.0))
+        assert self._rates("balanced") == (3.0, pytest.approx(2.5))
+        assert self._rates("sweep") == (1.0, pytest.approx(1.0))
+        assert self._rates("burst") == (2.5, pytest.approx(2.0))
 
     def test_an_explicit_rd_rate_still_wins(self):
         assert self._rates(min_tpm=2, rd_min_tpm=1.9) == (2, pytest.approx(1.9))
 
     def test_the_ratio_is_preserved_across_presets(self):
-        for preset, ratio in (("sniper", 1.0), ("balanced", 0.8),
+        for preset, ratio in (("sniper", 1.0), ("balanced", 2.5 / 3.0),
                               ("sweep", 1.0), ("burst", 0.8)):
             m1, m3 = self._rates(preset, min_tpm=3)
             assert m3 == pytest.approx(3 * ratio), preset
+
+
+class TestM3CountsBarsNotEpisodes:
+    """#204 — the fill ratio alone understated M3's floor in episode mode.
+
+    M3 has no notion of episodes (it opens a trade on every active bar, no
+    flat-state check), so a declared *episode* rate has to be converted to
+    the *bar* rate M3 actually counts before the fill ratio applies.  The
+    `_episode`-suffixed M3 spec keys applied the ratio straight to the
+    episode rate instead — correct in bar mode (M1 and M3 already share a
+    unit there), silently wrong in episode mode, where it understated M3's
+    floor by `bars_per_episode` (~1.76, measured median on `ADA_1D_TRAIN`)
+    and inflated `min_train_months` for no reason.
+    """
+
+    @staticmethod
+    def _rates(preset="balanced", **kw):
+        from forgedge.presets import forge_preset
+
+        kw.setdefault("event_counting", "episode")
+        d, _a, r = forge_preset(preset, "1D", asset="X", **kw)
+        return d.gate_params.min_tpm, r.criteria.min_tpm
+
+    def test_the_reported_case_is_fixed(self):
+        """`forge_preset("balanced", min_tpm=2)` — M3 used to stay at the
+        spec's literal 0.8 whatever M1 was told; it now follows M1 through
+        the same bar-rate conversion the resolver's `_derive_m3_rate` uses."""
+        m1, m3 = self._rates(min_tpm=2)
+        assert (m1, m3) == (2, pytest.approx(2.9333, rel=1e-3))
+
+    def test_bars_per_episode_times_the_bar_mode_fill_ratio(self):
+        """Each preset's episode-mode M3 rate is `M1 x bars_per_episode x
+        fill_ratio`, where `fill_ratio` is the *bar*-mode pair
+        (`daily_rd_min_tpm / daily_min_tpm`) — the only ratio that is a pure
+        fill margin, same unit on both sides."""
+        from forgedge.resolver import PipelineContext
+
+        bpe = PipelineContext().bars_per_episode
+        for preset, fill_ratio in (("sniper", 1.0), ("balanced", 2.5 / 3.0),
+                                    ("sweep", 1.0), ("burst", 0.8)):
+            m1, m3 = self._rates(preset)
+            assert m3 == pytest.approx(m1 * bpe * fill_ratio, rel=1e-3), preset
+
+    def test_no_preset_timeframe_counting_combination_falsely_flags_m3_stricter(self):
+        """The naive comparison (`_check_m3_vs_m1` before #204) would flag
+        every one of these as M3 demanding a frequency nobody asked for — it
+        was comparing an episode count to a bar count.  None of them should
+        fire once the check converts units the same way the derive does."""
+        from forgedge import config_report
+        from forgedge.presets import forge_preset as _fp
+
+        for preset in ("sniper", "balanced", "sweep", "burst"):
+            for tf in ("1D", "4H", "1H", "15m"):
+                for counting in ("episode", "bar"):
+                    d, a, r = _fp(preset, tf, asset="X", event_counting=counting)
+                    rep = config_report(d, a, r, timeframe=tf)
+                    assert "m3_stricter_than_m1" not in _codes(rep), (preset, tf, counting)
+
+    def test_bar_mode_is_unaffected(self):
+        """In bar mode M1 and M3 already share a unit, so the conversion
+        factor is 1 and every value this test class exists for stays exactly
+        what `TestThePresetScalesBothRates` already pins."""
+        m1, m3 = self._rates(event_counting="bar")
+        assert (m1, m3) == (3.0, pytest.approx(2.5))

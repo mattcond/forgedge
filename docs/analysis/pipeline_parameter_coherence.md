@@ -576,6 +576,7 @@ which is why the plan could not have contained them.
 |---|---|---|
 | of F5 | [#196](https://github.com/mattcond/forgedge/issues/196) | `AlphaConfig.horizon_grid` followed the session only when `forge()` built the config itself; an explicit config on daily candles still scanned up to 48 *days* |
 | of F2/F4 | [#200](https://github.com/mattcond/forgedge/issues/200) | `SelectionCriteria.min_tpm` did not follow the rate Event Discovery was told to demand, so `min_train_months` (#177) and `pf_min_tpm` (#178) stayed sized for a rate the session no longer had |
+| of #200 | [#204](https://github.com/mattcond/forgedge/issues/204) | the fix above applied M1→M3's fill ratio straight to a *declared episode* rate, but M3 counts bars, not episodes — a unit gap one factor upstream of #200's own |
 
 \#200 is the more instructive of the two, because the fix is *smaller* than it first looks.
 The obvious reading — M1 counts episodes, M3 counts filled trades, so M3 should ask for
@@ -605,3 +606,23 @@ have propagated the wrong one: M3's floor to 0.4, `min_train_months` from 8 to 4
 than the reference history can supply, and the walk-forward gone entirely. The resolver
 therefore stays silent unless somebody actually chose a rate — the same distinction
 `timeframe_declared` draws.
+
+#204 found the gap #200 left behind, and it hid in plain sight inside #200's own fix: the
+fill ratio (M3 asks slightly less than M1, because not every episode fills) is legitimate,
+but it was being applied to the *episode* rate directly. M3 has no notion of episodes — it
+"opens a trade on every active bar, with no flat-state check" — so it counts bars, and a
+declared episode rate has to be converted to a bar rate *before* the fill ratio means
+anything. Skipping that conversion understated M3's floor by `bars_per_episode` (~1.76,
+measured median on `ADA_1D_TRAIN`): `forge_preset("balanced", "1D", min_tpm=2)`'s M3 rate
+was 1.6, corrected to 2.93, and the stock preset's own `min_train_months` moved from 20
+months to 11 — the exact shape of #200's finding, one conversion earlier in the chain.
+
+The fix generalises #200's own machinery rather than adding a parallel one:
+`PipelineContext.bars_per_episode` sits beside `rate_retention` as another *policy* default
+(the resolver never reads data to derive it, by the same invariant), and `_derive_m3_rate`
+applies it only when `event_counting="episode"` — in `"bar"` mode M1 and M3 already share a
+unit, so the factor is 1 and #200's original derivation is untouched. The one thing #204
+could not leave alone was `m3_stricter_than_m1`'s own *check*: comparing M1's declared rate
+to M3's derived one without the same conversion would have turned every declared episode
+rate into a false "M3 is stricter" warning, which is precisely the coherence layer
+mis-firing on the fix meant to close it.

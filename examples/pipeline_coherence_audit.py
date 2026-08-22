@@ -125,6 +125,25 @@ def stage_rates() -> None:
     print("  the fill margin is a preset judgement instead: 1.00 on sniper/sweep,")
     print("  0.80 on balanced/burst, each spec's own ratio carried through.")
 
+    print("\n  #204 — M3 has no notion of episodes; \"episode\" mode has to say so:")
+    print(f"  {'event_counting':>15}  {'M1 declared':>12}  {'M3 (old, wrong)':>16}  "
+          f"{'M3 (fixed)':>11}")
+    for ec, old_ratio in (("bar", 2.5 / 3.0), ("episode", 0.8)):
+        disc, _a, rd = forge_preset("balanced", "1D", asset="X", event_counting=ec)
+        m1 = disc.gate_params.min_tpm
+        old = round(m1 * old_ratio, 4)
+        print(f"  {ec:>15}  {m1:12.4f}  {old:16.4f}  {rd.criteria.min_tpm:11.4f}")
+    print("  the \"old\" column is the fill ratio (0.83) applied straight to the")
+    print("  declared rate, which is correct in bar mode — M1 and M3 already share")
+    print("  a unit there. In episode mode it was applied to the wrong quantity:")
+    print("  M3 counts bars (\"a trade opens on every active bar, no flat-state")
+    print("  check\"), and episodes are runs of *several* bars — median 1.76 on")
+    print("  ADA_1D_TRAIN, 3664 candidates. The fixed column converts episodes to")
+    print("  bars first (PipelineContext.bars_per_episode), then applies the same")
+    print("  fill ratio: 1.0 × 1.76 × 0.83 = 1.47, not 0.8 — M3's floor was ~1.8x")
+    print("  too low, which inflated min_train_months for no reason (same shape")
+    print("  as #200's fill-margin fix, one factor upstream of it).")
+
     print("\n" + "=" * 78)
     print("  LATENT PARAMETER: bar duration — the fields that mean \"N bars\"")
     print("=" * 78)
