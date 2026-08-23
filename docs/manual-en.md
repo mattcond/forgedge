@@ -523,6 +523,45 @@ ad.summary()   # pd.DataFrame, sorted by composite score
 
 An `AlphaContract`'s important attributes: `alpha_id`, `status` (`"HYPOTHESIS"`/`"REJECTED"`), `event_candidate_id` (links back to the originating `EventCandidate`), `derived_target` (`holding_period_h`, `sell_pct`, `direction`, `base_rate`, `mean_advantage`), `oos_validation`, `event_stats` (`win_rate`, `lift`, `cohens_d`, `p_value`), `regime_analysis`, `alpha_score` (`composite_score`, `grade`), `rejection_reasons` (blocking causes only — empty on a promoted contract), `diagnostics` (non-blocking observations that feed the grade; routinely non-empty on a promoted contract), `rotation_p`/`rotation_threshold` (set by the search-level rotation null).
 
+### Module 2 alternative — `TargetOptimizer`
+
+A second, standalone way to reach Module 2, for the inverse question: not "what does this event predict?" but "which events predict *this specific, fixed* target?" You supply the target — a horizon and a minimum return — and `TargetOptimizer` mines Event Discovery's raw atoms and AND-compositions directly against it, using a two-proportion lift score rather than Alpha Discovery's derive-per-event pipeline.
+
+```python
+from forgedge import TargetOptimizer
+from forgedge.alpha_discovery.models import TargetConfig
+
+cfg = TargetConfig(horizon=10, min_return=0.05, side="long")   # +5% within 10 bars, long
+opt = TargetOptimizer(train_df, cfg)
+ranked = opt.run() -> pd.DataFrame       # columns: event_id, n_components, expression,
+                                          # n_activations, win_rate_event, win_rate_base, lift, z_score
+opt.base_rate           # unconditional win rate of the target, set only after run()
+opt.candidates           # the underlying list[EventCandidate], ranked to match `ranked`'s order
+
+oos = opt.validate_oos(full_df, top_k=10) -> pd.DataFrame   # adds *_oos columns for the top-k rows
+contracts = opt.discover_alpha(config: AlphaConfig | None = None) -> list[AlphaContract]
+```
+
+`TargetConfig` fields and defaults: `horizon: int`, `min_return: float`, `side: str` (`"long"`/`"short"`, required, no default), `min_activations: int = 10`, `min_lift_atoms: float = 1.0`, `min_lift_result: float = 1.0`, `target_mode: str = "proj"`, `trend_sma_mult: float = 2.0`. **`target_mode` defaults to `"proj"` here too** — the same trend-excess scoring §8/§9/§15 describe for `AlphaConfig` — so `TargetConfig(horizon=20, min_return=0.10, side="long")` without an explicit `target_mode` measures "beat the 2×20-bar trend SMA by 10%," not "close moved +10% in 20 bars." Pass `target_mode="abs"` for the literal reading. `min_lift_atoms`/`min_lift_result`/`min_activations` are pruning thresholds specific to `TargetOptimizer`'s own two lift-pruning passes (before and after AND composition) — Alpha Discovery's fixed-target mode ignores them.
+
+**Verified run**, on the ADA fixture's first 600 bars (`horizon=10, min_return=0.05, side="long"`, target-mode default `"proj"`):
+
+```
+run() -> 2235 rows, base_rate = 0.5775
+  event_id                       expression                                                         n_act  win_event  win_base  lift   z
+  EVT-close_ret_03-PRxZS-1916    pr_close_ret_03_48 > 0.916667 AND zs_close_ema_12_48 < -1            17     1.000      0.5775   1.731  3.53
+  EVT-close_ret_03-PRxZS-1912    pr_close_ret_03_48 > 0.916667 AND zs_close_bb_upper_20_48 < -1        22     1.000      0.5775   1.731  4.01
+
+validate_oos(full_df, top_k=5) — same two rows, now with *_oos columns:
+  n_activations_oos  low_sample_oos  win_rate_oos  base_rate_oos  lift_oos  z_oos
+  34                 False           0.7941        0.5872         1.352     2.45
+  35                 False           0.9143        0.5872         1.557     3.93
+```
+
+Two mechanics worth knowing before you rely on the OOS numbers: `validate_oos()`'s scoring pass **bypasses `min_activations` entirely** (it's hardcoded to `1` for the actual lift/z computation; the configured `min_activations` only drives the `low_sample_oos` diagnostic flag, which does not filter anything), and it reassigns `full_df`'s row order onto the target's index rather than aligning by index label — safe only if `cand.apply(full_df)` preserves `full_df`'s original row order, which it does for the standard pipeline but is worth knowing if you construct `full_df` unusually.
+
+**The one fact worth documenting explicitly: `TargetOptimizer` sits outside the parameter-coherence resolver.** `target_optimizer.py` imports nothing from `forgedge.resolver` or `forgedge.unset` — unlike every other module touched by the #173–#185 audit, it was written before, or deliberately kept outside, that layer. `TargetConfig` itself has no `UNSET` fields (every default is a concrete literal), so it's unaffected either way — but `discover_alpha()`'s internal `AlphaConfig()` **is** built without ever going through `forge()`'s session resolver, since `TargetOptimizer` "does not touch `forge()` or `ForgeResult`" by design. Any `UNSET`-sentinel field on that `AlphaConfig` (`horizon_grid`, `bars_per_day`, …) falls back to `AlphaDiscovery`'s own internal `coalesce()` default at each read site, not the timeframe-calibrated value `forge()` would have injected — on daily-or-slower data this is the same hourly-grid footgun §9's Alpha Discovery pitfall and §21 describe, reached through a different door. `discover_alpha()` also **silently overwrites** `config.fixed_target`, `config.target_mode`, and `config.trend_sma_mult` on whatever `AlphaConfig` you pass it, even if you set `fixed_target` yourself — this is deliberate (it keeps IS and OOS scoring consistent with the `TargetConfig` that drove `run()`), but it means a caller cannot use the `config=` argument to target a *different* fixed target than the one already fed to `TargetOptimizer.__init__`.
+
 ### Module 3 — `RuleDiscovery`, `RuleDiscoveryResponse`
 
 ```python
@@ -714,6 +753,101 @@ A `RuleDiscoveryResponse`'s important attributes: `verdict` (`"EDGE"|"PARTIAL-ED
 
 `from forgedge.rule_discovery import text_report, html_report` build human-readable/HTML reports from a response; `resp.to_dict()` gives a JSON-serializable form.
 
+### A concrete contract, field by field
+
+§7's quick start prints a handful of fields from one `PARTIAL-EDGE` case. Here is the same case again, but every object dumped in full — the actual `repr()` of a real `EventCandidate`, `AlphaContract` and `RuleDiscoveryResponse`, verified on the ADA fixture, so you can see exactly what these objects hold rather than inferring it from the attribute lists above.
+
+```python
+c, r = partial[0]   # same lookup as §7
+cand = next(x for x in result.candidates if x.event_id == c.event_candidate_id)
+```
+
+**`EventCandidate`** — the boolean condition, with no notion yet of what happens after it fires:
+
+```
+event_id:          EVT-close_vol_12-DL-0327
+expression:         delta_close_vol_12_6 < -0.018035
+components:         [EventComponent(source_feature='close_vol_12', transform='delta',
+                       transform_params={'lag': 6}, transformed_col='delta_close_vol_12_6',
+                       threshold=-0.018035, threshold_type='distributional_p10',
+                       direction='below', event_type='threshold', ...)]
+activation_stats:   ActivationStats(n_activations=88, n_active_months=20, zero_months=9,
+                       max_monthly_share=0.1364, mean_tpm=3.0345, index_of_dispersion=4.2484,
+                       n_episodes=20, episode_index_of_dispersion=0.425, n_eff=47.0588)
+```
+
+Note what is *not* here: no return, no direction, no win rate. `close_vol_12` (12-bar rolling volatility of close) dropped by more than the 10th-percentile 6-bar change, 88 times across 20 active months — that is the entirety of what Event Discovery knows about this pattern. `threshold_type='distributional_p10'` is the tell that `-0.018035` was chosen as this asset's own 10th percentile, not hand-picked.
+
+**`AlphaContract`** — the same condition, now with a derived economic target and a statistical grade:
+
+```
+alpha_id:            ALPHA-ADAUSDC-1D-260823-327
+event_candidate_id:  EVT-close_vol_12-DL-0327
+status:              HYPOTHESIS
+direction:           short
+promoted:            True
+derived_target:      DerivedTarget(holding_period_h=12, sell_pct=0.11244, direction='short',
+                        mean_advantage=-0.10176,
+                        score_by_h={1: 0.547, 2: 0.820, 3: 0.951, 5: 1.117, 6: 1.143,
+                                    7: 1.389, 10: 1.926, 12: 2.445, 24: 1.901},
+                        p_value_by_h={..., 12: 0.00810, ...}, h_sig=(12,),
+                        statistically_weak=False, fixed_target=False)
+event_stats:         EventStats(n_activations=61, win_rate=0.4590, base_rate=0.3174,
+                        lift=0.1417, fwd_return_mean=0.0850, cohens_d=0.7731,
+                        t_stat=4.6311, p_value=2.23e-06)
+oos_validation:       OOSValidation(n_bars=265, n_activations=23, mean_advantage=0.05516,
+                        t_stat=-0.3306, p_value=0.6294, win_rate=0.3478, base_rate=0.3953,
+                        lift=-0.0474, passed=False, min_detectable_effect=0.2810)
+alpha_score:          AlphaScore(ic_magnitude=0.01324, lift=0.1417, cohens_d=0.7731,
+                        regime_breadth=0.2, composite_score=0.5233, grade='B')
+rejection_reasons:    []
+diagnostics:          ['IC weak (|IC|=0.0132 < 0.02 or p=0.7452)',
+                        'OOS weak (p=0.6294 vs 0.1, mean_adv=0.05516, n_act=23)']
+rotation_p:           1.0   rotation_threshold: 5.8726   fdr_promoted: True
+```
+
+Read this the way §14 describes: `event_stats`/`cohens_d`/`t_stat` are strong (`p≈2e-6`) — the horizon-12 score in `derived_target.score_by_h` is the grid's best point and clears its own significance test. But `diagnostics` (non-blocking, feeding the grade) already flags a weak Spearman IC and a weak *contract-level* OOS re-check — neither blocks promotion (`rejection_reasons` is empty; only `direction=="undetermined"` would have), but both lower the letter grade to `B` and foreshadow exactly what Rule Discovery's own, independent OOS judgment below will find.
+
+**`RuleDiscoveryResponse`** — realistic backtest, walk-forward OOS, the economic verdict:
+
+```
+verdict:              PARTIAL-EDGE
+validated_rule.params: BacktestParams(direction='short', buy_type='market', buy_drop_pct=0.01,
+                          buy_delay_bar=1, sell_pct=0.1324, target_h=12, fee=0.002,
+                          early_stopping=True)
+in_sample_summary:    BacktestSummary(total_trades=72, win_rate_pct=0.7917, profit_factor=6.892,
+                          expectancy=0.06793, n_episodes=15, mean_concurrent_positions=3.758,
+                          max_concurrent_positions=12, tpm_mu=3.130, active_months=13, n_months=23)
+statistical_validation: StatisticalValidation(ttest_winrate_p=3.8e-05, ttest_expectancy_p=4.1e-04,
+                          deflated_sharpe=3.781, sharpe_ratio=5.521, n_trials_tested=15,
+                          temporal_stability='PASS', pf_first_half=6.887, pf_second_half=6.896,
+                          n_effective=19.158)
+walk_forward.consistency:        1.0   (4/4 test windows profitable)
+walk_forward.oos_summary:        BacktestSummary(total_trades=57, win_rate_pct=0.7895,
+                                     profit_factor=5.499, expectancy=0.06067)
+walk_forward.n_splits_in_sample: 3     (of 4 — see below)
+entry_optimization:   EntryOptimization(selected_entry='market', adopted=False,
+                          failed_condition='sharpe', authoritative='market',
+                          market_opportunity_sharpe=4.498, limit_opportunity_sharpe=4.365,
+                          limit_buy_drop_pct=0.008,
+                          reason="limit @ buy_drop=0.008 did not hold its risk-adjusted return "
+                                 "per unit of time out-of-sample (4.365 < market 4.498); "
+                                 "kept market operating point")
+rejection_reasons:    ['active_months 13/23 = 57% < 80%',
+                        'search-level rotation null not cleared (rotation_p=1.0000 > 0.05)']
+```
+
+Three things this dump makes concrete that the attribute list above cannot:
+
+- **`n_effective=19.158` against `total_trades=72`.** Trades on this rule overlap heavily (`mean_concurrent_positions=3.758`, up to 12 at once) — `StatisticalValidation`'s t-tests and Deflated Sharpe are computed against the ~19 effective, concurrency-corrected observations this ledger actually supplies, not the 72 nominal ones. `n_effective` never touches the economic numbers (`profit_factor`, `expectancy` above are still the true, nominal ones) — only the inferential ones (t-test standard error/df, `deflated_sharpe`'s `n_obs`).
+- **`entry_optimization.adopted=False` with `failed_condition='sharpe'`.** Stage 2's limit sweep found `buy_drop_pct=0.008` with a *higher* per-trade Sharpe (it fires on fewer, cleaner fills) but a **lower** `opportunity_sharpe` (4.365 vs. the market point's 4.498) once the cost of trading less is priced in — see §9's Module 3 entry-mode discussion for why `opportunity_sharpe`, not `StatisticalValidation.sharpe_ratio`, is the metric that decides this.
+- **`n_splits_in_sample=3` of 4.** This is `WalkForwardSplit.tests_in_sample` aggregated: three of this rule's four walk-forward test windows fall, by timestamp, before the session's own IS/OOS boundary (the span Alpha Discovery derived `derived_target` on) — meaning three of the four "OOS" folds are OOS only with respect to Rule Discovery's *own* parameter selection, not with respect to the target itself, and so contribute weaker evidence than a fold that is OOS on both axes. It is a quality annotation on `WalkForwardResult`, not a gate — `consistency=1.0` and the verdict are computed exactly the same either way. On this fixture's default 4-month test windows against a session split near the end of 2024, this 3-of-4 split is typical, not a bug in this particular rule.
+
+**The exact formulas behind two numbers you'll see quoted throughout this manual, since neither is the "textbook" version its name suggests:**
+
+- **Deflated Sharpe (`StatisticalValidation.deflated_sharpe`)** is a multiplicative haircut, not the Bailey/López de Prado probabilistic DSR some readers will know: `dsr = sharpe_annualised × sqrt(1 − γ·ln(n_trials) / ln(n_obs))`, where `γ ≈ 0.5772156649` is the Euler–Mascheroni constant and `n_obs` is the **effective**, concurrency-corrected trade count (`n_effective`, not the nominal one). It is a no-op — the raw Sharpe is returned unchanged — whenever `n_trials ≤ 1` (OOS validation, §9's walk-forward, always passes `n_trials=1` since OOS data played no part in selection) or `n_obs ≤ e ≈ 2.718`; it returns `nan` outright ("selection bias too severe to trust") if the radicand under the square root goes negative.
+- **`cohens_d`** (feeding `AlphaConfig.thresholds.min_cohens_d` and the `event_stats.cohens_d` shown above) pools variance as `sqrt((var_a + var_b) / 2)` — the unweighted average of the two samples' own variances, not the classic `(n-1)`-weighted pooled-variance formula. The two agree only when the two samples are the same size; on the routinely unequal active/base sample sizes Alpha Discovery compares, this is a real, if usually small, numeric difference from the pooled-variance Cohen's d a statistics textbook would compute.
+
 ### Module 4 — `RuleRegistry`
 
 ```python
@@ -727,6 +861,28 @@ reg.html_report(timeframe="1H")      # self-contained HTML, inline SVG, no CDN
 ```
 
 `frames` must be the *post-Event-Discovery* frames (i.e. `ForgeResult.event_frame` per ticker), not raw KPI Tables — the cross-ticker replay needs the derived feature columns the rule expressions reference.
+
+**`reg.flat_table()`'s default does not filter.** `apply_filters=False` by default — a plain `registry.flat_table()` call includes duplicates and non-generic rules regardless of `RegistryConfig.export_duplicates`/`export_non_generic`. Those flags only take effect via `reg.flat_table(apply_filters=True)` or `reg.export(...)`/`reg.html_report(...)` (which apply them internally). This is a deliberate design choice — "FORGE shows complexity rather than hiding it" — but it means a first `flat_table()` call showing more rows than you expected is not a bug.
+
+**How a rule crosses tickers: recalibration, not reuse.** Testing `RULE_ADA_01` on `BTCUSDC` cannot mean applying ADA's literal threshold (`-0.018035` in the example above) to BTC's numbers — the two assets' distributions don't share a scale. Before replay, `recalibrate_candidate()` deep-copies the candidate and, for every threshold-bearing component (categorical/binary components are left untouched — there is no distributional threshold to move), does two lookups against the *empirical* distributions of the source and target ticker:
+
+1. On the **source** ticker: find the percentile the original threshold occupies — `q = mean(source_series <= threshold)`.
+2. On the **target** ticker: read off the value at that same percentile — `target_series.quantile(q)`.
+
+So a rule discovered as "10th percentile of ADA's 6-bar Δvol" is tested on BTC as "10th percentile of *BTC's own* 6-bar Δvol," not as the literal ADA number. Relative (`rolling_pctrank`/`rolling_zscore`) transforms are close to a no-op under this recalibration, since they're already self-normalising; `identity`-transform thresholds shift by construction. The recalibrated candidate is a fresh object with its cached `event_series` explicitly cleared, so replay always re-evaluates on the target frame rather than risking a stale source-ticker cache.
+
+**Genericity is a four-tier classification, driven by the two-part `PASS`/`FAIL` criterion §10 already introduces:**
+
+| classification | condition | meaning |
+|---|---|---|
+| `GENERIC` | passes on 100% of other tickers tested | works everywhere tested |
+| `PARTIAL` | passes on ≥ `generic_ratio_threshold` (2/3 by default) but < 100% | works on the majority |
+| `SPECIFIC` | passes on some but < `generic_ratio_threshold` | mostly ties to its home ticker |
+| `ISOLATED` | passes on none, **or** only one ticker exists in the whole session (nothing to test against) | does not generalise, or cannot be tested |
+
+Each individual per-ticker `PASS`/`FAIL` is the two-part criterion from §10 (`pf_other >= cross_pf_threshold AND pf_other >= retention × pf_home`); `classification`/`is_generic` are the roll-up across every *other* ticker in the session. `CrossTickerResult.bar` records the exact PF floor (`max(cross_pf_threshold, retention × pf_home)`) that specific rule had to clear on that specific target — reported per result precisely so a reader can tell "not tradeable there" from "gave up too much of its home edge" apart, rather than inferring it from a single pass/fail flag.
+
+**Deduplication flags a chain, never deletes.** Two rules with Jaccard overlap **strictly greater than** `overlap_threshold` (0.70 default) on their activation dates are compared by home-ticker profit factor; the *weaker* one (strictly lower PF — an exact PF tie never dominates either direction) is marked `is_duplicate=True`, `duplicate_of=<the closest stronger neighbour's rule_id>` — the closest, not the single strongest rule in the registry, so that a PF-ordered chain (`R01 ← R02 ← R03`) stays a chain rather than collapsing every weaker rule onto the single global best. Nothing is ever removed from `reg.documents` or the default `flat_table()` — §14 explains why: a pair flagged as overlapping isn't necessarily redundant, it can be independent confirmation of the same edge via two different mechanisms, and the decision to keep or discard is left to you.
 
 ### KPI Builder — building a KPI Table from raw candles
 
@@ -743,9 +899,58 @@ kpi = lag_features(kpi, *cols, periods=(1,2,3), like=None, order_on="open_dt") -
 
 `candle_features` adds six scale-free candlestick-geometry columns (`body`, `upper_wick`, `lower_wick`, `close_pos`, `range_pct`, `gap`), all in `[-1,1]`/`[0,1]` regardless of price level. `lag_features` appends `{col}_prev_{NN}` shifted copies of named or pattern-matched columns.
 
-`pattern_features(df, *, patterns=None, order_on="open_dt", col="candle_pattern")` is a fourth, deliberately **opt-in** function — see §15.
+`pattern_features(df, *, patterns=None, order_on="open_dt", col="candle_pattern")` is a fourth, deliberately **opt-in** function — see below.
 
 **Column-naming convention that matters:** for a column to be recognised as part of a *same-family ratio pair* by Event Discovery's feature generator, its name must match `{base}_{indicator}_{period}` with `base ∈ {close, high, low, open, volume}` and `indicator ∈ {ema, sma, rsi, dema, tema, wma, hma, mdd, atr, natr}` (or the dedicated Bollinger/volatility/return/MACD naming patterns). A column that doesn't match this convention still works as a standalone feature and can still be reached by one of the *other*, more narrowly-scoped arity-2 pairings described in §8 (cross-time OHLC pairs, MACD-vs-signal, price-vs-volume return, `candle_features()` geometry pairs, indicator-vs-lagged-OHLC-base) — it's specifically the generic same-family grouping it opts out of. If a custom indicator you added never shows up composed with anything in Event Discovery's candidates, check its name against this convention first.
+
+#### The default indicator set, and its exact formulas
+
+`build_features(candles, config=None, ...)`'s packaged default (`DEFAULT_CONFIG`, one entry per indicator family) is what runs when you pass `config=None` — this is what §12's Use Case 2 got when it asked for a smaller, explicit config instead:
+
+| indicator | default periods | default columns | enabled |
+|---|---|---|---|
+| `moving_average` (SMA) | 3, 9, 12, 25, 96, 168 | close, high, low, volume | yes |
+| `ema` | 3, 9, 12, 25, 96, 168 | close, high, low | yes |
+| `volatility` | 5, 12, 24, 96, 168 | close | yes |
+| `min` / `max` | 3, 6, 12, 24, 48, 96, 168 | close, high, low | yes |
+| `return` | 1, 3, 6, 12, 24, 48, 96, 168 | close | yes |
+| `rsi` | 14, 25 | close | yes |
+| `bollinger_bands` | 20 | close | yes |
+| `max_drawdown` | 12, 24, 48, 120, 240 | close | yes |
+| `atr` | 14, 28 | close (+ requires high/low) | **no** |
+| `macd` | 12, 26, 9 (fast, slow, signal) | close | **no** |
+
+**Verified**, on 400 hourly synthetic bars: `build_features(candles, timestamp_col="open_time")` with no config (i.e. the packaged default) produces **no** `*_atr_*`/`*_macd_*` columns at all — confirming `atr`/`macd` really do ship off. Passing a config that explicitly enables them —
+
+```python
+CONFIG = {"atr": {"enabled": True, "params": {"periods": [14, 28], "columns": ["close"]}},
+          "macd": {"enabled": True, "params": {"periods": [12, 26, 9], "columns": ["close"]}}}
+kpi = build_features(candles, CONFIG, timestamp_col="open_time")
+```
+
+adds exactly `close_atr_14, close_atr_28, close_natr_14, close_natr_28, close_macd_12_26, close_macd_12_26_signal_09, close_macd_12_26_hist_09` — seven columns for two indicator blocks. Two details worth knowing before you turn either on:
+
+- **ATR's default two periods (14, 28) are deliberate, not arbitrary**, and the reason is specific to how Event Discovery pairs features: unlike a bounded oscillator (RSI, a `pctrank`), raw ATR is not reliably scale-free on its own, so a *second* period exists specifically so `{base}_{indicator}_{period}`-family pairing (the convention above) can auto-derive a scale-free ratio between the two (e.g. `ratio_close_atr14_atr28`) — every `multiple_atr` call also emits the matching `*_natr_*` (normalised ATR, `ATR/price`) columns unconditionally as a second, already-scale-free reading of the same thing. **MACD has no equivalent rescue**: its column name carries two parameters (`fast_slow`), so the same-family pairing convention doesn't recognise multiple MACD triples as a ratio-able family the way it does multiple ATR/EMA/SMA periods — passing several `(fast, slow, signal)` triples doesn't buy you the same automatic pairing.
+- `multiple_macd`'s `periods` parameter is a **flat list of `(fast, slow, signal)` triples**, not independent window lengths like every other indicator here — `len(periods) % 3 != 0` raises `ValueError`. Passing `[12, 26]` expecting "two MACD windows" the way you would for RSI is the wrong mental model and will raise.
+- The computed MACD **line is normalised by price** (`(ema_fast − ema_slow) / close`), not the textbook raw-price-unit difference — deliberately, to keep it in the same scale-free family as the rest of the KPI Table's indicators.
+- ATR/RSI both use Wilder's smoothing (`ewm(alpha=1/period, adjust=False)`, not a simple moving average of the true range/gains-losses) — RSI's `100 - 100/(1+rs)` uses `rs = gain/(loss + 1e-10)`, so it asymptotically approaches but never exactly reaches 100 on a zero-loss window.
+
+#### `pattern_features()` — the opt-in named-pattern layer
+
+```python
+from forgedge import pattern_features
+kpi = pattern_features(kpi)   # adds one categorical column: candle_pattern
+```
+
+Ten named single-, two- and three-bar formations (HAMMER, DOJI, SHOOTING_STAR, MARUBOZU, BULLISH/BEARISH_ENGULFING, BULLISH/BEARISH_HARAMI, MORNING_STAR, EVENING_STAR), each a fixed geometric rule on the same body/wick fractions `candle_features()` computes, coalesced into **one categorical column** (first match wins, checked in that fixed precedence order: `morning_star, evening_star, bullish_engulfing, bearish_engulfing, bullish_harami, bearish_harami, marubozu, hammer, shooting_star, doji`) — deliberately *not* ten separate boolean columns, because a sparse per-pattern boolean would routinely have ≤1 distinct non-null value and get silently dropped by FORGE's own type classifier before it ever reached Event Discovery.
+
+**Verified**, on 400 bars of synthetic OHLCV: `candle_pattern.value_counts()` → `None: 182, DOJI: 49, SHOOTING_STAR: 41, HAMMER: 35, MARUBOZU: 33, EVENING_STAR: 31, MORNING_STAR: 20, BEARISH_HARAMI: 4, BULLISH_ENGULFING: 3, BULLISH_HARAMI: 1, BEARISH_ENGULFING: 1` — roughly 54% of bars carry no named pattern at all, and the single-bar patterns (DOJI/SHOOTING_STAR/HAMMER/MARUBOZU) dominate the rest, as expected from geometric rules with no cross-bar confirmation required. This function is **explicitly not part of the recommended pipeline** (`build_features → candle_features → lag_features`): the module docstring frames `candle_features()`'s continuous geometry as the preferred input for FORGE's own asset-adaptive threshold discovery, and named patterns as fixed, human-chosen thresholds better suited to testing a specific hypothesis (§15's opt-in table already lists the trade-off). Multi-bar patterns additionally **require** `order_on` (or a `DatetimeIndex`) to exist — unlike `candle_features()`/`lag_features()`, which fall back to assuming the frame is already chronologically ordered, `pattern_features()` raises `KeyError` rather than silently guessing at row order for a multi-bar formation.
+
+#### The other opt-in KPI-level pairing: `indicator_lag_cross_lags`
+
+Not a `kpi_builder` function at all, but a Module 1 (`DiscoveryConfig`) knob that only makes sense in the context of what `kpi_builder` produced: Event Discovery's feature generator always tests price-scale indicator columns (SMA/EMA/WMA/HMA families) against **time-shifted base OHLC columns** — e.g. `close_sma_12[t] > low[t-3]` — at lags `DiscoveryConfig.indicator_lag_cross_lags`, default `(1, 3)`. This pairing is on by default and independent of anything you enable in `build_features()`'s config; pass `indicator_lag_cross_lags=()` to disable it entirely.
+
+**Verified cost**, on a 400-bar KPI Table with 2 EMA periods (a small table — §17 reports a much larger measured cost, +24% runtime / +21% candidates, on a 36-column table): `EventDiscovery(..., indicator_lag_cross_lags=(1,3))` (the default) → **6987** candidates; the same table with `indicator_lag_cross_lags=()` → **6841** candidates — a real, measurable difference in search-surface size purely from this one always-on pairing, growing with how many price-scale indicator columns and periods your KPI Table carries.
 
 ### Configuration coherence — `config_report`
 
@@ -1688,6 +1893,18 @@ Each entry: symptom → likely cause → how to confirm → fix → how to preve
 
 - **Cause:** this is a **methodology error**, not a bug — `AlphaDiscovery` *re-derives* direction and horizon from whatever data you give it. On history spanning incompatible market regimes, the same boolean condition can have preceded opposite-signed returns in different regimes, and the re-derivation can flip direction or collapse to `undetermined`, even though the *original* discovered edge is intact.
 - **Fix:** the correct tool for "does a published rule still hold" is **`RuleDiscovery`**, not `AlphaDiscovery` — it replays the *fixed*, previously-derived target rather than re-deriving it. See §9's Module 3 API, §12's Use Case 6, and §19's `revalidate()` sketch.
+
+### "I set `GridSpec.buy_delay_bar` (or expected the grid to tune it) and the operating point never changed"
+
+- **Cause:** `build_grid()` auto-fans `buy_drop_pct`, `sell_pct`, and `target_h` around the seed `BacktestParams` into a small symmetric grid, but **not `buy_delay_bar`** — it always stays pinned to the single value on `base_params`, in every grid cell, unless you explicitly set `GridSpec.buy_delay_bar` to a sequence of your own. This is easy to miss because the other three axes *do* auto-fan.
+- **Confirm:** `grid_dataframe(results)["buy_delay_bar"]` has exactly one distinct value even though `buy_drop_pct`/`sell_pct`/`target_h` show several.
+- **Fix:** pass `RuleDiscoveryConfig(grid=GridSpec(buy_delay_bar=(1, 3, 6)))` (or whatever values matter for your data) if you specifically want the fill-delay window searched too.
+
+### "A Sharpe or Deflated Sharpe I computed by calling `validate()` directly looks wrong on daily/15-minute data"
+
+- **Cause:** `rule_discovery.validation.validate(trades, base_rate, n_trials, bars_per_year=24*365, ...)` defaults `bars_per_year` to **8760 — an hourly-bar assumption** — and does not infer it from your data. `walk_forward()` (and therefore every `RuleDiscoveryResponse` you get through the normal `forge()`/`RuleDiscovery(...).run()` path) always overrides it with the actual median bar spacing measured from your candles, so this only bites a caller who calls `validate()` standalone.
+- **Confirm:** an annualised `sharpe_ratio`/`deflated_sharpe` on daily data that looks implausibly large or small relative to the per-trade numbers.
+- **Fix:** pass `bars_per_year=` explicitly (`365.25` for daily, `35040` for 15-minute, …) whenever you call `validate()` outside of `walk_forward()`.
 
 ---
 

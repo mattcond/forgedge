@@ -397,6 +397,36 @@ out.
 13. **`RuleDiscoveryConfig.entry_mode` now defaults to `"auto"`, not
     `"limit"`.** This changes verdicts, not just execution — see the
     *Entry mode* note below before assuming a verdict means what it used to.
+14. **`TargetOptimizer` sits outside the parameter-coherence resolver.**
+    `target_optimizer.py` imports nothing from `forgedge.resolver`/
+    `forgedge.unset` — it predates, or was deliberately kept outside, the
+    #173–#185 audit. `TargetConfig` itself has no `UNSET` fields, so it's
+    unaffected either way, but `discover_alpha()`'s internal `AlphaConfig()`
+    is built without ever going through `forge()`'s session resolver (the
+    module docstring says as much: "does not touch `forge()` or
+    `ForgeResult`"). On daily-or-slower data this reaches the same
+    hourly-grid footgun as pitfall #2, through `TargetOptimizer` instead of
+    `AlphaDiscovery` directly — pass `horizon_grid` explicitly on the
+    `AlphaConfig` you hand to `discover_alpha()`. Also note `discover_alpha()`
+    silently overwrites `config.fixed_target`/`.target_mode`/
+    `.trend_sma_mult` on whatever `AlphaConfig` you pass it, even if you set
+    `fixed_target` yourself.
+15. **`GridSpec`'s auto-fan covers `buy_drop_pct`/`sell_pct`/`target_h`, not
+    `buy_delay_bar`.** `build_grid()` only ever emits the single
+    `base_params.buy_delay_bar` value in every cell unless you set
+    `GridSpec.buy_delay_bar` explicitly — easy to miss since the other three
+    axes do fan out automatically.
+16. **`RuleRegistry.flat_table()`'s default does not filter.**
+    `apply_filters=False` by default — duplicates and non-generic rules stay
+    in a plain `reg.flat_table()` call regardless of `RegistryConfig
+    .export_duplicates`/`.export_non_generic`; those flags only apply via
+    `flat_table(apply_filters=True)` or `reg.export(...)`/`.html_report(...)`.
+    Cross-ticker replay doesn't reuse a rule's literal threshold either — it
+    recalibrates each threshold-bearing component onto the target ticker's
+    own empirical distribution at the same percentile the threshold occupied
+    on the source ticker (`recalibrate_candidate`), so `GENERIC`/`PARTIAL`/
+    `SPECIFIC`/`ISOLATED` measures transfer of a *relative* pattern, not
+    reuse of an absolute number.
 
 ### Entry mode and what a verdict now measures
 
@@ -433,7 +463,18 @@ against ≈32 effective overstates significance by `sqrt(118/32) ≈ 1.93×`. Th
 economics (profit factor, expectancy, net gain) stay **nominal** — this is
 reproducible capital-permitting reality, not something to "fix". Primitives
 live in `forgedge.episodes` (`episode_starts`, `episode_ids`, `concurrency`)
-for anyone measuring this directly.
+for anyone measuring this directly. `StatisticalValidation.deflated_sharpe`
+is a multiplicative haircut (`sharpe × sqrt(1 - γ·ln(n_trials)/ln(n_obs))`,
+`γ` = Euler-Mascheroni, `n_obs` = the *effective* count above), not the
+probabilistic Bailey/López de Prado DSR — it's a no-op when `n_trials<=1`
+(every OOS validation, since OOS data played no part in selection) and
+`nan` when the radicand goes negative. `WalkForwardSplit.tests_in_sample`
+flags a fold whose *test* window starts before the session's own IS/OOS
+boundary — OOS with respect to M3's own parameter selection but not with
+respect to the target Alpha Discovery derived; `WalkForwardResult
+.n_splits_in_sample` counts them. Purely a quality annotation, not a gate —
+3 of 4 folds carry this flag on this repo's own reference fixture under
+`forge()` defaults.
 
 ## Best practices
 
