@@ -8,9 +8,10 @@ The counting unit is set by ``GateParams.event_counting`` (issue #134).
 "episode" mode (default) — counts episodes (consecutive-activation runs):
   1. Rate         — episodes per month ≥ MIN_TPM
   2. Power        — at least MIN_EPISODES episodes
-  3. Dispersion   — episode-level Index of Dispersion ≤ effective threshold,
-                    where the threshold is raised to a Poisson χ² floor so the
-                    gate never rejects an event consistent with randomness.
+  3. Dispersion   — episode-level Index of Dispersion ≤ a Poisson χ² floor
+                    times DISPERSION_MARGIN, so the gate never rejects an
+                    event consistent with randomness while still letting a
+                    preset's own burstiness tolerance actually bind (#205).
   A persistent multi-bar state no longer inflates the monthly variance.
 
 "bar" mode — historical behaviour, 100% backward compatible:
@@ -69,11 +70,16 @@ class ConsistencyGate:
         1. **Rate** (``episodes / n_months >= min_tpm``).
         2. **Episode power** (``n_episodes >= min_episodes``).
         3. **Episode dispersion** (episode-level ``Var/Mean`` of monthly
-           counts ``<= effective_max_dispersion``), where the threshold is
-           raised to a Poisson χ² floor — ``chi2_ppf_095(n_months-1) /
-           (n_months-1)`` — so the gate never rejects an event statistically
-           consistent with a random process at the observed rate.  A
-           persistent multi-bar state no longer inflates the monthly variance.
+           counts ``<= eff_max_dispersion``), where
+           ``eff_max_dispersion = dispersion_margin x poisson_floor`` and
+           ``poisson_floor = chi2_ppf_095(n_months-1) / (n_months-1)`` — so
+           the gate never rejects an event statistically consistent with a
+           random process at the observed rate, while a preset's own
+           tolerance for burstiness (``dispersion_margin``) still reaches the
+           gate instead of being swallowed by the floor (#205).
+           ``max_dispersion`` plays no role here — it is a ``"bar"``-mode-only
+           field.  A persistent multi-bar state no longer inflates the
+           monthly variance.
 
         Episode metrics (``n_episodes``, ``episode_index_of_dispersion``,
         ``n_eff``) are reported as diagnostics in both modes whenever
@@ -157,14 +163,21 @@ class ConsistencyGate:
             return _result(True)
 
         # Episode mode (default) — rate, power floor, episode-level dispersion.
-        # The dispersion threshold is raised to a Poisson χ² floor so the gate
-        # never rejects an event statistically consistent with a random process
-        # at the observed rate (issue #134).
+        # The threshold is `dispersion_margin` above a Poisson χ² floor, not
+        # `max_dispersion` (#205): the floor exists so the gate never rejects
+        # an event statistically consistent with a random process at the
+        # observed rate (issue #134), but comparing an *absolute* ID against
+        # `max(max_dispersion, floor)` meant the floor almost always won —
+        # measured across every preset/timeframe combination, `max_dispersion`
+        # never bound for `sniper`, the preset built for "regular" events.
+        # Expressing the tolerance as a margin over the floor keeps the
+        # statistical protection while letting a preset's own tolerance for
+        # burstiness actually reach the gate.
         if n_total_months > 1:
             poisson_floor = _chi2_ppf_095(n_total_months - 1) / (n_total_months - 1)
         else:
             poisson_floor = 0.0
-        eff_max_dispersion = max(p.max_dispersion, poisson_floor)
+        eff_max_dispersion = poisson_floor * p.dispersion_margin
 
         # Criterion 1: episode rate (episodes per month)
         if episode_tpm < p.min_tpm:

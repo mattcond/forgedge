@@ -1044,9 +1044,13 @@ class TestConsistencyGate:
         assert "episodes" in r.fail_reason
 
     def test_poisson_chi2_floor_raises_low_max_dispersion(self):
-        """A user max_dispersion below the Poisson χ² floor never rejects an
-        event statistically consistent with randomness: a Poisson-distributed
-        episodic event passes even with max_dispersion=1.0."""
+        """Episode mode never rejects an event statistically consistent with
+        randomness: a Poisson-distributed episodic event passes even with
+        max_dispersion=1.0 — which is not read at all in episode mode any
+        more (#205), so this also demonstrates that `dispersion_margin`'s
+        class default (1.3) does not accidentally tighten the floor below
+        what the class default max_dispersion used to (imperfectly) protect.
+        """
         rng = np.random.default_rng(4)
         ts = pd.Series(pd.date_range("2019-01-01", periods=1825, freq="1D"))
         mi, nm = _build_month_index(ts)
@@ -1059,8 +1063,9 @@ class TestConsistencyGate:
         r = ConsistencyGate(
             GateParams(min_tpm=0.3, max_dispersion=1.0, min_episodes=10)
         ).evaluate_series(pd.Series(mask.astype(float)), mi, nm)
-        # raw ID may sit slightly above 1.0 by sampling noise but below the
-        # χ² floor (~1.32 for 60 months), so the event still passes
+        # raw ID may sit slightly above 1.0 by sampling noise but below
+        # dispersion_margin(1.3) x the χ² floor (~1.32 for 60 months), so the
+        # event still passes
         assert r.passed
 
     def test_n_eff_is_episodes_over_id(self):
@@ -1069,6 +1074,80 @@ class TestConsistencyGate:
         mi, nm = _build_month_index(ts)
         r = ConsistencyGate(GateParams()).evaluate_series(event, mi, nm)
         assert abs(r.n_eff - r.n_episodes / r.episode_index_of_dispersion) < 1e-6
+
+    # ── #205: dispersion_margin replaces max_dispersion in episode mode ────
+
+    def _clustered_episodic_event(self, seed: int = 7):
+        """Episodes concentrated in every 6th month — genuinely over-dispersed
+        (episode ID ~2.0 over 60 months), not just noisy-looking.  Built to sit
+        between the Poisson floor (~1.32 at 60 months) scaled by the tight
+        presets' margins and by the loose ones', so it is rejected by one and
+        accepted by the other — the differentiation #205 restores."""
+        n = 1825
+        ts = pd.Series(pd.date_range("2019-01-01", periods=n, freq="1D"))
+        mon = pd.Series(ts.dt.to_period("M"))
+        rng = np.random.default_rng(seed)
+        mask = np.zeros(n, dtype=bool)
+        for i, m in enumerate(mon.unique()):
+            if i % 6 != 0:
+                continue
+            idx = np.where(mon.values == m)[0]
+            for _ in range(rng.integers(2, 5)):
+                mask[rng.choice(idx[:-2])] = True
+        return pd.Series(mask.astype(float)), ts
+
+    def test_max_dispersion_is_unread_in_episode_mode(self):
+        """A `max_dispersion` extreme enough to reject or admit anything on
+        its own has zero effect on the verdict in episode mode — only
+        `dispersion_margin` does (#205)."""
+        event, ts = self._clustered_episodic_event()
+        mi, nm = _build_month_index(ts)
+        tight = ConsistencyGate(
+            GateParams(min_tpm=0.01, min_episodes=1, max_dispersion=0.001)
+        ).evaluate_series(event, mi, nm)
+        loose = ConsistencyGate(
+            GateParams(min_tpm=0.01, min_episodes=1, max_dispersion=100.0)
+        ).evaluate_series(event, mi, nm)
+        assert tight.passed == loose.passed
+        assert tight.episode_index_of_dispersion == loose.episode_index_of_dispersion
+
+    def test_dispersion_margin_differentiates_tight_from_loose_presets(self):
+        """The point of #205: a genuinely clustered event is rejected by a
+        tight margin (`sniper`/`balanced`-like) and accepted by a loose one
+        (`sweep`/`burst`-like) — the differentiation `max_dispersion` used to
+        promise but the Poisson floor silently erased."""
+        event, ts = self._clustered_episodic_event()
+        mi, nm = _build_month_index(ts)
+
+        def _passes(margin):
+            r = ConsistencyGate(
+                GateParams(min_tpm=0.01, min_episodes=1, dispersion_margin=margin)
+            ).evaluate_series(event, mi, nm)
+            return r.passed
+
+        assert _passes(1.05) is False    # sniper-like: no slack above the floor
+        assert _passes(1.30) is False    # balanced-like
+        assert _passes(1.60) is True     # sweep-like
+        assert _passes(3.00) is True     # burst-like: clustering allowed on purpose
+
+    def test_bar_mode_still_uses_max_dispersion_directly(self):
+        """`dispersion_margin` is an episode-mode concept; bar mode is
+        unaffected and keeps comparing the raw configured value with no
+        floor, exactly as before #205."""
+        ts = pd.Series(pd.date_range("2024-01-01", periods=8760, freq="1h"))
+        month_idx, n_m = _build_month_index(ts)
+        active = np.array([True] * 50 + [False] * (8760 - 50), dtype=bool)
+        counts = _count_by_month(active, month_idx, n_m)
+        strict = self._bar_gate(max_dispersion=2.5, dispersion_margin=1.05).evaluate(
+            active, counts, n_m
+        )
+        loose = self._bar_gate(max_dispersion=2.5, dispersion_margin=3.00).evaluate(
+            active, counts, n_m
+        )
+        # dispersion_margin is not read in bar mode, so the two are identical
+        assert strict.passed == loose.passed
+        assert not strict.passed
+        assert "dispersion" in strict.fail_reason
 
     def test_episode_gap_merging(self):
         """A one-bar interruption does not start a new episode (gap=1);

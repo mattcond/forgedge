@@ -144,6 +144,33 @@ def stage_rates() -> None:
     print("  too low, which inflated min_train_months for no reason (same shape")
     print("  as #200's fill-margin fix, one factor upstream of it).")
 
+    print("\n  #205 — a preset's own dispersion tolerance, before and after:")
+    from forgedge.event_discovery.consistency_gate import _chi2_ppf_095
+
+    def _poisson_floor(n_months):
+        df = n_months - 1
+        return _chi2_ppf_095(df) / df if df > 0 else 0.0
+
+    print(f"  {'preset':>9}  {'daily_max_dispersion':>21}  {'eff @ 24mo (old)':>17}  "
+          f"{'dispersion_margin':>18}  {'eff @ 24mo (new)':>17}")
+    floor_24 = _poisson_floor(24)
+    for preset in ("sniper", "balanced", "sweep", "burst"):
+        disc, _a, _r = forge_preset(preset, "1D", asset="X")
+        old_configured = disc.gate_params.max_dispersion
+        old_eff = max(old_configured, floor_24)
+        new_eff = floor_24 * disc.gate_params.dispersion_margin
+        print(f"  {preset:>9}  {old_configured:21.2f}  {old_eff:17.3f}  "
+              f"{disc.gate_params.dispersion_margin:18.2f}  {new_eff:17.3f}")
+    print("  at 1D sniper's own max_dispersion=1.0 already collapses to the 24-month")
+    print("  Poisson floor (1.53) — and on faster timeframes it gets worse: scale_")
+    print("  dispersion() shrinks the configured value further while the floor (a")
+    print("  function of calendar months only) does not move, so the floor wins more")
+    print("  often the faster the timeframe gets. Measured across all four presets and")
+    print("  four timeframes: 12 of 16 combinations had max_dispersion never binding,")
+    print("  and sniper — the preset built for \"regular\" events — never bound on any")
+    print("  of them (#205). dispersion_margin expresses the tolerance as slack *above*")
+    print("  the floor instead, which the floor mechanism can no longer swallow.")
+
     print("\n" + "=" * 78)
     print("  LATENT PARAMETER: bar duration — the fields that mean \"N bars\"")
     print("=" * 78)
@@ -196,7 +223,7 @@ def stage_m1(kpi: pd.DataFrame) -> None:
     n, train_ratio, n_splits = len(enriched), 0.80, 3
     n_oos = n - int(n * train_ratio)
     fold_months = n_oos / n_splits / 30.0
-    gate = GateParams(min_tpm=1.0, max_dispersion=2.0, event_counting="episode")
+    gate = GateParams(min_tpm=1.0, event_counting="episode")
     print(f"  bars={n}  IS={int(n * train_ratio)}  OOS={n_oos}  "
           f"fold={n_oos // n_splits} bars ≈ {fold_months:.1f} months")
     print(f"  IS gate requires {gate.min_tpm:.2f} episodes/month")
@@ -254,7 +281,7 @@ def stage_m2(kpi: pd.DataFrame) -> None:
     print("=" * 78)
     enriched = MarketContext(kpi).run()
     ed = EventDiscovery(enriched, config=DiscoveryConfig(
-        gate_params=GateParams(min_tpm=1.0, max_dispersion=2.0, event_counting="episode"),
+        gate_params=GateParams(min_tpm=1.0, event_counting="episode"),
         train_ratio=1.0, max_and_components=1,
     ))
     cands = ed.run()

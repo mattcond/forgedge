@@ -131,15 +131,23 @@ forge_preset(
 ```
 
 `preset` ∈ `PRESETS` = `["sniper", "balanced", "sweep", "burst"]`. Overrides
-accepted by name: M1 — `min_tpm`, `max_dispersion`, `max_and_components`,
-`timestamp_col`, `event_counting`; M2 — `min_lift`, `min_cohens_d`, `fdr_q`,
-`oos_max_p`, `horizon_grid`, `bars_per_day`; M3 — `rd_min_tpm`. Unknown
-override keys raise `TypeError`.
+accepted by name: M1 — `min_tpm`, `max_dispersion`, `dispersion_margin`,
+`max_and_components`, `timestamp_col`, `event_counting`; M2 — `min_lift`,
+`min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; M3 —
+`rd_min_tpm`. Unknown override keys raise `TypeError`.
 
 M1's `min_tpm`/`max_dispersion` are scaled from the preset's daily-calibrated
-spec to `timeframe` via `_TFClass` (daily / intraday / hft bucket). M3's rate
-is set at the preset's own ratio to M1's (1.00 on `sniper`/`sweep`, 0.80 on
-`balanced`/`burst` — a deliberate per-profile fill margin, not one flat
+spec to `timeframe` via `_TFClass` (daily / intraday / hft bucket).
+`dispersion_margin` is **not** scaled — it is a multiplier over the Poisson
+floor, already scale-free, and it is what governs dispersion under
+`event_counting="episode"` (the default); `max_dispersion` governs only
+`"bar"` mode (#205 — comparing an absolute `max_dispersion` against
+`max(max_dispersion, poisson_floor)` left it dead code on 12 of 16 measured
+preset×timeframe combinations, `"sniper"` on all of them). Per-preset
+`dispersion_margin`: 1.05 `sniper`, 1.30 `balanced`, 1.60 `sweep`, 3.00
+`burst`. M3's rate is set at the preset's own ratio to M1's (1.00 on
+`sniper`/`sweep`, 0.80 on `balanced`/`burst` — a deliberate per-profile fill
+margin, not one flat
 number) rather than left to a class default, so `RuleWalkForwardConfig
 .min_train_months` — left `UNSET` by the preset — is derived correctly from
 a rate the preset actually chose (see *Configuration resolution* below).
@@ -391,14 +399,23 @@ the price-scale-indicator-vs-lagged-OHLC-base feature family below; pass
 `()` to disable that family entirely).
 
 `GateParams` (Consistency Gate, Step 4) — `min_tpm: float = 0.5`,
-`max_dispersion: float = 1.5`, `event_counting: "episode"|"bar" = "episode"`,
-`min_episodes: int = 10`, `episode_gap: int = 1`. `"episode"` counts maximal
-runs of consecutive activations (bridged by gaps ≤ `episode_gap`) rather than
-raw bars — the default because a persistent multi-bar state otherwise
-inflates monthly-count variance and gets wrongly rejected. `"bar"` reproduces
-the pre-#134 behaviour exactly. **Note:** an older `GateParams` API
-(`min_act`, `min_months`, `max_conc`) appears in several `examples/*.py`
-scripts and now raises `TypeError` — see *Errors and warnings*.
+`max_dispersion: float = 1.5`, `dispersion_margin: float = 1.3`,
+`event_counting: "episode"|"bar" = "episode"`, `min_episodes: int = 10`,
+`episode_gap: int = 1`. `"episode"` counts maximal runs of consecutive
+activations (bridged by gaps ≤ `episode_gap`) rather than raw bars — the
+default because a persistent multi-bar state otherwise inflates
+monthly-count variance and gets wrongly rejected. `"bar"` reproduces the
+pre-#134 behaviour exactly. `max_dispersion` and `dispersion_margin` are
+mode-exclusive, not redundant (#205): in `"bar"` mode the dispersion
+criterion is the raw `ID <= max_dispersion`, no floor; in `"episode"` mode
+it is `episode_ID <= dispersion_margin x poisson_floor(n_months)` and
+`max_dispersion` is not read at all — comparing the absolute value against
+`max(max_dispersion, poisson_floor)` used to leave a preset's own tolerance
+dead code whenever the floor (a function of calendar months only) exceeded
+it, which measurement showed was most of the time. **Note:** an older
+`GateParams` API (`min_act`, `min_months`, `max_conc`) appears in several
+`examples/*.py` scripts and now raises `TypeError` — see *Errors and
+warnings*.
 
 **Arity-2 feature pairings beyond same-family ratios.** `FeatureGenerator`
 pairs same-family columns (two EMAs, two RSIs, …) by default, plus five

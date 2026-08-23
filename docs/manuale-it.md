@@ -247,7 +247,7 @@ Questo è l'**opposto** dell'intuizione naturale (di sicuro un oscillatore limit
 1. `EventDiscovery(kpi)` ha classificato entrambe le colonne come `CONTINUOUS`, poi ha eseguito il test scale-free su ciascuna indipendentemente — vedi il riquadro sopra per cosa misura effettivamente quel test. Il flag scale-free governa se una colonna è idonea a costruire feature *ratio/spread* contro altre colonne della stessa famiglia (Step 2 sotto); non determina se una colonna può avere propri eventi diretti di soglia/crossing, ed è per questo che `close` — pur non essendo ciò che chiameresti casualmente "scale-free" — ha comunque prodotto il candidato `close crosses_below 95.45` in cima alla lista di questa esecuzione.
 2. Ha generato **versioni trasformate** di ciascuna colonna: rank percentile mobile, z-score mobile e delta semplici, su diverse lunghezze di finestra.
 3. Per ogni serie (base o trasformata), ha provato un catalogo di **soglie distribuzionali** (es. il 10° percentile della storia stessa di quella serie) e **soglie teoriche** (livelli z-score fissi come −2.0), ognuna delle quali produce un'espressione booleana candidata — un evento "crossing" sul valore grezzo di una colonna (come con `close` qui), oppure qualcosa nella forma `close_rsi_14 < P10 [P10=...]` per una serie trasformata (presente tra i 309 candidati di questa esecuzione — filtra con `[c for c in candidates if "rsi" in c.expression]` per trovarne uno).
-4. Ogni candidato è passato attraverso il **Consistency Gate**: si attiva abbastanza spesso (`min_tpm`), in modo abbastanza consistente tra i mesi (non bursty — `max_dispersion`), e con abbastanza osservazioni totali da essere statisticamente significativo? I candidati che falliscono vengono scartati silenziosamente — non diventano mai oggetti `EventCandidate`.
+4. Ogni candidato è passato attraverso il **Consistency Gate**: si attiva abbastanza spesso (`min_tpm`), in modo abbastanza consistente tra i mesi (non bursty — `dispersion_margin` nella modalità di conteggio `"episode"` di default, `max_dispersion` in modalità `"bar"`; i due campi non si sovrappongono, #205), e con abbastanza osservazioni totali da essere statisticamente significativo? I candidati che falliscono vengono scartati silenziosamente — non diventano mai oggetti `EventCandidate`.
 5. **In nessun punto di tutto questo si è guardato il valore futuro di `close`.** Il gate ispeziona solo *quando* l'evento si è attivato, mai *cosa è successo dopo*.
 
 ### Configurazione implicita da notare
@@ -255,7 +255,7 @@ Questo è l'**opposto** dell'intuizione naturale (di sicuro un oscillatore limit
 Hai chiamato `EventDiscovery(kpi)` senza argomento `config=`. Questo significa che sono stati usati silenziosamente i default di `DiscoveryConfig()`:
 
 - `train_ratio=1.0` — è stata usata l'*intera* tabella per la discovery, nessuno split OOS riservato (non c'è validazione walk-forward in corso qui; vedi §10 per come abilitarla).
-- `gate_params=GateParams()` — le soglie di default del Consistency Gate: `min_tpm=0.5` (almeno 0.5 "episodi" qualificanti al mese), `max_dispersion=1.5` (le attivazioni non devono essere troppo bursty), `event_counting="episode"` (§15).
+- `gate_params=GateParams()` — le soglie di default del Consistency Gate: `min_tpm=0.5` (almeno 0.5 "episodi" qualificanti al mese), `event_counting="episode"` (§15), `dispersion_margin=1.3` (le attivazioni non devono raggrupparsi più di 1.3x quanto produrrebbe un processo di Poisson al tasso osservato — il campo che governa davvero la dispersione in questa modalità di default; `max_dispersion=1.5` è presente ma non letto qui, conta solo sotto `event_counting="bar"`, #205).
 - `max_and_components=2` — Event Discovery ha anche provato a comporre coppie di eventi a singola colonna con AND, soggette allo stesso gate.
 
 Nessuna di queste scelte ha coinvolto il rendimento forward di `close` — quel concetto non esiste ancora a questo stadio della pipeline.
@@ -287,23 +287,31 @@ print("tradabili (edges()):", len(result.edges()))
 ```
 (882, 26)
 ['open_dt', 'high', 'low', 'close', 'open', 'close_ret_03']
-Candidati M1: 5241
-Promossi M2:   370
-Risposte M3:   370
-tradabili (edges()): 54
+Candidati M1: 5356
+Promossi M2:   392
+Risposte M3:   392
+tradabili (edges()): 32
 ```
+
+*(Ri-verificato dopo #205: `GateParams.dispersion_margin` sostituisce `max_dispersion` come
+soglia in modalità episode — vedi §15 — più permissiva qui (soglia effettiva 1.5 → 1.92 sui
+29 mesi di questo fixture), quindi 115 candidati in più superano il gate (5241 → 5356) e 22
+in più vengono promossi (370 → 392). I 22 nuovi contratti sono tutti finiti `NON-EDGE` — il
+conteggio dei tradabili non si muove, 32 in entrambi i casi; il blocco che questo manuale
+riportava qui in precedenza (`... tradabili (edges()): 54`) era già disallineato dal
+`Counter` poche righe sotto indipendentemente da #205, e ora concordano entrambi.)*
 
 ### Interpretare l'output
 
-- **5241 candidati evento** hanno superato il Consistency Gate di Event Discovery — ricorda, nessuno di questi è stato ancora verificato contro un rendimento forward.
-- **370 di essi sono stati promossi** da Alpha Discovery a oggetti `AlphaContract` con stato "HYPOTHESIS" — cioè ciascuno ha una direzione determinata (long o short) e un periodo di detenzione/take-profit derivato.
-- **370 risposte di regola** — ogni contratto promosso è passato attraverso il backtest realistico e la validazione walk-forward di Rule Discovery (questo fixture ha `run_rule_discovery=True` di default).
+- **5356 candidati evento** hanno superato il Consistency Gate di Event Discovery — ricorda, nessuno di questi è stato ancora verificato contro un rendimento forward.
+- **392 di essi sono stati promossi** da Alpha Discovery a oggetti `AlphaContract` con stato "HYPOTHESIS" — cioè ciascuno ha una direzione determinata (long o short) e un periodo di detenzione/take-profit derivato.
+- **392 risposte di regola** — ogni contratto promosso è passato attraverso il backtest realistico e la validazione walk-forward di Rule Discovery (questo fixture ha `run_rule_discovery=True` di default).
 - **32 sono tradabili** (`result.edges()` — verdetto `EDGE` o `PARTIAL-EDGE`). Su questo specifico dataset con impostazioni di default, scavando un livello più a fondo si scopre che *tutti e 32* sono `PARTIAL-EDGE`, non `EDGE` pieno, e altri 6 contratti sono stati esplicitamente declassati a `INSUFFICIENT-DATA` invece di essere riportati silenziosamente come qualcosa di più forte di quanto l'evidenza OOS potesse sostenere:
 
 ```python
 from collections import Counter
 print(Counter(r.verdict for _, r in result.rule_responses))
-# Counter({'NON-EDGE': 332, 'PARTIAL-EDGE': 32, 'INSUFFICIENT-DATA': 6})
+# Counter({'NON-EDGE': 354, 'PARTIAL-EDGE': 32, 'INSUFFICIENT-DATA': 6})
 ```
 
 Zero verdetti `EDGE` pieni non è un bug e non è un segno che la libreria "non funzioni" — è il gate della rotation null di default (§14-15) che fa esattamente ciò per cui è progettato. Guarda il singolo miglior candidato `PARTIAL-EDGE` su questi dati:
@@ -342,7 +350,7 @@ Questo è importante, ed è la prima cosa che sorprende i nuovi utilizzatori. `f
 5. Eseguito la **rotation null veloce a livello di ricerca** (`fast_null=True` di default) e annotato `rotation_p`/`rotation_threshold` su ogni contratto promosso — questo è esattamente ciò che ha prodotto il tetto `PARTIAL-EDGE` appena visto.
 6. Costruito un `TimeBudget` condiviso e **purgato** per Event/Alpha Discovery (§15) anche se non hai passato alcun argomento `time_budget=`.
 7. Registrato un `HypothesisLedger` su `result.ledger`, contando quanto fosse effettivamente ampia la superficie di ricerca della sessione.
-8. Eseguito Rule Discovery su tutti i 370 contratti promossi con `selection_mode="walk_forward"` (il default) — cioè i parametri operativi pubblicati provengono solo dall'interno delle finestre di train walk-forward, mai da uno sguardo alla finestra di test finale.
+8. Eseguito Rule Discovery su tutti i 392 contratti promossi con `selection_mode="walk_forward"` (il default) — cioè i parametri operativi pubblicati provengono solo dall'interno delle finestre di train walk-forward, mai da uno sguardo alla finestra di test finale.
 9. Valutato ogni regola con `entry_mode="auto"` (il default dalla issue #185, in sostituzione di `"limit"`) — un verdetto a ingresso di mercato è autoritativo, e un ingresso a limite viene pubblicato solo quando supera tre condizioni out-of-sample (§9, §15).
 10. Misurato il conteggio di episodi e la **concurrency** dei trade per ogni backtest (`resp.in_sample_summary.n_episodes` / `.mean_concurrent_positions` / `.max_concurrent_positions`, issue #168) — `run_backtest` apre un trade su ogni barra attiva senza controllo di stato flat, quindi le posizioni possono sovrapporsi e lo fanno; questi campi sono ciò che permette di distinguere un conteggio di trade nominale da quello effettivo, rilevante per il capitale (§9).
 11. Saltato il Modulo 4 (Rule Registry) — non perché tu l'abbia disabilitato, ma perché `RuleRegistry.from_forge_results` ha bisogno di più ticker per dire qualcosa sulla generalizzazione cross-ticker; con una chiamata `forge()` a singolo ticker viene comunque eseguito e produce un registry, ma ogni regola è classificata `ISOLATED` (§9).
@@ -1108,7 +1116,8 @@ Ogni modulo accetta una dataclass che porta i suoi parametri. Questa sezione cop
 | Campo | Default | Significato |
 |---|---|---|
 | `min_tpm` | `0.5` | minimo di trigger medi al mese (l'unità dipende da `event_counting`) |
-| `max_dispersion` | `1.5` | massimo Index of Dispersion consentito (Var/Mean dei conteggi mensili) |
+| `max_dispersion` | `1.5` | massimo Index of Dispersion consentito (Var/Mean dei conteggi mensili) — solo modalità `"bar"`; non letto in modalità `"episode"` (#205) |
+| `dispersion_margin` | `1.3` | solo modalità `"episode"`: moltiplicatore sopra il floor χ² di Poisson (`eff = margine × floor`), non un ID assoluto — non letto in modalità `"bar"` (#205) |
 | `event_counting` | `"episode"` | `"episode"` conta run massimali di attivazioni consecutive; `"bar"` conta ogni singola barra (§15) |
 | `min_episodes` | `10` | floor assoluto sul conteggio di episodi, solo modalità `"episode"` |
 | `episode_gap` | `1` | gap massimo in barre che appartiene ancora allo stesso episodio |
@@ -1168,7 +1177,7 @@ result = forge(kpi, ticker="ADAUSDC", timeframe="1D",
 | `"sweep"` | Ricerca ampia e permissiva — progettata per abbinarsi a `rotation_calibration=RotationConfig(k>=100)` e a un filtro `min_lift` a valle. |
 | `"burst"` | Eventi concentrati nel tempo (cambio di regime, momentum). Alta dispersione esplicitamente tollerata. |
 
-Override accettati per nome: lato M1 — `min_tpm`, `max_dispersion`, `max_and_components`, `timestamp_col`, `event_counting`; lato M2 — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; lato M3 — `rd_min_tpm`. Una chiave di override non riconosciuta solleva `TypeError`.
+Override accettati per nome: lato M1 — `min_tpm`, `max_dispersion`, `dispersion_margin`, `max_and_components`, `timestamp_col`, `event_counting`; lato M2 — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; lato M3 — `rd_min_tpm`. Una chiave di override non riconosciuta solleva `TypeError`.
 
 ---
 
@@ -1312,10 +1321,12 @@ Quattro assi di configurazione che è probabile ti servano davvero, ognuno mostr
 from forgedge import EventDiscovery, DiscoveryConfig
 from forgedge.event_discovery.models import GateParams
 
-# Il default GateParams(min_tpm=0.5, max_dispersion=1.5) è già piuttosto
+# Il default GateParams(min_tpm=0.5, dispersion_margin=1.3) è già piuttosto
 # permissivo; alzare min_tpm scambia via eventi rari/marginali per
 # potere statistico per evento (vedi il trade-off frequenza-vs-selettività di §16).
-config = DiscoveryConfig(gate_params=GateParams(min_tpm=1.5, max_dispersion=2.0))
+# `max_dispersion` non è la leva sulla dispersione qui — `event_counting`
+# di default è "episode", dove governa `dispersion_margin` (#205).
+config = DiscoveryConfig(gate_params=GateParams(min_tpm=1.5, dispersion_margin=1.8))
 ed = EventDiscovery(kpi, config=config)
 ```
 
@@ -1611,7 +1622,7 @@ Nulla in questa sezione è un benchmark inventato. Ogni numero è misurato e rip
 
 - `FastRotationNull` su dati giornalieri ADA reali: **~1 secondo**, calcolando la rotation null esatta su ogni offset circolare via FFT — riportato dal documento di design, e coerente con l'output quasi istantaneo di `result.calibration.summary()` catturato da questo manuale in §7.
 - Il `RotationCalibrator` (più pesante), campionato: **~4 secondi per estrazione** sugli stessi dati, secondo `docs/analysis/search_rotation_calibration.md` — cioè `K=100` è dell'ordine di diversi minuti, non secondi. Questo è il costo diretto del trade-off rigore-statistico-vs-velocità di §16.
-- L'esecuzione `forge()` verificata da questo manuale sul fixture ADA di 882 barre, single-thread, ha prodotto 5241 candidati → 370 promossi → 370 risposte di rule-discovery. I documenti di design della libreria segnalano separatamente il Modulo 3 come lo stadio compute-intensivo su scala: "M3 sequenziale (**255 contratti × ~0.4 s** su dati piccoli)" — cioè il backtest walk-forward per contratto di Rule Discovery è il modulo il cui costo scala più direttamente con quanti contratti Alpha Discovery ha promosso.
+- L'esecuzione `forge()` verificata da questo manuale sul fixture ADA di 882 barre, single-thread, ha prodotto 5356 candidati → 392 promossi → 392 risposte di rule-discovery (§6). I documenti di design della libreria segnalano separatamente il Modulo 3 come lo stadio compute-intensivo su scala: "M3 sequenziale (**255 contratti × ~0.4 s** su dati piccoli)" — cioè il backtest walk-forward per contratto di Rule Discovery è il modulo il cui costo scala più direttamente con quanti contratti Alpha Discovery ha promosso.
 - Lo stesso documento riporta che la suite di test stessa richiede **~8.5 minuti**, "dominata da pipeline complete ripetute" — un fatto più rilevante per contribuire alla libreria (§18) che per usarla, ma indicativo di quanto calcolo rappresenti una chiamata `forge()` completa.
 
 **Osservazioni di complessità dal codice (lettura propria di questo manuale, non un benchmark dichiarato):**
