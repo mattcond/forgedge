@@ -19,7 +19,11 @@ Scaling dei parametri per timeframe
 * ``max_dispersion`` scala verso il basso sui timeframe corti: la legge dei
   grandi numeri stabilizza i conteggi mensili all'aumentare delle barre,
   quindi lo stesso ID naturale dei "buoni" eventi è più basso su intraday/HFT
-  rispetto al daily.
+  rispetto al daily.  Vale solo in ``event_counting="bar"`` — in ``"episode"``
+  (il default) questo campo non è letto dal gate, vedi sotto.
+* ``dispersion_margin`` — la controparte di ``max_dispersion`` in
+  ``"episode"`` mode (#205) — NON scala per timeframe: è un moltiplicatore
+  sopra il floor statistico di Poisson, già scale-free per costruzione.
 * ``horizon_grid`` e ``bars_per_day`` sono risolti dal timeframe (#179, #196).
 
 Utilizzo
@@ -163,9 +167,22 @@ def default_horizon_grid(timeframe: str) -> Optional[Tuple[int, ...]]:
 #                          `daily_rd_min_tpm_episode` che c'era prima
 #                          applicava il fill ratio senza convertire l'unità,
 #                          sottostimando il floor di M3 di ~1.8x).
-#   daily_max_dispersion — gate M1 (uguale in entrambe le modalità;
-#                          il Poisson-floor nel ConsistencyGate protegge
-#                          già dalla dispersione artificiale in episode mode)
+#   daily_max_dispersion — gate M1, "bar" mode ONLY: soglia assoluta,
+#                          nessun floor.  In "episode" mode questo campo non
+#                          è letto dal gate — vedi dispersion_margin (#205:
+#                          confrontare un valore assoluto contro
+#                          max(daily_max_dispersion, poisson_floor) rendeva
+#                          il valore del preset codice morto su 12 delle 16
+#                          combinazioni preset×timeframe misurate, perché il
+#                          floor di Poisson non scala col timeframe mentre
+#                          daily_max_dispersion sì — scala_dispersion() lo
+#                          riduce, il floor no, quindi vince sempre più
+#                          spesso quanto più il timeframe è veloce).
+#   dispersion_margin    — gate M1, "episode" mode ONLY: moltiplicatore sopra
+#                          il floor di Poisson (eff = floor × margin), non
+#                          scalato per timeframe (un moltiplicatore è già
+#                          scale-free).  È qui che i preset si differenziano
+#                          davvero sulla dispersione in episode mode.
 #   parametri alpha      — gate M2 (AlphaDiscovery)
 _PRESET_SPECS: dict = {
     "sniper": {
@@ -178,6 +195,7 @@ _PRESET_SPECS: dict = {
         "daily_min_tpm_episode": 0.3,   # ≈1 episodio ogni 3 mesi
         "daily_rd_min_tpm": 1.0,
         "daily_max_dispersion": 1.0,
+        "dispersion_margin": 1.05,      # quasi zero slack sopra il rumore Poisson
         "min_lift": 0.10,
         "min_cohens_d": 0.15,
         "fdr_q": 0.05,
@@ -193,6 +211,7 @@ _PRESET_SPECS: dict = {
         "daily_min_tpm_episode": 1.0,   # ≈1 episodio/mese (trade/mese minimo)
         "daily_rd_min_tpm": 2.5,
         "daily_max_dispersion": 2.0,
+        "dispersion_margin": 1.30,      # margine moderato sopra il floor
         "min_lift": 0.06,
         "min_cohens_d": 0.10,
         "fdr_q": 0.15,
@@ -210,6 +229,7 @@ _PRESET_SPECS: dict = {
         "daily_min_tpm_episode": 0.3,   # molto permissivo: il filtro è il RotationCalibrator
         "daily_rd_min_tpm": 1.0,
         "daily_max_dispersion": 2.5,
+        "dispersion_margin": 1.60,      # permissivo: il filtro è il RotationCalibrator
         "min_lift": 0.05,
         "min_cohens_d": 0.05,
         "fdr_q": 0.25,
@@ -226,6 +246,7 @@ _PRESET_SPECS: dict = {
         "daily_min_tpm_episode": 1.5,   # episodi frequenti per natura del burst
         "daily_rd_min_tpm": 2.0,
         "daily_max_dispersion": 5.0,
+        "dispersion_margin": 3.00,      # clustering Poisson-implausibile, di proposito
         "min_lift": 0.08,
         "min_cohens_d": 0.12,
         "fdr_q": 0.10,
@@ -274,8 +295,8 @@ def forge_preset(
     **overrides
         Override any computed parameter by name.  Supported keys:
 
-        M1: ``min_tpm``, ``max_dispersion``, ``max_and_components``,
-        ``timestamp_col``, ``event_counting``.
+        M1: ``min_tpm``, ``max_dispersion``, ``dispersion_margin``,
+        ``max_and_components``, ``timestamp_col``, ``event_counting``.
 
         M2: ``min_lift``, ``min_cohens_d``, ``fdr_q``, ``oos_max_p``,
         ``horizon_grid``, ``bars_per_day``.
@@ -319,6 +340,12 @@ def forge_preset(
     max_dispersion = overrides.pop(
         "max_dispersion", tf.scale_dispersion(spec["daily_max_dispersion"])
     )
+    # Not timeframe-scaled (#205) — a multiplier over the Poisson floor is
+    # already scale-free, unlike the absolute `max_dispersion` above.  Reaches
+    # the gate only in `event_counting="episode"`; `max_dispersion` above is
+    # `"bar"`-mode-only.  Both live on `GateParams` at once because a caller
+    # can switch `event_counting` after construction.
+    dispersion_margin = overrides.pop("dispersion_margin", spec["dispersion_margin"])
     max_and = overrides.pop("max_and_components", spec["max_and_components"])
     # Left UNSET unless the caller asks for one: the schema is a session
     # fact, not a profile choice, and the resolver propagates it to every
@@ -329,6 +356,7 @@ def forge_preset(
         gate_params=GateParams(
             min_tpm=min_tpm,
             max_dispersion=max_dispersion,
+            dispersion_margin=dispersion_margin,
             event_counting=event_counting,
         ),
         timestamp_col=timestamp_col,
@@ -438,7 +466,8 @@ def preset_info(preset: Optional[str] = None) -> None:
         print(f"  {spec['description']}")
         print(f"  M1 gate : min_tpm(episode)={spec['daily_min_tpm_episode']}  "
               f"min_tpm(bar)={spec['daily_min_tpm']}  "
-              f"max_dispersion={spec['daily_max_dispersion']}  "
+              f"max_dispersion(bar-mode only)={spec['daily_max_dispersion']}  "
+              f"dispersion_margin(episode-mode only)={spec['dispersion_margin']}  "
               f"max_and={spec['max_and_components']}")
         print(f"  M2 alpha: min_lift={spec['min_lift']}  "
               f"cohens_d={spec['min_cohens_d']}  "

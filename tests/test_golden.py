@@ -51,7 +51,14 @@ _ED_GOLDEN = {
     "n_components":         1,
 }
 
-_AD_GOLDEN_CANDIDATE_ID = "EVT-ratio_close_ret03_re-PR-0527"
+# ID re-pinned -PR-0527 -> -PR-0543 by #205: `dispersion_margin` (default 1.3)
+# is more permissive than the class default `max_dispersion=1.5` was at this
+# fixture's 29-month span (eff. threshold 1.5 -> 1.92), so 115 more candidates
+# now clear the Consistency Gate (5241 -> 5356) and the deterministic
+# indicator-family numbering shifts everything after them by 16 slots. The
+# candidate itself is unchanged — same expression, same activation series —
+# verified bit-for-bit against every pinned value below under the new ID.
+_AD_GOLDEN_CANDIDATE_ID = "EVT-ratio_close_ret03_re-PR-0543"
 _AD_GOLDEN = {
     "expression":   "pr_ratio_close_ret03_ret96_96 < 0.166667",
     "direction":    "short",
@@ -248,6 +255,23 @@ _AD_GOLDEN = {
 # `TestM3CountsBarsNotEpisodes` and the re-pin in
 # `TestSameResolverGuarantee.test_the_stock_preset_on_daily_data_is_coherent`
 # (20 months → 11, `forge_preset("balanced", "1D")`'s own `min_train_months`).
+#
+# ── #205: checked, one ID moved (an index shift, not a verdict change) ──────
+#
+# `GateParams.dispersion_margin` (default 1.3) replaces `max_dispersion`
+# (default 1.5, unread in episode mode from now on) as the threshold above
+# the Poisson floor.  At this fixture's 29-month span the effective threshold
+# moves from 1.5 (`max_dispersion` happened to sit just above the 1.476 floor
+# here) to 1.92 (1.3 x the floor) — strictly more permissive, so 115 more
+# candidates now clear the gate (5241 → 5356).  Candidate IDs are assigned by
+# a deterministic per-family enumeration order, so every candidate discovered
+# after the 115 new ones shifts — including `_AD_GOLDEN_CANDIDATE_ID` above
+# (`-PR-0527` → `-PR-0543`, see its own comment).  `_ED_GOLDEN_ID` and
+# `_AD_GOLDEN_LONG_CANDIDATE_ID` land early enough in their own families that
+# neither shifts.  Every pinned value below — expression, direction, h_star,
+# lift, verdict, economics — is bit-for-bit identical under the new ID:
+# nothing about *this* candidate's own gate evaluation changed, only its
+# position relative to the newly-admitted ones.
 _RD_GOLDEN = {
     "verdict":        "NON-EDGE",
     "profit_factor":  pytest.approx(1.6746, rel=1e-3),

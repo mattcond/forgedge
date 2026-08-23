@@ -695,7 +695,12 @@ class TestEventAppliedAsFunction:
         A = full.iloc[:3000].copy()
         ed = EventDiscovery(A, DiscoveryConfig(
             timestamp_col="open_dt",
-            gate_params=GateParams(min_tpm=1.0, max_dispersion=10.0),
+            # `max_dispersion` is unread in the default "episode" counting
+            # mode (#205) — `dispersion_margin` is what has to be generous
+            # here, so the gate keeps admitting on rate alone as it did
+            # before #205, when `max_dispersion=10.0` made dispersion
+            # effectively never bind.
+            gate_params=GateParams(min_tpm=1.0, dispersion_margin=100.0),
         ))
         cands = ed.run()
         cand = self._identity_candidate(cands)

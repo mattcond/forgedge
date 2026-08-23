@@ -577,6 +577,7 @@ which is why the plan could not have contained them.
 | of F5 | [#196](https://github.com/mattcond/forgedge/issues/196) | `AlphaConfig.horizon_grid` followed the session only when `forge()` built the config itself; an explicit config on daily candles still scanned up to 48 *days* |
 | of F2/F4 | [#200](https://github.com/mattcond/forgedge/issues/200) | `SelectionCriteria.min_tpm` did not follow the rate Event Discovery was told to demand, so `min_train_months` (#177) and `pf_min_tpm` (#178) stayed sized for a rate the session no longer had |
 | of #200 | [#204](https://github.com/mattcond/forgedge/issues/204) | the fix above applied M1→M3's fill ratio straight to a *declared episode* rate, but M3 counts bars, not episodes — a unit gap one factor upstream of #200's own |
+| of F1 | [#205](https://github.com/mattcond/forgedge/issues/205) | a preset's own dispersion tolerance (`daily_max_dispersion`) never bound in `"episode"` mode on most preset×timeframe combinations — silently overridden by a Poisson floor that does not scale with timeframe while the preset value does |
 
 \#200 is the more instructive of the two, because the fix is *smaller* than it first looks.
 The obvious reading — M1 counts episodes, M3 counts filled trades, so M3 should ask for
@@ -626,3 +627,24 @@ could not leave alone was `m3_stricter_than_m1`'s own *check*: comparing M1's de
 to M3's derived one without the same conversion would have turned every declared episode
 rate into a false "M3 is stricter" warning, which is precisely the coherence layer
 mis-firing on the fix meant to close it.
+
+#205 is a different shape from #200/#204 — not a missing conversion, but a comparison that
+silently favoured whichever side happened to be larger. `ConsistencyGate` has always
+compared an event's episode-level dispersion against `max(max_dispersion, poisson_floor)`,
+a floor whose purpose is legitimate: never reject an event that is statistically
+consistent with a random process at its own rate. The bug was in how the two sides scaled.
+The floor is a function of calendar months only (≈1.3–2.2 over any realistic 6–60-month
+window); `max_dispersion` was *scaled down* for faster timeframes on top of that. Measured
+across all four presets and four timeframes, 12 of 16 combinations had `max_dispersion`
+never binding, and `sniper` — the preset built for "regular" events — never bound on any of
+them. A preset's own tolerance for burstiness was discarded more often the faster the
+timeframe got, the opposite of what the scaling was for.
+
+The fix does not touch the floor's purpose, only how a preset expresses its tolerance over
+it: `dispersion_margin` is a multiplier (`eff_max_dispersion = poisson_floor x
+dispersion_margin`), not an absolute Index of Dispersion, so the floor can no longer
+swallow it — a tight margin (`sniper=1.05`) stays close to what a Poisson process itself
+would produce, a loose one (`burst=3.00`) tolerates clustering on purpose. `max_dispersion`
+keeps its old, absolute meaning in `"bar"` mode, where there is no floor to be swallowed by
+in the first place — the two fields are mode-exclusive rather than one superseding the
+other, the same shape #179 used for `event_counting`'s two units.

@@ -247,7 +247,7 @@ That's the **opposite** of the intuitive guess (surely a bounded oscillator is "
 1. `EventDiscovery(kpi)` classified both columns as `CONTINUOUS`, then ran the scale-free test on each independently — see the box above for what that test actually measures. The scale-free flag governs whether a column is eligible to build *ratio/spread* features against other same-family columns (Step 2 below); it does not gate whether a column can have its own direct threshold/crossing events, which is why `close` — despite not being what you'd casually call "scale-free" — still produced the `close crosses_below 95.45` candidate that topped this run's list.
 2. It generated **transformed versions** of each column: rolling percentile rank, rolling z-score, and simple deltas, over several window lengths.
 3. For each (base or transformed) series, it tried a catalog of **distributional thresholds** (e.g. the 10th percentile of that series' own history) and **theoretical thresholds** (fixed z-score levels like −2.0), each producing a candidate boolean expression — a "crossing" event on a raw column's own value (as with `close` here), or something shaped like `close_rsi_14 < P10 [P10=...]` for a transformed series (present among this run's 309 candidates — filter with `[c for c in candidates if "rsi" in c.expression]` to find one).
-4. Every candidate was passed through the **Consistency Gate**: does it fire often enough (`min_tpm`), consistently enough across months (not bursty — `max_dispersion`), and with enough total observations to be statistically meaningful? Candidates that fail are silently discarded — they never become `EventCandidate` objects.
+4. Every candidate was passed through the **Consistency Gate**: does it fire often enough (`min_tpm`), consistently enough across months (not bursty — `dispersion_margin` in the default `"episode"` counting mode, `max_dispersion` in `"bar"` mode; the two fields don't overlap, #205), and with enough total observations to be statistically meaningful? Candidates that fail are silently discarded — they never become `EventCandidate` objects.
 5. **At no point did any of this look at `close`'s future value.** The gate only ever inspects *when* the event fired, never *what happened afterward*.
 
 ### Implicit configuration you should notice
@@ -255,7 +255,7 @@ That's the **opposite** of the intuitive guess (surely a bounded oscillator is "
 You called `EventDiscovery(kpi)` with no `config=` argument. That means `DiscoveryConfig()` defaults were used silently:
 
 - `train_ratio=1.0` — the *entire* table was used for discovery, no OOS split was reserved (there's no walk-forward validation happening here; see §10 for how to enable it).
-- `gate_params=GateParams()` — the default Consistency Gate thresholds: `min_tpm=0.5` (at least 0.5 qualifying "episodes" per month), `max_dispersion=1.5` (activations shouldn't be too bursty), `event_counting="episode"` (§15).
+- `gate_params=GateParams()` — the default Consistency Gate thresholds: `min_tpm=0.5` (at least 0.5 qualifying "episodes" per month), `event_counting="episode"` (§15), `dispersion_margin=1.3` (activations shouldn't cluster more than 1.3x what a Poisson process at the observed rate would — the field that actually governs dispersion in this default mode; `max_dispersion=1.5` is present but unread here, it only matters under `event_counting="bar"`, #205).
 - `max_and_components=2` — Event Discovery also tried composing pairs of single-column events with AND, subject to the same gate.
 
 None of these choices involved the forward return of `close` — that concept doesn't exist yet at this stage of the pipeline.
@@ -287,23 +287,31 @@ print("tradeable (edges()):", len(result.edges()))
 ```
 (882, 26)
 ['open_dt', 'high', 'low', 'close', 'open', 'close_ret_03']
-M1 candidates: 5241
-M2 promoted:   370
-M3 responses:  370
-tradeable (edges()): 54
+M1 candidates: 5356
+M2 promoted:   392
+M3 responses:  392
+tradeable (edges()): 32
 ```
+
+*(Re-verified after #205: `GateParams.dispersion_margin` replaced `max_dispersion` as the
+episode-mode threshold — see §15 — which is more permissive here (effective threshold
+1.5 → 1.92 at this fixture's 29-month span), so 115 more candidates clear the gate
+(5241 → 5356) and 22 more get promoted (370 → 392). The 22 new contracts all landed
+`NON-EDGE` — the tradeable count itself does not move, 32 either way; the fenced block
+this manual previously carried here (`... tradeable (edges()): 54`) had drifted out of
+sync with the `Counter` a few lines below independently of #205, and both now agree.)*
 
 ### Interpreting the output
 
-- **5241 event candidates** survived Event Discovery's Consistency Gate — remember, none of these have been checked against a forward return yet.
-- **370 of them were promoted** by Alpha Discovery to `AlphaContract` "HYPOTHESIS" status — meaning each has a determined direction (long or short) and a derived holding period / take-profit.
-- **370 rule responses** — every promoted contract was run through Rule Discovery's realistic backtest and walk-forward validation (this fixture has `run_rule_discovery=True` by default).
+- **5356 event candidates** survived Event Discovery's Consistency Gate — remember, none of these have been checked against a forward return yet.
+- **392 of them were promoted** by Alpha Discovery to `AlphaContract` "HYPOTHESIS" status — meaning each has a determined direction (long or short) and a derived holding period / take-profit.
+- **392 rule responses** — every promoted contract was run through Rule Discovery's realistic backtest and walk-forward validation (this fixture has `run_rule_discovery=True` by default).
 - **32 are tradeable** (`result.edges()` — verdict `EDGE` or `PARTIAL-EDGE`). On this specific dataset with default settings, digging one level deeper shows *all 32* are `PARTIAL-EDGE`, not full `EDGE`, and 6 more contracts were explicitly demoted to `INSUFFICIENT-DATA` rather than silently reported as something stronger than the OOS evidence could support:
 
 ```python
 from collections import Counter
 print(Counter(r.verdict for _, r in result.rule_responses))
-# Counter({'NON-EDGE': 332, 'PARTIAL-EDGE': 32, 'INSUFFICIENT-DATA': 6})
+# Counter({'NON-EDGE': 354, 'PARTIAL-EDGE': 32, 'INSUFFICIENT-DATA': 6})
 ```
 
 Zero full `EDGE` verdicts is not a bug and not a sign the library "isn't working" — it is the default rotation-null gate (§14–15) doing exactly what it's designed to do. Look at the single best `PARTIAL-EDGE` candidate on this data:
@@ -342,7 +350,7 @@ This is important, and it's the first thing that surprises new users. `forge(kpi
 5. Ran the **fast search-level rotation null** (`fast_null=True` by default) and annotated `rotation_p`/`rotation_threshold` on every promoted contract — this is exactly what produced the `PARTIAL-EDGE` cap you just saw.
 6. Built a shared, **purged** `TimeBudget` for Event/Alpha Discovery (§15) even though you passed no `time_budget=` argument.
 7. Recorded a `HypothesisLedger` on `result.ledger`, tallying how large the session's search surface actually was.
-8. Ran Rule Discovery on all 370 promoted contracts with `selection_mode="walk_forward"` (the default) — meaning the published operating parameters came from inside walk-forward train windows only, never from a peek at the final test window.
+8. Ran Rule Discovery on all 392 promoted contracts with `selection_mode="walk_forward"` (the default) — meaning the published operating parameters came from inside walk-forward train windows only, never from a peek at the final test window.
 9. Evaluated every rule with `entry_mode="auto"` (the default since issue #185, replacing `"limit"`) — a market-entry verdict is authoritative, and a limit entry is published only when it clears three out-of-sample conditions (§9, §15).
 10. Measured episode count and trade **concurrency** for every backtest (`resp.in_sample_summary.n_episodes` / `.mean_concurrent_positions` / `.max_concurrent_positions`, issue #168) — `run_backtest` opens a trade on every active bar with no flat-state check, so positions can and do overlap; these fields are what let you tell a nominal trade count from the effective, capital-relevant one (§9).
 11. Skipped Module 4 (Rule Registry) — not because you disabled it, but because `RuleRegistry.from_forge_results` needs multiple tickers to say anything about cross-ticker generalisation; with a single-ticker `forge()` call it still runs and produces a registry, but every rule is classified `ISOLATED` (§9).
@@ -1098,7 +1106,8 @@ Every module accepts a dataclass carrying its knobs. This section covers the one
 | Field | Default | Meaning |
 |---|---|---|
 | `min_tpm` | `0.5` | minimum average triggers per month (unit depends on `event_counting`) |
-| `max_dispersion` | `1.5` | maximum allowed Index of Dispersion (Var/Mean of monthly counts) |
+| `max_dispersion` | `1.5` | maximum allowed Index of Dispersion (Var/Mean of monthly counts) — `"bar"` mode only; unread in `"episode"` mode (#205) |
+| `dispersion_margin` | `1.3` | `"episode"` mode only: multiplier over the Poisson χ² floor (`eff = margin x floor`), not an absolute ID — unread in `"bar"` mode (#205) |
 | `event_counting` | `"episode"` | `"episode"` counts maximal runs of consecutive activations; `"bar"` counts every individual bar (§15) |
 | `min_episodes` | `10` | absolute floor on episode count, `"episode"` mode only |
 | `episode_gap` | `1` | max bar-gap that still belongs to the same episode |
@@ -1158,7 +1167,7 @@ result = forge(kpi, ticker="ADAUSDC", timeframe="1D",
 | `"sweep"` | Wide, permissive search — designed to pair with `rotation_calibration=RotationConfig(k>=100)` and a `min_lift` filter downstream. |
 | `"burst"` | Time-concentrated events (regime-change, momentum). High dispersion explicitly tolerated. |
 
-`overrides` accepted by name: M1 side — `min_tpm`, `max_dispersion`, `max_and_components`, `timestamp_col`, `event_counting`; M2 side — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; M3 side — `rd_min_tpm`. An unrecognized override key raises `TypeError`.
+`overrides` accepted by name: M1 side — `min_tpm`, `max_dispersion`, `dispersion_margin`, `max_and_components`, `timestamp_col`, `event_counting`; M2 side — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; M3 side — `rd_min_tpm`. An unrecognized override key raises `TypeError`.
 
 ---
 
@@ -1302,10 +1311,12 @@ Four configuration axes you're likely to actually need to change, each shown as 
 from forgedge import EventDiscovery, DiscoveryConfig
 from forgedge.event_discovery.models import GateParams
 
-# Default GateParams(min_tpm=0.5, max_dispersion=1.5) is already fairly
+# Default GateParams(min_tpm=0.5, dispersion_margin=1.3) is already fairly
 # permissive; raising min_tpm trades away rare/marginal events for
 # statistical power per event (see §16's frequency-vs-selectivity trade-off).
-config = DiscoveryConfig(gate_params=GateParams(min_tpm=1.5, max_dispersion=2.0))
+# `max_dispersion` is not the dispersion knob here — `event_counting`
+# defaults to "episode", where `dispersion_margin` governs instead (#205).
+config = DiscoveryConfig(gate_params=GateParams(min_tpm=1.5, dispersion_margin=1.8))
 ed = EventDiscovery(kpi, config=config)
 ```
 
@@ -1600,7 +1611,7 @@ Nothing in this section is an invented benchmark. Every number is either measure
 
 - `FastRotationNull` on real ADA daily data: **~1 second**, computing the exact rotation null over every circular offset via FFT — reported by the design document, and consistent with the near-instant `result.calibration.summary()` output this manual captured in §7.
 - The (heavier) `RotationCalibrator`, sampled: **~4 seconds per draw** on the same data, per `docs/analysis/search_rotation_calibration.md` — meaning `K=100` is on the order of several minutes, not seconds. This is the direct cost of the statistical-rigor-vs-speed trade-off in §16.
-- This manual's own verified `forge()` run on the 882-bar ADA fixture, single-threaded, produced 5241 candidates → 370 promoted → 370 rule-discovery responses. The library's design docs separately flag Module 3 as the compute-heavy stage at scale: *(translated, `docs/analysis/forge2_functional_analysis.md`)* "M3 sequential (**255 contracts × ~0.4 s** on small data)" — i.e. Rule Discovery's per-contract walk-forward backtest is the module whose cost scales most directly with how many contracts Alpha Discovery promoted.
+- This manual's own verified `forge()` run on the 882-bar ADA fixture, single-threaded, produced 5356 candidates → 392 promoted → 392 rule-discovery responses (§6). The library's design docs separately flag Module 3 as the compute-heavy stage at scale: *(translated, `docs/analysis/forge2_functional_analysis.md`)* "M3 sequential (**255 contracts × ~0.4 s** on small data)" — i.e. Rule Discovery's per-contract walk-forward backtest is the module whose cost scales most directly with how many contracts Alpha Discovery promoted.
 - The same document reports the test suite itself takes **~8.5 minutes**, "dominated by repeated full pipelines" — a fact more relevant to contributing to the library (§18) than to using it, but indicative of how much compute a full `forge()` call represents.
 
 **Complexity observations from the code (this manual's own reading, not a stated benchmark):**

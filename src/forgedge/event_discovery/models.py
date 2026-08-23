@@ -119,10 +119,35 @@ class GateParams:
     max_dispersion : float
         Maximum allowed Index of Dispersion (``Var/Mean`` of the monthly
         counts in the chosen unit).  For a Poisson process ID = 1.  Default
-        1.5.  In ``"episode"`` mode the threshold is automatically raised to
-        a Poisson χ² floor when the user's value would reject events that are
-        statistically consistent with a random process at the observed rate
-        (see ``ConsistencyGate``); the raw value is used in ``"bar"`` mode.
+        1.5.  **``"bar"`` mode only** — this is the raw threshold there, no
+        floor involved.  In ``"episode"`` mode this field is not read by the
+        gate at all; see ``dispersion_margin`` (#205).
+    dispersion_margin : float
+        **``"episode"`` mode's dispersion tolerance — a margin over the
+        Poisson χ² floor, not an absolute Index of Dispersion.**
+
+        Episode mode has always compared against
+        ``max(max_dispersion, poisson_floor(n_months))`` — a floor so the
+        gate never rejects an event statistically consistent with a random
+        process at its own rate.  Because the floor depends only on the
+        number of calendar months (≈1.3–2.2 over any realistic 6–60-month
+        window) while ``max_dispersion`` used to be *scaled down* for faster
+        timeframes (``_TFClass.scale_dispersion``), the floor almost always
+        won: measured across all four presets and four timeframes, 12 of 16
+        combinations had ``max_dispersion`` **never** binding, and ``sniper``
+        — the preset built for "regular" events — never bound on any of
+        them.  A preset's own dispersion tolerance was silently discarded
+        (#205).
+
+        The fix inverts the relationship instead of chasing the floor:
+        ``eff_max_dispersion = poisson_floor(n_months) x dispersion_margin``.
+        A preset now differentiates by how much slack it tolerates *above*
+        the statistically defensible minimum, which the floor mechanism can
+        no longer swallow — ``dispersion_margin=1.05`` stays close to what a
+        Poisson process itself would produce, ``3.0`` tolerates
+        Poisson-implausible clustering on purpose.  Default 1.3 — a middle
+        value, not derived from any specific preset.  Unread in ``"bar"``
+        mode, where there is no floor to set a margin over.
     event_counting : {"episode", "bar"}
         Counting unit for the rate and dispersion criteria.  Default
         ``"episode"``.
@@ -140,6 +165,7 @@ class GateParams:
     """
     min_tpm: float = 0.5
     max_dispersion: float = 1.5
+    dispersion_margin: float = 1.3
     event_counting: Literal["episode", "bar"] = "episode"
     min_episodes: int = 10
     episode_gap: int = 1
