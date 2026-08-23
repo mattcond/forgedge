@@ -183,12 +183,26 @@ def default_horizon_grid(timeframe: str) -> Optional[Tuple[int, ...]]:
 #                          scalato per timeframe (un moltiplicatore è già
 #                          scale-free).  È qui che i preset si differenziano
 #                          davvero sulla dispersione in episode mode.
+#   min_episodes         — gate M1, "episode" mode ONLY: floor assoluto di
+#                          potenza statistica (Criterion 2).  Indipendente dal
+#                          tasso, quindi la finestra IS che serve per
+#                          raggiungerlo con margine di Poisson al 95% dipende
+#                          da entrambi (#206): a min_episodes=10 sniper/sweep
+#                          (0.3 episodi/mese) servono 53.3 mesi (4.44 anni),
+#                          non i "≥2 anni" che sniper prometteva prima di
+#                          questa misura.  sniper tiene 10 — il rigore
+#                          statistico è il suo scopo dichiarato, la
+#                          descrizione va corretta, non il numero.  sweep lo
+#                          abbassa a 5 — è esplicitamente permissivo per
+#                          design e delega il rigore al RotationCalibrator a
+#                          valle, coerente con la propria filosofia.
 #   parametri alpha      — gate M2 (AlphaDiscovery)
 _PRESET_SPECS: dict = {
     "sniper": {
         "description": (
             "Rari e regolari. Alta precisione statistica, regole semplici. "
-            "Richiede IS lungo (>=2 anni su 1D). "
+            "Richiede IS molto lungo (~4.5 anni su 1D al proprio tasso minimo, "
+            "min_episodes=10 con margine di Poisson al 95% — #206). "
             "Non abbinare a RotationCalibrator."
         ),
         "daily_min_tpm": 1.0,
@@ -196,6 +210,7 @@ _PRESET_SPECS: dict = {
         "daily_rd_min_tpm": 1.0,
         "daily_max_dispersion": 1.0,
         "dispersion_margin": 1.05,      # quasi zero slack sopra il rumore Poisson
+        "min_episodes": 10,             # invariato: il rigore statistico è lo scopo
         "min_lift": 0.10,
         "min_cohens_d": 0.15,
         "fdr_q": 0.05,
@@ -212,6 +227,7 @@ _PRESET_SPECS: dict = {
         "daily_rd_min_tpm": 2.5,
         "daily_max_dispersion": 2.0,
         "dispersion_margin": 1.30,      # margine moderato sopra il floor
+        "min_episodes": 10,             # invariato: già coerente al proprio tasso (16 mesi)
         "min_lift": 0.06,
         "min_cohens_d": 0.10,
         "fdr_q": 0.15,
@@ -230,6 +246,8 @@ _PRESET_SPECS: dict = {
         "daily_rd_min_tpm": 1.0,
         "daily_max_dispersion": 2.5,
         "dispersion_margin": 1.60,      # permissivo: il filtro è il RotationCalibrator
+        "min_episodes": 5,              # abbassato (#206): permissivo per design, il
+                                         # rigore statistico è delegato al RotationCalibrator
         "min_lift": 0.05,
         "min_cohens_d": 0.05,
         "fdr_q": 0.25,
@@ -247,6 +265,7 @@ _PRESET_SPECS: dict = {
         "daily_rd_min_tpm": 2.0,
         "daily_max_dispersion": 5.0,
         "dispersion_margin": 3.00,      # clustering Poisson-implausibile, di proposito
+        "min_episodes": 10,             # invariato: già coerente al proprio tasso (10.7 mesi)
         "min_lift": 0.08,
         "min_cohens_d": 0.12,
         "fdr_q": 0.10,
@@ -296,7 +315,8 @@ def forge_preset(
         Override any computed parameter by name.  Supported keys:
 
         M1: ``min_tpm``, ``max_dispersion``, ``dispersion_margin``,
-        ``max_and_components``, ``timestamp_col``, ``event_counting``.
+        ``min_episodes``, ``max_and_components``, ``timestamp_col``,
+        ``event_counting``.
 
         M2: ``min_lift``, ``min_cohens_d``, ``fdr_q``, ``oos_max_p``,
         ``horizon_grid``, ``bars_per_day``.
@@ -346,6 +366,13 @@ def forge_preset(
     # `"bar"`-mode-only.  Both live on `GateParams` at once because a caller
     # can switch `event_counting` after construction.
     dispersion_margin = overrides.pop("dispersion_margin", spec["dispersion_margin"])
+    # Not scaled by timeframe — an absolute count of episodes, and the
+    # timeframe's own effect on how long that takes is already carried by
+    # `min_tpm`'s scaling.  Per-preset, not a flat class default (#206):
+    # sniper/burst/balanced keep the class default 10, sweep lowers it to 5
+    # because it is permissive by design and defers rigor to the
+    # RotationCalibrator downstream.
+    min_episodes = overrides.pop("min_episodes", spec["min_episodes"])
     max_and = overrides.pop("max_and_components", spec["max_and_components"])
     # Left UNSET unless the caller asks for one: the schema is a session
     # fact, not a profile choice, and the resolver propagates it to every
@@ -357,6 +384,7 @@ def forge_preset(
             min_tpm=min_tpm,
             max_dispersion=max_dispersion,
             dispersion_margin=dispersion_margin,
+            min_episodes=min_episodes,
             event_counting=event_counting,
         ),
         timestamp_col=timestamp_col,
@@ -468,7 +496,12 @@ def preset_info(preset: Optional[str] = None) -> None:
               f"min_tpm(bar)={spec['daily_min_tpm']}  "
               f"max_dispersion(bar-mode only)={spec['daily_max_dispersion']}  "
               f"dispersion_margin(episode-mode only)={spec['dispersion_margin']}  "
+              f"min_episodes={spec['min_episodes']}  "
               f"max_and={spec['max_and_components']}")
+        from forgedge.resolver import poisson_min_window
+        _is_window = poisson_min_window(spec["min_episodes"], spec["daily_min_tpm_episode"])
+        print(f"            IS window needed @ 95% Poisson margin (1D, episode "
+              f"mode, own rate): {_is_window:.1f} mo ({_is_window / 12:.2f} y)")
         print(f"  M2 alpha: min_lift={spec['min_lift']}  "
               f"cohens_d={spec['min_cohens_d']}  "
               f"fdr_q={spec['fdr_q']}  oos_max_p={spec['oos_max_p']}")

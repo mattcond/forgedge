@@ -157,6 +157,17 @@ class GateParams:
         mode, and **applied in-sample only** — on a walk-forward fold an
         absolute count is a rate requirement in disguise, scaling inversely
         with the fold's length (F1).  Default 10.
+
+        Being absolute, it also implies an in-sample *discovery* window,
+        which depends on ``min_tpm`` too — the naive ``min_episodes /
+        min_tpm`` satisfies it only in expectation; the window that clears it
+        with 95 % confidence is :func:`~forgedge.resolver.poisson_min_window`
+        (#173's mistake, recurring here — #206).  ``config_report()``'s
+        ``m1_is_window_too_short`` (WARN) names the gap when ``span_months``
+        is known.  ``forge_preset()`` differentiates this per profile rather
+        than leaving it at one flat default: ``sniper``/``balanced``/
+        ``burst`` keep 10, ``sweep`` lowers it to 5 — permissive by design,
+        deferring statistical rigor to the ``RotationCalibrator`` downstream.
     episode_gap : int
         Maximum gap, in bars, that still belongs to the same episode.  With
         the default 1, a single missing bar inside a run does not start a new

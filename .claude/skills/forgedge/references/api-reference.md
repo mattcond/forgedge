@@ -132,9 +132,9 @@ forge_preset(
 
 `preset` ∈ `PRESETS` = `["sniper", "balanced", "sweep", "burst"]`. Overrides
 accepted by name: M1 — `min_tpm`, `max_dispersion`, `dispersion_margin`,
-`max_and_components`, `timestamp_col`, `event_counting`; M2 — `min_lift`,
-`min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; M3 —
-`rd_min_tpm`. Unknown override keys raise `TypeError`.
+`min_episodes`, `max_and_components`, `timestamp_col`, `event_counting`; M2 —
+`min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`,
+`bars_per_day`; M3 — `rd_min_tpm`. Unknown override keys raise `TypeError`.
 
 M1's `min_tpm`/`max_dispersion` are scaled from the preset's daily-calibrated
 spec to `timeframe` via `_TFClass` (daily / intraday / hft bucket).
@@ -145,7 +145,16 @@ floor, already scale-free, and it is what governs dispersion under
 `max(max_dispersion, poisson_floor)` left it dead code on 12 of 16 measured
 preset×timeframe combinations, `"sniper"` on all of them). Per-preset
 `dispersion_margin`: 1.05 `sniper`, 1.30 `balanced`, 1.60 `sweep`, 3.00
-`burst`. M3's rate is set at the preset's own ratio to M1's (1.00 on
+`burst`. `min_episodes` is likewise **not** timeframe-scaled (an absolute
+episode count; the timeframe's effect is already carried by `min_tpm`'s own
+scaling) but *is* per-preset (#206): 10 on `sniper`/`balanced`/`burst`, 5 on
+`sweep` — `sniper` and `sweep` share the same low stock rate (0.3
+episodes/month) and used to share `min_episodes=10` too, needing 53.3 months
+(4.44 years) at 95 % Poisson confidence regardless of preset philosophy;
+`sniper` keeps 10 (statistical rigor is the point, so the fix was correcting
+its description, not weakening the floor), `sweep` lowers it to 5 since it is
+permissive by design and already defers rigor to the `RotationCalibrator`.
+M3's rate is set at the preset's own ratio to M1's (1.00 on
 `sniper`/`sweep`, 0.80 on `balanced`/`burst` — a deliberate per-profile fill
 margin, not one flat
 number) rather than left to a class default, so `RuleWalkForwardConfig
@@ -412,10 +421,14 @@ it is `episode_ID <= dispersion_margin x poisson_floor(n_months)` and
 `max_dispersion` is not read at all — comparing the absolute value against
 `max(max_dispersion, poisson_floor)` used to leave a preset's own tolerance
 dead code whenever the floor (a function of calendar months only) exceeded
-it, which measurement showed was most of the time. **Note:** an older
-`GateParams` API (`min_act`, `min_months`, `max_conc`) appears in several
-`examples/*.py` scripts and now raises `TypeError` — see *Errors and
-warnings*.
+it, which measurement showed was most of the time. `min_episodes` is
+absolute and, being unrelated to `min_tpm`, implies an in-sample *discovery*
+window that depends on both: `config_report()`'s `m1_is_window_too_short`
+(WARN) says when the configured span can't reach it at 95 % Poisson
+confidence (#206) — `poisson_min_window(min_episodes, min_tpm)`, not the
+naive `min_episodes / min_tpm`. **Note:** an older `GateParams` API
+(`min_act`, `min_months`, `max_conc`) appears in several `examples/*.py`
+scripts and now raises `TypeError` — see *Errors and warnings*.
 
 **Arity-2 feature pairings beyond same-family ratios.** `FeatureGenerator`
 pairs same-family columns (two EMAs, two RSIs, …) by default, plus five

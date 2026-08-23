@@ -578,6 +578,7 @@ which is why the plan could not have contained them.
 | of F2/F4 | [#200](https://github.com/mattcond/forgedge/issues/200) | `SelectionCriteria.min_tpm` did not follow the rate Event Discovery was told to demand, so `min_train_months` (#177) and `pf_min_tpm` (#178) stayed sized for a rate the session no longer had |
 | of #200 | [#204](https://github.com/mattcond/forgedge/issues/204) | the fix above applied M1→M3's fill ratio straight to a *declared episode* rate, but M3 counts bars, not episodes — a unit gap one factor upstream of #200's own |
 | of F1 | [#205](https://github.com/mattcond/forgedge/issues/205) | a preset's own dispersion tolerance (`daily_max_dispersion`) never bound in `"episode"` mode on most preset×timeframe combinations — silently overridden by a Poisson floor that does not scale with timeframe while the preset value does |
+| of F1 | [#206](https://github.com/mattcond/forgedge/issues/206) | `min_episodes` was an absolute floor fixed across every preset regardless of rate — `sniper`'s description promised "≥2 anni" but its own stock rate needed 4.44 years at 95% Poisson confidence, and no resolver check said so |
 
 \#200 is the more instructive of the two, because the fix is *smaller* than it first looks.
 The obvious reading — M1 counts episodes, M3 counts filled trades, so M3 should ask for
@@ -648,3 +649,26 @@ would produce, a loose one (`burst=3.00`) tolerates clustering on purpose. `max_
 keeps its old, absolute meaning in `"bar"` mode, where there is no floor to be swallowed by
 in the first place — the two fields are mode-exclusive rather than one superseding the
 other, the same shape #179 used for `event_counting`'s two units.
+
+#206 sits one level above #205 in the same criterion: F1 already established that M1's
+*out-of-sample fold* length has to fit `min_tpm` (`m1_oos_fold_too_short`, #177). Nobody had
+asked the same question of M1's own *in-sample discovery* window against `min_episodes` — a
+different, absolute-count criterion (Criterion 2 of the Consistency Gate), which the naive
+`min_episodes / rate` division satisfies only in expectation, #173's mistake recurring at
+the one place the whole plan had not yet reached. At `sniper`'s stock rate (0.3
+episodes/month) the naive estimate is 33.3 months; the window that actually clears the
+floor 95% of the time is 53.3 (4.44 years) — more than double what the preset's own
+description claimed ("Richiede IS lungo, ≥2 anni").
+
+The fix has two parts, deliberately independent. A resolver check (`m1_is_window_too_short`,
+mirroring `m1_oos_fold_too_short`'s shape but WARN rather than FAIL — a candidate above the
+configured rate can still clear the floor on less data, so this is not a structural
+impossibility the way an empty OOS fold is) names the gap in `config_report()` before a long
+run comes back nearly empty. And `min_episodes` becomes preset-parametrized rather than a
+flat class default, resolving the fork the issue explicitly left open: `sniper` keeps 10 —
+statistical rigor is the entire point of the preset, so the fix is to correct the
+description to the measured number, not to weaken the floor — while `sweep`, sharing
+`sniper`'s low rate but none of its precision claim, lowers it to 5, consistent with a
+preset that is permissive by design and already defers rigor to the `RotationCalibrator`
+downstream. `balanced` and `burst` were already coherent at 10 (16 and 10.7 months) and are
+untouched.

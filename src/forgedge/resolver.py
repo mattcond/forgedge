@@ -1304,6 +1304,62 @@ def _check_m1_fold(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str
             f"potrà concludere nulla. {fix}.")
 
 
+def _check_m1_is_window(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """M1's own in-sample discovery window versus ``min_episodes`` (#206).
+
+    ``min_episodes`` (episode mode only) is an absolute power floor on
+    Criterion 2 of the Consistency Gate, applied to the *discovery* window —
+    ``span_months x train_ratio`` — not to a walk-forward fold (that side is
+    ``m1_oos_fold_too_short`` above).  The naive ``min_episodes / rate`` gives
+    a window that satisfies the floor only in expectation, the same mistake
+    #173 made for M3's; a candidate sitting exactly at the configured
+    ``min_tpm`` needs :func:`poisson_min_window` months at 95 % confidence to
+    actually clear it.  On ``sniper``'s stock rate (0.3 episodes/month) that
+    is 53.3 months (4.44 years), not the "≥2 anni" its description used to
+    claim before this issue measured the real number.
+
+    **WARN, not FAIL.**  Unlike the OOS-fold check, this is not a structural
+    impossibility — a candidate with a higher realised rate than the
+    configured floor can still clear ``min_episodes`` on a shorter history.
+    The check describes the worst admissible candidate, which is worth
+    knowing before a long IS run comes back nearly empty, not a reason to
+    refuse to start.
+
+    Reads ``span_months``, so a check and not a derivation, for the same
+    reason as its OOS sibling: the resolver's derive half stays blind to the
+    data on purpose.
+    """
+    got = _need(values,
+                "event_discovery.train_ratio",
+                "event_discovery.gate_params.min_tpm",
+                "event_discovery.gate_params.min_episodes")
+    if got is None:
+        return None
+    train_ratio, rate, floor = float(got[0]), float(got[1]), int(got[2])
+    counting = values.get("event_discovery.gate_params.event_counting", "episode")
+    if counting != "episode" or rate <= 0 or floor <= 0 or train_ratio <= 0:
+        return None
+    span = ctx.span_months
+    if not span:
+        return None
+
+    is_months = span * train_ratio
+    need = poisson_min_window(floor, rate)
+    if need == float("inf") or is_months >= need:
+        return None
+    max_floor = int(rate * is_months / 1.65)  # inverse of poisson_min_window's ~1.65x rule
+    fix = (f"abbassare min_episodes a <= {max_floor}" if max_floor >= 1
+           else f"a questo tasso nemmeno min_episodes=1 è raggiungibile su {is_months:.1f} mesi")
+    return (f"la finestra di discovery IS ({is_months:.1f} mesi = {span:.1f} mesi di "
+            f"storia x train_ratio={train_ratio:g}) non raggiunge i "
+            f"gate_params.min_episodes={floor} al tasso configurato min_tpm={rate:g}: "
+            f"servono {need:.1f} mesi con margine di Poisson al 95 % ({need / 12:.2f} anni). "
+            f"Un candidato esattamente al floor di frequenza non avrà mai abbastanza "
+            f"episodi per superare il Criterion 2 su questa storia — non un errore, ma "
+            f"la ragione per cui una IS lunga rende meno di quanto sembri: {fix}, "
+            f"oppure alzare min_tpm, oppure allungare la storia.")
+
+
 def _check_oos_span(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
     """F4 — the pooled walk-forward test span versus ``min_oos_trades``."""
     got = _need(values,
@@ -1569,6 +1625,12 @@ def _statistical_constraints() -> List[Constraint]:
                          "event_discovery.gate_params.min_episodes",
                          "event_discovery.gate_params.event_counting"),
                    check=_check_m1_fold),
+        Constraint(code="m1_is_window_too_short", level="WARN", stage=STATISTICAL,
+                   free=("event_discovery.train_ratio",
+                         "event_discovery.gate_params.min_tpm",
+                         "event_discovery.gate_params.min_episodes",
+                         "event_discovery.gate_params.event_counting"),
+                   check=_check_m1_is_window),
         Constraint(code="oos_span_too_short", level="FAIL", stage=STRUCTURAL,
                    free=("rule_discovery.criteria.min_tpm",
                          "rule_discovery.criteria.min_oos_trades",

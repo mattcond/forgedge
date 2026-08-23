@@ -248,6 +248,53 @@ class TestFailConstraints:
 
 
 class TestWarnConstraints:
+    def test_m1_is_window_too_short(self):
+        """#206 — the reported case: `sniper`'s own stock rate (0.3
+        episodes/month) needs 53.3 months at 95% Poisson confidence to reach
+        `min_episodes=10`, not the "≥2 anni" the preset's description used to
+        claim before this was measured."""
+        disc = DiscoveryConfig(gate_params=GateParams(min_tpm=0.3, min_episodes=10))
+        rep = config_report(disc, None, None, ctx=_ctx(span_months=29))
+
+        assert "m1_is_window_too_short" in _codes(rep)
+        msg = _message(rep, "m1_is_window_too_short")
+        assert "min_episodes" in msg      # names the field
+        assert "53.3" in msg              # the measured window, not a naive one
+        assert "min_episodes" in msg and "min_tpm" in msg  # names both fixes
+
+    def test_m1_is_window_is_silent_when_the_window_can_conclude(self):
+        """Same rate, a span long enough to actually reach the floor."""
+        disc = DiscoveryConfig(gate_params=GateParams(min_tpm=0.3, min_episodes=10))
+        rep = config_report(disc, None, None, ctx=_ctx(span_months=60))
+        assert "m1_is_window_too_short" not in _codes(rep)
+
+    def test_m1_is_window_is_silent_in_bar_mode(self):
+        """`min_episodes` is an episode-mode-only criterion (ignored in
+        `"bar"` mode by `ConsistencyGate`), so the check has nothing to say
+        there regardless of the span."""
+        disc = DiscoveryConfig(
+            gate_params=GateParams(min_tpm=0.3, min_episodes=10, event_counting="bar")
+        )
+        rep = config_report(disc, None, None, ctx=_ctx(span_months=29))
+        assert "m1_is_window_too_short" not in _codes(rep)
+
+    def test_m1_is_window_is_silent_without_a_span(self):
+        """Same invariant as its OOS sibling: the resolver's derive half
+        never reads the data, and this check needs `span_months` to say
+        anything at all."""
+        disc = DiscoveryConfig(gate_params=GateParams(min_tpm=0.3, min_episodes=10))
+        rep = config_report(disc, None, None, ctx=PipelineContext(timeframe="1D"))
+        assert "m1_is_window_too_short" not in _codes(rep)
+
+    def test_m1_is_window_never_fails_strict_mode(self):
+        """WARN, not FAIL (#206) — a candidate with a higher realised rate
+        than the configured floor can still clear `min_episodes` on a shorter
+        history, so this is worth knowing, not a reason to refuse to start."""
+        disc = DiscoveryConfig(gate_params=GateParams(min_tpm=0.3, min_episodes=10))
+        rep = config_report(disc, None, None, ctx=_ctx(span_months=29))
+        assert "m1_is_window_too_short" in _codes(rep)
+        assert not rep.has_critical
+
     def test_m3_stricter_than_m1(self):
         disc = DiscoveryConfig(gate_params=GateParams(min_tpm=1.0))
         rd = RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=3.0))
@@ -961,3 +1008,50 @@ class TestM3CountsBarsNotEpisodes:
         what `TestThePresetScalesBothRates` already pins."""
         m1, m3 = self._rates(event_counting="bar")
         assert (m1, m3) == (3.0, pytest.approx(2.5))
+
+
+class TestPresetsDifferentiateMinEpisodes:
+    """#206 — `min_episodes` is now preset-parametrized, not a flat class
+    default: `sniper`/`balanced`/`burst` keep 10 (already coherent with their
+    own rate, or the point of the preset), `sweep` lowers it to 5 because it
+    is permissive by design and defers rigor to the RotationCalibrator.
+    """
+
+    def test_the_stock_values(self):
+        from forgedge.presets import forge_preset
+
+        for preset, expected in (("sniper", 10), ("balanced", 10),
+                                  ("sweep", 5), ("burst", 10)):
+            d, _a, _r = forge_preset(preset, "1D", asset="X")
+            assert d.gate_params.min_episodes == expected, preset
+
+    def test_an_explicit_override_still_wins(self):
+        from forgedge.presets import forge_preset
+
+        d, _a, _r = forge_preset("sweep", "1D", asset="X", min_episodes=8)
+        assert d.gate_params.min_episodes == 8
+
+    def test_not_scaled_by_timeframe(self):
+        """An absolute episode count, unlike `min_tpm` — the timeframe's own
+        effect on how long that takes is already carried by the rate."""
+        from forgedge.presets import forge_preset
+
+        for tf in ("1D", "4H", "1H", "15m"):
+            d, _a, _r = forge_preset("sweep", tf, asset="X")
+            assert d.gate_params.min_episodes == 5, tf
+
+    def test_sweeps_lower_floor_is_reachable_where_sniper_and_sweeps_old_floor_was_not(self):
+        """The measured point of lowering it: at 31 months of history `sweep`'s
+        own rate now clears `min_episodes=5` at 95% confidence (needs 30.8);
+        it did not before this issue, when both shared min_episodes=10 and
+        needed 53.3 months regardless of the span."""
+        from forgedge import config_report
+        from forgedge.presets import forge_preset
+
+        d, a, r = forge_preset("sweep", "1D", asset="X")
+        rep = config_report(d, a, r, ctx=_ctx(span_months=31))
+        assert "m1_is_window_too_short" not in _codes(rep)
+
+        d, a, r = forge_preset("sniper", "1D", asset="X")
+        rep = config_report(d, a, r, ctx=_ctx(span_months=31))
+        assert "m1_is_window_too_short" in _codes(rep)

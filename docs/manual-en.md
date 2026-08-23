@@ -692,6 +692,21 @@ signal is bad".
   Measured on the same fixture: fold pass rate 0.7% → 54.2%, OOS-stable
   candidates 0.5% → 52.4%, with the remaining failures attributed to rate and
   dispersion — the criteria that were always meant to decide.
+- **M1's discovery window** (`#206`, F1 one level up from the fold case above).
+  `min_episodes` is absolute and unrelated to `min_tpm`, so it implies an
+  in-sample *discovery* window too — the naive `min_episodes / min_tpm`
+  satisfies it only in expectation, #173's mistake recurring here. At
+  `"sniper"`'s stock rate (0.3 episodes/month) the window that actually
+  clears `min_episodes=10` with 95% confidence is 53.3 months (4.44 years),
+  not the "≥2 anni" the preset's own description used to claim before this
+  was measured. `config_report()`'s `m1_is_window_too_short` (WARN, not
+  FAIL — a candidate above the configured rate can still clear the floor on
+  less data) names the gap when the span is known. `min_episodes` is now
+  preset-parametrized rather than one flat default: `"sniper"` keeps 10
+  (statistical rigor is the point, so the description was corrected instead
+  of the floor), `"sweep"` — sharing `"sniper"`'s low rate but none of its
+  precision claim — lowers it to 5, consistent with being permissive by
+  design and already deferring rigor to the `RotationCalibrator` downstream.
 
 
 #### Entry mode — what the verdict measures
@@ -1109,7 +1124,7 @@ Every module accepts a dataclass carrying its knobs. This section covers the one
 | `max_dispersion` | `1.5` | maximum allowed Index of Dispersion (Var/Mean of monthly counts) — `"bar"` mode only; unread in `"episode"` mode (#205) |
 | `dispersion_margin` | `1.3` | `"episode"` mode only: multiplier over the Poisson χ² floor (`eff = margin x floor`), not an absolute ID — unread in `"bar"` mode (#205) |
 | `event_counting` | `"episode"` | `"episode"` counts maximal runs of consecutive activations; `"bar"` counts every individual bar (§15) |
-| `min_episodes` | `10` | absolute floor on episode count, `"episode"` mode only |
+| `min_episodes` | `10` | absolute floor on episode count, `"episode"` mode only — implies an in-sample discovery window depending on `min_tpm` too (`m1_is_window_too_short`, #206) |
 | `episode_gap` | `1` | max bar-gap that still belongs to the same episode |
 
 ### `AlphaConfig` (Module 2)
@@ -1167,7 +1182,7 @@ result = forge(kpi, ticker="ADAUSDC", timeframe="1D",
 | `"sweep"` | Wide, permissive search — designed to pair with `rotation_calibration=RotationConfig(k>=100)` and a `min_lift` filter downstream. |
 | `"burst"` | Time-concentrated events (regime-change, momentum). High dispersion explicitly tolerated. |
 
-`overrides` accepted by name: M1 side — `min_tpm`, `max_dispersion`, `dispersion_margin`, `max_and_components`, `timestamp_col`, `event_counting`; M2 side — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; M3 side — `rd_min_tpm`. An unrecognized override key raises `TypeError`.
+`overrides` accepted by name: M1 side — `min_tpm`, `max_dispersion`, `dispersion_margin`, `min_episodes`, `max_and_components`, `timestamp_col`, `event_counting`; M2 side — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; M3 side — `rd_min_tpm`. An unrecognized override key raises `TypeError`.
 
 ---
 
