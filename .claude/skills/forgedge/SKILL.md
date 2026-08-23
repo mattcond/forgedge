@@ -298,6 +298,20 @@ into a stopped run. Useful whenever you assemble configs by hand and want to
 know what will actually happen before spending a full pipeline run finding
 out.
 
+`config_report()` is blind to data by construction (it must resolve without a
+frame), so it cannot catch the case where a preset is internally coherent yet
+still rejects every candidate a *specific asset* actually produces — that
+used to surface only as a bare `"M1 Event Discovery — 0 candidate(s)"` log
+line with no diagnosis, easily mistaken for "the pipeline is broken" rather
+than "these thresholds and this asset's event statistics disagree" (#215).
+`EventDiscovery.event_distribution_report` (`str | None`, populated by
+`.run()`, `None` before) closes that gap: an always-computed diagnostic of
+the tpm/dispersion distribution actually observed across every raw
+candidate the gate evaluated, against the configured thresholds — below a
+15% gate-survival rate it also suggests concrete parameters at the observed
+median. `forge()`'s M1 stage line carries this text; `result.event_discovery
+.event_distribution_report` exposes it for code-level inspection.
+
 ## Common pitfalls
 
 1. **Passing the wrong frame to `AlphaDiscovery`.** When building the pipeline

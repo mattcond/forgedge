@@ -531,6 +531,34 @@ class TestForgeProgress:
         assert "M3 Rule Discovery" in err
         assert "done" in err
 
+    def test_m1_log_uses_event_distribution_report(self, kpi, caplog):
+        """#215 — the M1 stage line carries the distribution diagnostic, not a
+        bare count, whenever Event Discovery actually ran (not manual injection)."""
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="forgedge.forge"):
+            result = forge(
+                kpi,
+                event_discovery_config=_FAST_ED_CONFIG,
+                rule_discovery_config=_FAST_RD_CONFIG,
+            )
+        report = result.event_discovery.event_distribution_report
+        assert report is not None
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(report in m for m in msgs)
+
+    def test_manual_events_m1_log_is_bare_count(self, kpi, caplog):
+        """Manual event injection skips EventDiscovery.run() entirely (#215's
+        aggregation only exists there), so the M1 line keeps its original,
+        bare-count form instead of a distribution report."""
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="forgedge.forge"):
+            forge(kpi, manual_events=self._MANUAL, rule_discovery_config=_FAST_RD_CONFIG)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("M1 Event Discovery — 1 candidate(s)" in m for m in msgs)
+        assert not any("Consistency Gate (" in m for m in msgs)
+
 
 class TestWalkForwardConfigNaming:
     """The two ``WalkForwardConfig`` classes are distinct and both reachable.

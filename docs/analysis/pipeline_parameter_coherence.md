@@ -697,3 +697,20 @@ default `entry_mode="auto"` (the floor that actually binds there is `min_fill_ra
 What was left — `min_profit_factor`, `min_win_rate`, `min_pf_score_tpm`,
 `min_fill_rate_opt` — is exactly the economic-quality core with no existing chain pulling
 it in any direction, which is why it had stayed uniform by omission rather than by design.
+
+[#215](https://github.com/mattcond/forgedge/issues/215) is a different shape again from
+every entry above, and deliberately outside this plan's own Layer 2: every prior finding
+was config-vs-config — two resolved fields disagreeing with each other, catchable by
+`config_report()` because it never needs the data to see the contradiction. #215 is
+config-vs-*data*: `forge_preset("balanced", "1H")` on a real, bursty asset (SUIUSDC)
+produced zero candidates — every raw event either failed the rate floor or, of what
+remained, failed dispersion — while `config_report()` reported nothing wrong, because
+nothing *was* wrong at the config level; the preset's thresholds and the asset's actual
+event statistics simply disagreed, which is a fact about the data no resolver check can
+see without a frame. `config_report()` is blind to data by construction (§3's own
+derive/check split, restated for Layer 2), so this class of silent failure sits one level
+below invariant #9 and needed a different kind of fix: not a resolver check, but
+`EventDiscovery.event_distribution_report` — an always-computed, plain-text diagnostic of
+the tpm/dispersion distribution actually observed, populated by `run()` itself and carried
+by `forge()`'s M1 stage line in place of the old bare candidate count, with a median-based
+parameter suggestion appended below a 15% gate-survival rate.

@@ -19,6 +19,7 @@ from forgedge.event_discovery.discovery import MIN_FOLD_LAMBDA
 from forgedge.event_discovery.consistency_gate import (
     ConsistencyGate,
     _build_month_index,
+    _chi2_ppf_095,
     _count_by_month,
     _episode_starts,
     _monthly_counts,
@@ -1288,6 +1289,127 @@ class TestEventDiscoveryE2E:
         ids_sorted = {c.event_id for c in candidates_sorted}
         ids_shuffled = {c.event_id for c in candidates_shuffled}
         assert ids_sorted == ids_shuffled
+
+
+# ---------------------------------------------------------------------------
+# event_distribution_report (#215)
+# ---------------------------------------------------------------------------
+
+
+class TestEventDistributionReport:
+    """Tests for ``EventDiscovery.event_distribution_report`` (#215).
+
+    ``config_report()`` is blind to data by construction, so it can only
+    catch config-vs-config incoherence — never a preset that is internally
+    coherent yet still rejects every candidate a specific asset actually
+    produces.  This report is the always-computed diagnostic that closes
+    that gap: it aggregates the ``GateResult`` already attached to every
+    raw (pre-AND-composition) event, and — below a 15% gate-survival rate —
+    appends a concrete parameter suggestion at the observed median.
+    """
+
+    @pytest.fixture(scope="class")
+    def df_2000(self):
+        return _make_kpi_table(n=2000)
+
+    def test_none_before_run(self, df_2000):
+        ed = EventDiscovery(df_2000)
+        assert ed.event_distribution_report is None
+
+    def test_populated_after_run(self, df_2000):
+        ed = EventDiscovery(
+            df_2000, config=DiscoveryConfig(gate_params=GateParams(min_tpm=1.0, min_episodes=1))
+        )
+        ed.run()
+        report = ed.event_distribution_report
+        assert isinstance(report, str)
+        assert "M1 Event Discovery" in report
+        assert "Consistency Gate" in report
+
+    def test_populated_even_with_zero_candidates(self, df_2000):
+        """The whole point of #215: a report exists even when the gate
+        rejects every single candidate — the scenario that used to log only
+        a bare, uninformative '0 candidate(s)'."""
+        ed = EventDiscovery(
+            df_2000,
+            config=DiscoveryConfig(
+                gate_params=GateParams(min_tpm=1000.0, min_episodes=1000)
+            ),
+        )
+        candidates = ed.run()
+        assert len(candidates) == 0
+        report = ed.event_distribution_report
+        assert report is not None
+        assert "0 superano il Consistency Gate (0.0%)" in report
+
+    def test_median_stats_match_raw_events(self, df_2000):
+        """The reported tpm/dispersion medians are computed over ALL raw
+        events (including zero-activation ones), episode mode."""
+        cfg = DiscoveryConfig(gate_params=GateParams(min_tpm=1.0, min_episodes=1))
+        ed = EventDiscovery(df_2000, config=cfg)
+        ed.run()
+        raw = ed.raw_events
+        assert len(raw) > 0
+
+        _, n_months = _build_month_index(ed._timestamps)
+        expected_rate_median = float(
+            np.median([ev.gate_result.n_episodes / n_months for ev in raw])
+        )
+        dispersions = [
+            ev.gate_result.episode_index_of_dispersion for ev in raw
+            if ev.gate_result.episode_index_of_dispersion == ev.gate_result.episode_index_of_dispersion
+        ]
+        expected_disp_median = float(np.median(dispersions))
+
+        assert f"mediana={expected_rate_median:.2f}" in ed.event_distribution_report
+        assert f"mediana={expected_disp_median:.2f}" in ed.event_distribution_report
+
+    def test_low_survival_hint_fires_with_correct_suggestion(self, df_2000):
+        """Below 15% gate-survival, the report suggests min_tpm/dispersion_margin
+        at the observed median (#215 point 5), episode mode."""
+        cfg = DiscoveryConfig(
+            gate_params=GateParams(min_tpm=50.0, dispersion_margin=1.0, min_episodes=1)
+        )
+        ed = EventDiscovery(df_2000, config=cfg)
+        candidates = ed.run()
+        raw = ed.raw_events
+        survival = len([e for e in raw if e.gate_result.passed]) / len(raw)
+        assert survival < 0.15, "fixture must actually exercise the low-survival branch"
+
+        report = ed.event_distribution_report
+        assert "Meno del 15% dei candidati generati supera il Consistency Gate" in report
+        assert "min_tpm<=" in report
+        assert "dispersion_margin>=" in report
+        assert "max_dispersion>=" not in report
+
+    def test_high_survival_has_no_hint(self, df_2000):
+        cfg = DiscoveryConfig(
+            gate_params=GateParams(min_tpm=0.1, dispersion_margin=10.0, min_episodes=1)
+        )
+        ed = EventDiscovery(df_2000, config=cfg)
+        ed.run()
+        raw = ed.raw_events
+        survival = len([e for e in raw if e.gate_result.passed]) / len(raw)
+        assert survival >= 0.15, "fixture must actually exercise the high-survival branch"
+        assert "Prova questi parametri" not in ed.event_distribution_report
+
+    def test_bar_mode_hint_suggests_max_dispersion(self, df_2000):
+        """In 'bar' mode the second suggested field is the absolute
+        max_dispersion, not the episode-mode-only dispersion_margin (#205)."""
+        cfg = DiscoveryConfig(
+            gate_params=GateParams(
+                min_tpm=50.0, max_dispersion=0.1, event_counting="bar"
+            )
+        )
+        ed = EventDiscovery(df_2000, config=cfg)
+        candidates = ed.run()
+        raw = ed.raw_events
+        survival = len([e for e in raw if e.gate_result.passed]) / len(raw)
+        assert survival < 0.15, "fixture must actually exercise the low-survival branch"
+
+        report = ed.event_distribution_report
+        assert "max_dispersion>=" in report
+        assert "dispersion_margin>=" not in report
 
 
 # ---------------------------------------------------------------------------
