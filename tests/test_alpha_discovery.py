@@ -445,9 +445,17 @@ class TestAlphaDiscoveryEndToEnd:
 # ---------------------------------------------------------------------------
 
 class TestPromotionGates:
-    def test_raw_pvalue_mode_is_more_permissive_than_fdr(self):
+    @pytest.fixture(scope="class")
+    def shared(self):
+        """Candidates depend only on the input table, not on AlphaConfig, and
+        every test below builds its own AlphaDiscovery/AlphaConfig — sharing
+        (df, cands) is safe (mirrors TestAlphaDiscoveryEndToEnd.fitted)."""
         df = _predictive_kpi_table()
         _, cands = _make_candidates(df)
+        return df, cands
+
+    def test_raw_pvalue_mode_is_more_permissive_than_fdr(self, shared):
+        df, cands = shared
 
         fdr = AlphaDiscovery(df.copy(), cands, AlphaConfig(
             thresholds=PromotionThresholds(use_fdr=True, fdr_q=0.05)))
@@ -456,11 +464,10 @@ class TestPromotionGates:
         fdr.run(); raw.run()
         assert len(raw.promoted_contracts()) >= len(fdr.promoted_contracts())
 
-    def test_strict_thresholds_become_diagnostics(self):
+    def test_strict_thresholds_become_diagnostics(self, shared):
         """Strict IC/lift/Cohen's d thresholds are non-blocking: all directed
         contracts are promoted but carry diagnostic notes."""
-        df = _predictive_kpi_table()
-        _, cands = _make_candidates(df)
+        df, cands = shared
         ad = AlphaDiscovery(df.copy(), cands, AlphaConfig(
             thresholds=PromotionThresholds(min_lift=0.95, min_cohens_d=5.0)))
         ad.run()
@@ -477,21 +484,19 @@ class TestPromotionGates:
             "[diagnostic]" in d for c in directed for d in c.diagnostics
         )
 
-    def test_train_ratio_one_disables_oos(self):
+    def test_train_ratio_one_disables_oos(self, shared):
         """With no held-out tail there is no OOS validation — contracts carry
         ``oos_validation=None`` and the OOS gate is skipped."""
-        df = _predictive_kpi_table()
-        _, cands = _make_candidates(df)
+        df, cands = shared
         ad = AlphaDiscovery(df.copy(), cands, AlphaConfig(train_ratio=1.0))
         contracts = ad.run()
         assert all(c.oos_validation is None for c in contracts)
         assert ad.promoted_contracts()  # promotion still possible
 
-    def test_impossible_oos_threshold_is_diagnostic_only(self):
+    def test_impossible_oos_threshold_is_diagnostic_only(self, shared):
         """oos_max_p=0 makes every OOS confirmation fail; with non-blocking
         design, all directed contracts are still promoted but carry OOS notes."""
-        df = _predictive_kpi_table()
-        _, cands = _make_candidates(df)
+        df, cands = shared
         ad = AlphaDiscovery(df.copy(), cands, AlphaConfig(
             thresholds=PromotionThresholds(oos_max_p=0.0)))
         ad.run()
@@ -575,12 +580,21 @@ class TestRegimeSensitivity:
 # ---------------------------------------------------------------------------
 
 class TestNoRecompute:
-    def test_events_come_from_stored_series_not_apply(self, monkeypatch):
+    @pytest.fixture(scope="class")
+    def shared(self):
+        """(df, ed, cands) depend only on the input table.  Every test below
+        either only reads ``cands`` or explicitly deep-copies before mutating
+        (see test_apply_fallback_when_series_missing), so sharing the build is
+        safe (mirrors TestAlphaDiscoveryEndToEnd.fitted)."""
+        df = _predictive_kpi_table()
+        ed, cands = _make_candidates(df)
+        return df, ed, cands
+
+    def test_events_come_from_stored_series_not_apply(self, shared, monkeypatch):
         """Fast path: when the observed candles are identical to the event's
         (the sequential ``ed.df`` case), the cached ``event_series`` is reused
         verbatim and ``EventCandidate.apply`` must never run."""
-        df = _predictive_kpi_table()
-        ed, cands = _make_candidates(df)
+        _, ed, cands = shared
         assert all(c.event_series is not None for c in cands)
 
         def _boom(self, frame):
@@ -593,10 +607,9 @@ class TestNoRecompute:
         contracts = ad.run()
         assert len(contracts) == len(cands)
 
-    def test_features_read_from_table_when_present(self, monkeypatch):
+    def test_features_read_from_table_when_present(self, shared, monkeypatch):
         """With ed.df as input every feature column exists — no replay needed."""
-        df = _predictive_kpi_table()
-        ed, cands = _make_candidates(df)
+        _, ed, cands = shared
 
         import forgedge.alpha_discovery.discovery as disc
 
@@ -612,11 +625,11 @@ class TestNoRecompute:
         contracts = ad.run()
         assert len(contracts) == len(cands)
 
-    def test_apply_fallback_when_series_missing(self):
+    def test_apply_fallback_when_series_missing(self, shared):
         """Candidates serialised without event_series still work via replay."""
-        df = _predictive_kpi_table()
-        ed, cands = _make_candidates(df)
-        stripped = cands[:5]
+        import copy
+        _, ed, cands = shared
+        stripped = copy.deepcopy(cands[:5])
         assert stripped, "fixture must yield at least one candidate"
         for c in stripped:
             c.event_series = None
@@ -625,11 +638,10 @@ class TestNoRecompute:
         contracts = ad.run()
         assert len(contracts) == len(stripped)
 
-    def test_activation_counts_match_event_discovery(self):
+    def test_activation_counts_match_event_discovery(self, shared):
         """The activations Alpha Discovery sees are Event Discovery's, bar for
         bar, restricted to the in-sample window."""
-        df = _predictive_kpi_table()
-        ed, cands = _make_candidates(df)
+        df, ed, cands = shared
         ad = AlphaDiscovery(ed.df, cands, AlphaConfig())
         ad.run()
         split = ad.split_idx
@@ -1421,19 +1433,26 @@ class TestRejectionReasonsVsDiagnostics:
     named *rejection reasons* consisting almost entirely of non-rejections.
     """
 
-    def test_promoted_contracts_carry_no_rejection_reasons(self):
+    @pytest.fixture(scope="class")
+    def shared_noise(self):
+        """Candidates depend only on the input table, not on AlphaConfig — the
+        three tests below build their own AlphaDiscovery, so sharing (df,
+        cands) is safe (mirrors TestAlphaDiscoveryEndToEnd.fitted)."""
         df = _predictive_kpi_table(include_noise=True)
         _, cands = _make_candidates(df)
+        return df, cands
+
+    def test_promoted_contracts_carry_no_rejection_reasons(self, shared_noise):
+        df, cands = shared_noise
         contracts = AlphaDiscovery(df.copy(), cands, AlphaConfig()).run()
 
         promoted = [c for c in contracts if c.promoted]
         assert promoted
         assert all(not c.rejection_reasons for c in promoted)
 
-    def test_undirected_contracts_carry_the_blocking_reason(self):
+    def test_undirected_contracts_carry_the_blocking_reason(self, shared_noise):
         """The only blocking cause is an underivable direction."""
-        df = _predictive_kpi_table(include_noise=True)
-        _, cands = _make_candidates(df)
+        df, cands = shared_noise
         contracts = AlphaDiscovery(df.copy(), cands, AlphaConfig()).run()
 
         rejected = [c for c in contracts if not c.promoted]
@@ -1441,9 +1460,8 @@ class TestRejectionReasonsVsDiagnostics:
             assert c.rejection_reasons
             assert all("no derivable target" in r for r in c.rejection_reasons)
 
-    def test_diagnostics_are_populated_and_unprefixed(self):
-        df = _predictive_kpi_table(include_noise=True)
-        _, cands = _make_candidates(df)
+    def test_diagnostics_are_populated_and_unprefixed(self, shared_noise):
+        df, cands = shared_noise
         contracts = AlphaDiscovery(
             df.copy(), cands,
             AlphaConfig(thresholds=PromotionThresholds(min_lift=0.95, min_cohens_d=5.0)),

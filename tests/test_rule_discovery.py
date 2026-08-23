@@ -645,6 +645,7 @@ class TestScoring:
 # ---------------------------------------------------------------------------
 
 class TestRangeOfAction:
+    pytestmark = pytest.mark.slow
     def test_envelope_brackets_performance(self):
         df = _candle_with_signal(n=4000, signal_every=40, drift_after_signal=0.06)
         params = BacktestParams(buy_drop_pct=0.005, sell_pct=0.03, target_h=24)
@@ -983,6 +984,7 @@ def _market_edge_kpi_table(n=9000, seed=3, drift=0.05, span=12, sigma=0.009,
 
 
 class TestEndToEnd:
+    pytestmark = pytest.mark.slow
     @pytest.fixture(scope="class")
     def pipeline(self):
         df = _predictive_kpi_table()
@@ -1297,6 +1299,7 @@ class TestEntryAdoption:
     synthetic reverts too weakly for the market baseline to clear the gates, so
     Stage 2 never ran on it and the criterion could not be observed at all.
     """
+    pytestmark = pytest.mark.slow
 
     @pytest.fixture(scope="class")
     def pipeline(self):
@@ -1436,6 +1439,7 @@ class TestEntryAdoption:
 
 class TestWalkForwardSelection:
     """§3.4 — the operating point is selected inside WF train windows only."""
+    pytestmark = pytest.mark.slow
 
     @pytest.fixture(scope="class")
     def pipeline(self):
@@ -1521,6 +1525,7 @@ class TestPowerGate:
     OOS evidence cannot support them.  The gate never reads per-window counts:
     walk-forward windows are short by design and are not individually gated.
     """
+    pytestmark = pytest.mark.slow
 
     @pytest.fixture(scope="class")
     def pipeline(self):
@@ -1626,6 +1631,7 @@ class TestPowerGate:
 
 class TestSearchLevelGates:
     """Level-0/1 verdict gates: rotation-null p and honest DSR degradation."""
+    pytestmark = pytest.mark.slow
 
     @pytest.fixture(scope="class")
     def pipeline(self):
@@ -1701,6 +1707,7 @@ class TestSearchLevelGates:
 
 
 class TestConfig:
+    pytestmark = pytest.mark.slow
     def test_contract_target_seeds_params(self):
         df = _predictive_kpi_table(n=6000)
         ed = EventDiscovery(df.copy(), DiscoveryConfig(timestamp_col="open_dt"))

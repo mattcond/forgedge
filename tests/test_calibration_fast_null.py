@@ -41,6 +41,7 @@ def _run_pipeline(df):
 
 
 class TestFastRotationNull:
+    pytestmark = pytest.mark.slow
     @pytest.fixture(scope="class")
     def signal_pipeline(self):
         """Planted edge: the feature genuinely predicts the next-bar return."""

@@ -70,6 +70,8 @@ def _ohlc_kpi_table(n: int = 2600, seed: int = 7) -> pd.DataFrame:
 
 
 class TestForge:
+    pytestmark = pytest.mark.slow
+
     @pytest.fixture(scope="class")
     @classmethod
     def kpi(cls):
@@ -206,6 +208,7 @@ class TestForgeTimeframeScaledHorizons:
     resolver derives it on every path, so the substitution — and the warning
     that stood in for it on the other path — are both gone.
     """
+    pytestmark = pytest.mark.slow
 
     @staticmethod
     def _daily_kpi(n: int = 1000) -> pd.DataFrame:
@@ -271,6 +274,7 @@ class TestForgeTimeframeScaledHorizons:
 
 class TestForgeFastNullAndLedger:
     """Default fast rotation null + hypothesis ledger wiring."""
+    pytestmark = pytest.mark.slow
 
     @pytest.fixture(scope="class")
     def result(self):
@@ -328,9 +332,15 @@ class TestForgeFastNullAndLedger:
 
 class TestForgeGradeFilter:
     """rule_discovery_grades restricts which alphas reach Rule Discovery."""
+    pytestmark = pytest.mark.slow
 
-    def test_filter_limits_rule_discovery_to_selected_grades(self):
-        kpi = _ohlc_kpi_table()
+    @pytest.fixture(scope="class")
+    def kpi(self):
+        """forge() is a pure function of its inputs (never mutates the KPI
+        table), so the identical default table below is safe to share."""
+        return _ohlc_kpi_table()
+
+    def test_filter_limits_rule_discovery_to_selected_grades(self, kpi):
         # Baseline: every promoted contract is backtested.
         baseline = forge(
             kpi,
@@ -365,8 +375,7 @@ class TestForgeGradeFilter:
         for contract, _ in filtered.rule_responses:
             assert contract.alpha_score.grade in keep
 
-    def test_filter_is_case_insensitive(self):
-        kpi = _ohlc_kpi_table()
+    def test_filter_is_case_insensitive(self, kpi):
         result = forge(
             kpi,
             asset="TEST",
@@ -379,8 +388,7 @@ class TestForgeGradeFilter:
         # Every grade accepted (any case) ⇒ same as no filter.
         assert len(result.rule_responses) == len(result.promoted)
 
-    def test_empty_grade_set_skips_all_rule_discovery(self):
-        kpi = _ohlc_kpi_table()
+    def test_empty_grade_set_skips_all_rule_discovery(self, kpi):
         result = forge(
             kpi,
             asset="TEST",
@@ -397,6 +405,7 @@ class TestForgeGradeFilter:
 
 
 class TestForgeMulti:
+    pytestmark = pytest.mark.slow
     def test_pools_tickers_into_one_cross_ticker_registry(self):
         frames = {
             "BTCUSDC": _ohlc_kpi_table(seed=7),
@@ -423,10 +432,16 @@ class TestForgeMulti:
 
 class TestForgeManualEvents:
     """Custom Event Injection — forge(manual_events=...) (issue #77)."""
+    pytestmark = pytest.mark.slow
 
-    def test_mutual_exclusion_raises(self):
+    @pytest.fixture(scope="class")
+    def kpi(self):
+        """forge() is a pure function of its inputs (never mutates the KPI
+        table), so the identical default table below is safe to share."""
+        return _ohlc_kpi_table()
+
+    def test_mutual_exclusion_raises(self, kpi):
         """Passing both manual_events and event_discovery_config → ValueError."""
-        kpi = _ohlc_kpi_table()
         with pytest.raises(ValueError, match="mutually exclusive"):
             forge(
                 kpi,
@@ -434,9 +449,8 @@ class TestForgeManualEvents:
                 event_discovery_config=_FAST_ED_CONFIG,
             )
 
-    def test_manual_event_end_to_end(self):
+    def test_manual_event_end_to_end(self, kpi):
         """forge(manual_events=[...]) skips M1 and runs M2/M3 on the injected event."""
-        kpi = _ohlc_kpi_table()
         result = forge(
             kpi,
             asset="TEST",
@@ -456,11 +470,10 @@ class TestForgeManualEvents:
         assert len(result.contracts) == 1
         assert result.alpha_discovery is not None
 
-    def test_gate_failure_does_not_block(self, caplog):
+    def test_gate_failure_does_not_block(self, kpi, caplog):
         """An event that fails the Consistency Gate still reaches M2, with a warning."""
         import logging
 
-        kpi = _ohlc_kpi_table()
         # An almost-never-true formula fails the gate's volume criterion.
         with caplog.at_level(logging.WARNING, logger="forgedge.forge"):
             result = forge(
@@ -477,21 +490,26 @@ class TestForgeManualEvents:
 
 class TestForgeProgress:
     """Status logging and the optional stderr progress output."""
+    pytestmark = pytest.mark.slow
 
     _MANUAL = [CustomEvent("feat < 0.4", name="feat_low")]
 
-    def test_logs_stage_milestones_at_info(self, caplog):
+    @pytest.fixture(scope="class")
+    def kpi(self):
+        """forge() is a pure function of its inputs (never mutates the KPI
+        table), so the identical default table below is safe to share."""
+        return _ohlc_kpi_table()
+
+    def test_logs_stage_milestones_at_info(self, kpi, caplog):
         import logging
 
-        kpi = _ohlc_kpi_table()
         with caplog.at_level(logging.INFO, logger="forgedge.forge"):
             forge(kpi, manual_events=self._MANUAL, rule_discovery_config=_FAST_RD_CONFIG)
         msgs = [r.getMessage() for r in caplog.records]
         for needle in ("M0 Market Context", "M2 Alpha Discovery", "M3 Rule Discovery", "done"):
             assert any(needle in m for m in msgs), needle
 
-    def test_progress_false_is_silent_on_stderr(self, capsys):
-        kpi = _ohlc_kpi_table()
+    def test_progress_false_is_silent_on_stderr(self, kpi, capsys):
         forge(
             kpi,
             manual_events=self._MANUAL,
@@ -500,8 +518,7 @@ class TestForgeProgress:
         )
         assert "[forge" not in capsys.readouterr().err
 
-    def test_progress_true_prints_stages_to_stderr(self, capsys):
-        kpi = _ohlc_kpi_table()
+    def test_progress_true_prints_stages_to_stderr(self, kpi, capsys):
         forge(
             kpi,
             ticker="BTCUSDC",
@@ -579,6 +596,7 @@ class TestForgeResolution:
     schema chosen on one module reaches the others — and the trace makes the
     decision auditable after the fact, next to ``ledger.describe()``.
     """
+    pytestmark = pytest.mark.slow
 
     def test_result_carries_the_context_and_the_trace(self):
         # `_ohlc_kpi_table` is 4H-spaced, and since #179 declaring anything
