@@ -392,6 +392,8 @@ Internamente, il classificatore di default (`EMAProxyClassifier`) calcola `ratio
 
 **Nulla in questi cinque step legge un rendimento forward.** Questo è il singolo fatto più importante su questo modulo.
 
+**`event_distribution_report` (#215).** `config_report()` (§9, §11) valida la coerenza della configurazione senza mai toccare i tuoi dati — quindi non può accorgersi del caso in cui un preset sia internamente coerente ma rigetti comunque ogni candidato che uno *specifico asset* produce davvero. Finora questo si manifestava solo con un log spoglio `"M1 Event Discovery — 0 candidate(s)"`, facile da scambiare per una pipeline rotta invece che per "queste soglie e le statistiche degli eventi di questo asset sono in disaccordo." `EventDiscovery.run()` ora popola sempre `ed.event_distribution_report` (`str | None`, `None` prima di `.run()`): un riepilogo testuale della distribuzione di tpm/dispersione osservata su ogni candidato grezzo valutato dal Consistency Gate, confrontata con le soglie configurate. Sotto un tasso di sopravvivenza al gate del 15% suggerisce anche parametri concreti alla mediana osservata (`min_tpm`, più `dispersion_margin` o `max_dispersion` a seconda di `event_counting`). La riga di stage M1 di `forge()` porta questo testo ogni volta che Event Discovery viene eseguito davvero (l'iniezione manuale via `manual_events=` salta `.run()` del tutto, quindi mantiene la vecchia riga col solo conteggio); `result.event_discovery.event_distribution_report` lo espone senza costo aggiuntivo.
+
 ### Modulo 2 — Alpha Discovery
 
 Data la lista di candidati dal Modulo 1, e *per la prima volta nella pipeline*, questo modulo legge il percorso futuro del prezzo. Per ogni candidato evento:

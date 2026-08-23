@@ -10,11 +10,13 @@ Usage
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from ..timebudget import TimeBudget
@@ -22,7 +24,12 @@ from ..unset import UNSET
 from ..resolver import resolve_config
 from .and_composer import ANDComposer
 from .classifier import TypeClassifier
-from .consistency_gate import ConsistencyGate, _build_month_index, _monthly_counts
+from .consistency_gate import (
+    ConsistencyGate,
+    _build_month_index,
+    _chi2_ppf_095,
+    _monthly_counts,
+)
 from .diversity_gate import apply_diversity_gate
 from .event_generator import EventGenerator
 from .feature_generator import FeatureGenerator
@@ -39,6 +46,12 @@ from .models import (
     EventWalkForwardConfig,
 )
 from .transform_layer import TransformLayer
+
+logger = logging.getLogger(__name__)
+
+#: Below this fraction of raw candidates surviving the Consistency Gate,
+#: ``event_distribution_report`` appends a parameter suggestion (#215).
+_LOW_SURVIVAL_THRESHOLD = 0.15
 
 
 @dataclass
@@ -162,6 +175,7 @@ class EventDiscovery:
         self._timestamps: Optional[pd.Series] = None
         self._split_idx: int = 0
         self._raw_events: Optional[list[RawEvent]] = None
+        self.event_distribution_report: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -309,6 +323,11 @@ class EventDiscovery:
 
         all_passing = passing_single + passing_composed
 
+        self.event_distribution_report = self._build_event_distribution_report(
+            raw_events, passing_single, timestamps, cfg
+        )
+        logger.info(self.event_distribution_report)
+
         # Build EventCandidate objects
         candidates = [
             self._to_candidate(ev, idx, timestamps)
@@ -328,6 +347,98 @@ class EventDiscovery:
 
         self._candidates = candidates
         return candidates
+
+    def _build_event_distribution_report(
+        self,
+        raw_events: list[RawEvent],
+        passing_single: list[RawEvent],
+        timestamps: pd.Series,
+        cfg: "DiscoveryConfig",
+    ) -> str:
+        """Build the always-computed M1 candidate-distribution diagnostic (#215).
+
+        ``config_report()`` is blind to data by construction (it must resolve
+        without a frame), so it can only catch config-vs-config incoherence —
+        never config-vs-real-candidate-statistics incoherence.  A preset can
+        be internally coherent and still reject every candidate a specific
+        asset actually produces, and nothing said so until now: the M1 stage
+        log line only reported a bare count.  This aggregates the
+        ``GateResult`` already attached to every raw (pre-AND-composition)
+        event by ``ConsistencyGate.filter`` — no new data pass, no opt-out
+        needed (negligible cost even on ``_MAX_PAIRS``-bounded batch runs).
+
+        Below a 15% gate-survival rate it also appends a concrete parameter
+        suggestion at the observed median on both measures, styled like the
+        resolver's own ``Constraint`` checks (state the measured fact with
+        numbers, then the fix with numbers).
+        """
+        params = cfg.gate_params
+        n_raw = len(raw_events)
+        n_passed = len(passing_single)
+        if n_raw == 0:
+            return "M1 Event Discovery — 0 candidati generati (nessuna feature/evento producibile)."
+
+        _, n_total_months = _build_month_index(timestamps)
+        episode_mode = params.event_counting == "episode"
+
+        if episode_mode:
+            poisson_floor = (
+                _chi2_ppf_095(n_total_months - 1) / (n_total_months - 1)
+                if n_total_months > 1 else 0.0
+            )
+            eff_dispersion_threshold = poisson_floor * params.dispersion_margin
+            rates = np.array([
+                ev.gate_result.n_episodes / n_total_months if n_total_months > 0 else 0.0
+                for ev in raw_events
+            ])
+            dispersions = np.array([
+                ev.gate_result.episode_index_of_dispersion for ev in raw_events
+            ])
+        else:
+            poisson_floor = 0.0
+            eff_dispersion_threshold = params.max_dispersion
+            rates = np.array([ev.gate_result.mean_tpm for ev in raw_events])
+            dispersions = np.array([ev.gate_result.index_of_dispersion for ev in raw_events])
+
+        valid_dispersions = dispersions[~np.isnan(dispersions)]
+        rate_p50 = float(np.median(rates))
+        rate_below_pct = float((rates < params.min_tpm).mean() * 100.0)
+        has_dispersion = len(valid_dispersions) > 0
+        disp_p50 = float(np.median(valid_dispersions)) if has_dispersion else float("nan")
+        disp_above_pct = (
+            float((valid_dispersions > eff_dispersion_threshold).mean() * 100.0)
+            if has_dispersion else 0.0
+        )
+
+        survival_pct = n_passed / n_raw * 100.0
+        lines = [
+            f"M1 Event Discovery — {n_raw} candidati generati, {n_passed} superano il "
+            f"Consistency Gate ({survival_pct:.1f}%).",
+            f"tpm osservato: mediana={rate_p50:.2f} "
+            f"(soglia min_tpm={params.min_tpm}, {rate_below_pct:.1f}% sotto soglia).",
+        ]
+        if has_dispersion:
+            lines.append(
+                f"dispersione osservata: mediana={disp_p50:.2f} "
+                f"(soglia effettiva={eff_dispersion_threshold:.2f}, "
+                f"{disp_above_pct:.1f}% sopra soglia)."
+            )
+
+        if survival_pct < _LOW_SURVIVAL_THRESHOLD * 100.0:
+            suggestion = f"min_tpm<={rate_p50:.2f}"
+            if has_dispersion:
+                if episode_mode and poisson_floor > 0:
+                    suggestion += f", dispersion_margin>={disp_p50 / poisson_floor:.2f}"
+                elif not episode_mode:
+                    suggestion += f", max_dispersion>={disp_p50:.2f}"
+            lines.append(
+                f"Meno del 15% dei candidati generati supera il Consistency Gate "
+                f"({n_passed}/{n_raw} = {survival_pct:.1f}%).\n"
+                f"Prova questi parametri (mediana osservata su tpm e dispersione): "
+                f"{suggestion}."
+            )
+
+        return "\n".join(lines)
 
     def get_classifications(self) -> Optional[dict]:
         """Return the column classifications from Step 0.

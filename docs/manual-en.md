@@ -392,6 +392,8 @@ This is a five-step internal pipeline (`EventDiscovery.run()`), and it's worth k
 
 **Nothing in these five steps reads a forward return.** That is the single most important fact about this module.
 
+**`event_distribution_report` (#215).** `config_report()` (§9, §11) validates configuration coherence without ever touching your data — so it cannot catch the case where a preset is internally coherent yet still rejects every candidate a *specific asset* actually produces. That used to surface only as a bare `"M1 Event Discovery — 0 candidate(s)"` log line, easy to mistake for a broken pipeline rather than "these thresholds and this asset's event statistics disagree." `EventDiscovery.run()` now always populates `ed.event_distribution_report` (`str | None`, `None` before `.run()`): a plain-text summary of the tpm/dispersion distribution actually observed across every raw candidate the Consistency Gate evaluated, against the configured thresholds. Below a 15% gate-survival rate it also suggests concrete parameters at the observed median (`min_tpm`, plus `dispersion_margin` or `max_dispersion` depending on `event_counting`). `forge()`'s M1 stage line carries this text whenever Event Discovery actually ran (manual event injection via `manual_events=` skips `.run()` entirely, so keeps the old bare-count line); `result.event_discovery.event_distribution_report` exposes it at no extra cost.
+
 ### Module 2 — Alpha Discovery
 
 Given the candidate list from Module 1, and *for the first time in the pipeline*, this module reads the forward price path. Per event candidate:

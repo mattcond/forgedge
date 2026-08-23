@@ -628,7 +628,10 @@ def forge(
         )
         candidates = ed.run()
         alpha_frame = ed.df
-    report.stage(f"M1 Event Discovery — {len(candidates)} candidate(s)")
+    if ed is not None and ed.event_distribution_report is not None:
+        report.stage(ed.event_distribution_report)
+    else:
+        report.stage(f"M1 Event Discovery — {len(candidates)} candidate(s)")
 
     alpha_candidates = candidates
     if only_validated_events:

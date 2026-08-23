@@ -407,7 +407,29 @@ EventDiscovery(kpi_table: pd.DataFrame, config: DiscoveryConfig | None = None,
 ed.run() -> list[EventCandidate]
 ed.df           # post-pipeline frame with derived features — pass this to AlphaDiscovery, not kpi_table
 ed.summary()    # pd.DataFrame, one row per candidate
+ed.event_distribution_report   # str | None — populated by run(), see below
 ```
+
+`event_distribution_report` (#215) — an always-computed, plain-text diagnostic
+populated inside `run()` itself (`None` before). `config_report()` is blind to
+data by construction (it must resolve without a frame), so it can only catch
+config-vs-config incoherence — never a preset that is internally coherent yet
+still rejects every candidate a specific asset actually produces, which used
+to surface only as a bare `"M1 Event Discovery — 0 candidate(s)"` log line
+with no diagnosis. This aggregates the `GateResult` already attached to every
+raw (pre-AND-composition) event by the Consistency Gate — no new data pass —
+into the observed tpm/dispersion median and the share failing each criterion,
+against the configured thresholds (`eff_max_dispersion =
+poisson_floor(n_months) x dispersion_margin` in `"episode"` mode, raw
+`max_dispersion` in `"bar"` mode). Below a 15% gate-survival rate it also
+appends a concrete parameter suggestion at the observed median on both
+measures (`min_tpm<=...`, plus `dispersion_margin>=...` or `max_dispersion>=
+...` depending on `event_counting`). `forge()`'s M1 stage line uses this text
+in place of the old bare count whenever Event Discovery actually ran (manual
+event injection via `manual_events=` skips `EventDiscovery.run()` entirely, so
+that path keeps the bare-count line); `result.event_discovery
+.event_distribution_report` exposes it for code-level inspection at no extra
+cost, since the `EventDiscovery` instance is already retained on `ForgeResult`.
 
 `DiscoveryConfig` fields and defaults (`src/forgedge/event_discovery/discovery.py`):
 `gate_params: GateParams = GateParams()`, `max_categorical_classes: int = 20`,
