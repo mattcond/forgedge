@@ -694,6 +694,22 @@ indistinguibile da «il segnale è brutto».
   Misurato sulla stessa fixture: pass rate dei fold da 0.7 % a 54.2 %, candidati
   OOS-stabili da 0.5 % a 52.4 %, con i fallimenti residui attribuiti a tasso e
   dispersione — i criteri che avrebbero sempre dovuto decidere.
+- **La finestra di discovery di M1** (`#206`, F1 un livello sopra il caso del
+  fold appena visto). `min_episodes` è assoluto e indipendente da `min_tpm`,
+  quindi implica anch'esso una finestra di discovery in-sample — il naive
+  `min_episodes / min_tpm` la soddisfa solo in aspettativa, l'errore di #173
+  che ricompare qui. Al tasso di default di `"sniper"` (0.3 episodi/mese) la
+  finestra che raggiunge `min_episodes=10` con confidenza al 95 % è di 53.3
+  mesi (4.44 anni), non i "≥2 anni" che la descrizione del preset dichiarava
+  prima di questa misura. `m1_is_window_too_short` di `config_report()`
+  (WARN, non FAIL — un candidato sopra il tasso configurato può comunque
+  superare il floor su meno storia) segnala il gap quando lo span è noto.
+  `min_episodes` è ora differenziato per preset invece di un unico default
+  fisso: `"sniper"` tiene 10 (il rigore statistico è lo scopo del preset,
+  quindi si è corretta la descrizione, non il floor), `"sweep"` — che
+  condivide il tasso basso di `"sniper"` ma non la sua promessa di
+  precisione — lo abbassa a 5, coerente con l'essere permissivo per design e
+  delegare già il rigore al `RotationCalibrator` a valle.
 
 
 #### Modalità d'ingresso — cosa misura il verdetto
@@ -1119,7 +1135,7 @@ Ogni modulo accetta una dataclass che porta i suoi parametri. Questa sezione cop
 | `max_dispersion` | `1.5` | massimo Index of Dispersion consentito (Var/Mean dei conteggi mensili) — solo modalità `"bar"`; non letto in modalità `"episode"` (#205) |
 | `dispersion_margin` | `1.3` | solo modalità `"episode"`: moltiplicatore sopra il floor χ² di Poisson (`eff = margine × floor`), non un ID assoluto — non letto in modalità `"bar"` (#205) |
 | `event_counting` | `"episode"` | `"episode"` conta run massimali di attivazioni consecutive; `"bar"` conta ogni singola barra (§15) |
-| `min_episodes` | `10` | floor assoluto sul conteggio di episodi, solo modalità `"episode"` |
+| `min_episodes` | `10` | floor assoluto sul conteggio di episodi, solo modalità `"episode"` — implica una finestra di discovery in-sample che dipende anche da `min_tpm` (`m1_is_window_too_short`, #206) |
 | `episode_gap` | `1` | gap massimo in barre che appartiene ancora allo stesso episodio |
 
 ### `AlphaConfig` (Modulo 2)
@@ -1177,7 +1193,7 @@ result = forge(kpi, ticker="ADAUSDC", timeframe="1D",
 | `"sweep"` | Ricerca ampia e permissiva — progettata per abbinarsi a `rotation_calibration=RotationConfig(k>=100)` e a un filtro `min_lift` a valle. |
 | `"burst"` | Eventi concentrati nel tempo (cambio di regime, momentum). Alta dispersione esplicitamente tollerata. |
 
-Override accettati per nome: lato M1 — `min_tpm`, `max_dispersion`, `dispersion_margin`, `max_and_components`, `timestamp_col`, `event_counting`; lato M2 — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; lato M3 — `rd_min_tpm`. Una chiave di override non riconosciuta solleva `TypeError`.
+Override accettati per nome: lato M1 — `min_tpm`, `max_dispersion`, `dispersion_margin`, `min_episodes`, `max_and_components`, `timestamp_col`, `event_counting`; lato M2 — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; lato M3 — `rd_min_tpm`. Una chiave di override non riconosciuta solleva `TypeError`.
 
 ---
 

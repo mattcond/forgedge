@@ -171,6 +171,27 @@ def stage_rates() -> None:
     print("  of them (#205). dispersion_margin expresses the tolerance as slack *above*")
     print("  the floor instead, which the floor mechanism can no longer swallow.")
 
+    print("\n  #206 — min_episodes is absolute, so the IS window it needs depends")
+    print("  on the rate too, the same shape as F1 one level up (discovery, not a fold):")
+    print(f"  {'preset':>9}  {'rate (ep/mo)':>13}  {'min_episodes':>13}  "
+          f"{'window @ 95% (mo)':>18}  {'(years)':>8}  {'promised':>28}")
+    from forgedge.resolver import poisson_min_window
+    promised = {"sniper": "was \"≥2 anni\"", "balanced": "—", "sweep": "—", "burst": "—"}
+    for preset in ("sniper", "balanced", "sweep", "burst"):
+        disc, _a, _r = forge_preset(preset, "1D", asset="X")
+        gp = disc.gate_params
+        window = poisson_min_window(gp.min_episodes, gp.min_tpm)
+        print(f"  {preset:>9}  {gp.min_tpm:13.2f}  {gp.min_episodes:13d}  "
+              f"{window:18.1f}  {window / 12:8.2f}  {promised[preset]:>28}")
+    print("  sniper and sweep share the same 0.3 ep/mo rate; before #206 both also")
+    print("  shared min_episodes=10 and needed 53.3 months (4.44 years) regardless —")
+    print("  more than double what sniper's own description promised. sniper keeps")
+    print("  min_episodes=10 (statistical rigor is the point) and the description is")
+    print("  corrected instead; sweep lowers it to 5, consistent with being permissive")
+    print("  by design and deferring rigor to the RotationCalibrator downstream.")
+    print("  config_report() now names the gap directly (m1_is_window_too_short, WARN —")
+    print("  not FAIL: a candidate above the floor rate can still clear it on less data).")
+
     print("\n" + "=" * 78)
     print("  LATENT PARAMETER: bar duration — the fields that mean \"N bars\"")
     print("=" * 78)
