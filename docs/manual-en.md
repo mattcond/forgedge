@@ -1156,7 +1156,7 @@ Every module accepts a dataclass carrying its knobs. This section covers the one
 
 `BacktestParams` defaults: `direction="long"`, `buy_type="limit"`, `buy_drop_pct=0.010`, `buy_delay_bar=6`, `sell_pct=0.040`, `target_h=24`, `fee=0.002`, `early_stopping=True`.
 
-`SelectionCriteria` defaults you're most likely to touch: `min_profit_factor=2.0`, `min_win_rate=0.55`, `min_tpm=2.0` (the sole frequency gate — the executed-trade floor is `max(10, n_months × min_tpm)`, not a fixed count), `min_fill_rate=0.40`, `min_dsr=1.0`, `max_rotation_p=0.05`, `power_gate=True` (§15), `early_elimination=True` (set `False` to force full diagnostics even on a fast-screened `NON-EDGE`).
+`SelectionCriteria` defaults you're most likely to touch: `min_profit_factor=2.0`, `min_win_rate=0.55`, `min_pf_score_tpm=0.30`, `min_fill_rate_opt=0.80` (these four are preset-parametrized by `forge_preset()` — stricter on `"sniper"`, looser on `"sweep"` — see §16, #207), `min_tpm=2.0` (the sole frequency gate — the executed-trade floor is `max(10, n_months × min_tpm)`, not a fixed count), `min_fill_rate=0.40`, `min_dsr=1.0`, `max_rotation_p=0.05`, `power_gate=True` (§15), `early_elimination=True` (set `False` to force full diagnostics even on a fast-screened `NON-EDGE`).
 
 ### `RegistryConfig` (Module 4)
 
@@ -1182,7 +1182,7 @@ result = forge(kpi, ticker="ADAUSDC", timeframe="1D",
 | `"sweep"` | Wide, permissive search — designed to pair with `rotation_calibration=RotationConfig(k>=100)` and a `min_lift` filter downstream. |
 | `"burst"` | Time-concentrated events (regime-change, momentum). High dispersion explicitly tolerated. |
 
-`overrides` accepted by name: M1 side — `min_tpm`, `max_dispersion`, `dispersion_margin`, `min_episodes`, `max_and_components`, `timestamp_col`, `event_counting`; M2 side — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; M3 side — `rd_min_tpm`. An unrecognized override key raises `TypeError`.
+`overrides` accepted by name: M1 side — `min_tpm`, `max_dispersion`, `dispersion_margin`, `min_episodes`, `max_and_components`, `timestamp_col`, `event_counting`; M2 side — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; M3 side — `rd_min_tpm`, `min_profit_factor`, `min_win_rate`, `min_pf_score_tpm`, `min_fill_rate_opt`. An unrecognized override key raises `TypeError`.
 
 ---
 

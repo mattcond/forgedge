@@ -197,6 +197,27 @@ def default_horizon_grid(timeframe: str) -> Optional[Tuple[int, ...]]:
 #                          design e delega il rigore al RotationCalibrator a
 #                          valle, coerente con la propria filosofia.
 #   parametri alpha      — gate M2 (AlphaDiscovery)
+#   min_profit_factor, min_win_rate, min_pf_score_tpm, min_fill_rate_opt —
+#                          gate M3, il nucleo di qualità economica pura
+#                          (#207).  Prima di questa issue erano identici sui
+#                          quattro preset nonostante le descrizioni divergano
+#                          esplicitamente su precisione-vs-volume: sniper
+#                          "alta precisione statistica", sweep "soglie
+#                          permissive... conta sul RotationCalibrator" — ma
+#                          quel filtro agisce sulla significatività
+#                          statistica della ricerca, non sulla qualità
+#                          economica del singolo candidato, quindi non lo
+#                          sostituisce.  Non tutti i campi di
+#                          SelectionCriteria sono qui: gli altri sono
+#                          già session-resolved da un'altra fonte
+#                          (min_net_gain_retention, min_sell_pct),
+#                          deliberatamente NON legati al profilo (max_ttest_p,
+#                          max_rotation_p — derivano da ctx.alpha, #182), o
+#                          inerti sotto il default entry_mode="auto"
+#                          (min_fill_rate — il floor che conta è
+#                          min_fill_rate_opt).  balanced e burst restano ai
+#                          default di classe: non citati nella issue come
+#                          incoerenti, e nessuna misura li contraddice.
 _PRESET_SPECS: dict = {
     "sniper": {
         "description": (
@@ -211,6 +232,10 @@ _PRESET_SPECS: dict = {
         "daily_max_dispersion": 1.0,
         "dispersion_margin": 1.05,      # quasi zero slack sopra il rumore Poisson
         "min_episodes": 10,             # invariato: il rigore statistico è lo scopo
+        "min_profit_factor": 2.5,       # #207: poche regole, alta conviction
+        "min_win_rate": 0.60,
+        "min_pf_score_tpm": 0.40,
+        "min_fill_rate_opt": 0.80,      # già il più severo dei default di classe
         "min_lift": 0.10,
         "min_cohens_d": 0.15,
         "fdr_q": 0.05,
@@ -228,6 +253,10 @@ _PRESET_SPECS: dict = {
         "daily_max_dispersion": 2.0,
         "dispersion_margin": 1.30,      # margine moderato sopra il floor
         "min_episodes": 10,             # invariato: già coerente al proprio tasso (16 mesi)
+        "min_profit_factor": 2.0,       # #207: default di classe, già "sensato"
+        "min_win_rate": 0.55,
+        "min_pf_score_tpm": 0.30,
+        "min_fill_rate_opt": 0.80,
         "min_lift": 0.06,
         "min_cohens_d": 0.10,
         "fdr_q": 0.15,
@@ -248,6 +277,10 @@ _PRESET_SPECS: dict = {
         "dispersion_margin": 1.60,      # permissivo: il filtro è il RotationCalibrator
         "min_episodes": 5,              # abbassato (#206): permissivo per design, il
                                          # rigore statistico è delegato al RotationCalibrator
+        "min_profit_factor": 1.8,       # #207: permissivo di proposito — il
+        "min_win_rate": 0.50,           # RotationCalibrator filtra il rumore
+        "min_pf_score_tpm": 0.25,       # di ricerca a monte, non la qualità
+        "min_fill_rate_opt": 0.70,      # economica del singolo candidato
         "min_lift": 0.05,
         "min_cohens_d": 0.05,
         "fdr_q": 0.25,
@@ -266,6 +299,10 @@ _PRESET_SPECS: dict = {
         "daily_max_dispersion": 5.0,
         "dispersion_margin": 3.00,      # clustering Poisson-implausibile, di proposito
         "min_episodes": 10,             # invariato: già coerente al proprio tasso (10.7 mesi)
+        "min_profit_factor": 2.0,       # #207: default di classe, non citato dalla issue
+        "min_win_rate": 0.55,
+        "min_pf_score_tpm": 0.30,
+        "min_fill_rate_opt": 0.80,
         "min_lift": 0.08,
         "min_cohens_d": 0.12,
         "fdr_q": 0.10,
@@ -321,7 +358,8 @@ def forge_preset(
         M2: ``min_lift``, ``min_cohens_d``, ``fdr_q``, ``oos_max_p``,
         ``horizon_grid``, ``bars_per_day``.
 
-        M3: ``rd_min_tpm``.
+        M3: ``rd_min_tpm``, ``min_profit_factor``, ``min_win_rate``,
+        ``min_pf_score_tpm``, ``min_fill_rate_opt``.
 
     Returns
     -------
@@ -471,12 +509,26 @@ def forge_preset(
     rd_min_tpm = overrides.pop(
         "rd_min_tpm", round(min_tpm * _bars_per_episode * _fill_ratio, 4)
     )
+    # The economic quality bar itself — not timeframe-scaled, these are
+    # ratios/rates already (#207).  Before this, every preset shared the
+    # class default regardless of how differently their descriptions read on
+    # precision vs. volume; see the header comment above `_PRESET_SPECS`.
+    min_profit_factor = overrides.pop("min_profit_factor", spec["min_profit_factor"])
+    min_win_rate = overrides.pop("min_win_rate", spec["min_win_rate"])
+    min_pf_score_tpm = overrides.pop("min_pf_score_tpm", spec["min_pf_score_tpm"])
+    min_fill_rate_opt = overrides.pop("min_fill_rate_opt", spec["min_fill_rate_opt"])
 
     if overrides:
         raise TypeError(f"Unexpected override keys: {list(overrides)}")
 
     rd_cfg = RuleDiscoveryConfig(
-        criteria=SelectionCriteria(min_tpm=rd_min_tpm),
+        criteria=SelectionCriteria(
+            min_tpm=rd_min_tpm,
+            min_profit_factor=min_profit_factor,
+            min_win_rate=min_win_rate,
+            min_pf_score_tpm=min_pf_score_tpm,
+            min_fill_rate_opt=min_fill_rate_opt,
+        ),
     )
 
     return disc_cfg, alpha_cfg, rd_cfg
@@ -516,6 +568,12 @@ def preset_info(preset: Optional[str] = None) -> None:
         )
         print(f"  M3 gate : rd_min_tpm(episode)={_rd_min_tpm_episode}  "
               f"rd_min_tpm(bar)={spec['daily_rd_min_tpm']}")
+        # The economic quality bar (#207) — previously identical on all four
+        # presets regardless of stated philosophy.
+        print(f"  M3 econ : min_profit_factor={spec['min_profit_factor']}  "
+              f"min_win_rate={spec['min_win_rate']}  "
+              f"min_pf_score_tpm={spec['min_pf_score_tpm']}  "
+              f"min_fill_rate_opt={spec['min_fill_rate_opt']}")
         # The scoring knobs decide which operating point is published, so they
         # belong next to the gates rather than being invisible (F3, #178).
         # Resolved for a daily session — they track `criteria.min_tpm`, and

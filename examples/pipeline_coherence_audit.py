@@ -192,6 +192,21 @@ def stage_rates() -> None:
     print("  config_report() now names the gap directly (m1_is_window_too_short, WARN —")
     print("  not FAIL: a candidate above the floor rate can still clear it on less data).")
 
+    print("\n  #207 — M3's economic quality bar, before this issue identical on all four:")
+    print(f"  {'preset':>9}  {'min_profit_factor':>18}  {'min_win_rate':>13}  "
+          f"{'min_pf_score_tpm':>17}  {'min_fill_rate_opt':>18}")
+    for preset in ("sniper", "balanced", "sweep", "burst"):
+        _d, _a, r = forge_preset(preset, "1D", asset="X")
+        c = r.criteria
+        print(f"  {preset:>9}  {c.min_profit_factor:18.2f}  {c.min_win_rate:13.2f}  "
+              f"{c.min_pf_score_tpm:17.2f}  {c.min_fill_rate_opt:18.2f}")
+    print("  sniper (\"alta precisione statistica\") and sweep (\"soglie permissive...")
+    print("  conta sul RotationCalibrator\") used to share every one of these four")
+    print("  values with balanced and burst — the RotationCalibrator prices the search's")
+    print("  statistical noise, not a candidate's own economics, so it never substituted")
+    print("  for a differentiated bar. sniper is now stricter, sweep looser; balanced and")
+    print("  burst stay at the class defaults, untouched by this issue's own measurement.")
+
     print("\n" + "=" * 78)
     print("  LATENT PARAMETER: bar duration — the fields that mean \"N bars\"")
     print("=" * 78)

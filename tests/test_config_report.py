@@ -1055,3 +1055,70 @@ class TestPresetsDifferentiateMinEpisodes:
         d, a, r = forge_preset("sniper", "1D", asset="X")
         rep = config_report(d, a, r, ctx=_ctx(span_months=31))
         assert "m1_is_window_too_short" in _codes(rep)
+
+
+class TestPresetsDifferentiateEconomicQuality:
+    """#207 — the economic-quality core of M3 was identical on every preset
+    regardless of stated philosophy: `sniper` promises "alta precisione
+    statistica", `sweep` is explicitly permissive and relies on the
+    `RotationCalibrator` downstream — a filter on the search's statistical
+    noise, not on a candidate's own economics, so it does not substitute for
+    a differentiated bar. `min_profit_factor`, `min_win_rate`,
+    `min_pf_score_tpm`, `min_fill_rate_opt` are now preset-parametrized;
+    `balanced`/`burst` stay at the class defaults.
+    """
+
+    @staticmethod
+    def _criteria(preset="balanced", **kw):
+        from forgedge.presets import forge_preset
+
+        _d, _a, r = forge_preset(preset, "1D", asset="X", **kw)
+        return r.criteria
+
+    def test_the_stock_values(self):
+        expected = {
+            "sniper":   (2.5, 0.60, 0.40, 0.80),
+            "balanced": (2.0, 0.55, 0.30, 0.80),
+            "sweep":    (1.8, 0.50, 0.25, 0.70),
+            "burst":    (2.0, 0.55, 0.30, 0.80),
+        }
+        for preset, (pf, wr, pfs, fill) in expected.items():
+            c = self._criteria(preset)
+            assert (c.min_profit_factor, c.min_win_rate,
+                    c.min_pf_score_tpm, c.min_fill_rate_opt) == (pf, wr, pfs, fill), preset
+
+    def test_sniper_is_stricter_than_sweep_on_every_economic_field(self):
+        """The point of the fix: the two presets whose descriptions most
+        directly disagree on precision-vs-volume now disagree on the
+        economic bar too, not just on frequency."""
+        sniper, sweep = self._criteria("sniper"), self._criteria("sweep")
+        assert sniper.min_profit_factor > sweep.min_profit_factor
+        assert sniper.min_win_rate > sweep.min_win_rate
+        assert sniper.min_pf_score_tpm > sweep.min_pf_score_tpm
+        assert sniper.min_fill_rate_opt > sweep.min_fill_rate_opt
+
+    def test_balanced_and_burst_are_bit_for_bit_the_class_defaults(self):
+        from forgedge.rule_discovery.models import SelectionCriteria
+
+        default = SelectionCriteria()
+        for preset in ("balanced", "burst"):
+            c = self._criteria(preset)
+            assert c.min_profit_factor == default.min_profit_factor
+            assert c.min_win_rate == default.min_win_rate
+            assert c.min_pf_score_tpm == default.min_pf_score_tpm
+            assert c.min_fill_rate_opt == default.min_fill_rate_opt
+
+    def test_explicit_overrides_still_win(self):
+        c = self._criteria("sniper", min_profit_factor=3.0, min_win_rate=0.65,
+                            min_pf_score_tpm=0.5, min_fill_rate_opt=0.9)
+        assert (c.min_profit_factor, c.min_win_rate,
+                c.min_pf_score_tpm, c.min_fill_rate_opt) == (3.0, 0.65, 0.5, 0.9)
+
+    def test_not_scaled_by_timeframe(self):
+        """Ratios/rates already, unlike `min_tpm` — nothing to scale."""
+        from forgedge.presets import forge_preset
+
+        for tf in ("1D", "4H", "1H", "15m"):
+            _d, _a, r = forge_preset("sweep", tf, asset="X")
+            assert r.criteria.min_profit_factor == 1.8, tf
+            assert r.criteria.min_win_rate == 0.50, tf

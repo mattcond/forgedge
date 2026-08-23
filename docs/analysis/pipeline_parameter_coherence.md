@@ -579,6 +579,7 @@ which is why the plan could not have contained them.
 | of #200 | [#204](https://github.com/mattcond/forgedge/issues/204) | the fix above applied M1→M3's fill ratio straight to a *declared episode* rate, but M3 counts bars, not episodes — a unit gap one factor upstream of #200's own |
 | of F1 | [#205](https://github.com/mattcond/forgedge/issues/205) | a preset's own dispersion tolerance (`daily_max_dispersion`) never bound in `"episode"` mode on most preset×timeframe combinations — silently overridden by a Poisson floor that does not scale with timeframe while the preset value does |
 | of F1 | [#206](https://github.com/mattcond/forgedge/issues/206) | `min_episodes` was an absolute floor fixed across every preset regardless of rate — `sniper`'s description promised "≥2 anni" but its own stock rate needed 4.44 years at 95% Poisson confidence, and no resolver check said so |
+| new (M3) | [#207](https://github.com/mattcond/forgedge/issues/207) | `forge_preset` differentiates M1 (rate, dispersion) and M2 (effect size, FDR) by profile, but M3's economic quality bar — `min_profit_factor`, `min_win_rate`, `min_pf_score_tpm`, `min_fill_rate_opt` — was one flat class default on all four presets, despite `sniper`/`sweep`'s descriptions explicitly diverging on precision-vs-volume |
 
 \#200 is the more instructive of the two, because the fix is *smaller* than it first looks.
 The obvious reading — M1 counts episodes, M3 counts filled trades, so M3 should ask for
@@ -672,3 +673,27 @@ description to the measured number, not to weaken the floor — while `sweep`, s
 preset that is permissive by design and already defers rigor to the `RotationCalibrator`
 downstream. `balanced` and `burst` were already coherent at 10 (16 and 10.7 months) and are
 untouched.
+
+#207 is not a tail of a specific earlier fix the way #196/#200/#204/#205/#206 are — it is
+the same audit question (does a preset's stated philosophy actually reach every module it
+claims to) asked of a dimension nobody had checked yet: M3's *economic* quality bar.
+`forge_preset` differentiates M1's rate and dispersion tolerance and M2's effect-size and
+FDR budget by profile, but built `RuleDiscoveryConfig` touching a single field of
+`SelectionCriteria` — `min_tpm` — leaving `min_profit_factor`, `min_win_rate`,
+`min_pf_score_tpm` and `min_fill_rate_opt` at one shared class default across all four
+presets, despite `sniper`'s own description promising "alta precisione statistica" and
+`sweep`'s promising the opposite. The natural objection — `sweep` relies on the
+`RotationCalibrator` downstream to filter noise — does not resolve the gap: that filter
+prices the *search's* statistical noise (a rotation-null p-value on the whole discovery
+surface), not a single candidate's own profit factor or win rate, so it was never a
+substitute for a differentiated economic bar.
+
+Not every field of `SelectionCriteria` was a candidate. Several are already spoken for by
+a different mechanism entirely: `max_ttest_p`/`max_rotation_p` derive from
+`PipelineContext.alpha` (#182), and `max_rotation_p`'s own docstring already explains why a
+value that reads "strict" on `sweep` is intended, not drift; `min_net_gain_retention` and
+`min_sell_pct` are session-resolved from other sources; `min_fill_rate` is inert under the
+default `entry_mode="auto"` (the floor that actually binds there is `min_fill_rate_opt`).
+What was left — `min_profit_factor`, `min_win_rate`, `min_pf_score_tpm`,
+`min_fill_rate_opt` — is exactly the economic-quality core with no existing chain pulling
+it in any direction, which is why it had stayed uniform by omission rather than by design.

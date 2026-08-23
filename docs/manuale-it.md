@@ -1167,7 +1167,7 @@ Ogni modulo accetta una dataclass che porta i suoi parametri. Questa sezione cop
 
 Default di `BacktestParams`: `direction="long"`, `buy_type="limit"`, `buy_drop_pct=0.010`, `buy_delay_bar=6`, `sell_pct=0.040`, `target_h=24`, `fee=0.002`, `early_stopping=True`.
 
-Default di `SelectionCriteria` che più probabilmente toccherai: `min_profit_factor=2.0`, `min_win_rate=0.55`, `min_tpm=2.0` (l'unico gate di frequenza — il floor sui trade eseguiti è `max(10, n_months × min_tpm)`, non un conteggio fisso), `min_fill_rate=0.40`, `min_dsr=1.0`, `max_rotation_p=0.05`, `power_gate=True` (§15), `early_elimination=True` (imposta `False` per forzare la diagnostica completa anche su un `NON-EDGE` filtrato velocemente).
+Default di `SelectionCriteria` che più probabilmente toccherai: `min_profit_factor=2.0`, `min_win_rate=0.55`, `min_pf_score_tpm=0.30`, `min_fill_rate_opt=0.80` (questi quattro sono differenziati per preset da `forge_preset()` — più severi su `"sniper"`, più permissivi su `"sweep"` — vedi §16, #207), `min_tpm=2.0` (l'unico gate di frequenza — il floor sui trade eseguiti è `max(10, n_months × min_tpm)`, non un conteggio fisso), `min_fill_rate=0.40`, `min_dsr=1.0`, `max_rotation_p=0.05`, `power_gate=True` (§15), `early_elimination=True` (imposta `False` per forzare la diagnostica completa anche su un `NON-EDGE` filtrato velocemente).
 
 ### `RegistryConfig` (Modulo 4)
 
@@ -1193,7 +1193,7 @@ result = forge(kpi, ticker="ADAUSDC", timeframe="1D",
 | `"sweep"` | Ricerca ampia e permissiva — progettata per abbinarsi a `rotation_calibration=RotationConfig(k>=100)` e a un filtro `min_lift` a valle. |
 | `"burst"` | Eventi concentrati nel tempo (cambio di regime, momentum). Alta dispersione esplicitamente tollerata. |
 
-Override accettati per nome: lato M1 — `min_tpm`, `max_dispersion`, `dispersion_margin`, `min_episodes`, `max_and_components`, `timestamp_col`, `event_counting`; lato M2 — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; lato M3 — `rd_min_tpm`. Una chiave di override non riconosciuta solleva `TypeError`.
+Override accettati per nome: lato M1 — `min_tpm`, `max_dispersion`, `dispersion_margin`, `min_episodes`, `max_and_components`, `timestamp_col`, `event_counting`; lato M2 — `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day`; lato M3 — `rd_min_tpm`, `min_profit_factor`, `min_win_rate`, `min_pf_score_tpm`, `min_fill_rate_opt`. Una chiave di override non riconosciuta solleva `TypeError`.
 
 ---
 
