@@ -254,7 +254,7 @@ config = DiscoveryConfig(
     ),
     gate_params=GateParams(     # soglie del ConsistencyGate
         min_tpm=0.5,             # ≥0.5 episodi/mese in media (default)
-        max_dispersion=1.5,      # Index of Dispersion ≤ 1.5 (Var/Mean dei conteggi mensili, default)
+        dispersion_margin=1.3,   # margine sopra il floor di Poisson, modalità "episode" (default, #205)
     ),
     max_and_components=2,       # 1=solo singoli, 2=+coppie, 3=+coppie+triple (default conservativo)
 )
@@ -267,7 +267,7 @@ print(f"{len(wf_stable)} eventi stabili OOS su {len(candidates)} totali")
 ```
 
 **Conteggio per episodi vs per barra (`GateParams.event_counting`).** I criteri
-di rate (`min_tpm`) e dispersione (`max_dispersion`) contano **barre** oppure
+di rate (`min_tpm`) e dispersione contano **barre** oppure
 **episodi** (run massimali di attivazioni consecutive, ponti su gap fino a
 `episode_gap` barre, default `1`). `"episode"` è il default: rimuove
 l'artefatto di conteggio per cui uno stato persistente multi-barra (es. un
@@ -281,13 +281,35 @@ il comportamento storico del gate (pre-episodi):
 GateParams(min_tpm=2.0, max_dispersion=2.5, event_counting="bar")
 ```
 
+**`max_dispersion` vs `dispersion_margin` — i due campi di dispersione non
+sono intercambiabili, e ne viene letto uno solo alla volta (#205).** In
+modalità `"bar"` `max_dispersion` (default `1.5`) è il tetto grezzo
+sull'Index of Dispersion; nella modalità di default `"episode"` **non viene
+letto affatto dal gate**, e al suo posto governa `dispersion_margin`
+(default `1.3`) — non un Index of Dispersion assoluto, ma un moltiplicatore
+sopra un floor χ² di Poisson: `eff_max_dispersion = poisson_floor(n_months) ×
+dispersion_margin`. Questo floor esiste perché il gate non respinga mai una
+cadenza statisticamente indistinguibile da un processo casuale (Poisson) al
+rate osservato — un `dispersion_margin` basso (es. `1.05`) resta vicino a
+quanto produrrebbe un processo Poisson stesso, uno alto (es. `3.0`) tollera
+deliberatamente un clustering Poisson-implausibile. Impostare
+`max_dispersion` lasciando `event_counting="episode"` (il default) non ha
+effetto in modo silenzioso — imposta invece `dispersion_margin`.
+
 `min_episodes` (default `10`) è un ulteriore floor di potenza statistica
-sul conteggio assoluto di episodi, applicato solo in modalità `"episode"`. In
-modalità `"episode"` la soglia di dispersione effettiva viene anche alzata
-automaticamente a un floor χ² di Poisson ogni volta che il `max_dispersion`
-dell'utente respingerebbe un evento statisticamente indistinguibile da un
-processo casuale (Poisson) al rate osservato — quindi il gate non respinge mai
-una cadenza compatibile col puro rumore.
+sul conteggio assoluto di episodi, applicato solo in modalità `"episode"`, e
+**solo in-sample** — applicare un conteggio assoluto a un fold walk-forward
+rende il requisito implicito di tasso inversamente proporzionale alla
+lunghezza del fold, quindi i fold usano invece un limite inferiore di Poisson
+al tasso osservato del candidato (§*Validazione OOS* sopra). Essendo
+assoluto, `min_episodes` implica anche una finestra di discovery in-sample
+che dipende pure da `min_tpm` — il naive `min_episodes / min_tpm` la
+soddisfa solo in aspettativa, non con confidenza; `m1_is_window_too_short`
+(WARN) di `config_report()` nomina il gap quando lo span è noto (#206).
+`forge_preset()` differenzia `min_episodes` per profilo invece di un unico
+default fisso: `"sniper"`/`"balanced"`/`"burst"` restano a `10`, `"sweep"`
+lo abbassa a `5` — coerente con l'essere permissivo per design e con il
+demandare il rigore statistico al `RotationCalibrator` a valle.
 
 Con `train_ratio < 1.0` e `walk_forward` attivo, ogni candidato espone
 `c.validation` (un `ValidationResult`) con:
@@ -593,7 +615,8 @@ resp = rd.run()
   quali parametri pubblicare. Lo Stage 2 esplora `buy_drop_pct` sul
   sopravvissuto e adotta il punto a limite solo se supera tutte e tre le
   condizioni **out-of-sample**: fill rate `>= criteria.min_fill_rate_opt`
-  (default `0.80`); rendimento aggiustato per il rischio per unità di tempo
+  (default `0.80`, preset-parametrizzato dalla #207 — `"sweep"` lo abbassa a
+  `0.70`); rendimento aggiustato per il rischio per unità di tempo
   (`opportunity_sharpe`) almeno pari a quello del punto market; e net gain
   almeno `min_net_gain_retention × quello del market` (default `0.5`) — un
   backstop contro una media minuscola con una varianza minuscola che lo
@@ -884,10 +907,14 @@ result = forge(
 
 `forge_preset(preset, timeframe, asset="ASSET", train_ratio=0.70, **overrides)`
 accetta override keyword per qualunque parametro calcolato — `min_tpm`,
-`max_dispersion`, `max_and_components`, `timestamp_col`, `event_counting`
-(lato Discovery), `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`,
-`horizon_grid`, `bars_per_day` (lato Alpha), e `rd_min_tpm` (lato Rule
-Discovery). Ogni preset calibra `min_tpm` a partire da un rate giornaliero per
+`max_dispersion`, `dispersion_margin`, `min_episodes`, `max_and_components`,
+`timestamp_col`, `event_counting` (lato Discovery), `min_lift`,
+`min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day` (lato
+Alpha), e `rd_min_tpm`, `min_profit_factor`, `min_win_rate`,
+`min_pf_score_tpm`, `min_fill_rate_opt` (lato Rule Discovery — questi
+ultimi quattro sono ora preset-parametrizzati anch'essi, più severi su
+`"sniper"`/più permissivi su `"sweep"`, #207). Una chiave di override non
+riconosciuta solleva `TypeError`. Ogni preset calibra `min_tpm` a partire da un rate giornaliero per
 modalità — `event_counting="episode"` (default) usa un target episodi/mese,
 `"bar"` un target barre/mese — scalato sul tuo timeframe. Usa `preset_info()` (tutti) o `preset_info("sweep")` (uno solo) per
 stampare i parametri risolti, e `PRESETS` per la lista dei nomi.
@@ -912,7 +939,7 @@ result = forge(
     event_discovery_config=DiscoveryConfig(
         train_ratio=0.80,
         walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
-        gate_params=GateParams(min_tpm=0.5, max_dispersion=1.5),  # default espliciti
+        gate_params=GateParams(min_tpm=0.5, dispersion_margin=1.3),  # default espliciti
     ),
     alpha_config=AlphaConfig(
         train_ratio=0.70,
@@ -1025,7 +1052,7 @@ def run_forge_pipeline(
     ed_config = DiscoveryConfig(
         train_ratio=0.80,
         walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
-        gate_params=GateParams(min_tpm=0.5, max_dispersion=1.5),
+        gate_params=GateParams(min_tpm=0.5, dispersion_margin=1.3),
         max_and_components=2,
     )
     ed = EventDiscovery(enriched, config=ed_config)
