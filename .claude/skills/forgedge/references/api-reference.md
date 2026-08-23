@@ -134,7 +134,9 @@ forge_preset(
 accepted by name: M1 — `min_tpm`, `max_dispersion`, `dispersion_margin`,
 `min_episodes`, `max_and_components`, `timestamp_col`, `event_counting`; M2 —
 `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`,
-`bars_per_day`; M3 — `rd_min_tpm`. Unknown override keys raise `TypeError`.
+`bars_per_day`; M3 — `rd_min_tpm`, `min_profit_factor`, `min_win_rate`,
+`min_pf_score_tpm`, `min_fill_rate_opt`. Unknown override keys raise
+`TypeError`.
 
 M1's `min_tpm`/`max_dispersion` are scaled from the preset's daily-calibrated
 spec to `timeframe` via `_TFClass` (daily / intraday / hft bucket).
@@ -164,6 +166,16 @@ a rate the preset actually chose (see *Configuration resolution* below).
 `UNSET`; the resolver fills them from the same `timeframe`. `timestamp_col`
 on `DiscoveryConfig` is left `UNSET` unless overridden — a schema fact the
 session propagates to every module, not a per-preset choice.
+
+M3's *economic* quality bar is per-preset too (#207): `min_profit_factor`,
+`min_win_rate`, `min_pf_score_tpm`, `min_fill_rate_opt` used to be one shared
+class default on all four presets despite `"sniper"`/`"sweep"`'s
+descriptions explicitly diverging on precision-vs-volume — the
+`RotationCalibrator` `"sweep"` relies on prices the *search's* statistical
+noise, not a single candidate's own economics, so it was never a substitute.
+Stock values: `(2.5, 0.60, 0.40, 0.80)` `"sniper"`, `(2.0, 0.55, 0.30, 0.80)`
+`"balanced"`/`"burst"` (class defaults, untouched), `(1.8, 0.50, 0.25, 0.70)`
+`"sweep"`. None are timeframe-scaled — ratios/rates already.
 
 `preset_info(preset: str | None = None) -> None` prints the resolved
 parameters — including the M3 scoring knobs and every significance
@@ -683,20 +695,26 @@ forward-return horizon), `embargo_bars: int = UNSET` (session-resolved from
 value here still wins). The top-level `forgedge.WalkForwardConfig` alias
 resolves to this class, not the M1 one.
 
-`SelectionCriteria` — `min_profit_factor: float = 2.0`, `min_win_rate: float
-= 0.55`, `min_tpm: float = UNSET` (**the root of a chain** — resolved from
+`SelectionCriteria` — `min_profit_factor: float = 2.0` (preset-parametrized,
+#207 — 2.5 `"sniper"`, 1.8 `"sweep"`, class default on `"balanced"`/
+`"burst"`), `min_win_rate: float
+= 0.55` (likewise, #207: 0.60/0.50), `min_tpm: float = UNSET` (**the root of a chain** — resolved from
 `PipelineContext.target_rate_tpm × bars_per_episode × rate_retention` when
 M1's rate was *declared* and counted in episodes (`bars_per_episode` is 1 in
 `"bar"` mode — M1 and M3 already share a unit there, #204), else the
 documented default `2.0` stands; `min_train_months` and
 `scoring.pf_min_tpm` both derive from this, so pinning it manually
 disconnects them, see `SKILL.md` pitfall #8), `min_pf_score_tpm: float =
-0.30`, `min_fill_rate: float = 0.40` (inert under the default
+0.30` (preset-parametrized, #207: 0.40 `"sniper"`, 0.25 `"sweep"` — the grid's
+own objective should track the same precision-vs-volume intent as the PF/
+win-rate gates beside it), `min_fill_rate: float = 0.40` (inert under the default
 `entry_mode="auto"`, where Stage 1 is a market entry filling ≈100% — kept
 for `entry_mode="limit"`; `config_report()`'s `entry_mode_inert_gate` warns
 if this was moved off its default under a mode that makes it inert),
 `min_fill_rate_opt: float = 0.80` (floor for the `entry_mode="auto"` Stage-2
-adoption), `min_net_gain_retention: float = UNSET` (→ `0.5`; Stage-2
+adoption; preset-parametrized, #207 — the fill floor that actually binds
+under the default mode, unlike its inert sibling above: 0.70 `"sweep"`, class
+default elsewhere), `min_net_gain_retention: float = UNSET` (→ `0.5`; Stage-2
 adoption condition 3, see *Entry mode* below), `min_sell_pct: float = UNSET`
 (→ `0.005`; session-resolved from `AlphaConfig.mfe_floor` — it used to be a
 hardcoded `max(0.01, sell_pct)` inside `_seed_base_params`, twice M2's own

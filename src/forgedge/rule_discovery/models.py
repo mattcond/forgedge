@@ -331,8 +331,18 @@ class SelectionCriteria:
     ----------
     min_profit_factor : float
         Minimum profit factor for ``EDGE``.
+
+        Preset-parametrized (#207) — part of the economic-quality core that
+        used to be identical across all four presets despite their
+        descriptions explicitly diverging on precision-vs-volume: 2.5 on
+        ``sniper`` (few rules, high conviction), 1.8 on ``sweep``
+        (deliberately permissive — the ``RotationCalibrator`` filters the
+        search's statistical noise upstream, not a candidate's economics),
+        2.0 (the documented class default) on ``balanced``/``burst``.
     min_win_rate : float
-        Minimum win rate (0–1).
+        Minimum win rate (0–1).  Preset-parametrized alongside
+        ``min_profit_factor`` for the same reason (#207): 0.60 ``sniper``,
+        0.55 ``balanced``/``burst``, 0.50 ``sweep``.
     min_tpm : float
         Minimum trades/month.  This is the sole frequency gate: the minimum
         executed-trade count is **not** a fixed absolute but is derived from it
@@ -365,6 +375,13 @@ class SelectionCriteria:
         1D fixture and overrode the configured 2.0 for 34.3% of rules; it now
         sits at a median of 0.47 and binds for 0.8%, so the declared bar is the
         one that governs.
+
+        Preset-parametrized alongside ``min_profit_factor``/``min_win_rate``
+        (#207): 0.40 ``sniper``, 0.25 ``sweep``, 0.30 (class default)
+        ``balanced``/``burst`` — the composite objective the grid actually
+        maximises should track the same precision-vs-volume intent as the
+        PF/win-rate gates beside it, not stay a single flat bar while they
+        move.
     min_fill_rate : float
         Minimum fill rate — below it the limit discount is too deep.
 
@@ -382,6 +399,14 @@ class SelectionCriteria:
         the optimised entry still fills at ``>= min_fill_rate_opt`` — high by
         design (default ``0.80``), so a deep, rarely-filled limit cannot inflate
         PF on a non-tradeable subset of trades (the "fill confound").
+
+        This is the fill-rate floor that actually binds under the default
+        ``entry_mode="auto"`` (``min_fill_rate`` does not, see above), which
+        is why it is the one preset-parametrized (#207), not its inert
+        sibling: 0.80 (class default) ``sniper``/``balanced``/``burst``,
+        0.70 ``sweep`` — modestly looser, consistent with a preset that
+        already accepts noisier signals broadly and delegates statistical
+        rigor to the ``RotationCalibrator`` rather than to a tight fill bar.
     min_net_gain_retention : float
         Fraction of the market point's out-of-sample **net gain** the limit
         point must retain to be adopted — the third and last of the adoption
