@@ -305,7 +305,7 @@ class RuleDiscovery:
                 return self._reject(
                     ["grid produced no evaluable configuration"], base, notes
                 )
-            elim = self._early_elimination(pre_best.summary)
+            elim = self._early_elimination(pre_best.summary, floor=_MIN_TRADES_ABS)
             if elim:
                 notes.append(
                     "selection_mode=walk_forward — early elimination on the first "
@@ -902,15 +902,37 @@ class RuleDiscovery:
     # Step 2.3 — early elimination
     # ------------------------------------------------------------------
 
-    def _early_elimination(self, s) -> List[str]:
-        """Fast NON-EDGE screen (spec Section 2.3)."""
+    def _early_elimination(self, s, floor: Optional[int] = None) -> List[str]:
+        """Fast NON-EDGE screen (spec Section 2.3).
+
+        ``floor`` overrides the default ``n_months x min_tpm`` trade-count
+        target with a fixed value.  The default is the right question over a
+        *full* span (the selection span, or the whole frame under
+        ``selection_mode="full_sample"``): "did this candidate deliver at
+        least ``min_tpm`` over the history it actually had?"  It is the
+        *wrong* question over the walk-forward's *first train window*, whose
+        length (``min_train_months``) the resolver already sized — with a
+        95% Poisson margin, see ``resolver._derive_min_train_months`` — to
+        reach exactly ``_MIN_TRADES_ABS`` trades at ``criteria.min_tpm``, not
+        ``n_months x min_tpm`` trades.  Re-deriving the latter on that same
+        short window asks a stricter, unrelated question and collapses to an
+        unreachable bar whenever ``min_tpm`` is high enough that the window
+        rounds up to its 1-month floor (e.g. 1mo x 35.2 tpm = 35, when the
+        window was only ever sized to prove 10) — #217.  Callers pre-screening
+        that first window pass ``floor=_MIN_TRADES_ABS`` explicitly instead.
+        """
         cr = self.config.criteria
         reasons = []
-        floor = _dynamic_min_trades(s.n_months, cr.min_tpm)
-        if s.total_trades < floor:
+        trade_floor = floor if floor is not None else _dynamic_min_trades(s.n_months, cr.min_tpm)
+        if s.total_trades < trade_floor:
+            detail = (
+                f"first train window sized for {trade_floor} trades at "
+                f"min_tpm={cr.min_tpm:g} (95% Poisson margin)"
+                if floor is not None
+                else f"{s.n_months}mo × {cr.min_tpm} tpm"
+            )
             reasons.append(
-                f"total_trades {s.total_trades} < {floor} "
-                f"({s.n_months}mo × {cr.min_tpm} tpm, not significant)"
+                f"total_trades {s.total_trades} < {trade_floor} ({detail}, not significant)"
             )
         if np.isfinite(s.profit_factor) and s.profit_factor < 1.0:
             reasons.append(f"profit_factor {s.profit_factor:.2f} < 1.0 (losing in-sample)")

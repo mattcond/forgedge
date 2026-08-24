@@ -34,6 +34,7 @@ from forgedge.rule_discovery import (
     walk_forward,
 )
 from forgedge.rule_discovery import excursion_stats, execution_envelope
+from forgedge.rule_discovery.discovery import _MIN_TRADES_ABS
 from forgedge.rule_discovery.validation import (
     _effective_sample,
     _ttest_1samp_greater,
@@ -1920,6 +1921,76 @@ def _decide_on(cfg, summary):
     rd = RuleDiscovery.__new__(RuleDiscovery)
     rd.config = cfg
     return rd._decide(summary, None, None, None)
+
+
+def _early_elimination_on(cfg, summary, floor=None):
+    """Drive `_early_elimination` with a synthetic summary, no pipeline run."""
+    rd = RuleDiscovery.__new__(RuleDiscovery)
+    rd.config = cfg
+    return rd._early_elimination(summary, floor=floor)
+
+
+class TestFirstWindowFloorIsFixed:
+    """#217 — sibling of #173/`TestWindowIsNotAVerdict`, same underlying
+    formula (`_dynamic_min_trades`), a different call site.
+
+    The walk-forward's *first train window* (`min_train_months`) is sized by
+    the resolver (`_derive_min_train_months`) to reach exactly
+    `_MIN_TRADES_ABS` trades at `criteria.min_tpm` with a 95% Poisson margin —
+    not `n_months x min_tpm` trades.  Judging that window's pre-screen
+    (Step 2.3) against the re-derived `n_months x min_tpm` instead asks a
+    stricter, unrelated question that only coincides with `_MIN_TRADES_ABS`
+    when `min_tpm` is low enough not to collapse the window to its 1-month
+    granularity floor — at a high `min_tpm` the window stays at 1 month but
+    the re-derived floor balloons past what the window was ever sized to
+    prove.
+    """
+
+    def test_default_floor_is_the_old_dynamic_formula(self):
+        """No explicit floor: unchanged behaviour (`_decide()`'s own
+        full-span use, and #112/`TestDynamicMinTrades`, are untouched)."""
+        cfg = resolve_config(
+            RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=35.2)), "rule_discovery"
+        )
+        s = SimpleNamespace(total_trades=15, n_months=1, profit_factor=1.2, fill_rate=1.0)
+        reasons = _early_elimination_on(cfg, s)
+        # old formula: max(_MIN_TRADES_ABS, int(1 * 35.2)) = 35 > 15
+        assert any("total_trades 15 < 35" in r for r in reasons)
+
+    def test_explicit_floor_uses_the_window_sizing_target_not_min_tpm(self):
+        """With the fix's explicit floor (what the real pre-screen call site
+        now passes), the same summary clears the screen: 15 >= 10."""
+        cfg = resolve_config(
+            RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=35.2)), "rule_discovery"
+        )
+        s = SimpleNamespace(total_trades=15, n_months=1, profit_factor=1.2, fill_rate=1.0)
+        reasons = _early_elimination_on(cfg, s, floor=_MIN_TRADES_ABS)
+        assert reasons == []
+
+    def test_explicit_floor_still_eliminates_genuinely_underpowered_candidates(self):
+        """The fix corrects the floor's value, it does not remove it: fewer
+        than `_MIN_TRADES_ABS` trades in the first window is still fatal."""
+        cfg = resolve_config(
+            RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=35.2)), "rule_discovery"
+        )
+        s = SimpleNamespace(total_trades=5, n_months=1, profit_factor=1.2, fill_rate=1.0)
+        reasons = _early_elimination_on(cfg, s, floor=_MIN_TRADES_ABS)
+        assert any("total_trades 5 < 10" in r for r in reasons)
+
+    def test_low_min_tpm_is_unaffected_by_the_explicit_floor(self):
+        """At low min_tpm the two formulas already coincide (#173's own
+        regime) — an explicit floor=_MIN_TRADES_ABS behaves identically to
+        the default dynamic formula, since they resolve to the same number."""
+        cfg = resolve_config(
+            RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=0.5)), "rule_discovery"
+        )
+        # n_months x min_tpm = 20 x 0.5 = 10 = _MIN_TRADES_ABS: the two
+        # formulas land on the same number by construction here.
+        s = SimpleNamespace(total_trades=8, n_months=20, profit_factor=1.2, fill_rate=1.0)
+        r_dynamic = _early_elimination_on(cfg, s)
+        r_explicit = _early_elimination_on(cfg, s, floor=_MIN_TRADES_ABS)
+        assert any("total_trades 8 < 10" in r for r in r_dynamic)
+        assert any("total_trades 8 < 10" in r for r in r_explicit)
 
 
 class TestContractSeeding:
