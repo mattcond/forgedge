@@ -776,7 +776,7 @@ market point's — the verdict never pays for Stage 2.
 
 A `RuleDiscoveryResponse`'s important attributes: `verdict` (`"EDGE"|"PARTIAL-EDGE"|"NON-EDGE"|"INSUFFICIENT-DATA"`), `is_edge` (true for the first two), `rejection_reasons`, `validated_rule` (carries `.params`, a `BacktestParams`), `in_sample_summary` (`total_trades`, `profit_factor`, `win_rate_pct`, `expectancy`, `tpm_mu`, `n_episodes`, `mean_concurrent_positions`, `max_concurrent_positions` — trade-overlap fields, §15), `execution_envelope` (`.conservative`/`.optimistic` — see §17), `walk_forward` (`.oos_summary`, `.consistency`), `statistical_validation` (`.temporal_stability`, `.deflated_sharpe`), `regime_analysis`, `excursion` (MAE/MFE), `entry_optimization` (only populated under `entry_mode="auto"` — the default — and only once the Stage-1 market-mode verdict is `EDGE`/`PARTIAL-EDGE`; `None` under `"market"`/`"limit"` and under a `"auto"` run whose market verdict is `NON-EDGE`, §15).
 
-`from forgedge.rule_discovery import text_report, html_report` build human-readable/HTML reports from a response; `resp.to_dict()` gives a JSON-serializable form.
+`text_report(resp)`/`html_report(resp)` (also importable straight from top-level `forgedge`) build human-readable/HTML reports from a response — every rule parameter, IS/OOS stat, walk-forward per-split breakdown, statistical validation and rejection reason it carries. Pass the originating `AlphaContract` as `contract=` to fold its `rotation_p`/`rotation_threshold` (a Modulo 2 field `RuleDiscoveryResponse` doesn't duplicate) into the same report. `rule_summary_report(resp, *, contract=None, fmt="text"|"html", save=False, path=None)` wraps both of these in one discoverable call — `save=True` writes the report to `path` (default `f"{resp.alpha_id}.{txt|html}"`) and still returns the string, so `print(rule_summary_report(resp, save=True))` is one line. `resp.to_dict()` gives a JSON-serializable form. This is distinct from `rule_performance_report()` below, which replays rules on fresh candles for a monitoring-style chart report rather than rendering the verdict M3 already produced.
 
 ### A concrete contract, field by field
 
@@ -2036,7 +2036,7 @@ This is a compact index, not a replacement for §9–10's fuller treatment. Ever
 | `FastRotationNull` / `RotationCalibrator` / `RotationConfig` / `CalibrationReport` | `forgedge` | search-level multiple-testing calibration |
 | `TargetOptimizer` / `TargetConfig` | `forgedge` | standalone target-first alternative workflow |
 | `RuleSpec` / `rule_performance_report()` | `forgedge` | replay published rules on new candles, HTML report |
-| `text_report()` / `html_report()` | `forgedge.rule_discovery` | human/HTML reports from a `RuleDiscoveryResponse` |
+| `text_report()` / `html_report()` / `rule_summary_report()` | `forgedge` (and `forgedge.rule_discovery`) | human/HTML reports from a `RuleDiscoveryResponse`; `rule_summary_report(..., save=True)` writes to disk |
 | `run_backtest()` | `forgedge.rule_discovery` | the underlying single-configuration backtest engine |
 
 For every dataclass's full field list and default, see §10 (the ones you're likely to tune) or the source directly — every default quoted anywhere in this manual was verified against the installed package at the time of writing.

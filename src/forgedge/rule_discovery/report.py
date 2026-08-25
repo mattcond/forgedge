@@ -9,13 +9,23 @@ offline in any browser, matching the Rule Registry report philosophy.
 from __future__ import annotations
 
 import html
-from typing import List
+from typing import TYPE_CHECKING, List, Optional
 
 from .models import RuleDiscoveryResponse
 
+if TYPE_CHECKING:  # pragma: no cover
+    from ..alpha_discovery.models import AlphaContract
 
-def text_report(resp: RuleDiscoveryResponse) -> str:
-    """Compact plaintext verdict report."""
+
+def text_report(resp: RuleDiscoveryResponse, *, contract: "Optional[AlphaContract]" = None) -> str:
+    """Compact plaintext verdict report.
+
+    ``contract`` is optional: the originating :class:`AlphaContract` (Modulo 2)
+    is a different object than ``resp`` (Modulo 3) and carries the
+    rotation-calibration fields (``rotation_p``, ``rotation_threshold``) that
+    ``RuleDiscoveryResponse`` has no reason to duplicate. Pass it to fold a
+    "ROTATION CALIBRATION" section into the same report.
+    """
     s = resp.in_sample_summary
     lines: List[str] = []
     add = lines.append
@@ -120,6 +130,12 @@ def text_report(resp: RuleDiscoveryResponse) -> str:
         add(f"  dependency_score={_f(ra.dependency_score)}  zero_months={ra.zero_months}  "
             f"avoid_in={ra.avoid_in or '—'}")
 
+    if contract is not None:
+        add("-" * 64)
+        add("ROTATION CALIBRATION (Modulo 2)")
+        add(f"  rotation_p={_f(contract.rotation_p)}  "
+            f"rotation_threshold={_f(contract.rotation_threshold)}")
+
     if resp.rejection_reasons:
         add("-" * 64)
         add("REASONS")
@@ -130,8 +146,12 @@ def text_report(resp: RuleDiscoveryResponse) -> str:
     return "\n".join(lines)
 
 
-def html_report(resp: RuleDiscoveryResponse) -> str:
-    """Self-contained HTML verdict report (inline CSS, no external assets)."""
+def html_report(resp: RuleDiscoveryResponse, *, contract: "Optional[AlphaContract]" = None) -> str:
+    """Self-contained HTML verdict report (inline CSS, no external assets).
+
+    ``contract`` is optional — see :func:`text_report` for why it is a
+    separate argument rather than a field on ``resp`` itself.
+    """
     s = resp.in_sample_summary
     badge = {"EDGE": "#27ae60", "PARTIAL-EDGE": "#f39c12", "NON-EDGE": "#c0392b",
              "INSUFFICIENT-DATA": "#5d6d7e"}.get(
@@ -301,6 +321,13 @@ def html_report(resp: RuleDiscoveryResponse) -> str:
             f"{_f(resp.regime_analysis.dependency_score)} · "
             f"avoid in: {html.escape(', '.join(resp.regime_analysis.avoid_in) or '—')}</p>")
 
+    if contract is not None:
+        add("<h2>Rotation calibration — Modulo 2</h2>")
+        add(_kv_table({
+            "rotation_p": _f(contract.rotation_p),
+            "rotation_threshold": _f(contract.rotation_threshold),
+        }))
+
     if resp.rejection_reasons:
         add("<h2>Reasons</h2><ul>")
         for r in resp.rejection_reasons:
@@ -309,6 +336,55 @@ def html_report(resp: RuleDiscoveryResponse) -> str:
 
     add("</body></html>")
     return "".join(parts)
+
+
+def rule_summary_report(
+    resp: RuleDiscoveryResponse,
+    *,
+    contract: "Optional[AlphaContract]" = None,
+    fmt: str = "text",
+    save: bool = False,
+    path: "Optional[str]" = None,
+) -> str:
+    """One call for "what does this verdict actually say" — print it, or save it.
+
+    A thin, discoverable wrapper over :func:`text_report`/:func:`html_report`
+    (which already carry every parameter/IS/OOS/walk-forward statistic a
+    verdict produces): the two live one import away from where most users
+    reach for them (``forgedge.rule_discovery``, not top-level ``forgedge``),
+    and neither writes to disk on its own. This closes both gaps at once.
+
+    Parameters
+    ----------
+    resp : RuleDiscoveryResponse
+        The verdict to report on.
+    contract : AlphaContract or None
+        Optional — folds the rotation-calibration fields (``rotation_p``,
+        ``rotation_threshold``) from Modulo 2 into the same report, since
+        they live on a different object than ``resp``.
+    fmt : "text" or "html"
+        Report format. Default ``"text"``.
+    save : bool
+        When ``True``, also writes the report to ``path`` (default
+        ``f"{resp.alpha_id}.{txt|html}"`` in the current directory).
+        The string is returned either way, so ``save=True`` never trades
+        away the ability to also ``print()`` it.
+    path : str or None
+        Output path when ``save=True``. Ignored otherwise.
+
+    Returns
+    -------
+    str
+        The rendered report.
+    """
+    if fmt not in ("text", "html"):
+        raise ValueError(f"fmt must be 'text' or 'html', got {fmt!r}")
+    rendered = (html_report if fmt == "html" else text_report)(resp, contract=contract)
+    if save:
+        out_path = path or f"{resp.alpha_id}.{'html' if fmt == 'html' else 'txt'}"
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(rendered)
+    return rendered
 
 
 # ---------------------------------------------------------------------------

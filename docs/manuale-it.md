@@ -783,7 +783,7 @@ limite *è* la strategia, non un raffinamento dell'esecuzione.
 
 Gli attributi importanti di una `RuleDiscoveryResponse`: `verdict` (`"EDGE"|"PARTIAL-EDGE"|"NON-EDGE"|"INSUFFICIENT-DATA"`), `is_edge` (vero per i primi due), `rejection_reasons`, `validated_rule` (porta `.params`, un `BacktestParams`), `in_sample_summary` (`total_trades`, `profit_factor`, `win_rate_pct`, `expectancy`, `tpm_mu`, `n_episodes`, `mean_concurrent_positions`, `max_concurrent_positions` — campi di overlap dei trade, §15), `execution_envelope` (`.conservative`/`.optimistic` — vedi §17), `walk_forward` (`.oos_summary`, `.consistency`), `statistical_validation` (`.temporal_stability`, `.deflated_sharpe`), `regime_analysis`, `excursion` (MAE/MFE), `entry_optimization` (popolato solo sotto `entry_mode="auto"` — il default — e solo una volta che il verdetto Stage-1 a mercato è `EDGE`/`PARTIAL-EDGE`; `None` sotto `"market"`/`"limit"` e sotto una run `"auto"` il cui verdetto a mercato è `NON-EDGE`, §15).
 
-`from forgedge.rule_discovery import text_report, html_report` costruiscono report human-readable/HTML da una response; `resp.to_dict()` dà una forma serializzabile in JSON.
+`text_report(resp)`/`html_report(resp)` (importabili anche direttamente da `forgedge`) costruiscono report human-readable/HTML da una response — ogni parametro della regola, statistiche IS/OOS, dettaglio per-fold del walk-forward, validazione statistica e motivi di rigetto. Passa il contratto d'origine come `contract=` per includere nello stesso report `rotation_p`/`rotation_threshold` (un campo del Modulo 2 che `RuleDiscoveryResponse` non duplica). `rule_summary_report(resp, *, contract=None, fmt="text"|"html", save=False, path=None)` incapsula entrambi in un'unica chiamata scopribile — `save=True` scrive il report su `path` (default `f"{resp.alpha_id}.{txt|html}"`) e restituisce comunque la stringa, quindi `print(rule_summary_report(resp, save=True))` è una riga sola. `resp.to_dict()` dà una forma serializzabile in JSON. Diverso da `rule_performance_report()` più sotto, che ri-simula le regole su candele fresche per un report a grafici in stile monitoraggio, non renderizza il verdetto già prodotto da M3.
 
 ### Un contratto concreto, campo per campo
 
@@ -2050,7 +2050,7 @@ Questo è un indice compatto, non un sostituto della trattazione più completa d
 | `FastRotationNull` / `RotationCalibrator` / `RotationConfig` / `CalibrationReport` | `forgedge` | calibrazione per multiple-testing a livello di ricerca |
 | `TargetOptimizer` / `TargetConfig` | `forgedge` | workflow alternativo standalone target-first |
 | `RuleSpec` / `rule_performance_report()` | `forgedge` | riproduce regole pubblicate su nuove candele, report HTML |
-| `text_report()` / `html_report()` | `forgedge.rule_discovery` | report human/HTML da una `RuleDiscoveryResponse` |
+| `text_report()` / `html_report()` / `rule_summary_report()` | `forgedge` (e `forgedge.rule_discovery`) | report human/HTML da una `RuleDiscoveryResponse`; `rule_summary_report(..., save=True)` scrive su disco |
 | `run_backtest()` | `forgedge.rule_discovery` | il motore di backtest a singola configurazione sottostante |
 
 Per la lista completa dei campi e default di ogni dataclass, vedi §10 (quelli che più probabilmente andrai a tarare) o direttamente il sorgente — ogni default citato in questo manuale è stato verificato contro il pacchetto installato al momento della scrittura.
