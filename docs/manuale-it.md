@@ -290,28 +290,30 @@ print("tradabili (edges()):", len(result.edges()))
 Candidati M1: 5356
 Promossi M2:   392
 Risposte M3:   392
-tradabili (edges()): 32
+tradabili (edges()): 40
 ```
 
-*(Ri-verificato dopo #205: `GateParams.dispersion_margin` sostituisce `max_dispersion` come
-soglia in modalità episode — vedi §15 — più permissiva qui (soglia effettiva 1.5 → 1.92 sui
-29 mesi di questo fixture), quindi 115 candidati in più superano il gate (5241 → 5356) e 22
-in più vengono promossi (370 → 392). I 22 nuovi contratti sono tutti finiti `NON-EDGE` — il
-conteggio dei tradabili non si muove, 32 in entrambi i casi; il blocco che questo manuale
-riportava qui in precedenza (`... tradabili (edges()): 54`) era già disallineato dal
-`Counter` poche righe sotto indipendentemente da #205, e ora concordano entrambi.)*
+*(Ri-verificato dopo #217: il pre-screen di `_early_elimination` sulla prima finestra di
+train del walk-forward (§9, "Un floor irraggiungibile è una finestra, non un verdetto")
+ri-derivava il proprio floor di trade con una formula tarata per uno span di selezione
+completo, non per quella singola finestra breve — scartando erroneamente alcuni contratti
+prima ancora che raggiungessero un walk-forward completo. M1/M2 non sono toccati
+(5356/392, invariati da #205); su M3, `tradabili (edges())` è passato da 32 a 40 e il
+`Counter` dei verdetti sotto si è mosso con lui — ognuno di questi 8 contratti in più è
+ora valutato correttamente invece di essere scartato in anticipo su un floor che la sua
+stessa prima finestra non era mai stata dimensionata per raggiungere.)*
 
 ### Interpretare l'output
 
 - **5356 candidati evento** hanno superato il Consistency Gate di Event Discovery — ricorda, nessuno di questi è stato ancora verificato contro un rendimento forward.
 - **392 di essi sono stati promossi** da Alpha Discovery a oggetti `AlphaContract` con stato "HYPOTHESIS" — cioè ciascuno ha una direzione determinata (long o short) e un periodo di detenzione/take-profit derivato.
 - **392 risposte di regola** — ogni contratto promosso è passato attraverso il backtest realistico e la validazione walk-forward di Rule Discovery (questo fixture ha `run_rule_discovery=True` di default).
-- **32 sono tradabili** (`result.edges()` — verdetto `EDGE` o `PARTIAL-EDGE`). Su questo specifico dataset con impostazioni di default, scavando un livello più a fondo si scopre che *tutti e 32* sono `PARTIAL-EDGE`, non `EDGE` pieno, e altri 6 contratti sono stati esplicitamente declassati a `INSUFFICIENT-DATA` invece di essere riportati silenziosamente come qualcosa di più forte di quanto l'evidenza OOS potesse sostenere:
+- **40 sono tradabili** (`result.edges()` — verdetto `EDGE` o `PARTIAL-EDGE`). Su questo specifico dataset con impostazioni di default, scavando un livello più a fondo si scopre che *tutti e 40* sono `PARTIAL-EDGE`, non `EDGE` pieno, e altri 8 contratti sono stati esplicitamente declassati a `INSUFFICIENT-DATA` invece di essere riportati silenziosamente come qualcosa di più forte di quanto l'evidenza OOS potesse sostenere:
 
 ```python
 from collections import Counter
 print(Counter(r.verdict for _, r in result.rule_responses))
-# Counter({'NON-EDGE': 354, 'PARTIAL-EDGE': 32, 'INSUFFICIENT-DATA': 6})
+# Counter({'NON-EDGE': 344, 'PARTIAL-EDGE': 40, 'INSUFFICIENT-DATA': 8})
 ```
 
 Zero verdetti `EDGE` pieni non è un bug e non è un segno che la libreria "non funzioni" — è il gate della rotation null di default (§14-15) che fa esattamente ciò per cui è progettato. Guarda il singolo miglior candidato `PARTIAL-EDGE` su questi dati:
@@ -330,14 +332,14 @@ print(r.entry_optimization.selected_entry, r.entry_optimization.adopted)
 Output verificato:
 
 ```
-pr_diffnorm_close_vol12_vol24_48 < 0.104167 | short
-17.166 60
-0.75 3.487
-['active_months 13/23 = 57% < 80%', 'search-level rotation null not cleared (rotation_p=1.0000 > 0.05)']
+pr_diffnorm_close_vol12_vol24_48 < 0.0833333 | short
+176.7489 50
+0.75 5.2793
+['active_months 12/23 = 52% < 80%', 'search-level rotation null not cleared (rotation_p=1.0000 > 0.05)']
 limit True
 ```
 
-Questa regola ha un profit factor in-sample eccezionale (17.2), un walk-forward positivo nel 75% delle finestre di test, e un profit factor OOS di 3.5 — ed è comunque limitata a `PARTIAL-EDGE`. Le `rejection_reasons` dicono esattamente perché: è attiva solo nel 57% dei mesi della sua finestra (sotto la soglia di copertura dell'80%), e — la ragione più importante — il suo p-value della rotation null a livello di ricerca è 1.0, cioè il test null di rotazione randomizzata proprio di FORGE (§14) ha scoperto che una versione ruotata e disaccoppiata dall'esito della stessa ricerca fa altrettanto bene o meglio. La riga `entry_optimization` mostra il default `entry_mode="auto"` (§9, §15) al lavoro: ha valutato questa regola a un ingresso a mercato per primo, poi ha provato un ingresso a limite e lo ha *adottato* perché il punto limite ha retto out-of-sample. Questo è la libreria che è onesta sulla dimensione del proprio spazio di ricerca, non un falso negativo.
+Questa regola ha un profit factor in-sample eccezionale (176.7 — in-sample quasi ogni trade tranne qualche eccezione è stato vincente), un walk-forward positivo nel 75% delle finestre di test, e un profit factor OOS di 5.3 — ed è comunque limitata a `PARTIAL-EDGE`. Le `rejection_reasons` dicono esattamente perché: è attiva solo nel 52% dei mesi della sua finestra (sotto la soglia di copertura dell'80%), e — la ragione più importante — il suo p-value della rotation null a livello di ricerca è 1.0, cioè il test null di rotazione randomizzata proprio di FORGE (§14) ha scoperto che una versione ruotata e disaccoppiata dall'esito della stessa ricerca fa altrettanto bene o meglio. La riga `entry_optimization` mostra il default `entry_mode="auto"` (§9, §15) al lavoro: ha valutato questa regola a un ingresso a mercato per primo, poi ha provato un ingresso a limite e lo ha *adottato* perché il punto limite ha retto out-of-sample. Questo è la libreria che è onesta sulla dimensione del proprio spazio di ricerca, non un falso negativo.
 
 ### Cosa ha fatto `forge()`, che non le hai chiesto esplicitamente
 
@@ -459,28 +461,86 @@ forge(
 
 `manual_events` e `event_discovery_config` sono mutuamente esclusivi — passare entrambi solleva `ValueError`. `ticker` ricade su `alpha_config.asset`, poi su `asset`, quando non passato esplicitamente.
 
-`ForgeResult` — il valore di ritorno — porta ogni artefatto intermedio:
+`forge_multi(frames_by_ticker: dict[str, pd.DataFrame], *, registry_config=None, progress=True, **forge_kwargs) -> tuple[dict[str, ForgeResult], RuleRegistry]` esegue `forge()` una volta per ticker e mette in comune ogni regola tradabile in un unico registry cross-ticker — è il modo naturale per ottenere dal Modulo 4 regole genuinamente classificate `GENERIC`.
+
+### `ForgeResult`, campo per campo
+
+Il valore di ritorno di `forge()` è un'unica dataclass piatta — nessun annidamento, ogni artefatto intermedio della run raggiungibile direttamente da `result`. Questa sezione è un riferimento completo campo per campo, ogni voce verificata contro il sorgente attuale (`dataclasses.fields(ForgeResult)`) e, dove utile, contro una run reale, così vedi tipi e forme effettivi invece di una loro descrizione.
 
 | Campo | Tipo | Significato |
 |---|---|---|
-| `enriched` | `pd.DataFrame` | KPI Table dopo Market Context |
-| `event_frame` | `pd.DataFrame` | frame post-pipeline di Event Discovery — **passa questo, non `enriched`**, a qualunque cosa richieda feature derivate |
-| `candidates` | `list[EventCandidate]` | ogni output del Modulo 1 |
-| `contracts` | `list[AlphaContract]` | ogni output del Modulo 2, promossi *e* rifiutati |
-| `promoted` | `list[AlphaContract]` | il sottoinsieme con `status="HYPOTHESIS"` |
-| `rule_responses` | `list[tuple[AlphaContract, RuleDiscoveryResponse]]` | una coppia per contratto promosso, se M3 è stato eseguito |
-| `registry` | `RuleRegistry \| None` | output del Modulo 4, se eseguito |
-| `calibration` | `CalibrationReport \| None` | il report della rotation null |
-| `ledger` | `HypothesisLedger \| None` | contabilità della superficie di ricerca |
-| `time_budget` | `TimeBudget \| None` | lo split IS/OOS effettivo usato |
-| `context` | `PipelineContext` | i fatti di sessione risolti (timeframe, schema, policy statistica) usati dalla run |
-| `resolution` | `ResolutionTrace` | ogni campo di config che il resolver ha derivato — `default → risolto`, con la regola che si è attivata e gli input letti; `.describe()` per un riassunto in una riga |
-| `coherence` | `ConfigReport` | il controllo di coerenza con cui la run è stata eseguita (il supporto di `strict=True`) — `.findings`, `.has_critical`, `.trace` (stesso oggetto di `.resolution`) |
-| `market_context`, `event_discovery`, `alpha_discovery` | istanze modulo | oggetti live per drill-down (`.distribution()`, `.summary()`, …) |
+| `ticker` | `str` | la stringa ticker con cui la run è stata etichettata — `ticker=` se dato, altrimenti `alpha_config.asset`, altrimenti `asset` |
+| `enriched` | `pd.DataFrame` | KPI Table dopo Market Context (aggiunge `regime`/`regime_stable`, o invariata se `run_market_context=False`) |
+| `event_frame` | `pd.DataFrame \| None` | frame post-pipeline di Event Discovery — **passa questo, non `enriched`**, a qualunque cosa richieda le colonne derivate ratio/spread/trasformazione a cui le espressioni degli eventi fanno riferimento; `None` solo se M1 stesso non è mai girato (gira sempre sotto `forge()` a meno di iniettare `manual_events`, nel qual caso è comunque impostato dalla valutazione manuale degli eventi) |
+| `candidates` | `list[EventCandidate]` | ogni output del Modulo 1 sopravvissuto al Consistency Gate |
+| `contracts` | `list[AlphaContract]` | ogni output del Modulo 2, **promossi e rifiutati allo stesso modo** — stessa lunghezza di `candidates`, un contratto per candidato |
+| `promoted` | `list[AlphaContract]` | il sottoinsieme di `contracts` con `status="HYPOTHESIS"` |
+| `rule_responses` | `list[tuple[AlphaContract, RuleDiscoveryResponse]]` | una coppia `(contract, response)` per contratto promosso, se M3 è stato eseguito (`run_rule_discovery=True`, il default) — stessa lunghezza di `promoted` |
+| `registry` | `RuleRegistry \| None` | output del Modulo 4, se eseguito (`run_registry=True`, il default) |
+| `market_context` | `MarketContext \| None` | l'istanza live del Modulo 0, per `.distribution()`/`.window_resolution` — `None` se `run_market_context=False` |
+| `event_discovery` | `EventDiscovery \| None` | l'istanza live del Modulo 1 — `.summary()`, `.df`, `.event_distribution_report` (#215, sopra) |
+| `alpha_discovery` | `AlphaDiscovery \| None` | l'istanza live del Modulo 2 — `.summary()`, `.market_structure` |
+| `calibration` | `CalibrationReport \| None` | il report della rotation null (`fast_null=True`, il default, oppure un `rotation_calibration=` esplicito) — `.tippett_p`, `.real_stats`, `.null_arrays` |
+| `ledger` | `HypothesisLedger \| None` | contabilità della superficie di ricerca: `m1_candidates`, `m2_horizons`, `m2_promoted`, `m3_grid_cells`, `m2_return_tests` — non una correzione, solo una registrazione di quanto grande fosse la ricerca della sessione |
+| `time_budget` | `TimeBudget \| None` | lo split IS/OOS a indice-barra effettivo, purgato, usato dalla sessione — `n_bars`, `split`, `horizon_bars`, `purge_bars`, `embargo_bars` |
+| `context` | `PipelineContext \| None` | i fatti di sessione risolti da cui sono stati riempiti i campi `UNSET` di ogni modulo — timeframe, nomi colonne schema, fee, policy statistica |
+| `resolution` | `ResolutionTrace \| None` | ogni campo di config che il resolver ha derivato — `default → risolto`, con la regola che si è attivata e gli input letti; `.describe()` per un riassunto in una riga |
+| `coherence` | `ConfigReport \| None` | il controllo di coerenza con cui la run è stata eseguita (il supporto di `strict=True`) — `.findings`, `.has_critical`, `.one_line()`; `.trace` è *lo stesso oggetto* di `.resolution`, non una copia |
 
-Metodi: `.edges()` → coppie `(contract, response)` dove `response.is_edge` è vero; `.validated_rules()`; `.submissions()`; `.summary()` (un `pd.DataFrame`, una riga per candidato, arricchito con `rule_verdict`).
+**Verificato**, sul fixture ADA (`forge(kpi, ticker="ADAUSDC", timeframe="1D", progress=False)`):
 
-`forge_multi(frames_by_ticker: dict[str, pd.DataFrame], *, registry_config=None, progress=True, **forge_kwargs) -> tuple[dict[str, ForgeResult], RuleRegistry]` esegue `forge()` una volta per ticker e mette in comune ogni regola tradabile in un unico registry cross-ticker — è il modo naturale per ottenere dal Modulo 4 regole genuinamente classificate `GENERIC`.
+```
+ticker              = 'ADAUSDC'
+enriched.shape      = (882, 28)
+event_frame.shape   = (882, 174)                 # 174 — ogni feature derivata generata da Event Discovery
+len(candidates)     = 5356      len(contracts) = 5356      len(promoted) = 392
+len(rule_responses) = 392
+ledger    = HypothesisLedger(m1_candidates=5356, m2_horizons=6, m2_promoted=392,
+                              m3_grid_cells=15, m2_return_tests=38097)
+time_budget = TimeBudget(n_bars=882, split=617, horizon_bars=24, purge_bars=24,
+                          embargo_bars=0, event_split=882)
+context   = PipelineContext(timeframe='1D', timeframe_declared=True, timestamp_col='open_dt',
+                             close_col='close', regime_col='regime', regime_stable_col='regime_stable',
+                             fee_per_side=0.002, alpha=0.05, min_sample=10, target_rate_tpm=None,
+                             rate_retention=1.0, bars_per_episode=1.76, cross_pf_retention=0.8,
+                             net_gain_retention=0.5, n_bars=882, span_months=29.37,
+                             inferred_bar_hours=24.0)
+resolution.describe() = 'resolution: 30 field(s) derived, 0 left at their documented default'
+coherence.one_line()  = due finding WARN — m1_is_window_too_short (lo span IS è corto di
+                         ciò che gate_params.min_episodes=10 richiede a min_tpm=0.5 con un
+                         margine di Poisson al 95 %) e m3_stricter_than_m1 (il min_tpm di M3
+                         legge più severo di quello di M1 una volta convertito nella stessa
+                         unità) — informativo, dato che forge(strict=True) solleva solo su
+                         un finding FAIL, mai su un WARN
+```
+
+Due cose da notare in questo dump: `context`/`resolution`/`coherence` **non sono sempre popolati** — sono `None` se la run non ha mai raggiunto il resolver (non un percorso `forge()` normale, ma possibile se costruisci `ForgeResult` a mano) — e i due finding `WARN` su `coherence` sono esattamente il tipo di segnale «la pipeline ti dice attorno a cosa sta silenziosamente lavorando» che §14-15 descrivono: nulla è fallito, ma il messaggio nomina esattamente quale manopola una storia più lunga o un `min_tpm` diverso dovrebbero toccare.
+
+**Metodi** (tutti di sola lettura, calcolati su richiesta dai campi sopra — nulla è cachato oltre a ciò che è già su `result`):
+
+```python
+result.edges()           # list[tuple[AlphaContract, RuleDiscoveryResponse]]
+                          #   coppie dove response.is_edge — verdetto EDGE o PARTIAL-EDGE
+result.validated_rules()  # list[RuleDiscoveryResponse] che porta un validated_rule non None
+                          #   — EDGE + PARTIAL-EDGE + INSUFFICIENT-DATA (che mantiene il suo
+                          #   ValidatedRule per una futura ri-valutazione); NON-EDGE mai
+result.submissions()      # list[RuleSubmission] — esattamente le risposte EDGE/PARTIAL-EDGE,
+                          #   già pronte per essere ingestite da RuleRegistry.from_forge_results()
+result.summary()          # pd.DataFrame, una riga per candidato M1 (non per contratto promosso)
+```
+
+**Verificato sulla stessa run**: `len(result.edges()) == 40` (combacia col `Counter` del §7 — `EDGE`+`PARTIAL-EDGE`), `len(result.validated_rules()) == 48` (40 + le 8 risposte `INSUFFICIENT-DATA`, l'unico punto in cui `edges()` e `validated_rules()` divergono — un verdetto può portare una regola validata per una futura ri-valutazione senza essere tradabile *ora*), `len(result.submissions()) == 40` (popolazione identica a `edges()`, dato che l'ingestione del Modulo 4 è definita sullo stesso gate `EDGE`/`PARTIAL-EDGE`). `result.summary()` è `(5356, 34)` — una riga per *candidato*, non per contratto promosso, con colonne:
+
+```
+alpha_id, status, promoted, event_candidate_id, expression, pattern_family,
+holding_period_h, sell_pct, direction, mean_advantage, feature, ic, ic_p_value,
+ic_admitted, rolling_ic_stable, n_activations, win_rate, base_rate, lift,
+fwd_return_mean, cohens_d, t_stat, p_value, fdr_promoted, oos_passed, oos_p_value,
+oos_lift, regime_dependency, regime_breadth, composite_score, grade,
+rejection_reasons, diagnostics, rule_verdict
+```
+
+`rule_verdict` è l'unica colonna che `summary()` aggiunge oltre a ciò che i campi propri di `AlphaContract` già portano — `"EDGE"`/`"PARTIAL-EDGE"`/`"NON-EDGE"`/`"INSUFFICIENT-DATA"` quando M3 è girato per quel candidato, `NaN` per un candidato mai promosso oltre M2 (M3 vede solo `promoted`, quindi la maggior parte delle 5356 righe qui è `NaN` — filtra prima con `summary()[summary()["promoted"]]` se vuoi solo quelle che Rule Discovery ha davvero toccato).
 
 ### Preset
 
@@ -509,7 +569,10 @@ EventDiscovery(kpi_table: pd.DataFrame, config: DiscoveryConfig | None = None,
 ed.run() -> list[EventCandidate]
 ed.df           # frame post-pipeline — passa questo ad AlphaDiscovery, non kpi_table
 ed.summary()    # pd.DataFrame, una riga per candidato
+ed.event_distribution_report   # str | None — popolato da run(), vedi sotto (#215)
 ```
+
+**`event_distribution_report`.** `config_report()` (sotto) valida la coerenza della configurazione senza mai toccare i tuoi dati, quindi non può cogliere il caso in cui un preset è internamente coerente ma respinge comunque ogni candidato che uno *specifico asset* produce davvero — cosa che prima emergeva solo come una nuda riga di log `"M1 Event Discovery — 0 candidate(s)"`, indistinguibile da una pipeline rotta. `run()` ora popola sempre `ed.event_distribution_report` (`None` prima): un riassunto in testo semplice della distribuzione tpm/dispersione osservata davvero su ogni candidato grezzo valutato dal Consistency Gate, contro le soglie configurate — sotto un tasso di sopravvivenza al gate del 15% suggerisce anche parametri concreti al valore mediano osservato. La riga di log dello stadio M1 di `forge()` porta questo testo ogni volta che Event Discovery gira davvero (l'iniezione manuale di eventi via `manual_events=` salta `.run()` e mantiene la vecchia riga col solo conteggio); `result.event_discovery.event_distribution_report` lo espone su un `ForgeResult` a costo zero.
 
 Gli attributi importanti di un `EventCandidate`: `event_id`, `expression` (la condizione booleana, come stringa), `event_formula` (una resa human-readable), `sql_expression` (una traduzione SQL compatibile con DuckDB della stessa condizione, utile se vuoi valutare l'evento fuori da Python), `components`, `activation_stats` (`n_activations`, `n_active_months`, `zero_months`, `max_monthly_share`, `mean_tpm`), `consistency_gate` (un `GateResult`), `validation` (un `ValidationResult`, solo se il walk-forward era configurato). Il suo metodo `.apply(df) -> pd.Series[bool]` rivaluta deterministicamente le soglie *memorizzate* su qualsiasi nuovo frame — nessuna ricalibrazione, nessun look-ahead — e `.persist(path)` dà un round-trip pickle completo (l'unico metodo che la documentazione descrive come completamente invertibile; la forma JSON di `.to_dict()` non lo è).
 
@@ -712,6 +775,28 @@ indistinguibile da «il segnale è brutto».
   condivide il tasso basso di `"sniper"` ma non la sua promessa di
   precisione — lo abbassa a 5, coerente con l'essere permissivo per design e
   delegare già il rigore al `RotationCalibrator` a valle.
+- **Il pre-screen di M3, sulla propria prima finestra** (`#217`, la stessa
+  confusione finestra/floor che ricompare una terza volta, un livello sotto
+  `min_train_months`). `min_train_months` dimensiona la prima finestra di
+  train del walk-forward per raggiungere esattamente 10 trade a
+  `criteria.min_tpm` — non `n_months × min_tpm` trade. Il pre-screen veloce
+  di `selection_mode="walk_forward"` (Step 2.3, `_early_elimination`)
+  ri-derivava il floor di trade con quella seconda formula, non correlata,
+  sulla stessa finestra breve invece di riusare il 10 per cui era stata
+  dimensionata — innocuo a `min_tpm` basso, dove le due formule
+  concordano approssimativamente, ma a un tasso effettivo alto (es.
+  `min_tpm=35.2`, il tasso bar-equivalente a cui risolve
+  `forge_preset("balanced", "1H")`) la finestra resta comunque arrotondata
+  al suo floor di 1 mese mentre il requisito ri-derivato sale a 35 — sette
+  volte il conteggio di trade per cui la finestra era mai stata dimensionata.
+  Riprodotto su dati reali (SUIUSDC/1H): 9 contratti che avevano già superato
+  la rotation null sono stati scartati con `"total_trades 0 < 35 (1mo ×
+  35.2 tpm, not significant)"` nonostante 255-674 attivazioni sull'intero
+  span IS. Il pre-screen su quella prima finestra ora prende un floor fisso
+  esplicito invece di ri-derivarne uno; il floor proprio di `_decide()`
+  (sull'intero span di selezione, dove `n_months × min_tpm` è la domanda
+  giusta — «questo candidato ha mantenuto il tasso dichiarato sull'intera
+  storia che aveva davvero?») resta intatto.
 
 
 #### Modalità d'ingresso — cosa misura il verdetto
@@ -1472,7 +1557,7 @@ print(f"{len(svc.published_rules())} regole pubblicate: {svc.published_rules()[:
 html = svc.health_report_html(kpi)   # in produzione: tabella di scoperta + barre genuinamente nuove
 ```
 
-**Output verificato** sul fixture ADA: `54 regole pubblicate: ['RULE_ADA_01', 'RULE_ADA_02', 'RULE_ADA_03'] ...`, e un report HTML generato di ~5 MB (grafici SVG inline, nessuna risorsa esterna — sicuro da salvare o inviare via email come singolo file). I nomi `RuleSpec` seguono la stessa convenzione `RULE_{TICKER}_{NN}` che il Modulo 4 usa internamente, anche quando non passi affatto per `RuleRegistry`.
+**Output verificato** sul fixture ADA: `40 regole pubblicate: ['RULE_ADA_01', 'RULE_ADA_02', 'RULE_ADA_03'] ...` (combacia col conteggio attuale di `result.edges()`, §7/§9), e un report HTML generato di ~5 MB (grafici SVG inline, nessuna risorsa esterna — sicuro da salvare o inviare via email come singolo file). I nomi `RuleSpec` seguono la stessa convenzione `RULE_{TICKER}_{NN}` che il Modulo 4 usa internamente, anche quando non passi affatto per `RuleRegistry`.
 
 ---
 
@@ -1800,7 +1885,7 @@ Questo è genuinamente eseguibile contro il fixture ADA:
 ```python
 kpi = pd.read_parquet("tests/fixtures/ADA_1D_TRAIN.parquet")
 session = DiscoverySession.run(kpi, ticker="ADAUSDC", timeframe="1D")
-print(f"{len(session.specs)} regole pubblicate")     # 54
+print(f"{len(session.specs)} regole pubblicate")     # 40
 print(session.check_signals(kpi))                     # regole attive sull'ultima barra del fixture
 ```
 
@@ -1895,6 +1980,12 @@ Adattando il pattern generale a ciò che questo codebase effettivamente supporta
 ## 21. Troubleshooting
 
 Ogni voce: sintomo → causa probabile → come verificarla → correzione → come prevenirla in futuro.
+
+### "Zero (o quasi zero) candidati di Event Discovery, solo `\"M1 Event Discovery — 0 candidate(s)\"` nel log"
+
+- **Causa:** le soglie del Consistency Gate e le statistiche reali degli eventi di questo specifico asset non concordano — un preset o un `DiscoveryConfig` costruito a mano può essere perfettamente coerente al suo interno (`config_report()` non trova nulla di sbagliato, perché non guarda mai i dati) e respingere comunque ogni candidato che una data KPI Table produce, es. un preset a `min_tpm` alto su un asset a bassa liquidità o bassa volatilità.
+- **Conferma:** leggi `result.event_discovery.event_distribution_report` (o `ed.event_distribution_report` se costruito a mano) — un riassunto in testo semplice della distribuzione tpm/dispersione osservata davvero su ogni candidato grezzo valutato dal gate, contro le soglie configurate. Sotto un tasso di sopravvivenza al gate del 15% nomina anche valori di parametro concreti al valore mediano osservato. La riga di log dello stadio M1 di `forge()` porta già questo testo ogni volta che Event Discovery gira normalmente (§8, §9).
+- **Correzione:** allenta `min_tpm`/`dispersion_margin` (o `max_dispersion` sotto `event_counting="bar"`) verso i valori che il report suggerisce, oppure accetta che questo asset genuinemente non produce eventi al tasso configurato.
 
 ### "Zero contratti promossi, o ogni contratto è `direction='undetermined'`"
 

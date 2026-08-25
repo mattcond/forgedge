@@ -290,28 +290,29 @@ print("tradeable (edges()):", len(result.edges()))
 M1 candidates: 5356
 M2 promoted:   392
 M3 responses:  392
-tradeable (edges()): 32
+tradeable (edges()): 40
 ```
 
-*(Re-verified after #205: `GateParams.dispersion_margin` replaced `max_dispersion` as the
-episode-mode threshold — see §15 — which is more permissive here (effective threshold
-1.5 → 1.92 at this fixture's 29-month span), so 115 more candidates clear the gate
-(5241 → 5356) and 22 more get promoted (370 → 392). The 22 new contracts all landed
-`NON-EDGE` — the tradeable count itself does not move, 32 either way; the fenced block
-this manual previously carried here (`... tradeable (edges()): 54`) had drifted out of
-sync with the `Counter` a few lines below independently of #205, and both now agree.)*
+*(Re-verified after #217: `_early_elimination`'s pre-screen on the walk-forward's first
+train window (§9's "An unreachable floor is a window, not a verdict") used to re-derive
+its trade floor with a formula sized for a full selection span, not that one short
+window — wrongly discarding some contracts before they ever reached a full walk-forward.
+M1/M2 are unaffected (5356/392, unchanged from #205); on M3, `tradeable (edges())` moved
+32 → 40 and the verdict `Counter` below moved with it — every one of those 8 additional
+contracts is now correctly evaluated rather than short-circuited on a floor its own
+first window was never sized to clear.)*
 
 ### Interpreting the output
 
 - **5356 event candidates** survived Event Discovery's Consistency Gate — remember, none of these have been checked against a forward return yet.
 - **392 of them were promoted** by Alpha Discovery to `AlphaContract` "HYPOTHESIS" status — meaning each has a determined direction (long or short) and a derived holding period / take-profit.
 - **392 rule responses** — every promoted contract was run through Rule Discovery's realistic backtest and walk-forward validation (this fixture has `run_rule_discovery=True` by default).
-- **32 are tradeable** (`result.edges()` — verdict `EDGE` or `PARTIAL-EDGE`). On this specific dataset with default settings, digging one level deeper shows *all 32* are `PARTIAL-EDGE`, not full `EDGE`, and 6 more contracts were explicitly demoted to `INSUFFICIENT-DATA` rather than silently reported as something stronger than the OOS evidence could support:
+- **40 are tradeable** (`result.edges()` — verdict `EDGE` or `PARTIAL-EDGE`). On this specific dataset with default settings, digging one level deeper shows *all 40* are `PARTIAL-EDGE`, not full `EDGE`, and 8 more contracts were explicitly demoted to `INSUFFICIENT-DATA` rather than silently reported as something stronger than the OOS evidence could support:
 
 ```python
 from collections import Counter
 print(Counter(r.verdict for _, r in result.rule_responses))
-# Counter({'NON-EDGE': 354, 'PARTIAL-EDGE': 32, 'INSUFFICIENT-DATA': 6})
+# Counter({'NON-EDGE': 344, 'PARTIAL-EDGE': 40, 'INSUFFICIENT-DATA': 8})
 ```
 
 Zero full `EDGE` verdicts is not a bug and not a sign the library "isn't working" — it is the default rotation-null gate (§14–15) doing exactly what it's designed to do. Look at the single best `PARTIAL-EDGE` candidate on this data:
@@ -330,14 +331,14 @@ print(r.entry_optimization.selected_entry, r.entry_optimization.adopted)
 Verified output:
 
 ```
-pr_diffnorm_close_vol12_vol24_48 < 0.104167 | short
-17.166 60
-0.75 3.487
-['active_months 13/23 = 57% < 80%', 'search-level rotation null not cleared (rotation_p=1.0000 > 0.05)']
+pr_diffnorm_close_vol12_vol24_48 < 0.0833333 | short
+176.7489 50
+0.75 5.2793
+['active_months 12/23 = 52% < 80%', 'search-level rotation null not cleared (rotation_p=1.0000 > 0.05)']
 limit True
 ```
 
-This rule has an outstanding in-sample profit factor (17.2), a walk-forward that is positive in 75% of test windows, and an OOS profit factor of 3.5 — and it is still capped at `PARTIAL-EDGE`. The `rejection_reasons` tell you exactly why: it's only active in 57% of the months in its window (below the 80% coverage bar), and — the more important reason — its search-level rotation-null p-value is 1.0, meaning FORGE's own randomized-rotation null test (§14) found that a purely rotated, outcome-decoupled version of the search does just as well or better. The `entry_optimization` line shows the default `entry_mode="auto"` (§9, §15) at work: it evaluated this rule at a market entry first, then tried a limit entry and *adopted* it because the limit point held up out-of-sample. This is the library being honest about the size of its own search space, not a false negative.
+This rule has an outstanding in-sample profit factor (176.7 — every in-sample trade but a handful was a winner), a walk-forward that is positive in 75% of test windows, and an OOS profit factor of 5.3 — and it is still capped at `PARTIAL-EDGE`. The `rejection_reasons` tell you exactly why: it's only active in 52% of the months in its window (below the 80% coverage bar), and — the more important reason — its search-level rotation-null p-value is 1.0, meaning FORGE's own randomized-rotation null test (§14) found that a purely rotated, outcome-decoupled version of the search does just as well or better. The `entry_optimization` line shows the default `entry_mode="auto"` (§9, §15) at work: it evaluated this rule at a market entry first, then tried a limit entry and *adopted* it because the limit point held up out-of-sample. This is the library being honest about the size of its own search space, not a false negative.
 
 ### What `forge()` did, that you didn't ask it to do explicitly
 
@@ -459,28 +460,85 @@ forge(
 
 `manual_events` and `event_discovery_config` are mutually exclusive — passing both raises `ValueError`. `ticker` falls back to `alpha_config.asset`, then to `asset`, when not given explicitly.
 
-`ForgeResult` — the return value — carries every intermediate artefact:
+`forge_multi(frames_by_ticker: dict[str, pd.DataFrame], *, registry_config=None, progress=True, **forge_kwargs) -> tuple[dict[str, ForgeResult], RuleRegistry]` runs `forge()` once per ticker and pools every tradeable rule into one cross-ticker registry — this is the natural way to get genuinely `GENERIC`-classified rules out of Module 4.
+
+### `ForgeResult`, field by field
+
+`forge()`'s return value is a single, flat dataclass — no nesting, every intermediate artefact of the run reachable directly off `result`. This section is a complete field-by-field reference, each entry verified against the current source (`dataclasses.fields(ForgeResult)`) and, where useful, against a real run so you see actual types and shapes rather than a description of them.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `enriched` | `pd.DataFrame` | KPI Table after Market Context |
-| `event_frame` | `pd.DataFrame` | Event Discovery's post-pipeline frame — **pass this, not `enriched`**, to anything that needs derived features |
-| `candidates` | `list[EventCandidate]` | every Module 1 output |
-| `contracts` | `list[AlphaContract]` | every Module 2 output, promoted *and* rejected |
-| `promoted` | `list[AlphaContract]` | the subset with `status="HYPOTHESIS"` |
-| `rule_responses` | `list[tuple[AlphaContract, RuleDiscoveryResponse]]` | one pair per promoted contract, if M3 ran |
-| `registry` | `RuleRegistry \| None` | Module 4 output, if it ran |
-| `calibration` | `CalibrationReport \| None` | the rotation-null report |
-| `ledger` | `HypothesisLedger \| None` | search-surface bookkeeping |
-| `time_budget` | `TimeBudget \| None` | the effective IS/OOS split used |
-| `context` | `PipelineContext` | the resolved session facts (timeframe, schema, statistical policy) the run used |
-| `resolution` | `ResolutionTrace` | every config field the resolver derived — `default → resolved`, with the rule that fired and the inputs it read; `.describe()` for a one-line summary |
-| `coherence` | `ConfigReport` | the coherence check the run executed with (`strict=True`'s backing) — `.findings`, `.has_critical`, `.trace` (same object as `.resolution`) |
-| `market_context`, `event_discovery`, `alpha_discovery` | module instances | live objects for drill-down (`.distribution()`, `.summary()`, …) |
+| `ticker` | `str` | the ticker string the run was labelled with — `ticker=` if given, else `alpha_config.asset`, else `asset` |
+| `enriched` | `pd.DataFrame` | KPI Table after Market Context (adds `regime`/`regime_stable`, or unchanged if `run_market_context=False`) |
+| `event_frame` | `pd.DataFrame \| None` | Event Discovery's post-pipeline frame — **pass this, not `enriched`**, to anything that needs the derived ratio/spread/transform columns event expressions reference; `None` only if M1 itself never ran (it always does under `forge()` unless you inject `manual_events`, in which case it's still set from the manual-event evaluation) |
+| `candidates` | `list[EventCandidate]` | every Module 1 output that survived the Consistency Gate |
+| `contracts` | `list[AlphaContract]` | every Module 2 output, **promoted and rejected alike** — same length as `candidates`, one contract per candidate |
+| `promoted` | `list[AlphaContract]` | the subset of `contracts` with `status="HYPOTHESIS"` |
+| `rule_responses` | `list[tuple[AlphaContract, RuleDiscoveryResponse]]` | one `(contract, response)` pair per promoted contract, if M3 ran (`run_rule_discovery=True`, the default) — same length as `promoted` |
+| `registry` | `RuleRegistry \| None` | Module 4 output, if it ran (`run_registry=True`, the default) |
+| `market_context` | `MarketContext \| None` | the live Module 0 instance, for `.distribution()`/`.window_resolution` — `None` if `run_market_context=False` |
+| `event_discovery` | `EventDiscovery \| None` | the live Module 1 instance — `.summary()`, `.df`, `.event_distribution_report` (#215, above) |
+| `alpha_discovery` | `AlphaDiscovery \| None` | the live Module 2 instance — `.summary()`, `.market_structure` |
+| `calibration` | `CalibrationReport \| None` | the rotation-null report (`fast_null=True`, the default, or an explicit `rotation_calibration=`) — `.tippett_p`, `.real_stats`, `.null_arrays` |
+| `ledger` | `HypothesisLedger \| None` | search-surface bookkeeping: `m1_candidates`, `m2_horizons`, `m2_promoted`, `m3_grid_cells`, `m2_return_tests` — not a correction, just a record of how large the session's search was |
+| `time_budget` | `TimeBudget \| None` | the effective, purged IS/OOS bar-index split the session used — `n_bars`, `split`, `horizon_bars`, `purge_bars`, `embargo_bars` |
+| `context` | `PipelineContext \| None` | the resolved session facts every module's `UNSET` fields were filled in from — timeframe, schema column names, fee, statistical policy |
+| `resolution` | `ResolutionTrace \| None` | every config field the resolver derived — `default → resolved`, with the rule that fired and the inputs it read; `.describe()` for a one-line summary |
+| `coherence` | `ConfigReport \| None` | the coherence check the run executed with (`strict=True`'s backing) — `.findings`, `.has_critical`, `.one_line()`; `.trace` is the *same object* as `.resolution`, not a copy |
 
-Methods: `.edges()` → `(contract, response)` pairs where `response.is_edge` is true; `.validated_rules()`; `.submissions()`; `.summary()` (a `pd.DataFrame`, one row per candidate, augmented with `rule_verdict`).
+**Verified**, on the ADA fixture (`forge(kpi, ticker="ADAUSDC", timeframe="1D", progress=False)`):
 
-`forge_multi(frames_by_ticker: dict[str, pd.DataFrame], *, registry_config=None, progress=True, **forge_kwargs) -> tuple[dict[str, ForgeResult], RuleRegistry]` runs `forge()` once per ticker and pools every tradeable rule into one cross-ticker registry — this is the natural way to get genuinely `GENERIC`-classified rules out of Module 4.
+```
+ticker              = 'ADAUSDC'
+enriched.shape      = (882, 28)
+event_frame.shape   = (882, 174)                 # 174 — every derived feature Event Discovery generated
+len(candidates)     = 5356      len(contracts) = 5356      len(promoted) = 392
+len(rule_responses) = 392
+ledger    = HypothesisLedger(m1_candidates=5356, m2_horizons=6, m2_promoted=392,
+                              m3_grid_cells=15, m2_return_tests=38097)
+time_budget = TimeBudget(n_bars=882, split=617, horizon_bars=24, purge_bars=24,
+                          embargo_bars=0, event_split=882)
+context   = PipelineContext(timeframe='1D', timeframe_declared=True, timestamp_col='open_dt',
+                             close_col='close', regime_col='regime', regime_stable_col='regime_stable',
+                             fee_per_side=0.002, alpha=0.05, min_sample=10, target_rate_tpm=None,
+                             rate_retention=1.0, bars_per_episode=1.76, cross_pf_retention=0.8,
+                             net_gain_retention=0.5, n_bars=882, span_months=29.37,
+                             inferred_bar_hours=24.0)
+resolution.describe() = 'resolution: 30 field(s) derived, 0 left at their documented default'
+coherence.one_line()  = two WARN findings — m1_is_window_too_short (the IS span is short of
+                         what gate_params.min_episodes=10 needs at min_tpm=0.5 with a 95% Poisson
+                         margin) and m3_stricter_than_m1 (M3's min_tpm reads stricter than M1's
+                         once converted to the same unit) — informational, since forge(strict=True)
+                         only ever raises on a FAIL finding, never a WARN
+```
+
+Two things worth noticing in that dump: `context`/`resolution`/`coherence` are **not always populated** — they're `None` if the run never reached the resolver (not a normal `forge()` path, but possible if you construct `ForgeResult` by hand) — and the two `WARN` findings on `coherence` are exactly the kind of "the pipeline tells you what it's silently working around" signal §14–15 describe: nothing failed, but the message names precisely which knob a longer history or a different `min_tpm` would need to touch.
+
+**Methods** (all read-only, computed on demand from the fields above — nothing cached beyond what's already on `result`):
+
+```python
+result.edges()           # list[tuple[AlphaContract, RuleDiscoveryResponse]]
+                          #   pairs where response.is_edge — verdict EDGE or PARTIAL-EDGE
+result.validated_rules()  # list[RuleDiscoveryResponse] carrying a non-None validated_rule
+                          #   — EDGE + PARTIAL-EDGE + INSUFFICIENT-DATA (which keeps its
+                          #   ValidatedRule for future re-evaluation); NON-EDGE never does
+result.submissions()      # list[RuleSubmission] — exactly the EDGE/PARTIAL-EDGE responses,
+                          #   pre-packaged as what RuleRegistry.from_forge_results() ingests
+result.summary()          # pd.DataFrame, one row per M1 candidate (not per promoted contract)
+```
+
+**Verified on the same run**: `len(result.edges()) == 40` (matches the `Counter` in §7 — `EDGE`+`PARTIAL-EDGE`), `len(result.validated_rules()) == 48` (40 + the 8 `INSUFFICIENT-DATA` responses, which is the one place `edges()` and `validated_rules()` diverge — a verdict can carry a validated rule for future re-evaluation without being tradeable *now*), `len(result.submissions()) == 40` (identical population to `edges()`, since Module 4 ingestion is defined on the same `EDGE`/`PARTIAL-EDGE` gate). `result.summary()` is `(5356, 34)` — one row per *candidate*, not per promoted contract, with columns:
+
+```
+alpha_id, status, promoted, event_candidate_id, expression, pattern_family,
+holding_period_h, sell_pct, direction, mean_advantage, feature, ic, ic_p_value,
+ic_admitted, rolling_ic_stable, n_activations, win_rate, base_rate, lift,
+fwd_return_mean, cohens_d, t_stat, p_value, fdr_promoted, oos_passed, oos_p_value,
+oos_lift, regime_dependency, regime_breadth, composite_score, grade,
+rejection_reasons, diagnostics, rule_verdict
+```
+
+`rule_verdict` is the one column `summary()` adds beyond what `AlphaContract`'s own fields already carry — `"EDGE"`/`"PARTIAL-EDGE"`/`"NON-EDGE"`/`"INSUFFICIENT-DATA"` when M3 ran for that candidate, `NaN` for a candidate never promoted past M2 (M3 only sees `promoted`, so most of the 5356 rows are `NaN` here — filter `summary()[summary()["promoted"]]` first if you only want the ones Rule Discovery actually touched).
 
 ### Presets
 
@@ -509,7 +567,10 @@ EventDiscovery(kpi_table: pd.DataFrame, config: DiscoveryConfig | None = None,
 ed.run() -> list[EventCandidate]
 ed.df           # post-pipeline frame — pass this to AlphaDiscovery, not kpi_table
 ed.summary()    # pd.DataFrame, one row per candidate
+ed.event_distribution_report   # str | None — populated by run(), see below (#215)
 ```
+
+**`event_distribution_report`.** `config_report()` (below) validates configuration coherence without ever touching your data, so it cannot catch the case where a preset is internally coherent yet still rejects every candidate a *specific asset* actually produces — that used to surface only as a bare `"M1 Event Discovery — 0 candidate(s)"` log line, indistinguishable from a broken pipeline. `run()` now always populates `ed.event_distribution_report` (`None` before it): a plain-text summary of the tpm/dispersion distribution actually observed across every raw candidate the Consistency Gate evaluated, against the configured thresholds — below a 15% gate-survival rate it also suggests concrete parameters at the observed median. `forge()`'s M1 stage log line carries this text whenever Event Discovery actually ran (manual event injection via `manual_events=` skips `.run()` and keeps the old bare-count line); `result.event_discovery.event_distribution_report` exposes it on a `ForgeResult` at no extra cost.
 
 An `EventCandidate`'s important attributes: `event_id`, `expression` (the boolean condition, as a string), `event_formula` (a human-readable rendering), `sql_expression` (a DuckDB-compatible SQL translation of the same condition, useful if you want to evaluate the event outside Python), `components`, `activation_stats` (`n_activations`, `n_active_months`, `zero_months`, `max_monthly_share`, `mean_tpm`), `consistency_gate` (a `GateResult`), `validation` (a `ValidationResult`, only if walk-forward was configured). Its method `.apply(df) -> pd.Series[bool]` deterministically re-evaluates the *stored* thresholds on any new frame — no recalibration, no look-ahead — and `.persist(path)` gives a full pickle round-trip (the only method the docs describe as fully invertible; `.to_dict()`'s JSON form is not).
 
@@ -709,6 +770,26 @@ signal is bad".
   of the floor), `"sweep"` — sharing `"sniper"`'s low rate but none of its
   precision claim — lowers it to 5, consistent with being permissive by
   design and already deferring rigor to the `RotationCalibrator` downstream.
+- **M3's own pre-screen, on its own first window** (`#217`, the same
+  window/floor confusion recurring a third time, one level down from
+  `min_train_months`). `min_train_months` sizes the walk-forward's first
+  train window to reach exactly 10 trades at `criteria.min_tpm` — not
+  `n_months × min_tpm` trades. `selection_mode="walk_forward"`'s fast
+  pre-screen (Step 2.3, `_early_elimination`) re-derived the trade floor with
+  that second, unrelated formula on that same short window instead of
+  reusing the 10 it was sized for — harmless at low `min_tpm`, where the two
+  formulas roughly agree, but at a high effective rate (e.g. `min_tpm=35.2`,
+  the bar-equivalent rate `forge_preset("balanced", "1H")` resolves to) the
+  window still rounds to its 1-month floor while the re-derived requirement
+  climbs to 35 — seven times the trade count the window was ever sized to
+  supply. Reproduced on real data (SUIUSDC/1H): 9 contracts that had already
+  cleared the rotation null were discarded with `"total_trades 0 < 35 (1mo ×
+  35.2 tpm, not significant)"` despite 255–674 activations over the full IS
+  span. The pre-screen on that first window now takes an explicit fixed
+  floor instead of re-deriving one; `_decide()`'s own floor (over the full
+  selection span, where `n_months × min_tpm` is the right question — "did
+  this candidate keep its declared rate over the history it actually had?")
+  is untouched.
 
 
 #### Entry mode — what the verdict measures
@@ -1460,7 +1541,7 @@ print(f"{len(svc.published_rules())} published rules: {svc.published_rules()[:3]
 html = svc.health_report_html(kpi)   # in production: discovery table + genuinely new bars
 ```
 
-**Verified output** on the ADA fixture: `54 published rules: ['RULE_ADA_01', 'RULE_ADA_02', 'RULE_ADA_03'] ...`, and a generated HTML report of ~5 MB (inline SVG charts, no external resources — safe to store or email as a single file). `RuleSpec` names follow the same `RULE_{TICKER}_{NN}` convention Module 4 uses internally, even when you're not going through `RuleRegistry` at all.
+**Verified output** on the ADA fixture: `40 published rules: ['RULE_ADA_01', 'RULE_ADA_02', 'RULE_ADA_03'] ...` (matches `result.edges()`'s current count, §7/§9), and a generated HTML report of ~5 MB (inline SVG charts, no external resources — safe to store or email as a single file). `RuleSpec` names follow the same `RULE_{TICKER}_{NN}` convention Module 4 uses internally, even when you're not going through `RuleRegistry` at all.
 
 ---
 
@@ -1788,7 +1869,7 @@ This is genuinely runnable against the ADA fixture:
 ```python
 kpi = pd.read_parquet("tests/fixtures/ADA_1D_TRAIN.parquet")
 session = DiscoverySession.run(kpi, ticker="ADAUSDC", timeframe="1D")
-print(f"{len(session.specs)} published rules")     # 54
+print(f"{len(session.specs)} published rules")     # 40
 print(session.check_signals(kpi))                    # rules firing on the fixture's own last bar
 ```
 
@@ -1881,6 +1962,12 @@ Adapting the general pattern to what this codebase actually supports — a state
 ## 21. Troubleshooting
 
 Each entry: symptom → likely cause → how to confirm → fix → how to prevent it next time.
+
+### "Zero (or almost zero) Event Discovery candidates, just `\"M1 Event Discovery — 0 candidate(s)\"` in the log"
+
+- **Cause:** the Consistency Gate's thresholds and this specific asset's actual event statistics disagree — a preset or hand-built `DiscoveryConfig` can be perfectly internally coherent (`config_report()` finds nothing wrong, since it never looks at data) and still reject every candidate a given KPI Table produces, e.g. a high-`min_tpm` preset on a low-liquidity or low-volatility asset.
+- **Confirm:** read `result.event_discovery.event_distribution_report` (or `ed.event_distribution_report` if built by hand) — a plain-text summary of the tpm/dispersion distribution actually observed across every raw candidate the gate evaluated, against the configured thresholds. Below a 15% gate-survival rate it also names concrete parameter values at the observed median. `forge()`'s M1 stage log line already carries this text whenever Event Discovery ran normally (§8, §9).
+- **Fix:** loosen `min_tpm`/`dispersion_margin` (or `max_dispersion` under `event_counting="bar"`) toward the values the report suggests, or accept that this asset genuinely doesn't produce events at the configured rate.
 
 ### "Zero promoted contracts, or every contract is `direction='undetermined'`"
 

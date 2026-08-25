@@ -452,6 +452,18 @@ median. `forge()`'s M1 stage line carries this text; `result.event_discovery
     on the source ticker (`recalibrate_candidate`), so `GENERIC`/`PARTIAL`/
     `SPECIFIC`/`ISOLATED` measures transfer of a *relative* pattern, not
     reuse of an absolute number.
+17. **A high-`min_tpm` contract wrongly early-eliminated with `"total_trades
+    0 < 35 (1mo × ... tpm, not significant)"` under `selection_mode
+    ="walk_forward"`.** Fixed in #217 — `_early_elimination`'s pre-screen on
+    the walk-forward's *first train window* used to re-derive its trade
+    floor as `n_months × min_tpm`, the formula that's correct over a full
+    selection span but wrong on that window, which `min_train_months` already
+    sizes to reach exactly 10 trades at `min_tpm` (95% Poisson margin) — the
+    two agree only while `min_tpm` is low enough that the window doesn't
+    round down to its 1-month floor. If you're on an older `forgedge` and see
+    plausible contracts eliminated this way at a high `min_tpm` (e.g. the
+    bar-equivalent rate of an hourly preset), that's this bug, not a real
+    frequency shortfall — upgrade rather than loosening `min_tpm`.
 
 ### Entry mode and what a verdict now measures
 
