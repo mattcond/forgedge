@@ -856,9 +856,25 @@ BacktestSummary` (`total_trades`, `profit_factor`, `win_rate_pct`,
 ExcursionStats | None` (MAE/MFE), `entry_optimization: EntryOptimization |
 None` (only under `entry_mode="auto"`), `grid_results: list[GridResult]`.
 
-`from forgedge.rule_discovery import text_report, html_report` — human /
-HTML report builders from a `RuleDiscoveryResponse`. `resp.to_dict()` for
-JSON export.
+`text_report(resp, *, contract=None)` / `html_report(resp, *, contract=None)`
+(also importable from top-level `forgedge`, not just `forgedge.rule_discovery`)
+— human/HTML report builders from a `RuleDiscoveryResponse`: every parameter
+of the validated rule, IS/OOS stats, walk-forward per-split breakdown,
+statistical validation, entry-mode optimisation, regime breakdown, rejection
+reasons. `contract` is optional — an `AlphaContract` (Modulo 2) is a
+different object than `resp` (Modulo 3) and carries `rotation_p`/
+`rotation_threshold`, which `RuleDiscoveryResponse` has no reason to
+duplicate; passing it folds a "rotation calibration" section into the same
+report. `rule_summary_report(resp, *, contract=None, fmt="text"|"html",
+save=False, path=None)` is a thin, discoverable wrapper over the two —
+`save=True` also writes the rendered report to `path` (default
+`f"{resp.alpha_id}.{txt|html}"` in the cwd) while still returning the
+string, so `print(rule_summary_report(resp, save=True))` works in one call.
+`resp.to_dict()` for JSON export. Don't confuse any of these with
+`rule_performance_report()` (pattern 5) — that one *replays* `RuleSpec`s on
+fresh candles to build monitoring charts (equity curve, rolling expectancy,
+MAE/MFE distributions); these three render the verdict M3 already computed,
+no replay.
 
 ## Episodes and concurrency
 

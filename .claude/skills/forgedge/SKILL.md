@@ -272,6 +272,17 @@ specs = RuleSpec.from_forge_result(result)
 html = rule_performance_report(result, fresh_candles)
 ```
 
+`rule_performance_report()` *replays* rules on fresh candles for monitoring
+charts (equity curve, rolling expectancy, MAE/MFE) — a different job from
+just reading what a single verdict already says. For that,
+`rule_summary_report(resp, contract=contract, fmt="text"|"html", save=True)`
+(also `text_report`/`html_report` directly) renders every parameter/IS/OOS/
+walk-forward statistic the response already carries, with `contract=`
+optionally folding in `rotation_p`/`rotation_threshold` from the originating
+`AlphaContract` (Modulo 2, a different object than `resp`). `save=True`
+writes it to disk (default `f"{resp.alpha_id}.{txt|html}"`) while still
+returning the string.
+
 Passing the original run's `time_budget` is optional but lets Rule Discovery
 report which walk-forward folds land inside the span Alpha Discovery actually
 fit the target on (`WalkForwardSplit.tests_in_sample`) — informative, not a

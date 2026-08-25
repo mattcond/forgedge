@@ -54,6 +54,9 @@ from .rule_discovery import (
     SelectionCriteria,
     ValidatedRule,
     WalkForwardConfig,
+    html_report,
+    rule_summary_report,
+    text_report,
 )
 from .rule_registry import (
     CrossTickerResult,
@@ -118,6 +121,9 @@ __all__ = [
     # Ambiguous legacy alias — resolves to RuleWalkForwardConfig.
     "WalkForwardConfig",
     "ValidatedRule",
+    "text_report",
+    "html_report",
+    "rule_summary_report",
     "RuleRegistry",
     "RuleSubmission",
     "RegistryConfig",

@@ -26,6 +26,7 @@ from forgedge.rule_discovery import (
     build_grid,
     deflated_sharpe,
     html_report,
+    rule_summary_report,
     run_backtest,
     run_grid,
     select_best,
@@ -1076,6 +1077,59 @@ class TestEndToEnd:
         assert resp.verdict in txt
         htm = html_report(resp)
         assert "<html" in htm and resp.verdict in htm
+
+    def test_reports_fold_in_rotation_calibration_when_contract_given(self, pipeline):
+        """`contract` is optional and lives on a different object than `resp`
+        (Modulo 2 vs Modulo 3) — passing it folds rotation_p/rotation_threshold
+        into the same report instead of requiring a second lookup."""
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        resp = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id]).run()
+
+        assert "ROTATION CALIBRATION" not in text_report(resp)
+        txt = text_report(resp, contract=c)
+        assert "ROTATION CALIBRATION" in txt
+        assert "rotation_p" in txt
+
+        assert "Rotation calibration" not in html_report(resp)
+        htm = html_report(resp, contract=c)
+        assert "Rotation calibration" in htm
+
+    def test_rule_summary_report_wraps_text_and_html(self, pipeline):
+        """#218-family — rule_summary_report() is a thin, discoverable wrapper:
+        same content as text_report()/html_report(), reachable in one call."""
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        resp = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id]).run()
+
+        assert rule_summary_report(resp) == text_report(resp)
+        assert rule_summary_report(resp, contract=c) == text_report(resp, contract=c)
+        assert rule_summary_report(resp, fmt="html") == html_report(resp)
+
+        with pytest.raises(ValueError, match="fmt must be"):
+            rule_summary_report(resp, fmt="bogus")
+
+    def test_rule_summary_report_save_writes_and_still_returns(self, pipeline, tmp_path):
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        resp = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id]).run()
+
+        out_path = tmp_path / "rule.html"
+        rendered = rule_summary_report(resp, fmt="html", save=True, path=str(out_path))
+        assert out_path.exists()
+        assert out_path.read_text(encoding="utf-8") == rendered
+        assert rendered == html_report(resp)
+
+    def test_rule_summary_report_save_defaults_path_to_alpha_id(self, pipeline, monkeypatch, tmp_path):
+        """No explicit `path`: save=True still has to land somewhere sensible
+        without the caller naming a file."""
+        ed, _, promoted, by_id = pipeline
+        c = promoted[0]
+        resp = RuleDiscovery(ed.df, c, by_id[c.event_candidate_id]).run()
+
+        monkeypatch.chdir(tmp_path)
+        rule_summary_report(resp, save=True)
+        assert (tmp_path / f"{resp.alpha_id}.txt").exists()
 
     def test_response_serialises_to_dict(self, pipeline):
         ed, _, promoted, by_id = pipeline

@@ -29,7 +29,7 @@ from .models import (
     WalkForwardResult,
     WalkForwardSplit,
 )
-from .report import html_report, text_report
+from .report import html_report, rule_summary_report, text_report
 from .validation import deflated_sharpe, validate
 from .walkforward import walk_forward
 
@@ -66,4 +66,5 @@ __all__ = [
     "excursion_stats",
     "text_report",
     "html_report",
+    "rule_summary_report",
 ]
