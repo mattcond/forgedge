@@ -349,15 +349,15 @@ class FeatureGenerator:
         parsed = {col: pf for col, pf in parsed.items() if pf is not None}
 
         # Arity 2 — same-family pairs
-        self._generate_arity2(df, parsed, extended, meta)
+        extended = self._generate_arity2(df, parsed, extended, meta)
 
         # Arity 2 — cross-column, cross-time OHLC pairs (issue #161)
-        self._generate_lag_cross(df, extended, meta)
+        extended = self._generate_lag_cross(df, extended, meta)
 
         # Arity 2 — same-time pairings that never got wired up (issue #162)
-        self._generate_macd_pairs(df, parsed, extended, meta)
-        self._generate_price_volume_pairs(df, parsed, extended, meta)
-        self._generate_candle_geometry_pairs(df, parsed, extended, meta)
+        extended = self._generate_macd_pairs(df, parsed, extended, meta)
+        extended = self._generate_price_volume_pairs(df, parsed, extended, meta)
+        extended = self._generate_candle_geometry_pairs(df, parsed, extended, meta)
 
         # Arity 2 — indicator vs lagged OHLC-base cross-time pairs (issue #165)
         lags = (
@@ -365,10 +365,10 @@ class FeatureGenerator:
             if indicator_lag_cross_lags is None
             else indicator_lag_cross_lags
         )
-        self._generate_indicator_lag_cross(df, parsed, extended, meta, lags)
+        extended = self._generate_indicator_lag_cross(df, parsed, extended, meta, lags)
 
         # Arity 3 — Bollinger & rolling-range triples
-        self._generate_arity3(df, parsed, extended, meta)
+        extended = self._generate_arity3(df, parsed, extended, meta)
 
         return extended, meta
 
@@ -382,7 +382,7 @@ class FeatureGenerator:
         parsed: dict[str, ParsedFeature],
         extended: pd.DataFrame,
         meta: dict[str, DerivedFeature],
-    ) -> None:
+    ) -> pd.DataFrame:
         """Generate all arity-2 derived features and append them to ``extended``/``meta``.
 
         Three sub-cases are handled:
@@ -424,6 +424,8 @@ class FeatureGenerator:
             key = f"{pf.base}__{pf.family}"
             groups[key].append(col)
 
+        new_cols: dict[str, pd.Series] = {}
+
         for group_key, cols in groups.items():
             if len(cols) < 2:
                 continue
@@ -437,23 +439,22 @@ class FeatureGenerator:
                     param_a = pf_a.params[0] if pf_a.params else 0
                     param_b = pf_b.params[0] if pf_b.params else 0
                     new_col = f"ratio_{pf_a.base}_{pf_a.indicator}{param_a:02d}_{pf_b.indicator}{param_b:02d}"
-                    if new_col in extended.columns:
-                        continue
-                    series = _safe_ratio(df[col_a], df[col_b])
-                    extended[new_col] = series
-                    meta[new_col] = DerivedFeature(
-                        col=new_col,
-                        series=series,
-                        is_scale_free=True,
-                        arity=2,
-                        operation="ratio",
-                        source_cols=[col_a, col_b],
-                    )
+                    if new_col not in extended.columns and new_col not in new_cols:
+                        series = _safe_ratio(df[col_a], df[col_b])
+                        new_cols[new_col] = series
+                        meta[new_col] = DerivedFeature(
+                            col=new_col,
+                            series=series,
+                            is_scale_free=True,
+                            arity=2,
+                            operation="ratio",
+                            source_cols=[col_a, col_b],
+                        )
                     # diff_norm: (A - B) / std(A - B)
                     dn_col = f"diffnorm_{pf_a.base}_{pf_a.indicator}{param_a:02d}_{pf_b.indicator}{param_b:02d}"
-                    if dn_col not in extended.columns:
+                    if dn_col not in extended.columns and dn_col not in new_cols:
                         dn_series, dn_std = _safe_diff_norm(df[col_a], df[col_b])
-                        extended[dn_col] = dn_series
+                        new_cols[dn_col] = dn_series
                         meta[dn_col] = DerivedFeature(
                             col=dn_col,
                             series=dn_series,
@@ -478,10 +479,10 @@ class FeatureGenerator:
                 pf_ma = parsed[ma_col]
                 param = pf_ma.params[0] if pf_ma.params else 0
                 new_col = f"spread_{pf_ma.base}_{pf_ma.indicator}{param:02d}"
-                if new_col in extended.columns:
+                if new_col in extended.columns or new_col in new_cols:
                     continue
                 series = _safe_spread_pct(df[price_col], df[ma_col])
-                extended[new_col] = series
+                new_cols[new_col] = series
                 meta[new_col] = DerivedFeature(
                     col=new_col,
                     series=series,
@@ -501,10 +502,10 @@ class FeatureGenerator:
                 pf_vm = parsed[vm_col]
                 param = pf_vm.params[0] if pf_vm.params else 0
                 new_col = f"ratio_volume_{pf_vm.indicator}{param:02d}"
-                if new_col in extended.columns:
+                if new_col in extended.columns or new_col in new_cols:
                     continue
                 series = _safe_ratio(df["volume"], df[vm_col])
-                extended[new_col] = series
+                new_cols[new_col] = series
                 meta[new_col] = DerivedFeature(
                     col=new_col,
                     series=series,
@@ -513,6 +514,8 @@ class FeatureGenerator:
                     operation="ratio",
                     source_cols=["volume", vm_col],
                 )
+
+        return _flush_new_columns(extended, new_cols)
 
     # ------------------------------------------------------------------
     # Arity 2 — cross-column, cross-time ("lag-cross") pairs
@@ -523,7 +526,7 @@ class FeatureGenerator:
         df: pd.DataFrame,
         extended: pd.DataFrame,
         meta: dict[str, DerivedFeature],
-    ) -> None:
+    ) -> pd.DataFrame:
         """Generate cross-column, cross-time OHLC comparisons (issue #161).
 
         Neither the same-family arity-2 pairing above (cross-column,
@@ -572,7 +575,9 @@ class FeatureGenerator:
         """
         bases = [b for b in _OHLC_BASES if b in df.columns]
         if len(bases) < 2:
-            return
+            return extended
+
+        new_cols: dict[str, pd.Series] = {}
 
         for base_a in bases:
             series_a = df[base_a]
@@ -583,9 +588,9 @@ class FeatureGenerator:
                     lagged_b = df[base_b].shift(lag)
 
                     ratio_col = f"ratio_{base_a}_{base_b}_lag{lag}"
-                    if ratio_col not in extended.columns:
+                    if ratio_col not in extended.columns and ratio_col not in new_cols:
                         series = _safe_ratio(series_a, lagged_b)
-                        extended[ratio_col] = series
+                        new_cols[ratio_col] = series
                         meta[ratio_col] = DerivedFeature(
                             col=ratio_col,
                             series=series,
@@ -598,9 +603,9 @@ class FeatureGenerator:
                         )
 
                     spread_col = f"spread_{base_a}_{base_b}_lag{lag}"
-                    if spread_col not in extended.columns:
+                    if spread_col not in extended.columns and spread_col not in new_cols:
                         series = _safe_spread_pct(series_a, lagged_b)
-                        extended[spread_col] = series
+                        new_cols[spread_col] = series
                         meta[spread_col] = DerivedFeature(
                             col=spread_col,
                             series=series,
@@ -611,6 +616,8 @@ class FeatureGenerator:
                             params={"cross_lag": lag},
                             transforms=_LAG_CROSS_TRANSFORMS,
                         )
+
+        return _flush_new_columns(extended, new_cols)
 
     # ------------------------------------------------------------------
     # Arity 2 — indicator vs lagged OHLC-base cross-time pairs (issue #165)
@@ -623,7 +630,7 @@ class FeatureGenerator:
         extended: pd.DataFrame,
         meta: dict[str, DerivedFeature],
         lags: tuple[int, ...],
-    ) -> None:
+    ) -> pd.DataFrame:
         """Pair a price-scale indicator against a lagged OHLC base (issue #165).
 
         Completes the investigation started in #161 (OHLC-base cross-time,
@@ -686,28 +693,30 @@ class FeatureGenerator:
             family entirely.
         """
         if not lags:
-            return
+            return extended
 
         indicator_cols = [
             col for col, pf in parsed.items() if pf.family in _PRICE_SCALE_FAMILIES
         ]
         if not indicator_cols:
-            return
+            return extended
         ohlc_bases = [b for b in _OHLC_BASES if b in df.columns]
         if not ohlc_bases:
-            return
+            return extended
         indicator_cols.sort()  # deterministic regardless of df.columns order
+
+        new_cols: dict[str, pd.Series] = {}
 
         for ind_col in indicator_cols:
             series_ind = df[ind_col]
             for base in ohlc_bases:
                 for lag in lags:
                     ratio_col = f"ratio_{ind_col}_{base}_lag{lag}"
-                    if ratio_col in extended.columns:
+                    if ratio_col in extended.columns or ratio_col in new_cols:
                         continue
                     lagged_base = df[base].shift(lag)
                     series = _safe_ratio(series_ind, lagged_base)
-                    extended[ratio_col] = series
+                    new_cols[ratio_col] = series
                     meta[ratio_col] = DerivedFeature(
                         col=ratio_col,
                         series=series,
@@ -719,6 +728,8 @@ class FeatureGenerator:
                         transforms=_LAG_CROSS_TRANSFORMS,
                     )
 
+        return _flush_new_columns(extended, new_cols)
+
     # ------------------------------------------------------------------
     # Arity 2 — same-timestamp pairings that never got wired up (issue #162)
     # ------------------------------------------------------------------
@@ -729,7 +740,7 @@ class FeatureGenerator:
         parsed: dict[str, ParsedFeature],
         extended: pd.DataFrame,
         meta: dict[str, DerivedFeature],
-    ) -> None:
+    ) -> pd.DataFrame:
         """Pair each MACD line against its own signal line (issue #162).
 
         MACD/signal is arguably the single most textbook MACD signal, but its
@@ -780,6 +791,8 @@ class FeatureGenerator:
             elif pf.family == "macd_signal":
                 macd_signal[key] = col
 
+        new_cols: dict[str, pd.Series] = {}
+
         for key in set(macd_line) & set(macd_signal):
             base, fast, slow = key
             line_col = macd_line[key]
@@ -787,9 +800,9 @@ class FeatureGenerator:
             tag = f"{base}_macd{fast:02d}_{slow:02d}_signal"
 
             ratio_col = f"ratio_{tag}"
-            if ratio_col not in extended.columns:
+            if ratio_col not in extended.columns and ratio_col not in new_cols:
                 series = _safe_ratio(df[line_col], df[sig_col])
-                extended[ratio_col] = series
+                new_cols[ratio_col] = series
                 meta[ratio_col] = DerivedFeature(
                     col=ratio_col,
                     series=series,
@@ -800,9 +813,9 @@ class FeatureGenerator:
                 )
 
             dn_col = f"diffnorm_{tag}"
-            if dn_col not in extended.columns:
+            if dn_col not in extended.columns and dn_col not in new_cols:
                 dn_series, dn_std = _safe_diff_norm(df[line_col], df[sig_col])
-                extended[dn_col] = dn_series
+                new_cols[dn_col] = dn_series
                 meta[dn_col] = DerivedFeature(
                     col=dn_col,
                     series=dn_series,
@@ -813,13 +826,15 @@ class FeatureGenerator:
                     params={"diffnorm_std": dn_std},
                 )
 
+        return _flush_new_columns(extended, new_cols)
+
     def _generate_price_volume_pairs(
         self,
         df: pd.DataFrame,
         parsed: dict[str, ParsedFeature],
         extended: pd.DataFrame,
         meta: dict[str, DerivedFeature],
-    ) -> None:
+    ) -> pd.DataFrame:
         """Pair price % change against volume % change, same period (issue #162).
 
         Neither existing arity-2 branch pairs a price-family column against a
@@ -868,15 +883,17 @@ class FeatureGenerator:
             elif pf.base == "close":
                 price_ret[period] = col
 
+        new_cols: dict[str, pd.Series] = {}
+
         for period in set(price_ret) & set(vol_ret):
             p_col = price_ret[period]
             v_col = vol_ret[period]
             tag = f"close_ret{period:02d}_volume_ret{period:02d}"
 
             ratio_col = f"ratio_{tag}"
-            if ratio_col not in extended.columns:
+            if ratio_col not in extended.columns and ratio_col not in new_cols:
                 series = _safe_ratio(df[p_col], df[v_col])
-                extended[ratio_col] = series
+                new_cols[ratio_col] = series
                 meta[ratio_col] = DerivedFeature(
                     col=ratio_col,
                     series=series,
@@ -887,9 +904,9 @@ class FeatureGenerator:
                 )
 
             dn_col = f"diffnorm_{tag}"
-            if dn_col not in extended.columns:
+            if dn_col not in extended.columns and dn_col not in new_cols:
                 dn_series, dn_std = _safe_diff_norm(df[p_col], df[v_col])
-                extended[dn_col] = dn_series
+                new_cols[dn_col] = dn_series
                 meta[dn_col] = DerivedFeature(
                     col=dn_col,
                     series=dn_series,
@@ -900,13 +917,15 @@ class FeatureGenerator:
                     params={"diffnorm_std": dn_std},
                 )
 
+        return _flush_new_columns(extended, new_cols)
+
     def _generate_candle_geometry_pairs(
         self,
         df: pd.DataFrame,
         parsed: dict[str, ParsedFeature],
         extended: pd.DataFrame,
         meta: dict[str, DerivedFeature],
-    ) -> None:
+    ) -> pd.DataFrame:
         """Pair candle_features() geometry columns among themselves and vs NATR.
 
         ``kpi_builder.candle_features()`` produces ``body``/``upper_wick``/
@@ -963,11 +982,13 @@ class FeatureGenerator:
         geometry.sort()  # deterministic pairing order regardless of df.columns order
         natr_cols = [col for col, pf in parsed.items() if pf.family == "natr"]
 
+        new_cols: dict[str, pd.Series] = {}
+
         def _emit(col_a: str, col_b: str, tag: str) -> None:
             ratio_col = f"ratio_{tag}"
-            if ratio_col not in extended.columns:
+            if ratio_col not in extended.columns and ratio_col not in new_cols:
                 series = _safe_ratio(df[col_a], df[col_b])
-                extended[ratio_col] = series
+                new_cols[ratio_col] = series
                 meta[ratio_col] = DerivedFeature(
                     col=ratio_col,
                     series=series,
@@ -977,9 +998,9 @@ class FeatureGenerator:
                     source_cols=[col_a, col_b],
                 )
             dn_col = f"diffnorm_{tag}"
-            if dn_col not in extended.columns:
+            if dn_col not in extended.columns and dn_col not in new_cols:
                 dn_series, dn_std = _safe_diff_norm(df[col_a], df[col_b])
-                extended[dn_col] = dn_series
+                new_cols[dn_col] = dn_series
                 meta[dn_col] = DerivedFeature(
                     col=dn_col,
                     series=dn_series,
@@ -996,6 +1017,8 @@ class FeatureGenerator:
             for natr_col in natr_cols:
                 _emit(col_a, natr_col, f"{col_a}_{natr_col}")
 
+        return _flush_new_columns(extended, new_cols)
+
     # ------------------------------------------------------------------
     # Arity 3
     # ------------------------------------------------------------------
@@ -1006,7 +1029,7 @@ class FeatureGenerator:
         parsed: dict[str, ParsedFeature],
         extended: pd.DataFrame,
         meta: dict[str, DerivedFeature],
-    ) -> None:
+    ) -> pd.DataFrame:
         """Generate all arity-3 derived features (relative position within a range).
 
         Two sub-cases:
@@ -1058,19 +1081,21 @@ class FeatureGenerator:
         close_cols = [col for col, pf in parsed.items() if pf.family == "price" and pf.base == "close"]
         close_col = close_cols[0] if close_cols else None
 
+        new_cols: dict[str, pd.Series] = {}
+
         for key in set(bb_lower) & set(bb_upper):
             base, param = key
             lower_col = bb_lower[key]
             upper_col = bb_upper[key]
             new_col = f"bb_pct_b_{base}_{param:02d}"
-            if new_col not in extended.columns:
+            if new_col not in extended.columns and new_col not in new_cols:
                 base_cols = [col for col, pf in parsed.items()
                              if pf.family == "price" and pf.base == base]
                 base_col = base_cols[0] if base_cols else (base if base in df.columns else None)
                 if base_col is None:
                     continue
                 series = _safe_position(df[base_col], df[lower_col], df[upper_col])
-                extended[new_col] = series
+                new_cols[new_col] = series
                 meta[new_col] = DerivedFeature(
                     col=new_col,
                     series=series,
@@ -1102,9 +1127,9 @@ class FeatureGenerator:
             if price_col is None or price_col not in df.columns:
                 continue
             new_col = f"pos_{base}_range{param:02d}"
-            if new_col not in extended.columns:
+            if new_col not in extended.columns and new_col not in new_cols:
                 series = _safe_position(df[price_col], df[min_col], df[max_col])
-                extended[new_col] = series
+                new_cols[new_col] = series
                 meta[new_col] = DerivedFeature(
                     col=new_col,
                     series=series,
@@ -1113,6 +1138,29 @@ class FeatureGenerator:
                     operation="position",
                     source_cols=[price_col, min_col, max_col],
                 )
+
+        return _flush_new_columns(extended, new_cols)
+
+
+# ---------------------------------------------------------------------------
+# DataFrame accumulation (issue #219)
+# ---------------------------------------------------------------------------
+
+def _flush_new_columns(
+    extended: pd.DataFrame, new_cols: dict[str, pd.Series]
+) -> pd.DataFrame:
+    """Merge ``new_cols`` into ``extended`` in one ``pd.concat``.
+
+    Each ``_generate_*`` method below used to insert every new column with
+    ``extended[col] = series`` inside nested loops — hundreds of single-column
+    inserts on the same block manager, which pandas reallocates/fragments on
+    every insert (see the ``PerformanceWarning`` this was raising, and issue
+    #219). Callers now accumulate a method's new columns in a local dict and
+    call this once at the end of the method instead.
+    """
+    if not new_cols:
+        return extended
+    return pd.concat([extended, pd.DataFrame(new_cols, index=extended.index)], axis=1)
 
 
 # ---------------------------------------------------------------------------
