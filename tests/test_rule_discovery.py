@@ -517,6 +517,14 @@ class TestMonthIndex:
         assert s.zero_months == 0
         assert s.tpm_mu == pytest.approx(1.0)
 
+    @staticmethod
+    def _period_strs(months):
+        # `_month_index` returns int64 "months since 1970-01" ordinals (not a
+        # PeriodIndex) for speed — same epoch/step as pandas' own monthly
+        # `Period.ordinal`, so round-tripping through `pd.Period(ordinal=...)`
+        # recovers the human-readable month for the assertion.
+        return [str(pd.Period(ordinal=int(m), freq="M")) for m in months]
+
     def test_month_aligned_exclusive_bound_unchanged(self):
         # A walk-forward-style [from, to) window with a month-aligned exclusive
         # bound must not count the month the bound names.
@@ -524,14 +532,14 @@ class TestMonthIndex:
 
         dt = _as_datetime64(self._daily_candle()["open_dt"])
         months = _month_index("2025-01-01", "2025-03-01", dt)
-        assert [str(m) for m in months] == ["2025-01", "2025-02"]
+        assert self._period_strs(months) == ["2025-01", "2025-02"]
 
     def test_mid_month_bound_counts_partial_month(self):
         from forgedge.rule_discovery.backtest import _as_datetime64, _month_index
 
         dt = _as_datetime64(self._daily_candle()["open_dt"])
         months = _month_index("2025-01-01", "2025-03-15", dt)
-        assert [str(m) for m in months] == ["2025-01", "2025-02", "2025-03"]
+        assert self._period_strs(months) == ["2025-01", "2025-02", "2025-03"]
 
 
 class TestShortDirection:
