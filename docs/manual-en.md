@@ -992,20 +992,97 @@ Each individual per-ticker `PASS`/`FAIL` is the two-part criterion from §10 (`p
 
 ### KPI Builder — building a KPI Table from raw candles
 
-```python
-from forgedge import build_features, candle_features, lag_features, pattern_features
+Everything else in this manual assumes you already have a **KPI Table** — a `pandas.DataFrame` with a `close` column, a datetime source, and enough indicator columns for Event Discovery to have something to mine. If what you actually have is raw OHLCV candles from an exchange or a data vendor, `forgedge.kpi_builder` is the first thing you call, before you ever touch `forge()`. It is a self-contained, three-function toolkit — nothing here talks to `forge()` internally, and nothing in `forge()` requires you to have used it; you can build a KPI Table by any means you like, as long as the result has `close` and a timestamp.
 
+#### A complete walkthrough, starting from nothing but raw OHLCV
+
+This is deliberately the most basic case: hourly candles the way an exchange REST API hands them back — epoch-millisecond timestamps, no derived columns, nothing FORGE-specific about the shape at all. The three rows below are shown for shape; the actual table used for the verified output further down has 500 of them.
+
+```python
+import pandas as pd
+
+candles = pd.DataFrame({
+    "open_time": [1704067200000, 1704070800000, 1704074400000],  # epoch ms
+    "open":  [100.14, 100.39, 99.20],
+    "high":  [100.32, 100.61, 100.14],
+    "low":   [99.97,  99.08,  98.80],
+    "close": [100.31, 99.27,  100.02],
+    "volume": [1169.4, 2779.8, 3188.0],
+})   # a real table has as many rows as bars — 500 in the run below
+```
+
+Three calls turn this into a table `forge()` can consume:
+
+```python
+from forgedge import build_features, candle_features, lag_features, summary_report
+
+kpi = build_features(candles, timestamp_col="open_time")
+kpi = candle_features(kpi)
+kpi = lag_features(kpi, "close", "close_ema_09", periods=[1, 2, 3])
+
+rep = summary_report(kpi, timeframe="1H", verbose=False, return_report=True)
+print(rep.one_line())   # opt-in data-quality check — never blocks on its own, §9/§11
+```
+
+**Verified output**, on 500 synthetic-but-internally-consistent hourly bars built this way:
+
+```
+build_features   : (500, 6)  -> (500, 116)   # +color, +open_dt, +109 indicator columns
+candle_features   : (500, 116) -> (500, 122)  # +body, upper_wick, lower_wick, close_pos, range_pct, gap
+lag_features      : (500, 122) -> (500, 128)  # +close_prev_{01,02,03}, close_ema_09_prev_{01,02,03}
+summary_report    : "data quality OK"
+```
+
+That table is now a real KPI Table — pass it straight to `forge()`:
+
+```python
+from forgedge import forge
+result = forge(kpi, ticker="DEMO", timeframe="1H", progress=False)
+print(len(result.candidates), len(result.promoted))   # 26252  1108
+```
+
+Nothing about this is special-cased for the walkthrough: this is the exact `build_features → candle_features → lag_features` sequence §12's Use Case 2 and the repository's own `examples/kpi_builder_usage.py` follow, run here on synthetic instead of real data so you can see it work end to end without needing a data source. If you have real data with the exact same shape (a timestamp column plus `open`/`high`/`low`/`close`, optionally `volume`), this is literally all you need to reach `forge()`.
+
+#### What each function does, parameter by parameter
+
+```python
 kpi = build_features(candles, config=None, *, timestamp_col, output_timestamp_col="open_dt",
                       timestamp_unit="ms", add_color=True, sort_output=True) -> pd.DataFrame
 kpi = candle_features(kpi, *, order_on="open_dt", add_gap=True, round_to=5) -> pd.DataFrame
 kpi = lag_features(kpi, *cols, periods=(1,2,3), like=None, order_on="open_dt") -> pd.DataFrame
 ```
 
-`build_features` computes a configurable set of base indicators (SMA, EMA, RSI, Bollinger Bands, ATR, MACD, rolling min/max, returns, volatility, max-drawdown) from raw OHLCV, and derives the `open_dt` timestamp column `forge()` expects. `config` accepts a `dict`, a YAML file path, or `None` for the packaged default. Indicators referencing columns absent from `candles` (e.g. `volume`) are silently skipped with a `logger.warning`, not an error — OHLC-only input is safe. `"atr"` and `"macd"` ship **disabled by default** in that packaged config.
+**`build_features(candles, config, *, ...)`** computes a configurable set of base indicators (SMA, EMA, RSI, Bollinger Bands, ATR, MACD, rolling min/max, returns, volatility, max-drawdown) from raw OHLCV, and derives the `open_dt` timestamp column `forge()` expects.
 
-`candle_features` adds six scale-free candlestick-geometry columns (`body`, `upper_wick`, `lower_wick`, `close_pos`, `range_pct`, `gap`), all in `[-1,1]`/`[0,1]` regardless of price level. `lag_features` appends `{col}_prev_{NN}` shifted copies of named or pattern-matched columns.
+- `candles` — the only positional/required argument besides `timestamp_col`. Must contain `timestamp_col` and whatever price/volume columns your `config` references; anything else on the frame (an exchange's own bookkeeping columns, a symbol column, …) is carried through untouched.
+- `config` — a `dict`, a YAML file path (`str`/`Path`), or `None` for the packaged default (`DEFAULT_CONFIG`, table below) — see *Configuring which indicators get built* below for the schema.
+- `timestamp_col` — **required, keyword-only, no default.** The column in `candles` that holds each bar's timestamp. Omitting it raises a `TypeError` from Python itself (it's a required keyword argument); passing a name that isn't a column raises `KeyError` naming the columns that *are* available.
+- `output_timestamp_col="open_dt"` — the name of the datetime column `build_features` derives and writes. `"open_dt"` is what every other module in the library looks for by default; change it only if you have a specific reason and remember to pass `timestamp_col="your_name"` everywhere downstream that asks for one.
+- `timestamp_unit="ms"` — how to interpret `timestamp_col` **if it's numeric** (epoch milliseconds by default, matching most exchange APIs; pass `"s"` for Unix seconds, `"ns"` for nanoseconds). Ignored if `timestamp_col` is already a datetime dtype or a parseable string column — `build_features` detects which case you're in automatically (`pandas.api.types.is_datetime64_any_dtype` / `is_numeric_dtype`, then falls back to generic string parsing).
+- `add_color=True` — adds a `color` column (`+1` if `close > open`, `-1` if `close < open`, `0` on a doji), computed from raw `open`/`close` with no rounding. Requires both columns present; silently skipped (with a warning) otherwise.
+- `sort_output=True` — the returned frame is sorted chronologically by `output_timestamp_col`, regardless of what order `candles` arrived in. `build_features` also sorts *before* computing indicators, independently of this flag, so indicator math is always computed in time order even if you pass `sort_output=False` to skip only the final re-sort.
 
-`pattern_features(df, *, patterns=None, order_on="open_dt", col="candle_pattern")` is a fourth, deliberately **opt-in** function — see below.
+**`candle_features(df, *, ...)`** adds six scale-free candlestick-geometry columns — see the table below for what each one means. `order_on="open_dt"` is the column used to compute `gap` (which needs the *previous* bar's close); `add_gap=False` skips that one column if you don't need it (e.g. on data with real session gaps you don't want treated as candle geometry); `round_to=5` controls decimal rounding on every computed column.
+
+**`lag_features(df, *cols, periods=(1,2,3), like=None, order_on="open_dt")`** appends `{col}_prev_{NN}` shifted copies of columns that **already exist** on `df` — it runs *after* `build_features`/`candle_features` specifically so you're lagging real, inspectable column names instead of having to predict FORGE's internal naming convention up front. Two ways to select what to lag, usable together: list explicit names as positional arguments (`lag_features(kpi, "close", "close_ema_09")`; a typo raises `KeyError` naming the columns that do exist), or pass `like="_ema_"` to lag *every* column whose name contains that substring (`order_on` itself is never selected this way, even if it happens to match). `periods` accepts a single `int` or a sequence — `periods=[1, 2, 3]` (the default) produces three lagged columns per selected column, `periods=6` produces one.
+
+#### What your input table needs to have
+
+Only `timestamp_col` and `close` are ever strictly required — `close` because every module downstream measures forward returns on it. `open`/`high`/`low` are needed by specific pieces (`candle_features` needs all four OHLC columns and raises `KeyError` naming whichever are missing; `add_color` needs `open`+`close`; the `atr` indicator needs `high`+`low` in addition to whatever `columns` you configured it for) but are otherwise optional — a `close`-only series still builds a valid, if smaller, KPI Table. `volume` is optional everywhere: the packaged default config references it (for `moving_average`), but a column `config` references and `candles` doesn't have is skipped with a `logger.warning`, never an error — this is specifically why OHLC-only input, with no volume at all, is always safe to pass through `build_features` unmodified. If you're not sure your raw data is clean before spending a `forge()` run on it, `summary_report()` (used in the walkthrough above) is the opt-in check built for exactly that — see §9/§11 for what it looks for and §13 for a real example of it catching a genuinely malformed CSV.
+
+#### Configuring which indicators get built
+
+A config is a plain mapping: `{indicator_name: {"enabled": bool, "params": {"periods": [...], "columns": [...]}}}`. Three equivalent ways to supply one:
+
+```python
+kpi = build_features(candles, timestamp_col="open_time")                    # None -> packaged default
+kpi = build_features(candles, {"rsi": {"enabled": True,                     # a plain dict
+                                        "params": {"periods": [14], "columns": ["close"]}}},
+                      timestamp_col="open_time")
+kpi = build_features(candles, "my_config.yaml", timestamp_col="open_time")  # a YAML path (needs PyYAML)
+```
+
+A missing `"enabled"` key defaults to `True` (only `"enabled": False` turns a block off); a `"params"` block with no `"periods"`/`"columns"` produces empty lists, effectively a no-op for that indicator; an indicator name the library doesn't recognise is skipped with a warning, not an error, so a typo in a hand-written config degrades quietly rather than raising — check the log if a column you expected never shows up. A `"lagging"` block, if present (e.g. copied from an older config), is explicitly ignored with an informational log line — lagging lives in `lag_features()` now, not in this config. The packaged reference config ships alongside the source as an editable, commented YAML file (`kpi_builder/default_enricher.yaml`) with the same structure `DEFAULT_CONFIG` below has — copy it as a starting point for your own file rather than writing one from scratch. `load_kpi_config(path)` (used internally when you pass a `str`/`Path`, or callable directly) raises `ImportError` with a clear message if PyYAML isn't installed, and `FileNotFoundError` if `path` doesn't exist.
 
 **Column-naming convention that matters:** for a column to be recognised as part of a *same-family ratio pair* by Event Discovery's feature generator, its name must match `{base}_{indicator}_{period}` with `base ∈ {close, high, low, open, volume}` and `indicator ∈ {ema, sma, rsi, dema, tema, wma, hma, mdd, atr, natr}` (or the dedicated Bollinger/volatility/return/MACD naming patterns). A column that doesn't match this convention still works as a standalone feature and can still be reached by one of the *other*, more narrowly-scoped arity-2 pairings described in §8 (cross-time OHLC pairs, MACD-vs-signal, price-vs-volume return, `candle_features()` geometry pairs, indicator-vs-lagged-OHLC-base) — it's specifically the generic same-family grouping it opts out of. If a custom indicator you added never shows up composed with anything in Event Discovery's candidates, check its name against this convention first.
 
@@ -1041,6 +1118,21 @@ adds exactly `close_atr_14, close_atr_28, close_natr_14, close_natr_28, close_ma
 - The computed MACD **line is normalised by price** (`(ema_fast − ema_slow) / close`), not the textbook raw-price-unit difference — deliberately, to keep it in the same scale-free family as the rest of the KPI Table's indicators.
 - ATR/RSI both use Wilder's smoothing (`ewm(alpha=1/period, adjust=False)`, not a simple moving average of the true range/gains-losses) — RSI's `100 - 100/(1+rs)` uses `rs = gain/(loss + 1e-10)`, so it asymptotically approaches but never exactly reaches 100 on a zero-loss window.
 
+#### The six candlestick-geometry columns `candle_features()` adds
+
+Each is scale-free (a ratio, not a price-unit quantity), so a $0.01 asset and a $60,000 one produce directly comparable values:
+
+| column | formula | meaning |
+|---|---|---|
+| `body` | `(close − open) / (high − low)` | signed body size — positive on a bullish bar, negative on a bearish one |
+| `upper_wick` | `(high − max(open, close)) / (high − low)` | upper shadow |
+| `lower_wick` | `(min(open, close) − low) / (high − low)` | lower shadow |
+| `close_pos` | `(close − low) / (high − low)` | where the close landed within the bar's own range, `0` at the low, `1` at the high |
+| `range_pct` | `(high − low) / close` | bar amplitude relative to price |
+| `gap` | `(open − prev_close) / prev_close` | opening gap versus the previous bar's close (only if `add_gap=True`, the default) |
+
+By construction `abs(body) + upper_wick + lower_wick == 1` on any non-flat bar. All six divide by `(high − low)` (or by `prev_close` for `gap`), so a completely flat bar (`high == low`) or a zero previous close produces `NaN` rather than a division error — expected on very low-liquidity data, not a bug to work around.
+
 #### `pattern_features()` — the opt-in named-pattern layer
 
 ```python
@@ -1057,6 +1149,14 @@ Ten named single-, two- and three-bar formations (HAMMER, DOJI, SHOOTING_STAR, M
 Not a `kpi_builder` function at all, but a Module 1 (`DiscoveryConfig`) knob that only makes sense in the context of what `kpi_builder` produced: Event Discovery's feature generator always tests price-scale indicator columns (SMA/EMA/WMA/HMA families) against **time-shifted base OHLC columns** — e.g. `close_sma_12[t] > low[t-3]` — at lags `DiscoveryConfig.indicator_lag_cross_lags`, default `(1, 3)`. This pairing is on by default and independent of anything you enable in `build_features()`'s config; pass `indicator_lag_cross_lags=()` to disable it entirely.
 
 **Verified cost**, on a 400-bar KPI Table with 2 EMA periods (a small table — §17 reports a much larger measured cost, +24% runtime / +21% candidates, on a 36-column table): `EventDiscovery(..., indicator_lag_cross_lags=(1,3))` (the default) → **6987** candidates; the same table with `indicator_lag_cross_lags=()` → **6841** candidates — a real, measurable difference in search-surface size purely from this one always-on pairing, growing with how many price-scale indicator columns and periods your KPI Table carries.
+
+#### First-time mistakes worth knowing about upfront
+
+- **Passing `timestamp_col` positionally, or forgetting it.** It's keyword-only and required — `build_features(candles, timestamp_col="open_time")`, never `build_features(candles, "open_time")`. Leaving it out entirely raises a plain Python `TypeError` (a missing required keyword argument), not a `forgedge`-specific error.
+- **Calling `candle_features()`/`pattern_features()` on the raw `candles`, not on `build_features()`'s output.** Both need `open`/`high`/`low`/`close` — which your raw candles already have — so this technically runs either way, but you lose `open_dt` and every indicator column, and everything downstream that expects `open_dt` (including `forge()` itself, unless you pass `timestamp_col=` explicitly) breaks. Chain them in order: `build_features` → `candle_features` → `lag_features`.
+- **Passing the original KPI Table to `lag_features()` instead of the frame you actually want lagged columns on.** `lag_features()` lags whatever is on the `df` you hand it — call it *last*, after `candle_features()`, if you also want lagged copies of the geometry columns, not just the indicator columns from `build_features()`.
+- **A custom or renamed column silently never getting paired with anything in Event Discovery.** Not an error — see the naming-convention note above. This is far and away the most common "why isn't my feature being used" report; check the column name against `{base}_{indicator}_{period}` before assuming something is broken.
+- **Expecting `atr`/`macd` columns after calling `build_features()` with no config.** They ship disabled in the packaged default (`DEFAULT_CONFIG` below) — pass an explicit config that enables them, as shown above, if you want either.
 
 ### Configuration coherence — `config_report`
 
