@@ -76,6 +76,17 @@ def _months_m(values) -> pd.PeriodIndex:
     return pd.DatetimeIndex(_as_datetime64(values)).to_period("M")
 
 
+def _month_ordinals(dt: np.ndarray) -> np.ndarray:
+    """Datetime64 array -> int64 "months since 1970-01" ordinals, pure numpy.
+
+    Equivalent to ``pd.PeriodIndex(..., freq="M").asi8`` (pandas' own monthly
+    ``Period`` ordinal uses the same epoch/step), but skips PeriodIndex
+    construction entirely — this is the per-call hot path inside
+    ``_summarise_arrays`` (~22k calls per ``RuleDiscovery.run``).
+    """
+    return dt.astype("datetime64[M]").astype(np.int64)
+
+
 # ---------------------------------------------------------------------------
 # Prepared candles (extract per-bar arrays once)
 # ---------------------------------------------------------------------------
@@ -452,7 +463,7 @@ def _summarise_arrays(
     fill_dt: np.ndarray,
     target_hit: np.ndarray,
     total_signals: int,
-    months: pd.PeriodIndex,
+    months,
     scoring: ScoringParams,
     *,
     n_episodes: int = 0,
@@ -465,7 +476,8 @@ def _summarise_arrays(
     this function does not.  Omitting them leaves the overlap fields at their
     defaults rather than inventing values.
     """
-    n_months = max(len(months), 1)
+    months_ord = _as_month_ordinals(months)
+    n_months = max(months_ord.size, 1)
     n = int(net.size)
 
     wins = net[net > 0]
@@ -485,12 +497,23 @@ def _summarise_arrays(
     std = float(net.std(ddof=1)) if n > 1 else 0.0
 
     # ── monthly distribution (on the fill bar) ───────────────────────────
-    fill_months = _months_m(fill_dt)
-    monthly_counts = fill_months.value_counts().reindex(months, fill_value=0)
+    # Pure-numpy replacement for the previous
+    # ``_months_m(fill_dt).value_counts().reindex(months, fill_value=0)``:
+    # ``months_ord`` is contiguous (built by ``_month_index``/``_oos_months``),
+    # so a bincount over the offset from its first element reproduces the same
+    # reindexed counts (entries outside the window are dropped, matching
+    # ``reindex``'s behaviour) without building a PeriodIndex/Series per call.
+    if n and months_ord.size:
+        fill_month_ord = _month_ordinals(fill_dt)
+        offset = fill_month_ord - months_ord[0]
+        within = (offset >= 0) & (offset < months_ord.size)
+        monthly_counts = np.bincount(offset[within], minlength=months_ord.size)
+    else:
+        monthly_counts = np.zeros(months_ord.size, dtype=np.int64)
     active_months = int((monthly_counts > 0).sum())
     zero_months = n_months - active_months
-    mu = float(monthly_counts.mean())
-    sigma = float(monthly_counts.std(ddof=0))
+    mu = float(monthly_counts.mean()) if monthly_counts.size else 0.0
+    sigma = float(monthly_counts.std(ddof=0)) if monthly_counts.size else 0.0
 
     # ── composite scores (backtest_scoring.md) ───────────────────────────
     min_trades_dyn = max(scoring.pf_min_trades, n_months * scoring.pf_min_tpm)
@@ -572,7 +595,7 @@ def _summarise_arrays(
     )
 
 
-def _month_index(ts_from, ts_to, dt: np.ndarray) -> pd.PeriodIndex:
+def _month_index(ts_from, ts_to, dt: np.ndarray) -> np.ndarray:
     """Months spanned by the entry window (defaults to the candle span).
 
     The entry window is ``[from, to)``: when ``ts_to`` is given, the last
@@ -583,16 +606,37 @@ def _month_index(ts_from, ts_to, dt: np.ndarray) -> pd.PeriodIndex:
     a real, countable month.  Dropping that final month (the previous
     behaviour) silently excluded its trades from every monthly statistic
     (``tpm_mu``, ``zero_months``, ``c_norm``) on whole-table backtests.
+
+    Returns a contiguous int64 array of month ordinals (see
+    ``_month_ordinals``), not a ``pd.PeriodIndex`` — this runs once per
+    ``run_backtest`` call (~21k times per ``RuleDiscovery.run``) and
+    ``pd.Timestamp(...).to_period("M")`` / ``pd.period_range`` were measured
+    dominating the profile for exactly that reason.
     """
-    start = (
-        pd.Timestamp(ts_from) if ts_from is not None else pd.Timestamp(dt.min())
-    ).to_period("M")
+    start_dt = (
+        pd.Timestamp(ts_from).to_datetime64() if ts_from is not None else dt.min()
+    )
+    start = int(_month_ordinals(np.asarray(start_dt)))
     if ts_to is not None:
-        end = (pd.Timestamp(ts_to) - pd.Timedelta(1, "ns")).to_period("M")
+        end_dt = (pd.Timestamp(ts_to) - pd.Timedelta(1, "ns")).to_datetime64()
     else:
-        end = pd.Timestamp(dt.max()).to_period("M")
-    n = max((end.year - start.year) * 12 + (end.month - start.month) + 1, 1)
-    return pd.period_range(start, periods=n, freq="M")
+        end_dt = dt.max()
+    end = int(_month_ordinals(np.asarray(end_dt)))
+    n = max(end - start + 1, 1)
+    return start + np.arange(n, dtype=np.int64)
+
+
+def _as_month_ordinals(months) -> np.ndarray:
+    """Normalise either a ``_month_index`` ndarray or a ``pd.PeriodIndex`` (as
+    produced by ``walkforward._oos_months``) to the same int64 ordinal space.
+
+    Pandas' monthly ``Period.ordinal`` and numpy's ``datetime64[M]`` int
+    ordinal share the same epoch/step (both "months since 1970-01"), so the
+    two representations are directly comparable without conversion cost.
+    """
+    if isinstance(months, pd.PeriodIndex):
+        return months.asi8
+    return np.asarray(months, dtype=np.int64)
 
 
 def _empty_summary(n_months: int) -> BacktestSummary:
