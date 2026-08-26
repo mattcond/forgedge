@@ -6,6 +6,23 @@ FORGE è un sistema di ricerca quantitativa per la **scoperta sistematica di reg
 
 ---
 
+## Cosa fa FORGE, in parole semplici
+
+Se fai trading — o lavori con chi lo fa — probabilmente hai già sentito frasi tipo *"ogni volta che succede X, il prezzo tende a salire."* Individuare un pattern del genere è la parte facile. Quella difficile è capire se sia **reale**, o se sembri buono solo perché sono state provate abbastanza idee che una, per puro caso, doveva per forza sembrare buona. È esattamente la trappola che FORGE è costruito per evitare, in quattro passaggi:
+
+1. **Cerca un pattern ripetibile** nella storia di prezzi e indicatori — senza mai guardare cosa succede *dopo*, così il pattern non ha modo di "barare" conoscendo di nascosto il futuro.
+2. **Verifica se quel pattern predice davvero qualcosa** — il prezzo si muove in modo affidabile in una direzione, abbastanza spesso e abbastanza da contare?
+3. **Simula il trading per davvero** — commissioni reali, esecuzione realistica degli ordini, e test solo su dati che il pattern non ha mai visto mentre veniva scoperto.
+4. **Verifica se regge anche altrove** — su altri asset, non solo su quello su cui è stato scoperto.
+
+Ogni pattern esce da questo processo con un verdetto onesto — *funziona*, *è al limite*, oppure *non regge* — più le ragioni specifiche dietro a quel verdetto, mai un punteggio a scatola chiusa. Nessun pattern viene mai aggiustato a posteriori per farlo sembrare migliore; una regola che non supera la soglia viene riportata così com'è, non rimaneggiata di nascosto finché non la supera.
+
+Una cosa che FORGE deliberatamente **non** fa: piazzare ordini, o parlare con un exchange. È uno strumento di ricerca che ti dice quali idee vale la pena approfondire e passa il testimone con i dettagli operativi (quando entrare, quando uscire, quanto è forte l'evidenza) — trasformare questo in trading dal vivo è un passo separato e deliberato, affidato a qualunque sistema tu usi davvero per eseguire gli ordini.
+
+Il resto di questo documento entra nel funzionamento tecnico, per chi vuole eseguire FORGE in prima persona.
+
+---
+
 ## Perché FORGE
 
 La ricerca sistematica di edge di trading soffre di tre problemi ricorrenti:
@@ -49,7 +66,7 @@ KPI Table (OHLCV + indicatori tecnici)
     ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  Modulo 3 — Rule Discovery                                       │
-│  Backtest realistico con order mechanics (limit order, fee).     │
+│  Backtest realistico con order mechanics, fee, walk-forward OOS. │
 │  Output: EDGE / PARTIAL-EDGE / NON-EDGE + parametri operativi   │
 └──────────────────────────────────────────────────────────────────┘
     │
@@ -101,6 +118,8 @@ for contract, response in result.edges():       # solo EDGE / PARTIAL-EDGE
     print(contract.alpha_id, response.verdict)
 print(result.registry.summary())                # Modulo 4 — regole catalogate
 ```
+
+Prima che tutto questo giri, `forge()` risolve ogni campo di configurazione non impostato rispetto al timeframe/schema della sessione e verifica l'intero bundle per contraddizioni interne — di default (`strict=True`) solleva subito `ValueError` se ne trova una che farebbe fallire ogni candidato per ragioni che non c'entrano nulla col segnale, invece di lasciare che la run finisca e produca un muro di rigetti inspiegati. `strict=False` declassa questo a un warning e gira comunque; `forgedge.config_report(...)` esegue lo stesso controllo in standalone, prima di impegnarsi in una run completa.
 
 Su un `timeframe` daily o più lento la griglia di holding period di default
 viene sostituita automaticamente da una calibrata sul daily (la griglia
@@ -231,7 +250,7 @@ L'unico gate di rigetto rigido è la direzione indeterminata (nessun vantaggio f
 
 ### Regola — tradare in modo realistico
 
-Una **regola** è il verdetto operativo su un contratto alpha. Rule Discovery esegue un backtest realistico con ingresso a limit order, uscita a take-profit, stop a orizzonte e commissioni per lato — poi valida la migliore configurazione di parametri su un walk-forward OOS rolling.
+Una **regola** è il verdetto operativo su un contratto alpha. Rule Discovery esegue un backtest realistico — uscita a take-profit, stop a orizzonte, commissioni per lato — valutato prima con un ingresso a mercato (quel verdetto è autoritativo), poi opzionalmente con un ingresso a limite adottato solo se supera condizioni out-of-sample rigorose — e valida la migliore configurazione di parametri su un walk-forward OOS rolling.
 
 ```python
 resp = RuleDiscovery(ed.df, contract, cand).run()
@@ -271,8 +290,11 @@ if resp.is_edge:
 
 ## Documentazione
 
+**Inizia dal manuale** — [`docs/manuale-it.md`](docs/manuale-it.md) è un'unica guida completa, verificata con esempi, che copre l'installazione fino all'architettura di produzione, il troubleshooting, best practice/anti-pattern, una FAQ e un glossario. Ogni cosa al suo interno è stata verificata contro il sorgente attuale e, dove è citato un numero, contro una run reale. Tutto quello sotto è materiale di riferimento più stretto e complementare.
+
 | File | Contenuto |
 |---|---|
+| [`docs/manuale-it.md`](docs/manuale-it.md) | Il manuale completo, verificato con esempi — dall'installazione alla produzione, l'API di ogni modulo, troubleshooting, FAQ |
 | [`concepts_it.md`](src/forgedge/docs/specs/concepts_it.md) | Guida concettuale: evento, alpha e regola — dal mercato al segnale |
 | [`how_to_use_it.md`](src/forgedge/docs/specs/how_to_use_it.md) | Guida pratica alla pipeline end-to-end per produzione |
 | [`modulo_0_it.md`](src/forgedge/docs/specs/modulo_0_it.md) | Market Context: classificazione regime, EMAProxy, configurazione |

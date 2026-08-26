@@ -6,6 +6,23 @@ FORGE is a quantitative research system for the **systematic discovery of algori
 
 ---
 
+## What FORGE does, in plain terms
+
+If you trade — or work with people who do — you've probably heard something like *"whenever X happens, the price tends to go up."* Spotting a pattern like that is the easy part. The hard part is knowing whether it's **real**, or whether it just happened to look good because enough ideas were tried that one of them was bound to, by chance alone. That's the trap FORGE is built to avoid, in four steps:
+
+1. **Look for a repeatable pattern** in the price and indicator history — without ever looking at what happened *afterward*, so the pattern has no way to "cheat" by secretly knowing the future.
+2. **Check whether that pattern actually predicts anything** — does the price reliably move in a given direction afterward, often enough and by enough to matter?
+3. **Simulate trading it for real** — trading fees, realistic order fills, and tested only on data the pattern never saw while it was being found.
+4. **Check whether it still holds up elsewhere** — on other assets, not just the one it was discovered on.
+
+Every pattern comes out the other end with an honest verdict — *this works*, *this is borderline*, or *this doesn't hold up* — plus the specific reasons behind it, never a black-box score. No pattern is ever adjusted after the fact to look better; a rule that doesn't clear the bar is reported as such, not quietly reworked until it does.
+
+One thing FORGE deliberately does **not** do: place trades, or talk to an exchange. It's a research tool that tells you which ideas are worth taking further and hands off the operational details (when to enter, when to exit, how strong the evidence is) — turning that into live trading is a separate, deliberate step for whatever system you actually execute through.
+
+The rest of this document goes into how that works technically, for readers who want to run FORGE themselves.
+
+---
+
 ## Why FORGE
 
 Systematic edge research suffers from three recurring problems:
@@ -49,7 +66,7 @@ KPI Table (OHLCV + technical indicators)
     ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  Module 3 — Rule Discovery                                       │
-│  Realistic backtest with order mechanics (limit orders, fees).   │
+│  Realistic backtest with order mechanics, fees, walk-forward OOS.│
 │  Output: EDGE / PARTIAL-EDGE / NON-EDGE + operational parameters │
 └──────────────────────────────────────────────────────────────────┘
     │
@@ -101,6 +118,8 @@ for contract, response in result.edges():       # EDGE / PARTIAL-EDGE only
     print(contract.alpha_id, response.verdict)
 print(result.registry.summary())                # Module 4 — catalogued rules
 ```
+
+Before any of that runs, `forge()` resolves every unset config field against the session's timeframe/schema and checks the whole bundle for internal contradictions — by default (`strict=True`) it raises `ValueError` immediately if it finds one that would make every candidate fail for reasons that have nothing to do with the signal, rather than letting the run finish and produce a wall of unexplained rejections. `strict=False` downgrades that to a warning and runs anyway; `forgedge.config_report(...)` runs the same check standalone, before you commit to a full run.
 
 On a daily-or-slower `timeframe` the default holding-period grid is
 automatically replaced by a daily-calibrated one (the stock grid is calibrated
@@ -222,7 +241,7 @@ The only hard rejection gate is an undetermined direction (no finite advantage a
 
 ### Rule — trading realistically
 
-A **rule** is the operational verdict on an alpha contract. Rule Discovery runs a realistic backtest with limit order entry, take-profit exit, horizon stop, and per-side fees — then validates the best parameter configuration on a rolling walk-forward OOS.
+A **rule** is the operational verdict on an alpha contract. Rule Discovery runs a realistic backtest — take-profit exit, horizon stop, per-side fees — evaluated first at a market entry (that verdict is authoritative), then optionally with a limit entry adopted only if it clears strict out-of-sample conditions — and validates the best parameter configuration on a rolling walk-forward OOS.
 
 ```python
 resp = RuleDiscovery(ed.df, contract, cand).run()
@@ -262,8 +281,11 @@ if resp.is_edge:
 
 ## Documentation
 
+**Start with the manual** — [`docs/manual-en.md`](docs/manual-en.md) is a single, comprehensive, example-verified guide covering installation through production architecture, troubleshooting, best practices/anti-patterns, an FAQ and a glossary. Everything in it was checked against the current source and, where a number is quoted, against a real run. Everything below is narrower, complementary reference material.
+
 | File | Contents |
 |---|---|
+| [`docs/manual-en.md`](docs/manual-en.md) | The comprehensive, example-verified manual — installation to production, every module's API, troubleshooting, FAQ |
 | [`concepts_en.md`](src/forgedge/docs/specs/concepts_en.md) | Conceptual guide: event, alpha, and rule — from market to signal |
 | [`how_to_use_en.md`](src/forgedge/docs/specs/how_to_use_en.md) | End-to-end production pipeline guide with full configuration |
 | [`modulo_0_en.md`](src/forgedge/docs/specs/modulo_0_en.md) | Market Context: regime classification, EMAProxy, configuration |
