@@ -467,7 +467,13 @@ AND-composed pairs/triples (`ANDComposer`, below) are judged by this same
 mode-aware criterion as single events — `"episode"` mode gates on episode
 rate/count/dispersion, `"bar"` mode on raw `max_dispersion`, with no
 special-casing for arity (#226; before the fix, composed events were
-always judged bar-mode-only regardless of `event_counting`).
+always judged bar-mode-only regardless of `event_counting`). The episode-mode
+computation this added is memory-bounded regardless of dataset length (#228):
+`ANDComposer` internally chunks its vectorized pair/triple loops at a size
+that shrinks for long histories under a fixed budget, rather than a size
+fixed at 5000 regardless of `n_rows` — relevant only if you're reading
+`and_composer.py` internals or profiling `compose()`, not part of its public
+behaviour.
 
 **Arity-2 feature pairings beyond same-family ratios.** `FeatureGenerator`
 pairs same-family columns (two EMAs, two RSIs, …) by default, plus five

@@ -481,6 +481,30 @@ median. `forge()`'s M1 stage line carries this text; `result.event_discovery
     candidates under episode mode (the default) cannot be trusted to reflect
     the same pass/fail criteria as single events; upgrade rather than
     reasoning about the discrepancy.
+19. **`ANDComposer.compose()` risking OOM under permissive `GateParams`
+    (low `min_tpm`) on a realistic multi-year dataset.** Fixed in #228 — a
+    side effect of #226's own fix: the episode-mode computation it added
+    (`episodes._episode_starts_batch`) built several `(K, n_rows)` `int64`
+    temporaries that all stayed alive at once, ~41x the input's own size
+    (measured ~4.8 GB peak on a 5 000-pair x 23 352-row chunk vs 117 MB of
+    input). `and_composer._CHUNK_SIZE=5000`'s own comment assumed the volume
+    pre-filter always thins a chunk down to "≪ 5000" before that computation
+    runs — true only for strict gate params; a low `min_tpm` (including the
+    library's own `GateParams()` default) lets most of a chunk pass, so the
+    worst case (full-size chunk) is the *normal* case under permissive
+    params, not a rare edge case. The fix: `_episode_starts_batch` now uses
+    `int32` and frees intermediates as soon as nothing downstream needs them
+    (~2.2x lower peak on its own), and `and_composer._pair_chunk_size(n_rows)`
+    bounds the chunk size itself against a fixed ~1 GB memory budget instead
+    of assuming `n_rows` stays small — `_CHUNK_SIZE` is now only its upper
+    bound, unchanged on the short histories it was calibrated against.
+    Chunking is purely an implementation detail (verified: forcing a tiny
+    chunk size produces byte-identical composed events to the default one).
+    If you're on an older `forgedge` running AND composition with a
+    permissive M1 gate (default `GateParams()`, `"sweep"`-style presets) on
+    more than roughly a year of hourly-or-finer data, this is a real OOM
+    risk, not a data-size fluke — upgrade rather than working around it by
+    tightening `min_tpm`/`max_and_components`.
 
 ### Entry mode and what a verdict now measures
 

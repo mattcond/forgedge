@@ -108,6 +108,23 @@ def _episode_starts_batch(active: np.ndarray, gap: int) -> np.ndarray:
     index", forward and reversed) and bridge when that interior hole is
     short enough.  Verified row-for-row identical to the 1D loop version
     above across randomized bursty fixtures at gap in {0, 1, 2, 3} (#226).
+
+    Memory-conscious by construction (#228): the naive version of this
+    computation keeps five or six ``(K, n_rows)`` ``int64`` temporaries alive
+    at once, which peaked at ~4.8 GB on a realistic 5 000-pair x 23 352-row
+    chunk (a ~41x amplification over the 117 MB input) — large enough to OOM
+    a real ``ANDComposer.compose()`` call under permissive gate params, where
+    most of a chunk survives the volume pre-filter and reaches this function
+    at full size. Row indices fit comfortably in ``int32`` (no realistic bar
+    count approaches 2**31), and ``np.maximum.accumulate(..., out=...)``
+    reuses its input buffer instead of allocating a second one, so this
+    version peaks at roughly half the per-array cost with fewer arrays alive
+    at once (each intermediate is ``del``-eted the moment nothing downstream
+    still needs it) — measured ~1.7x-2x lower peak on the same chunk shape.
+    ``and_composer._pair_chunk_size`` (#228) is the complementary, more
+    important fix: it bounds ``K`` itself against ``n_rows`` so peak memory
+    stays under a fixed budget regardless of dataset length, rather than
+    relying on a per-call constant-factor improvement alone.
     """
     K, n = active.shape
     if n == 0:
@@ -115,18 +132,25 @@ def _episode_starts_batch(active: np.ndarray, gap: int) -> np.ndarray:
 
     bridged = active
     if gap > 0 and n > 1:
-        idx = np.arange(n)
-        last_active = np.maximum.accumulate(np.where(active, idx, -1), axis=1)
-        rev_active = active[:, ::-1]
-        next_active_rev = np.maximum.accumulate(np.where(rev_active, idx, -1), axis=1)
+        idx = np.arange(n, dtype=np.int32)
+
+        last_active = np.where(active, idx, np.int32(-1))
+        np.maximum.accumulate(last_active, axis=1, out=last_active)
+
+        next_active_rev = np.where(active[:, ::-1], idx, np.int32(-1))
+        np.maximum.accumulate(next_active_rev, axis=1, out=next_active_rev)
         no_next = next_active_rev[:, ::-1] == -1
-        next_active = np.where(no_next, n, (n - 1) - next_active_rev[:, ::-1])
+        next_active = np.where(no_next, np.int32(n), np.int32(n - 1) - next_active_rev[:, ::-1])
+        del next_active_rev
 
         has_prev = last_active >= 0
-        has_next = ~no_next
         hole_len = next_active - last_active - 1
-        bridge_mask = (~active) & has_prev & has_next & (hole_len <= gap)
+        del last_active, next_active
+
+        bridge_mask = (~active) & has_prev & (~no_next) & (hole_len <= gap)
+        del has_prev, no_next, hole_len
         bridged = active | bridge_mask
+        del bridge_mask
 
     prev = np.concatenate([np.zeros((K, 1), dtype=bool), bridged[:, :-1]], axis=1)
     starts_mask = bridged & ~prev

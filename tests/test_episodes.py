@@ -59,6 +59,36 @@ class TestEpisodeStarts:
         ).tolist()
 
 
+class TestEpisodeStartsBatch:
+    """The vectorized 2D path (``ANDComposer``, #226/#228) must be row-for-row
+    identical to calling the 1D path once per row — never persisted as an
+    explicit test before #228, though it was checked ad hoc while writing it;
+    added here since #228 rewrote the batch path's internals (dtype/memory)."""
+
+    def test_batch_matches_row_by_row_1d_calls(self):
+        rng = np.random.default_rng(42)
+        for _ in range(20):
+            n = rng.integers(5, 200)
+            K = rng.integers(1, 6)
+            active = rng.random((K, n)) < rng.uniform(0.05, 0.6)
+            for gap in (0, 1, 2, 3, 5):
+                batch_out = episode_starts(active, gap)
+                for row in range(K):
+                    row_out = episode_starts(active[row], gap)
+                    assert np.array_equal(batch_out[row], row_out), (n, K, gap, row)
+
+    def test_batch_empty_and_single_row_edge_cases(self):
+        assert episode_starts(np.zeros((0, 5), dtype=bool)).shape == (0, 5)
+        assert episode_starts(np.zeros((3, 0), dtype=bool)).shape == (3, 0)
+        single = np.array([[True, False, True, True, False]])
+        assert np.array_equal(episode_starts(single, gap=1)[0], episode_starts(single[0], gap=1))
+
+    def test_batch_accepts_uint8(self):
+        active_bool = np.array([[1, 0, 1, 1, 0], [0, 1, 1, 0, 1]], dtype=bool)
+        active_u8 = active_bool.astype(np.uint8)
+        assert np.array_equal(episode_starts(active_u8, gap=1), episode_starts(active_bool, gap=1))
+
+
 class TestEpisodeIds:
     def test_ids_label_the_bars_of_each_episode(self):
         a = _mask(".##.#..###.")
