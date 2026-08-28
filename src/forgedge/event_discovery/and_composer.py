@@ -47,7 +47,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .consistency_gate import ConsistencyGate, _build_month_index
+from ..episodes import episode_starts
+from .consistency_gate import ConsistencyGate, _build_month_index, _eff_max_dispersion, _gate_pass
 from .models import EventComponent, GateResult, RawEvent
 
 # Sentinel used as the default for the ``gate`` parameter of
@@ -194,6 +195,11 @@ class ANDComposer:
         month_index, n_total_months = _build_month_index(timestamps)
         n_months_dof = max(n_total_months - 1, 1)
         min_act_floor = max(int(p.min_tpm * n_total_months), 1)
+        # Episode-mode dispersion threshold — one number for this whole call
+        # (depends only on n_total_months), shared with ConsistencyGate.evaluate()
+        # via the same function so a composed event is judged by the same
+        # criteria as a single one, mode-aware (#226, the tail of #205).
+        eff_max_dispersion = _eff_max_dispersion(n_total_months, p.dispersion_margin)
 
         pool = _build_composition_pool(passing_events)
         if len(pool) < 2:
@@ -244,13 +250,25 @@ class ANDComposer:
             n_active_sub = (counts_sub > 0).sum(axis=1)  # diagnostic only
             max_conc_sub = counts_sub.max(axis=1) / n_act_sub  # diagnostic only
             mean_tpm_sub = n_act_sub / n_total_months
-            # Index of Dispersion for each pair
+            # Per-bar Index of Dispersion — diagnostic in "episode" mode, the
+            # gating quantity in "bar" mode.
             sum_sq_dev = ((counts_sub - mean_tpm_sub[:, None]) ** 2).sum(axis=1)
             var_sub = sum_sq_dev / n_months_dof
             id_sub = np.where(mean_tpm_sub > 0, var_sub / mean_tpm_sub, np.inf)
+            # Episode-level stats — the "episode"-mode gating quantities
+            # (#226): same episode_starts() bridging ConsistencyGate uses for
+            # single events, batched across this sub-chunk.
+            n_episodes_sub, episode_tpm_sub, episode_id_sub = _episode_stats(
+                and_chunk[sub_idx].astype(bool), p.episode_gap, n_total_months, one_hot
+            )
 
             if _gate is not None:
-                gate_pass = (mean_tpm_sub >= p.min_tpm) & (id_sub <= p.max_dispersion)
+                gate_pass = _gate_pass(
+                    p,
+                    mean_tpm=mean_tpm_sub, id_score=id_sub,
+                    episode_tpm=episode_tpm_sub, n_episodes=n_episodes_sub,
+                    episode_id=episode_id_sub, eff_max_dispersion=eff_max_dispersion,
+                )
                 passing = np.where(gate_pass)[0]
             else:
                 passing = np.arange(len(sub_idx))
@@ -268,6 +286,8 @@ class ANDComposer:
                     max_monthly_share=float(max_conc_sub[k]),
                     mean_tpm=float(mean_tpm_sub[k]),
                     index_of_dispersion=float(id_sub[k]),
+                    n_episodes=int(n_episodes_sub[k]),
+                    episode_index_of_dispersion=float(episode_id_sub[k]),
                 )
                 and_series = pd.Series(
                     and_chunk[orig].astype(float), index=pool[ii[orig]].series.index
@@ -315,9 +335,18 @@ class ANDComposer:
                     sum_sq_dev_t = ((counts_t - mean_tpm_s[:, None]) ** 2).sum(axis=1)
                     var_t = sum_sq_dev_t / n_months_dof
                     id_t = np.where(mean_tpm_s > 0, var_t / mean_tpm_s, np.inf)
+                    # Episode-level stats (#226) — same treatment as the pair loop.
+                    n_episodes_t, episode_tpm_t, episode_id_t = _episode_stats(
+                        and_ijk[sub_t].astype(bool), p.episode_gap, n_total_months, one_hot
+                    )
 
                     if _gate is not None:
-                        gate_t = (mean_tpm_s >= p.min_tpm) & (id_t <= p.max_dispersion)
+                        gate_t = _gate_pass(
+                            p,
+                            mean_tpm=mean_tpm_s, id_score=id_t,
+                            episode_tpm=episode_tpm_t, n_episodes=n_episodes_t,
+                            episode_id=episode_id_t, eff_max_dispersion=eff_max_dispersion,
+                        )
                         passing_t = np.where(gate_t)[0]
                     else:
                         passing_t = np.arange(len(sub_t))
@@ -335,6 +364,8 @@ class ANDComposer:
                             max_monthly_share=float(max_conc_s[m]),
                             mean_tpm=float(mean_tpm_s[m]),
                             index_of_dispersion=float(id_t[m]),
+                            n_episodes=int(n_episodes_t[m]),
+                            episode_index_of_dispersion=float(episode_id_t[m]),
                         )
                         and_series = pd.Series(
                             and_ijk[orig_m].astype(float),
@@ -472,6 +503,61 @@ def _build_composition_pool(events: list[RawEvent]) -> list[RawEvent]:
 # ---------------------------------------------------------------------------
 # Vectorized helpers
 # ---------------------------------------------------------------------------
+
+def _episode_stats(
+    and_bool: np.ndarray, gap: int, n_total_months: int, one_hot: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Batched episode rate/count/dispersion for a ``(K, n_rows)`` boolean
+    AND matrix — the same episode-counting semantics
+    ``ConsistencyGate.evaluate`` uses for single events (``episode_starts``'s
+    gap-bridging, monthly episode counts via the same one-hot matmul already
+    used for bar counts), vectorized across the whole chunk (#226).
+
+    NaN in ``episode_id`` reproduces ``ConsistencyGate.evaluate``'s own NaN
+    cases exactly — ``n_total_months <= 1`` or zero episodes — so
+    ``_gate_pass``'s NaN handling (skip, not fail, the dispersion criterion)
+    applies identically whether the caller is this function or the
+    single-event path.
+
+    Parameters
+    ----------
+    and_bool : np.ndarray
+        Boolean AND-composition matrix, shape ``(K, n_rows)``.
+    gap : int
+        ``GateParams.episode_gap``.
+    n_total_months : int
+        Total calendar months spanned by the dataset (one value for the
+        whole ``compose()`` call, not per-candidate).
+    one_hot : np.ndarray
+        ``(n_rows, n_total_months)`` one-hot month matrix from
+        ``_build_one_hot_f32``, reused for the episode-count matmul.
+
+    Returns
+    -------
+    n_episodes : np.ndarray[int64], shape (K,)
+    episode_tpm : np.ndarray[float64], shape (K,)
+    episode_id : np.ndarray[float64], shape (K,)
+        NaN where not evaluated (``n_total_months <= 1`` or zero episodes).
+    """
+    starts = episode_starts(and_bool, gap)
+    n_episodes = starts.sum(axis=1).astype(np.int64)
+    episode_tpm = (
+        n_episodes.astype(np.float64) / n_total_months
+        if n_total_months > 0 else np.zeros(and_bool.shape[0], dtype=np.float64)
+    )
+
+    if n_total_months > 1:
+        epi_counts = starts.astype(np.float64) @ one_hot
+        emu = epi_counts.mean(axis=1)
+        evar = epi_counts.var(axis=1, ddof=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            episode_id = np.where(emu > 0, evar / emu, np.inf)
+        episode_id = np.where(n_episodes > 0, episode_id, np.nan)
+    else:
+        episode_id = np.full(and_bool.shape[0], np.nan)
+
+    return n_episodes, episode_tpm, episode_id
+
 
 def _build_one_hot_f32(month_index: np.ndarray, n_months: int) -> np.ndarray:
     """Build a float32 one-hot month matrix for vectorized monthly counting.

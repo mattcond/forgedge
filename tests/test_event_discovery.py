@@ -1684,6 +1684,148 @@ class TestBugRegressions:
                 "float64 mismatch between ANDComposer and ConsistencyGate.evaluate"
             )
 
+    # ── Issue #226: ANDComposer must judge composed events by the same
+    # criteria as single ones, mode-aware — not its own bar-only reimplementation
+
+    @staticmethod
+    def _bursty_series(rng, n, burst_len=48, period=24 * 20, p_in_burst=0.6):
+        """Time-concentrated activation pattern (regime-clustered bursts,
+        quiet in between) — bar-level dispersion is high (persistent
+        multi-bar bursts), episode-level dispersion is low (episodes land
+        roughly one per burst, spread fairly evenly across bursts). This is
+        exactly the shape #205/#226 are about: a preset with a generous
+        `dispersion_margin` should accept it; a hardcoded bar-level
+        `max_dispersion=1.5` should not."""
+        s = np.zeros(n, dtype=bool)
+        for start in range(0, n, period):
+            end = min(start + burst_len, n)
+            s[start:end] = rng.random(end - start) < p_in_burst
+        return s
+
+    def test_and_composer_episode_mode_gate_decision_matches_single_gate(self):
+        """The heart of #226: a composed pair's pass/fail, n_episodes and
+        episode_index_of_dispersion must exactly match evaluating the same
+        AND result directly through ConsistencyGate.evaluate_series() — not
+        a bar-level approximation. Before the fix this pair was wrongly
+        rejected (bar-ID ~4.9 > the default max_dispersion=1.5, a field
+        episode mode never reads) even though the correct episode-level
+        evaluation passes comfortably under a generous dispersion_margin."""
+        rng = np.random.default_rng(3)
+        n = 24 * 400
+        ts = pd.Series(pd.date_range("2023-01-01", periods=n, freq="1h"))
+        month_idx, n_months = _build_month_index(ts)
+
+        a = self._bursty_series(rng, n)
+        b = self._bursty_series(rng, n)
+        s1, s2 = pd.Series(a.astype(float)), pd.Series(b.astype(float))
+
+        params = GateParams(
+            min_tpm=1.0, dispersion_margin=5.0, min_episodes=1, event_counting="episode"
+        )
+        gate = ConsistencyGate(params)
+
+        def _make_ev(s, name):
+            ev = RawEvent(series=s, component=_make_component(name, "identity", {}, []))
+            ev.gate_result = gate.evaluate_series(s, month_idx, n_months)
+            return ev
+
+        ev1, ev2 = _make_ev(s1, "feat_a"), _make_ev(s2, "feat_b")
+        assert ev1.gate_result.passed and ev2.gate_result.passed
+
+        composed = ANDComposer(gate).compose([ev1, ev2], ts, max_components=2)
+        assert composed, (
+            "composed pair wrongly rejected — ANDComposer is still judging "
+            "episode-mode candidates by bar-level dispersion (#226)"
+        )
+
+        and_arr = a & b
+        reference = gate.evaluate_series(pd.Series(and_arr.astype(float)), month_idx, n_months)
+        assert reference.passed, "fixture must actually be a real pass under episode mode"
+
+        gr = composed[0].gate_result
+        assert gr.passed == reference.passed
+        assert gr.n_episodes == reference.n_episodes
+        assert gr.episode_index_of_dispersion == pytest.approx(
+            reference.episode_index_of_dispersion, rel=1e-9
+        )
+
+    def test_and_composer_episode_mode_correctly_rejects_over_dispersed_pair(self):
+        """The rejection path, not just the acceptance path: a pair whose
+        episode-level ID genuinely exceeds a *tight* dispersion_margin must
+        still be rejected — the fix corrects which criterion is checked, it
+        does not make the composer permissive."""
+        rng = np.random.default_rng(11)
+        n = 24 * 400
+        ts = pd.Series(pd.date_range("2023-01-01", periods=n, freq="1h"))
+        month_idx, n_months = _build_month_index(ts)
+
+        a = self._bursty_series(rng, n, p_in_burst=0.8)
+        b = self._bursty_series(rng, n, p_in_burst=0.8)
+        s1, s2 = pd.Series(a.astype(float)), pd.Series(b.astype(float))
+
+        # For this fixture (seed=11, p_in_burst=0.8, n=24*400h) the composed
+        # AND measures episode_index_of_dispersion ~= 1.34 (verified directly
+        # via _eff_max_dispersion). margin=0.5 puts eff_max_dispersion ~= 0.86,
+        # safely below that with headroom, so the pair must fail episode
+        # dispersion rather than clear it.
+        params = GateParams(
+            min_tpm=1.0, dispersion_margin=0.5, min_episodes=1, event_counting="episode"
+        )
+        gate = ConsistencyGate(params)
+
+        def _make_ev(s, name):
+            ev = RawEvent(series=s, component=_make_component(name, "identity", {}, []))
+            ev.gate_result = gate.evaluate_series(s, month_idx, n_months)
+            return ev
+
+        ev1, ev2 = _make_ev(s1, "feat_a"), _make_ev(s2, "feat_b")
+
+        and_arr = a & b
+        reference = gate.evaluate_series(pd.Series(and_arr.astype(float)), month_idx, n_months)
+        assert not reference.passed and "dispersion" in (reference.fail_reason or ""), (
+            "fixture must actually fail on episode dispersion for this test to mean anything"
+        )
+
+        composed = ANDComposer(gate).compose([ev1, ev2], ts, max_components=2)
+        assert composed == [], (
+            "an over-dispersed pair under a tight dispersion_margin must be rejected, "
+            "not silently accepted by the fix"
+        )
+
+    def test_and_composer_bar_mode_unaffected_by_episode_fix(self):
+        """Regression guard: `"bar"` mode composed events must still be
+        judged by `max_dispersion` directly, exactly as before #226 —
+        the fix only changes what happens under `event_counting="episode"`."""
+        rng = np.random.default_rng(7)
+        n = 8760
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        month_idx, n_months = _build_month_index(ts)
+
+        gate = ConsistencyGate(GateParams(
+            min_tpm=2.0, max_dispersion=2.5, event_counting="bar",
+        ))
+        base = rng.random(n) < 0.30
+        s1 = pd.Series((base & (rng.random(n) < 0.80)).astype(float))
+        s2 = pd.Series((base & (rng.random(n) < 0.80)).astype(float))
+
+        def _make_ev(s, name):
+            ev = RawEvent(series=s, component=_make_component(name, "identity", {}, []))
+            ev.gate_result = gate.evaluate_series(s, month_idx, n_months)
+            return ev
+
+        ev1, ev2 = _make_ev(s1, "feat_a"), _make_ev(s2, "feat_b")
+        assert ev1.gate_result.passed and ev2.gate_result.passed
+
+        composed = ANDComposer(gate).compose([ev1, ev2], ts, max_components=2)
+        assert composed
+
+        and_arr = (s1.fillna(0).values.astype(bool) & s2.fillna(0).values.astype(bool))
+        reference = gate.evaluate_series(pd.Series(and_arr.astype(float)), month_idx, n_months)
+
+        gr = composed[0].gate_result
+        assert gr.passed == reference.passed
+        assert gr.index_of_dispersion == pytest.approx(reference.index_of_dispersion, rel=1e-9)
+
     # ── Issue #98: ANDComposer.compose() gate=None skips full gate ───────────
 
     def _make_two_events(self, n=8760):

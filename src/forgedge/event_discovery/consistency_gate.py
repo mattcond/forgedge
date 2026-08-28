@@ -140,58 +140,48 @@ class ConsistencyGate:
             # Effective sample size (issue #134): n / ID design effect.
             n_eff = n_episodes / episode_id if episode_id > 0 else float(n_episodes)
 
-        def _result(passed: bool, fail_reason: Optional[str] = None) -> GateResult:
-            return GateResult(
-                passed=passed,
-                n_activations=n_act,
-                n_active_months=n_active_months,
-                max_monthly_share=max_conc,
-                mean_tpm=mean_tpm,
-                index_of_dispersion=id_score,
-                n_episodes=n_episodes,
-                episode_index_of_dispersion=episode_id,
-                n_eff=n_eff,
-                fail_reason=fail_reason,
-            )
+        eff_max_dispersion = _eff_max_dispersion(n_total_months, p.dispersion_margin)
 
-        if p.event_counting == "bar":
-            # Backward-compatible mode: rate floor + raw per-bar dispersion.
-            if mean_tpm < p.min_tpm:
-                return _result(False, f"rate: {mean_tpm:.2f} tpm < {p.min_tpm}")
-            if id_score > p.max_dispersion:
-                return _result(False, f"dispersion: ID={id_score:.2f} > {p.max_dispersion}")
-            return _result(True)
+        # The pass/fail truth comes from `_gate_pass` — the same function
+        # `ANDComposer` calls (batched) on its own candidates, so the two can
+        # never silently diverge on what "passing the gate" means (#226).
+        # Only the *message* below is local: which criterion to blame first.
+        passed = bool(_gate_pass(
+            p,
+            mean_tpm=mean_tpm, id_score=id_score,
+            episode_tpm=episode_tpm, n_episodes=n_episodes, episode_id=episode_id,
+            eff_max_dispersion=eff_max_dispersion,
+        ))
 
-        # Episode mode (default) — rate, power floor, episode-level dispersion.
-        # The threshold is `dispersion_margin` above a Poisson χ² floor, not
-        # `max_dispersion` (#205): the floor exists so the gate never rejects
-        # an event statistically consistent with a random process at the
-        # observed rate (issue #134), but comparing an *absolute* ID against
-        # `max(max_dispersion, floor)` meant the floor almost always won —
-        # measured across every preset/timeframe combination, `max_dispersion`
-        # never bound for `sniper`, the preset built for "regular" events.
-        # Expressing the tolerance as a margin over the floor keeps the
-        # statistical protection while letting a preset's own tolerance for
-        # burstiness actually reach the gate.
-        if n_total_months > 1:
-            poisson_floor = _chi2_ppf_095(n_total_months - 1) / (n_total_months - 1)
-        else:
-            poisson_floor = 0.0
-        eff_max_dispersion = poisson_floor * p.dispersion_margin
+        fail_reason: Optional[str] = None
+        if not passed:
+            if p.event_counting == "bar":
+                if mean_tpm < p.min_tpm:
+                    fail_reason = f"rate: {mean_tpm:.2f} tpm < {p.min_tpm}"
+                else:
+                    fail_reason = f"dispersion: ID={id_score:.2f} > {p.max_dispersion}"
+            else:
+                if episode_tpm < p.min_tpm:
+                    fail_reason = f"rate: {episode_tpm:.2f} epi/month < {p.min_tpm}"
+                elif n_episodes < p.min_episodes:
+                    fail_reason = f"episodes: {n_episodes} < {p.min_episodes}"
+                else:
+                    fail_reason = (
+                        f"episode dispersion: ID={episode_id:.2f} > {eff_max_dispersion:.2f}"
+                    )
 
-        # Criterion 1: episode rate (episodes per month)
-        if episode_tpm < p.min_tpm:
-            return _result(False, f"rate: {episode_tpm:.2f} epi/month < {p.min_tpm}")
-        # Criterion 2: absolute episode-count floor (statistical power)
-        if n_episodes < p.min_episodes:
-            return _result(False, f"episodes: {n_episodes} < {p.min_episodes}")
-        # Criterion 3: episode-level dispersion vs the Poisson-aware threshold
-        if episode_id == episode_id and episode_id > eff_max_dispersion:  # not NaN
-            return _result(
-                False,
-                f"episode dispersion: ID={episode_id:.2f} > {eff_max_dispersion:.2f}",
-            )
-        return _result(True)
+        return GateResult(
+            passed=passed,
+            n_activations=n_act,
+            n_active_months=n_active_months,
+            max_monthly_share=max_conc,
+            mean_tpm=mean_tpm,
+            index_of_dispersion=id_score,
+            n_episodes=n_episodes,
+            episode_index_of_dispersion=episode_id,
+            n_eff=n_eff,
+            fail_reason=fail_reason,
+        )
 
     def evaluate_series(
         self,
@@ -296,6 +286,76 @@ class ConsistencyGate:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _eff_max_dispersion(n_total_months, dispersion_margin):
+    """Episode-mode dispersion threshold: Poisson χ² floor × ``dispersion_margin``.
+
+    A pure function of session-level facts (``n_total_months`` is one number
+    for an entire gate/compose call, never per-candidate), so it costs
+    nothing to call once and share — the point is that both
+    :meth:`ConsistencyGate.evaluate` and ``ANDComposer.compose`` (batched)
+    read the *same* threshold instead of each deriving their own (#226, the
+    tail of #205).  Unread in ``"bar"`` mode, where there is no floor.
+    """
+    if n_total_months > 1:
+        poisson_floor = _chi2_ppf_095(n_total_months - 1) / (n_total_months - 1)
+    else:
+        poisson_floor = 0.0
+    return poisson_floor * dispersion_margin
+
+
+def _gate_pass(
+    params: GateParams,
+    *,
+    mean_tpm,
+    id_score,
+    episode_tpm,
+    n_episodes,
+    episode_id,
+    eff_max_dispersion,
+):
+    """The single source of truth for "does this pass the Consistency Gate".
+
+    Every argument accepts either a Python scalar (the single-event path,
+    :meth:`ConsistencyGate.evaluate`) or a numpy array of matching shape
+    (``ANDComposer``'s batched pair/triple evaluation) — the comparisons
+    below are written so numpy broadcasts them identically either way, so
+    there is exactly one implementation of "passing the gate" rather than
+    two that a future change to one can silently leave the other behind
+    (#226: before this, ``ANDComposer`` re-derived its own bar-only version
+    of this decision and never adopted ``"episode"`` mode at all).
+
+    ``episode_id`` may be NaN (episode dispersion not evaluated — no
+    ``month_index``, or zero episodes): ``episode_id > eff_max_dispersion``
+    is then ``False`` (numpy/Python NaN comparisons are never True), so
+    ``~(...)`` is ``True`` — the criterion is skipped, not failed, matching
+    :meth:`ConsistencyGate.evaluate`'s original ``episode_id == episode_id``
+    NaN guard exactly.
+
+    Parameters
+    ----------
+    params : GateParams
+    mean_tpm, id_score : scalar or np.ndarray
+        Per-bar rate and Index of Dispersion — the ``"bar"``-mode criteria.
+    episode_tpm, n_episodes, episode_id : scalar or np.ndarray
+        Episode-level rate, count and Index of Dispersion — the
+        ``"episode"``-mode criteria.
+    eff_max_dispersion : float
+        From :func:`_eff_max_dispersion` — one value shared by the whole
+        batch, not per-candidate.
+
+    Returns
+    -------
+    bool or np.ndarray of bool
+    """
+    if params.event_counting == "bar":
+        return (mean_tpm >= params.min_tpm) & (id_score <= params.max_dispersion)
+    return (
+        (episode_tpm >= params.min_tpm)
+        & (n_episodes >= params.min_episodes)
+        & ~(episode_id > eff_max_dispersion)
+    )
+
 
 def _chi2_ppf_095(df: int) -> float:
     """95th-percentile of the chi-square distribution with ``df`` degrees of
