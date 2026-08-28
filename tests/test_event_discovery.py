@@ -1826,6 +1826,59 @@ class TestBugRegressions:
         assert gr.passed == reference.passed
         assert gr.index_of_dispersion == pytest.approx(reference.index_of_dispersion, rel=1e-9)
 
+    # ── Issue #228: ANDComposer chunk size must stay bounded on long
+    # histories, and the bound must not change what compose() returns
+
+    def test_pair_chunk_size_bounded_and_shrinks_with_n_rows(self):
+        """`_pair_chunk_size` must never exceed `_CHUNK_SIZE`, must shrink
+        (non-increasing) as n_rows grows, and must always return >= 1 even
+        for pathologically long histories."""
+        from forgedge.event_discovery.and_composer import _CHUNK_SIZE, _pair_chunk_size
+
+        assert _pair_chunk_size(0) == _CHUNK_SIZE
+        assert _pair_chunk_size(100) == _CHUNK_SIZE
+
+        sizes = [_pair_chunk_size(n) for n in (1_000, 10_000, 100_000, 1_000_000, 50_000_000)]
+        assert all(1 <= s <= _CHUNK_SIZE for s in sizes)
+        assert all(a >= b for a, b in zip(sizes, sizes[1:])), "chunk size must not grow with n_rows"
+
+    def test_and_composer_chunk_size_does_not_change_composed_results(self):
+        """The #228 memory fix only changes how many pairs/triples are
+        batched per vectorized iteration — forcing a small chunk size must
+        produce byte-identical composed events to the default, larger one."""
+        import forgedge.event_discovery.and_composer as and_composer_mod
+
+        rng = np.random.default_rng(13)
+        n = 8760
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+
+        gate = ConsistencyGate(GateParams(min_tpm=1.0, dispersion_margin=2.0, min_episodes=3))
+        events = []
+        for i in range(12):
+            p_act = rng.uniform(0.03, 0.12)
+            s = pd.Series((rng.random(n) < p_act).astype(float))
+            events.append(RawEvent(series=s, component=_make_component(f"feat_{i}", "identity", {}, [])))
+
+        passing = gate.filter(events, ts)
+        assert len(passing) >= 2, "fixture must produce a composable pool"
+
+        composer = ANDComposer(gate)
+
+        original = and_composer_mod._pair_chunk_size
+        try:
+            and_composer_mod._pair_chunk_size = lambda n_rows: 3  # force many tiny chunks
+            small_chunk_result = composer.compose(passing, ts, max_components=3)
+        finally:
+            and_composer_mod._pair_chunk_size = original
+
+        default_result = composer.compose(passing, ts, max_components=3)
+
+        def _key(ev):
+            return (ev.component.source_feature, ev.component.transform,
+                    ev.gate_result.n_activations, ev.gate_result.episode_index_of_dispersion)
+
+        assert sorted(map(_key, small_chunk_result)) == sorted(map(_key, default_result))
+
     # ── Issue #98: ANDComposer.compose() gate=None skips full gate ───────────
 
     def _make_two_events(self, n=8760):

@@ -38,6 +38,14 @@ each seed pair the inner loop over all valid third events is vectorized with
 the same early-volume + sub-chunk matmul pattern.  This reduces the
 effective search space from ``O(n³)`` to ``O(n_vol_pairs × n_pool)`` and
 makes uncapped triple evaluation practical.
+
+Chunk size (#228): the volume pre-filter's "~85% of the matmul work" saving
+above assumes a sparse activation rate, which permissive gate params (a low
+``min_tpm``) invalidate — most of a chunk can pass, and the episode-mode
+computation (#226) then runs on it at full chunk size. ``_pair_chunk_size()``
+bounds the chunk size itself against ``n_rows`` so that worst case stays
+within a fixed memory budget regardless of dataset length, rather than
+relying on the pre-filter alone to keep sub-chunks small.
 """
 from __future__ import annotations
 
@@ -61,7 +69,28 @@ _COMPOSE_DEFAULT: "ConsistencyGate" = object()  # type: ignore[assignment]
 # consume more peak memory; smaller values add Python loop overhead.
 # At 5 000 pairs with n_rows ≈ 8 760 (1 year 1H) the uint8 AND costs ~44 MB
 # and the float32 matmul on volume-passing pairs (typically ≪ 5000) is negligible.
+#
+# That "typically ≪ 5000" assumption is exactly what breaks under permissive
+# gate params (#228): the episode-mode computation #226 added
+# (`_episode_stats`/`episode_starts`) runs on the *volume-passing* sub-chunk,
+# and a low `min_tpm` (e.g. the library's own `GateParams()` default) lets
+# most of a chunk pass that pre-filter, so the sub-chunk can reach full
+# `_CHUNK_SIZE` — measured ~2.2 GB peak per chunk at `_CHUNK_SIZE=5000` on a
+# realistic 23 352-row (~2.7y 1H) dataset, enough to OOM a real
+# `ANDComposer.compose()` call.  `_pair_chunk_size()` below is the actual
+# per-call chunk size — it bounds this worst case against a fixed memory
+# budget instead of assuming a small sub-chunk; `_CHUNK_SIZE` is now only its
+# upper bound (unchanged behaviour on the short histories the number above
+# was calibrated against).
 _CHUNK_SIZE = 5_000
+
+# Target peak bytes for one chunk's worst-case (full sub-chunk) episode-mode
+# computation (#228).  ~20 bytes/cell was measured for `_episode_stats` on a
+# realistic chunk after the #228 dtype/cleanup fix in `episodes.py`; the
+# ~25% margin covers the pair/triple loops' own smaller (K, n_rows) and
+# (K, n_months) temporaries alongside it.
+_EPISODE_CHUNK_BUDGET_BYTES = 1_000_000_000  # ~1 GB
+_EPISODE_BYTES_PER_CELL = 25
 
 # Maximum number of events to retain per (feature, transform) slot
 # before cross-feature AND composition.  Within-slot events differ only
@@ -75,6 +104,34 @@ _MAX_PAIRS = 2000
 # Maximum triple events returned (3-component AND compositions).
 # Independent of _MAX_PAIRS so pairs never starve triples.
 _MAX_TRIPLES = 500
+
+
+def _pair_chunk_size(n_rows: int) -> int:
+    """Chunk size (``K``, candidates per vectorized batch) for
+    ``ANDComposer.compose()``'s pair and triple loops (#228).
+
+    Bounded so a full chunk's worst-case episode-mode computation
+    (``_episode_stats``, #226) stays within ``_EPISODE_CHUNK_BUDGET_BYTES``
+    regardless of ``n_rows`` — a fixed ``_CHUNK_SIZE`` implicitly assumed the
+    volume pre-filter always thins a chunk down before that computation runs,
+    which permissive gate params (low ``min_tpm``) make false.  Equals
+    ``_CHUNK_SIZE`` for the short histories that constant was calibrated
+    against and shrinks for longer ones.
+
+    Parameters
+    ----------
+    n_rows : int
+        Number of bars in the series being composed (``len(timestamps)``).
+
+    Returns
+    -------
+    int
+        Chunk size to use, ``1 <= result <= _CHUNK_SIZE``.
+    """
+    if n_rows <= 0:
+        return _CHUNK_SIZE
+    budget_chunk = _EPISODE_CHUNK_BUDGET_BYTES // (n_rows * _EPISODE_BYTES_PER_CELL)
+    return min(_CHUNK_SIZE, max(1, budget_chunk))
 
 
 class ANDComposer:
@@ -119,8 +176,10 @@ class ANDComposer:
            monthly counting.
 
         4. **Vectorized pair gate** (max_components >= 2): Pairs are
-           processed in chunks of ``_CHUNK_SIZE``.  Each chunk uses a
-           two-pass evaluation:
+           processed in chunks of ``_pair_chunk_size(n_rows)`` (#228) — at
+           most ``_CHUNK_SIZE``, shrunk for long histories so a chunk's
+           worst-case episode-mode computation stays within a fixed memory
+           budget.  Each chunk uses a two-pass evaluation:
 
            * **Pass 1** (cheap): ``and_chunk = bool_matrix[ii] & bool_matrix[jj]``
              (uint8 AND), then ``n_act = and_chunk.sum(axis=1)`` to identify
@@ -209,6 +268,9 @@ class ANDComposer:
         bool_matrix = np.stack(
             [ev.series.fillna(0).values.astype(np.uint8) for ev in pool]
         )  # (n_pool, n_rows)
+        # Bounded against n_rows so a full chunk's worst-case episode-mode
+        # computation can't OOM regardless of dataset length (#228).
+        chunk_size = _pair_chunk_size(bool_matrix.shape[1])
 
         pairs: list[RawEvent] = []
         triples: list[RawEvent] = []
@@ -223,10 +285,10 @@ class ANDComposer:
         # ----------------------------------------------------------------
         # Pair enumeration — two-pass: cheap volume filter, then matmul
         # ----------------------------------------------------------------
-        for chunk_start in range(0, n_pairs, _CHUNK_SIZE):
+        for chunk_start in range(0, n_pairs, chunk_size):
             if len(pairs) >= _MAX_PAIRS:
                 break
-            chunk_end = min(chunk_start + _CHUNK_SIZE, n_pairs)
+            chunk_end = min(chunk_start + chunk_size, n_pairs)
             ii = ii_all[chunk_start:chunk_end]
             jj = jj_all[chunk_start:chunk_end]
 
@@ -312,10 +374,10 @@ class ANDComposer:
                 if len(valid_k) == 0:
                     continue
 
-                for k_start in range(0, len(valid_k), _CHUNK_SIZE):
+                for k_start in range(0, len(valid_k), chunk_size):
                     if len(triples) >= _MAX_TRIPLES:
                         break
-                    k_end = min(k_start + _CHUNK_SIZE, len(valid_k))
+                    k_end = min(k_start + chunk_size, len(valid_k))
                     k_chunk = valid_k[k_start:k_end]
 
                     # Pass 1: cheap volume check
