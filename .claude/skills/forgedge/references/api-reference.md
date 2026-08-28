@@ -463,6 +463,11 @@ confidence (#206) — `poisson_min_window(min_episodes, min_tpm)`, not the
 naive `min_episodes / min_tpm`. **Note:** an older `GateParams` API
 (`min_act`, `min_months`, `max_conc`) appears in several `examples/*.py`
 scripts and now raises `TypeError` — see *Errors and warnings*.
+AND-composed pairs/triples (`ANDComposer`, below) are judged by this same
+mode-aware criterion as single events — `"episode"` mode gates on episode
+rate/count/dispersion, `"bar"` mode on raw `max_dispersion`, with no
+special-casing for arity (#226; before the fix, composed events were
+always judged bar-mode-only regardless of `event_counting`).
 
 **Arity-2 feature pairings beyond same-family ratios.** `FeatureGenerator`
 pairs same-family columns (two EMAs, two RSIs, …) by default, plus five

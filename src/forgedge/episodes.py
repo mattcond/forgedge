@@ -48,21 +48,32 @@ def episode_starts(active: np.ndarray, gap: int = 1) -> np.ndarray:
     daily data a one-day interruption is not a new event.  ``gap=0`` gives
     strict consecutive runs.
 
+    Accepts a 2D batch (``(K, n_rows)``) as well as a single 1D series —
+    the vectorized batch path (no per-row Python loop) is row-for-row
+    identical to calling this function once per row, so callers that need
+    to evaluate episode structure over many candidate series at once (e.g.
+    ``ANDComposer``, #226) never have to re-derive this logic (#134's
+    bridging semantics) themselves.
+
     Parameters
     ----------
     active : np.ndarray
-        Boolean activation array (dtype bool or uint8).
+        Boolean activation array (dtype bool or uint8), shape ``(n_rows,)``
+        or ``(K, n_rows)``.
     gap : int
         Maximum interruption length (in bars) bridged within an episode.
 
     Returns
     -------
     np.ndarray
-        Boolean array, True only at the first bar of each episode.  The marks
-        are positioned on the original (un-bridged) activations, so a bridged
-        gap bar is never itself marked.
+        Boolean array of the same shape as ``active``, True only at the
+        first bar of each episode.  The marks are positioned on the
+        original (un-bridged) activations, so a bridged gap bar is never
+        itself marked.
     """
     active = np.asarray(active).astype(bool)
+    if active.ndim == 2:
+        return _episode_starts_batch(active, gap)
     if active.size == 0:
         return active
 
@@ -84,6 +95,41 @@ def episode_starts(active: np.ndarray, gap: int = 1) -> np.ndarray:
     starts_mask = bridged & ~prev
     # Position the marks back on real activations: a bridged gap bar that opens
     # a bridged run is not itself an activation and must not be marked.
+    return starts_mask & active
+
+
+def _episode_starts_batch(active: np.ndarray, gap: int) -> np.ndarray:
+    """Vectorized ``episode_starts`` across every row of a ``(K, n_rows)``
+    matrix at once — no per-row Python loop over bridged holes.
+
+    Bridging a gap of length <= ``gap`` between two active bars is a
+    morphological closing: for each inactive position, find the nearest
+    active bar before and after it (via a running max of "last seen active
+    index", forward and reversed) and bridge when that interior hole is
+    short enough.  Verified row-for-row identical to the 1D loop version
+    above across randomized bursty fixtures at gap in {0, 1, 2, 3} (#226).
+    """
+    K, n = active.shape
+    if n == 0:
+        return active.copy()
+
+    bridged = active
+    if gap > 0 and n > 1:
+        idx = np.arange(n)
+        last_active = np.maximum.accumulate(np.where(active, idx, -1), axis=1)
+        rev_active = active[:, ::-1]
+        next_active_rev = np.maximum.accumulate(np.where(rev_active, idx, -1), axis=1)
+        no_next = next_active_rev[:, ::-1] == -1
+        next_active = np.where(no_next, n, (n - 1) - next_active_rev[:, ::-1])
+
+        has_prev = last_active >= 0
+        has_next = ~no_next
+        hole_len = next_active - last_active - 1
+        bridge_mask = (~active) & has_prev & has_next & (hole_len <= gap)
+        bridged = active | bridge_mask
+
+    prev = np.concatenate([np.zeros((K, 1), dtype=bool), bridged[:, :-1]], axis=1)
+    starts_mask = bridged & ~prev
     return starts_mask & active
 
 

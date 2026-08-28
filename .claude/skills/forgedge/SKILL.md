@@ -464,6 +464,23 @@ median. `forge()`'s M1 stage line carries this text; `result.event_discovery
     plausible contracts eliminated this way at a high `min_tpm` (e.g. the
     bar-equivalent rate of an hourly preset), that's this bug, not a real
     frequency shortfall — upgrade rather than loosening `min_tpm`.
+18. **`ANDComposer`-composed events ignoring `event_counting="episode"`
+    entirely, always gating on bar-level `max_dispersion`.** Fixed in #226 —
+    `and_composer.py`'s vectorized Pass 2 gate never adopted episode-mode
+    semantics (rate + `min_episodes` + `episode_index_of_dispersion` vs a
+    Poisson-floor-derived `eff_max_dispersion`; `max_dispersion` itself is
+    inert in this mode), so composed pairs/triples were silently
+    suppressed or wrongly accepted relative to what `ConsistencyGate
+    .evaluate()` would have decided for the same series under the
+    (default) episode mode. The fix extracted the gate decision itself
+    (`consistency_gate._gate_pass`/`_eff_max_dispersion`) and the batch
+    episode-detection primitive (`episodes.episode_starts` now dispatches
+    on a 2D input) as the single shared implementation both the scalar
+    single-event path and the composer's batched path call — not a
+    re-synchronized duplicate. If you're on an older `forgedge`, AND-composed
+    candidates under episode mode (the default) cannot be trusted to reflect
+    the same pass/fail criteria as single events; upgrade rather than
+    reasoning about the discrepancy.
 
 ### Entry mode and what a verdict now measures
 
