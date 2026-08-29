@@ -538,6 +538,31 @@ median. `forge()`'s M1 stage line carries this text; `result.event_discovery
     AND-composed candidates from a large pool under permissive gate params
     cannot be assumed diverse — upgrade rather than raising the caps as a
     workaround.
+21. **`EventDiscovery.run()` risking OOM on a rich KPI Table before M1 even
+    reports how many candidates survived the gate.** Fixed in #232 — the
+    generate-everything-then-filter pattern kept every raw candidate's full
+    activation series resident for the whole run, gate-failing ones
+    included. Measured on a 186-column KPI Table (SUIUSDC, ~2.7y hourly):
+    50874 raw candidates cost **9.5 GB** just for their series, before the
+    gate ever ran; at a permissive `min_tpm`/`dispersion_margin` where ~24%
+    passed, that stacked with the resulting larger AND-composition pool to
+    exceed a 15 GB container. Freeing a candidate's series as soon as it's
+    gated instead of after the whole run measured **4.2x less** memory
+    retained by the population. Fix: generation and gating are now
+    interleaved per batch (one `TransformedSeries`, or one binary/
+    categorical column, at a time — the granularity `EventGenerator` already
+    produced them at) instead of collecting the full raw population first;
+    `event_distribution_report`'s statistics are collected incrementally
+    from each `GateResult` as it's produced, so nothing about the diagnostic
+    changes. New `DiscoveryConfig.retain_raw_events: bool = True` — default
+    unchanged (needed by `TargetOptimizer`, which reads `EventDiscovery
+    .raw_events` directly, pre-gate); set `False` on a `forge()`-only config
+    (which never reads `.raw_events`) to get the memory saving. Do **not**
+    set it `False` on a `DiscoveryConfig` you also hand to `TargetOptimizer`
+    — it would silently lose the atom pool `TargetOptimizer` needs. If
+    you're on an older `forgedge` running M1 on a wide KPI Table with
+    permissive gate params, this is a real OOM risk that tightening
+    `min_tpm` only works around, not fixes — upgrade instead.
 
 ### Entry mode and what a verdict now measures
 
