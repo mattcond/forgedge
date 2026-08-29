@@ -2,7 +2,7 @@
 
 *A complete, practical guide to the FORGE (Feature-Oriented Rule Generation Engine) Python library.*
 
-Version covered: `forgedge==0.1.3`. Every code example in this manual was executed against the actual library in this repository; every number quoted from a run is a real, verified value, not an invented illustration. Where the manual states something the authors themselves documented (as opposed to something inferred from reading the code), it says so explicitly.
+Version covered: `forgedge==0.2.0`. Every code example in this manual was executed against the actual library in this repository; every number quoted from a run is a real, verified value, not an invented illustration. Where the manual states something the authors themselves documented (as opposed to something inferred from reading the code), it says so explicitly.
 
 ---
 
@@ -189,7 +189,7 @@ pip install pyarrow
 
 ```python
 import forgedge
-print(forgedge.__version__)   # "0.1.3" at the time of writing
+print(forgedge.__version__)   # "0.2.0" at the time of writing
 ```
 
 ---
