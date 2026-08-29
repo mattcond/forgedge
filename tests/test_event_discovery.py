@@ -1879,6 +1879,144 @@ class TestBugRegressions:
 
         assert sorted(map(_key, small_chunk_result)) == sorted(map(_key, default_result))
 
+    # ── Issue #230: pair/triple enumeration order must not let one pool
+    # event dominate every kept composition under permissive gate params
+
+    def test_shuffle_order_is_a_valid_deterministic_permutation(self):
+        from forgedge.event_discovery.and_composer import _shuffle_order
+
+        assert list(_shuffle_order(0, np.random.default_rng(1))) == []
+        assert list(_shuffle_order(1, np.random.default_rng(1))) == [0]
+
+        rng_a = np.random.default_rng(230)
+        rng_b = np.random.default_rng(230)
+        perm_a = _shuffle_order(500, rng_a)
+        perm_b = _shuffle_order(500, rng_b)
+        assert sorted(perm_a.tolist()) == list(range(500)), "must be a permutation of range(n)"
+        assert perm_a.tolist() == perm_b.tolist(), "same seed must reproduce the same permutation"
+
+    def test_and_composer_pair_shuffle_avoids_single_root_domination(self):
+        """The bug #230 fixes: under permissive gate params where most pairs
+        pass, pre-fix row-major enumeration let one pool event dominate every
+        kept pair (measured on a real fixture: max reuse == _MAX_PAIRS).
+        Reproduces the pathology by monkeypatching `_shuffle_order` to a
+        no-op, then shows the real (shuffled) code avoids it -- proving the
+        shuffle itself is what fixes it, not incidental fixture luck."""
+        import forgedge.event_discovery.and_composer as and_composer_mod
+
+        rng = np.random.default_rng(230)
+        n = 2000
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=3.0, min_episodes=1))
+
+        events = []
+        for i in range(40):
+            p_act = rng.uniform(0.15, 0.35)  # high overlap -> most pairs clear the gate easily
+            s = pd.Series((rng.random(n) < p_act).astype(float))
+            events.append(RawEvent(series=s, component=_make_component(f"feat_{i}", "identity", {}, [])))
+
+        passing = gate.filter(events, ts)
+        assert len(passing) >= 22, "fixture must produce enough passing singles to expose the bug"
+
+        composer = ANDComposer(gate)
+
+        original_max_pairs = and_composer_mod._MAX_PAIRS
+        original_shuffle = and_composer_mod._shuffle_order
+        try:
+            and_composer_mod._MAX_PAIRS = 20  # small relative to pool -> forces early-exit regime
+            shuffled_result = composer.compose(passing, ts, max_components=2)
+
+            and_composer_mod._shuffle_order = lambda n, rng: np.arange(n)  # simulate pre-#230
+            unshuffled_result = composer.compose(passing, ts, max_components=2)
+        finally:
+            and_composer_mod._MAX_PAIRS = original_max_pairs
+            and_composer_mod._shuffle_order = original_shuffle
+
+        def _max_reuse(result):
+            counts: dict[str, int] = {}
+            for ev in result:
+                for c in ev.component.components:
+                    counts[c.source_feature] = counts.get(c.source_feature, 0) + 1
+            return max(counts.values()) if counts else 0
+
+        assert len(shuffled_result) == 20 and len(unshuffled_result) == 20
+        assert _max_reuse(unshuffled_result) == 20, (
+            "fixture sanity: row-major order must reproduce the pre-#230 pathology"
+        )
+        assert _max_reuse(shuffled_result) < 20, (
+            "shuffled enumeration must not let one event dominate every kept pair"
+        )
+
+    def test_and_composer_shuffle_is_deterministic_across_repeated_calls(self):
+        """Same input + same config must produce byte-identical composed
+        events on repeated calls -- the #230 shuffle uses a fixed seed, not
+        real entropy, so FORGE's reproducibility guarantee is unaffected."""
+        rng = np.random.default_rng(7)
+        n = 4380
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=2.0, min_episodes=1))
+
+        events = []
+        for i in range(15):
+            p_act = rng.uniform(0.1, 0.3)
+            s = pd.Series((rng.random(n) < p_act).astype(float))
+            events.append(RawEvent(series=s, component=_make_component(f"feat_{i}", "identity", {}, [])))
+        passing = gate.filter(events, ts)
+
+        composer = ANDComposer(gate)
+        result_a = composer.compose(passing, ts, max_components=3)
+        result_b = composer.compose(passing, ts, max_components=3)
+
+        def _key(ev):
+            return (ev.component.source_feature, ev.gate_result.n_activations)
+
+        assert list(map(_key, result_a)) == list(map(_key, result_b)), (
+            "repeated calls on identical input must return compositions in the same order"
+        )
+
+    def test_and_composer_max_constituent_jaccard_rejects_near_duplicate_pair(self):
+        """Opt-in filter (#230): a pair whose two constituents are near
+        duplicates (high Jaccard) must be rejected when the threshold is set,
+        and the default (None) must leave existing behaviour unchanged."""
+        rng = np.random.default_rng(3)
+        n = 8760
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=2.0, min_episodes=1))
+
+        base = rng.random(n) < 0.20
+        # near-duplicate pair: differs on ~2% of bars -> Jaccard well above 0.9
+        near_dup = base.copy()
+        flip_idx = rng.choice(n, size=int(0.02 * n), replace=False)
+        near_dup[flip_idx] = ~near_dup[flip_idx]
+        # an unrelated third event, low overlap with the other two
+        independent = rng.random(n) < 0.20
+
+        events = [
+            RawEvent(series=pd.Series(base.astype(float)), component=_make_component("feat_a", "identity", {}, [])),
+            RawEvent(series=pd.Series(near_dup.astype(float)), component=_make_component("feat_b", "identity", {}, [])),
+            RawEvent(series=pd.Series(independent.astype(float)), component=_make_component("feat_c", "identity", {}, [])),
+        ]
+        passing = gate.filter(events, ts)
+        assert len(passing) == 3
+
+        composer = ANDComposer(gate)
+
+        no_filter = composer.compose(passing, ts, max_components=2)
+        pairs_no_filter = {
+            frozenset(c.source_feature for c in ev.component.components) for ev in no_filter
+        }
+        assert frozenset({"feat_a", "feat_b"}) in pairs_no_filter, (
+            "fixture sanity: the near-duplicate pair must be composable without the filter"
+        )
+
+        filtered = composer.compose(passing, ts, max_components=2, max_constituent_jaccard=0.8)
+        pairs_filtered = {
+            frozenset(c.source_feature for c in ev.component.components) for ev in filtered
+        }
+        assert frozenset({"feat_a", "feat_b"}) not in pairs_filtered, (
+            "near-duplicate pair must be rejected once max_constituent_jaccard is set"
+        )
+
     # ── Issue #98: ANDComposer.compose() gate=None skips full gate ───────────
 
     def _make_two_events(self, n=8760):

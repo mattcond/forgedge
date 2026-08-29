@@ -505,6 +505,39 @@ median. `forge()`'s M1 stage line carries this text; `result.event_discovery
     more than roughly a year of hourly-or-finer data, this is a real OOM
     risk, not a data-size fluke — upgrade rather than working around it by
     tightening `min_tpm`/`max_and_components`.
+20. **AND-composed pairs/triples all sharing the same single component
+    under a permissive M1 gate.** Fixed in #230. `ANDComposer.compose()`
+    enumerates candidate pairs via `np.where(np.triu(valid_mask, k=1))` —
+    row-major, exhausting every pair involving the *first* pool index before
+    ever trying a second one — combined with "stop once `_MAX_PAIRS`/
+    `_MAX_TRIPLES` is reached." Under permissive gate params (a low
+    `min_tpm`, including the library's own `GateParams()` default) where
+    most examined pairs pass, that early exit fires before the loop ever
+    advances past the first index: measured on a realistic pool (~7000-10000
+    events post-gate), *every one* of 2000 kept pairs shared the same single
+    component, paired with 2000 different partners — not 2000 independent
+    combinations. Permuting the pool's own order doesn't fix this (only
+    changes *which* event dominates); the enumeration order of the pairs
+    themselves has to be permuted. The fix: `_shuffle_order()` permutes pair
+    enumeration (and each triple seed's own third-candidate search) with a
+    fixed, deterministic seed — reproducibility unaffected (same input +
+    config always yields the same composed events) — measured 3-4x more
+    distinct source features touched and single-event reuse collapsing from
+    2000 to single digits on the same fixture. `ANDComposer.compose()` also
+    gained an opt-in `max_constituent_jaccard` parameter (default `None`,
+    disabled) rejecting a pair whose two constituents' Jaccard similarity
+    exceeds the threshold, at no extra cost — a real but secondary effect
+    that only matters once enumeration order is representative; on its own
+    (without the shuffle) it has almost no effect, since a non-representative
+    sample rarely contains near-duplicates to begin with. Raising
+    `_MAX_PAIRS`/`_MAX_TRIPLES` was evaluated as an alternative and rejected:
+    real, non-trivial time/memory cost (an OOM was reproduced at
+    `_MAX_PAIRS=10000` under a permissive preset in the same evaluation
+    session) without fixing the underlying skew — a higher cap still let one
+    component dominate, just more diluted. If you're on an older `forgedge`,
+    AND-composed candidates from a large pool under permissive gate params
+    cannot be assumed diverse — upgrade rather than raising the caps as a
+    workaround.
 
 ### Entry mode and what a verdict now measures
 
