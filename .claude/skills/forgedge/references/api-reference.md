@@ -439,7 +439,15 @@ UNSET` (session-resolved, `"open_dt"` fallback), `max_and_components: int =
 = None`, `diversity_gate_enabled: bool = False`, `diversity_threshold: float
 = 0.85`, `indicator_lag_cross_lags: tuple[int, ...] = (1, 3)` (lag set for
 the price-scale-indicator-vs-lagged-OHLC-base feature family below; pass
-`()` to disable that family entirely).
+`()` to disable that family entirely), `retain_raw_events: bool = True`
+(#232 — whether `EventDiscovery.raw_events` stays populated after `.run()`;
+`False` frees a gate-failing candidate's activation series as soon as it's
+gated instead of keeping the whole pre-gate population resident for the
+run's duration, measured 4.2x less memory retained on a rich KPI Table.
+Leave at the default for any `DiscoveryConfig` also handed to
+`TargetOptimizer`, which reads `.raw_events` directly, pre-gate; safe to set
+`False` only on a config used exclusively through `forge()`, which never
+reads it).
 
 `GateParams` (Consistency Gate, Step 4) — `min_tpm: float = 0.5`,
 `max_dispersion: float = 1.5`, `dispersion_margin: float = 1.3`,

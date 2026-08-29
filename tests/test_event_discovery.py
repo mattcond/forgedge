@@ -2017,6 +2017,73 @@ class TestBugRegressions:
             "near-duplicate pair must be rejected once max_constituent_jaccard is set"
         )
 
+    # ── Issue #232: EventDiscovery must not have to keep every raw
+    # candidate's full series resident just to gate it
+
+    def test_retain_raw_events_false_makes_raw_events_none(self):
+        df = _make_kpi_table(n=1500, seed=11)
+        cfg = DiscoveryConfig(
+            gate_params=GateParams(min_tpm=0.5, dispersion_margin=2.0, min_episodes=1),
+            retain_raw_events=False,
+        )
+        ed = EventDiscovery(df, cfg)
+        ed.run()
+        assert ed.raw_events is None
+
+    def test_retain_raw_events_false_produces_identical_candidates_and_report(self):
+        """The #232 memory fix only changes whether the pre-gate candidate
+        population stays resident afterward -- it must not change which
+        candidates are discovered or the distribution-report diagnostic."""
+        df = _make_kpi_table(n=1500, seed=11)
+        gp = GateParams(min_tpm=0.5, dispersion_margin=2.0, min_episodes=1)
+
+        ed_retain = EventDiscovery(df.copy(), DiscoveryConfig(gate_params=gp, retain_raw_events=True))
+        cands_retain = ed_retain.run()
+
+        ed_free = EventDiscovery(df.copy(), DiscoveryConfig(gate_params=gp, retain_raw_events=False))
+        cands_free = ed_free.run()
+
+        assert ed_retain.raw_events is not None and len(ed_retain.raw_events) > 0
+        assert ed_free.raw_events is None
+        assert sorted(c.event_id for c in cands_retain) == sorted(c.event_id for c in cands_free)
+        assert ed_retain.event_distribution_report == ed_free.event_distribution_report
+
+    def test_retain_raw_events_false_uses_measurably_less_memory(self):
+        """Directional, not a strict threshold (avoids flakiness): freeing a
+        gate-failing candidate's series as it's gated, instead of keeping
+        the whole pre-gate population resident, must measurably lower peak
+        memory -- verified stable (~13% on this fixture) across repeats."""
+        import tracemalloc
+
+        df = _make_kpi_table(n=3000, seed=11)
+        gp = GateParams(min_tpm=0.5, dispersion_margin=2.0, min_episodes=1)
+
+        peaks = {}
+        for retain in (True, False):
+            tracemalloc.start()
+            EventDiscovery(df.copy(), DiscoveryConfig(gate_params=gp, retain_raw_events=retain)).run()
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            peaks[retain] = peak
+
+        assert peaks[False] < peaks[True] * 0.98, (
+            f"retain_raw_events=False should use less peak memory: "
+            f"{peaks[False]/1e6:.1f} MB vs {peaks[True]/1e6:.1f} MB"
+        )
+
+    def test_retain_raw_events_true_keeps_targetoptimizer_atoms_intact(self):
+        """TargetOptimizer reads ed.raw_events directly, pre-gate (#232's own
+        motivation for defaulting retain_raw_events=True) -- must keep
+        working unchanged for a caller that never touches the new flag."""
+        from forgedge import TargetConfig, TargetOptimizer
+
+        df = _make_kpi_table(n=1500, seed=11)
+        opt = TargetOptimizer(df, TargetConfig(horizon=6, min_return=0.02, side="long"))
+        results = opt.run()
+        assert opt._ed is not None
+        assert opt._ed.raw_events is not None and len(opt._ed.raw_events) > 0
+        assert isinstance(results, pd.DataFrame)
+
     # ── Issue #98: ANDComposer.compose() gate=None skips full gate ───────────
 
     def _make_two_events(self, n=8760):
