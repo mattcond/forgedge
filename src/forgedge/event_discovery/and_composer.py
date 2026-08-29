@@ -46,6 +46,19 @@ computation (#226) then runs on it at full chunk size. ``_pair_chunk_size()``
 bounds the chunk size itself against ``n_rows`` so that worst case stays
 within a fixed memory budget regardless of dataset length, rather than
 relying on the pre-filter alone to keep sub-chunks small.
+
+Enumeration order (#230): "no arbitrary pool cap" above is about the search
+space, not the result — ``_MAX_PAIRS``/``_MAX_TRIPLES`` still cap what's
+*returned*, and which candidates fill that cap depends on traversal order.
+``np.where(np.triu(...))`` enumerates row-major: under permissive gate
+params, where most examined pairs pass, the "stop once the cap is reached"
+loop can exhaust every pair involving the first pool index before a second
+one is ever tried — measured on a realistic pool: every one of 2000 kept
+pairs sharing the same single component. ``_shuffle_order()`` permutes the
+traversal (fixed seed — deterministic, not random per run) so the same
+early-exit logic samples the whole pool instead; raising the caps was
+evaluated as an alternative and rejected (real, non-trivial time/memory cost
+without fixing the underlying skew — see issue #230).
 """
 from __future__ import annotations
 
@@ -105,6 +118,34 @@ _MAX_PAIRS = 2000
 # Independent of _MAX_PAIRS so pairs never starve triples.
 _MAX_TRIPLES = 500
 
+# Fixed, deterministic seed used to permute pair/triple enumeration order
+# (#230) — an arbitrary constant, not derived from wall-clock or any other
+# non-deterministic source, so the same KPI table + config always produces
+# the same composed events. See `_shuffle_order` for why this matters.
+_PAIR_ORDER_SHUFFLE_SEED = 20260828
+
+
+def _shuffle_order(n: int, rng: np.random.Generator) -> np.ndarray:
+    """Deterministic permutation of ``range(n)`` (#230).
+
+    ``ANDComposer.compose()``'s pair enumeration (row-major from
+    ``np.where(np.triu(...))``) and each triple seed's third-candidate
+    enumeration (ascending pool index) are otherwise structurally biased:
+    combined with the "stop once ``_MAX_PAIRS``/``_MAX_TRIPLES`` found" early
+    exit, the loop exhausts every combination involving the *first*
+    enumerated index before ever trying a second one. Measured on a
+    realistic pool (SUIUSDC, ~7000-10000 events post-gate) under permissive
+    gate params: all 2000 kept pairs shared the same single "root" event.
+    Permuting the traversal order — with a fixed seed, so still fully
+    reproducible run to run for the same input — lets the same "first N
+    found" logic sample the whole pool instead. Verified empirically:
+    distinct source features touched went from 129 to 420 on one regime,
+    102 to 503 on another, with no change to per-chunk cost.
+    """
+    if n <= 1:
+        return np.arange(n)
+    return rng.permutation(n)
+
 
 def _pair_chunk_size(n_rows: int) -> int:
     """Chunk size (``K``, candidates per vectorized batch) for
@@ -155,6 +196,7 @@ class ANDComposer:
         max_components: int = 2,
         *,
         gate: Optional[ConsistencyGate] = _COMPOSE_DEFAULT,
+        max_constituent_jaccard: Optional[float] = None,
     ) -> list[RawEvent]:
         """Generate valid AND compositions and return those passing the gate.
 
@@ -168,7 +210,12 @@ class ANDComposer:
         2. **Validity pre-filter**: ``_validity_mask`` builds a boolean
            matrix of shape (n_pool, n_pool) in pure numpy via broadcasting.
            The upper triangle of valid pairs is extracted as index arrays
-           ``(ii_all, jj_all)`` with no per-pair Python logic.
+           ``(ii_all, jj_all)``, then permuted with a fixed seed
+           (``_shuffle_order``, #230) so "stop once ``_MAX_PAIRS`` found"
+           samples the whole pool instead of exhausting one pool index's
+           row before ever trying a second one — a real effect under
+           permissive gate params, not a hypothetical one (measured: every
+           kept pair sharing the same single component, pre-fix).
 
         3. **One-hot month matrix**: ``_build_one_hot_f32`` constructs a
            (n_rows, n_months) float32 matrix where ``M[r, m] = 1`` if row
@@ -197,8 +244,9 @@ class ANDComposer:
 
         5. **Pair-seeded triple gate** (max_components >= 3): For each
            volume-passing pair ``(idx_a, idx_b)``, all valid third indices
-           ``k > idx_b`` are identified via the validity mask and processed
-           with the same early-volume + sub-chunk matmul pattern:
+           ``k > idx_b`` are identified via the validity mask, permuted the
+           same way as step 2 (#230), and processed with the same
+           early-volume + sub-chunk matmul pattern:
 
            * ``and_ijk = and_ij[None,:] & bool_matrix[valid_k_chunk]``
            * Volume pre-filter on ``n_act_t``; skip matmul if nothing passes.
@@ -209,7 +257,9 @@ class ANDComposer:
 
         6. **Hard caps**: ``_MAX_PAIRS`` limits pair compositions and
            ``_MAX_TRIPLES`` limits triple compositions independently, so
-           pairs never starve triples.
+           pairs never starve triples. Which specific pairs/triples fill
+           those caps is what steps 2 and 5's shuffle (#230) — and the
+           optional ``max_constituent_jaccard`` — control.
 
         Parameters
         ----------
@@ -236,6 +286,22 @@ class ANDComposer:
               subsequent ``ConsistencyGate.filter()`` pass.
             - **``ConsistencyGate`` instance**: uses that gate for the full
               check, overriding ``self.gate`` for this call only.
+        max_constituent_jaccard : float or None, keyword-only
+            Opt-in redundancy filter (#230), disabled (``None``, default) to
+            preserve existing behaviour. When set, a pair whose two
+            constituents' Jaccard similarity — ``|E1∩E2| / |E1∪E2|`` on their
+            activation series, the same formula ``DiversityGate`` already
+            uses for single events — exceeds this threshold is rejected
+            before the (expensive) full gate check, at no extra cost: the
+            intersection count is already computed by the cheap volume
+            pre-filter. A triple's seed pair is rejected the same way (its
+            own Jaccard checked once per seed); the third component is not
+            separately checked against either seed constituent. Only
+            meaningfully reduces redundancy once the traversal samples
+            broadly — measured negligible effect on its own (see the
+            enumeration-order fix above), a small real one layered on top of
+            it (roughly 1-2% of examined pairs at a threshold of 0.5 on a
+            realistic pool).
 
         Returns
         -------
@@ -268,9 +334,18 @@ class ANDComposer:
         bool_matrix = np.stack(
             [ev.series.fillna(0).values.astype(np.uint8) for ev in pool]
         )  # (n_pool, n_rows)
+        # Only materialized to support max_constituent_jaccard (#230); the
+        # per-pair sum it enables costs nothing extra there (reuses the Pass 1
+        # intersection count), but this reduction itself is O(n_pool x n_rows)
+        # so it's cheap regardless of whether the filter is active.
+        row_sums = bool_matrix.sum(axis=1).astype(np.float64)
         # Bounded against n_rows so a full chunk's worst-case episode-mode
         # computation can't OOM regardless of dataset length (#228).
         chunk_size = _pair_chunk_size(bool_matrix.shape[1])
+        # Reused (state advances) across the pair loop and every triple
+        # seed's third-candidate shuffle below — deterministic given the
+        # fixed seed and the fixed call order for a given input (#230).
+        shuffle_rng = np.random.default_rng(_PAIR_ORDER_SHUFFLE_SEED)
 
         pairs: list[RawEvent] = []
         triples: list[RawEvent] = []
@@ -278,6 +353,8 @@ class ANDComposer:
         valid_mask = _validity_mask(pool)
         ii_all, jj_all = np.where(np.triu(valid_mask, k=1))
         n_pairs = len(ii_all)
+        pair_perm = _shuffle_order(n_pairs, shuffle_rng)
+        ii_all, jj_all = ii_all[pair_perm], jj_all[pair_perm]
 
         vol_passing_ii: list[int] = []
         vol_passing_jj: list[int] = []
@@ -295,15 +372,20 @@ class ANDComposer:
             # Pass 1: cheap uint8 AND + activation count
             and_chunk = bool_matrix[ii] & bool_matrix[jj]      # (K, n_rows)
             n_act = and_chunk.sum(axis=1).astype(np.int32)     # (K,)
+            vol_ok = n_act >= min_act_floor
+
+            if max_constituent_jaccard is not None:
+                union = row_sums[ii] + row_sums[jj] - n_act
+                jaccard = np.where(union > 0, n_act / union, 0.0)
+                vol_ok = vol_ok & (jaccard <= max_constituent_jaccard)
 
             # Collect volume-passing seeds for triple enumeration
             if max_components >= 3:
-                vol_seed = n_act >= min_act_floor
-                vol_passing_ii.extend(ii[vol_seed].tolist())
-                vol_passing_jj.extend(jj[vol_seed].tolist())
+                vol_passing_ii.extend(ii[vol_ok].tolist())
+                vol_passing_jj.extend(jj[vol_ok].tolist())
 
-            # Pass 2: full gate only where volume passes — skip matmul otherwise
-            sub_idx = np.where(n_act >= min_act_floor)[0]
+            # Pass 2: full gate only where volume (+ Jaccard, if set) passes
+            sub_idx = np.where(vol_ok)[0]
             if len(sub_idx) == 0:
                 continue
 
@@ -373,6 +455,11 @@ class ANDComposer:
                 valid_k = valid_k[valid_k > idx_b]
                 if len(valid_k) == 0:
                     continue
+                # Same enumeration-order fix as the pair loop, scoped to this
+                # seed's own third-candidates (#230) — a single seed's
+                # ascending-index valid_k can otherwise fill all of
+                # _MAX_TRIPLES on its own before a second seed is ever tried.
+                valid_k = valid_k[_shuffle_order(len(valid_k), shuffle_rng)]
 
                 for k_start in range(0, len(valid_k), chunk_size):
                     if len(triples) >= _MAX_TRIPLES:

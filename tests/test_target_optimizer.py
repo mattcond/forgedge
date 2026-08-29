@@ -151,30 +151,64 @@ class TestTargetOptimizerLiftSplit:
     pytestmark = pytest.mark.slow
 
     def test_atoms_floor_preserves_emergent_and(self):
-        # Same final lift floor (1.4), two different atom floors.
-        df = _ohlc_table()
-        keep_atoms = TargetOptimizer(
-            df,
-            TargetConfig(
-                horizon=6, min_return=0.02, side="long",
-                min_lift_atoms=1.0, min_lift_result=1.4,
-            ),
-        ).run()
-        prune_atoms = TargetOptimizer(
-            df,
-            TargetConfig(
-                horizon=6, min_return=0.02, side="long",
-                min_lift_atoms=1.4, min_lift_result=1.4,
-            ),
-        ).run()
+        """A moderately-positive atom (individual lift in [1.0, 1.4)) can
+        combine into a pair whose *emergent* lift clears 1.4 -- something a
+        single min_lift=1.4 pre-filter (legacy behaviour) would never let
+        into composition at all, since that atom alone wouldn't survive it.
 
-        n2_keep = int((keep_atoms["n_components"] == 2).sum())
-        n2_prune = int((prune_atoms["n_components"] == 2).sum())
-        # Keeping moderately-positive atoms surfaces emergent-lift AND pairs that
-        # over-pruning the atoms (legacy single-threshold behaviour) suppresses.
-        assert n2_keep > n2_prune
-        # And those AND pairs genuinely clear the result floor.
-        assert (keep_atoms.loc[keep_atoms["n_components"] == 2, "lift"] >= 1.4).all()
+        Verified directly by checking which atom(s) contributed to a
+        surviving pair, not via a raw pair-count comparison against a
+        stricter-floor run (issue #230): `ANDComposer` caps compositions at
+        `_MAX_PAIRS` and (since #230) samples them representatively rather
+        than always from the same few atoms, so a smaller/stronger atom pool
+        can produce a *higher* survival rate among its own capped sample than
+        a larger/more heterogeneous one -- a raw count comparison between two
+        differently-sized, both-capped configs is not a reliable signal of
+        which pre-filter "preserves more emergent ANDs".
+        """
+        df = _ohlc_table()
+
+        # Capture each lift-positive atom's own (individual) lift alongside
+        # the min_lift_atoms=1.0 pass, so "moderate" atoms (lift in
+        # [1.0, 1.4), which the final min_lift_result=1.4 floor would reject
+        # standalone) can be identified by expression.
+        captured: list[tuple[str, float]] = []
+        orig_prune = TargetOptimizer._prune_by_lift
+
+        def _spying_prune(self, events, target, min_lift):
+            if min_lift == 1.0:
+                for ev in events:
+                    score = _lift_score(ev.series, target, self.target_cfg.min_activations)
+                    if score is not None:
+                        captured.append((ev.component.expression, score["lift"]))
+            return orig_prune(self, events, target, min_lift)
+
+        TargetOptimizer._prune_by_lift = _spying_prune
+        try:
+            keep_atoms = TargetOptimizer(
+                df,
+                TargetConfig(
+                    horizon=6, min_return=0.02, side="long",
+                    min_lift_atoms=1.0, min_lift_result=1.4,
+                ),
+            ).run()
+        finally:
+            TargetOptimizer._prune_by_lift = orig_prune
+
+        moderate_exprs = {expr for expr, lift in captured if 1.0 <= lift < 1.4}
+        assert moderate_exprs, "fixture sanity: some atoms must have moderate, non-final-floor lift"
+
+        n2 = keep_atoms.loc[keep_atoms["n_components"] == 2]
+        assert len(n2) > 0
+        # Those AND pairs genuinely clear the result floor.
+        assert (n2["lift"] >= 1.4).all()
+        # And at least one of them is a genuinely emergent pair: composed
+        # from a moderate atom that would never have survived a single
+        # min_lift=1.4 pre-filter on its own.
+        assert any(
+            any(expr in composed_expr for expr in moderate_exprs)
+            for composed_expr in n2["expression"]
+        ), "at least one surviving pair must involve a moderate-lift (not individually-1.4+) atom"
 
     def test_legacy_single_threshold_matches_symmetric_split(self):
         # min_lift=X (deprecated) must equal min_lift_atoms=X, min_lift_result=X.

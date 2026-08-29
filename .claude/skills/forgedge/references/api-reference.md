@@ -475,6 +475,20 @@ fixed at 5000 regardless of `n_rows` — relevant only if you're reading
 `and_composer.py` internals or profiling `compose()`, not part of its public
 behaviour.
 
+`ANDComposer.compose()`'s pair/triple enumeration order is permuted with a
+fixed, deterministic seed (#230) — under a permissive gate (a low `min_tpm`,
+including `GateParams()`'s own default), the pre-fix row-major order let
+`_MAX_PAIRS=2000` fill entirely with pairs sharing one single component;
+the permutation samples the whole candidate pool instead, with no change to
+reproducibility (same input always yields the same composed events).
+`compose()` also accepts an opt-in keyword-only `max_constituent_jaccard:
+float | None = None` — when set, rejects a pair whose two constituents'
+Jaccard similarity on their activation series exceeds the threshold, the
+same formula `DiversityGate` already applies to single events, at no extra
+cost (reuses the volume pre-filter's own intersection count). Disabled by
+default; only meaningfully reduces redundancy once the enumeration order is
+representative (i.e. after the #230 shuffle — negligible effect on its own).
+
 **Arity-2 feature pairings beyond same-family ratios.** `FeatureGenerator`
 pairs same-family columns (two EMAs, two RSIs, …) by default, plus five
 dedicated, narrowly-scoped pairings added to close specific gaps that rule
