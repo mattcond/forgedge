@@ -13,11 +13,14 @@ Usage::
 """
 
 from .m0 import regime_time_share, regime_transitions
+from .m1 import dead_event_candidates, gate_survival_observed
 from .m2 import discard_reasons_by_grade, undetermined_direction_by_family
 
 __all__ = [
     "regime_transitions",
     "regime_time_share",
+    "dead_event_candidates",
+    "gate_survival_observed",
     "discard_reasons_by_grade",
     "undetermined_direction_by_family",
 ]
