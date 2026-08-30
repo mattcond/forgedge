@@ -105,9 +105,9 @@ KPI Table (input)
 │           Soglie: distribuzionali (percentili) o teoriche (z-score) │
 │                                                                     │
 │  Step 4 — Consistency Gate                                          │
-│           Filtra per struttura temporale dell'evento               │
-│           Volume minimo | Copertura mensile | Concentrazione max    │
-│           Frequenza minima per mese                                 │
+│           Filtra per struttura temporale dell'evento (episodi)      │
+│           Frequenza minima (tpm) | N episodi minimo                 │
+│           Dispersione episodi entro il floor statistico di Poisson  │
 │                                                                     │
 │  Step 5 — AND Composition                                           │
 │           Combina eventi di trasformazioni diverse sulla            │
@@ -154,7 +154,7 @@ KPI Table (input)
 │  Validazione statistica (t-test, Deflated Sharpe Ratio)             │
 │  Analisi dipendenza dal regime                                      │
 │                                                                     │
-│  Risponde: EDGE | NON-EDGE | PARTIAL-EDGE                           │
+│  Risponde: EDGE | NON-EDGE | PARTIAL-EDGE | INSUFFICIENT-DATA       │
 │  Produce:  regola con parametri operativi validati                  │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │ Regola validata
@@ -185,9 +185,59 @@ Ogni confine è un vincolo architetturale, non una convenzione:
 | **Predittività statistica** | Alpha Discovery | Forward return, IC, win rate |
 | **Operatività** | Rule Discovery, Rule Registry | Fee, fill rate, PF, drawdown |
 
+### Risoluzione dei parametri e coerenza di configurazione
+
+Ogni esecuzione di `forge()` inizia con uno step di risoluzione che precede
+persino il Modulo 0: viene costruito un `PipelineContext` — la fonte unica
+di verità per timeframe, nomi di colonna dello schema, fee e politica
+statistica della sessione (`forgedge.resolver`) — e ogni campo di
+configurazione lasciato al valore sentinella `UNSET` da chi chiama viene
+risolto rispetto a quel contesto, invece di cadere silenziosamente su un
+default calibrato per un altro timeframe.
+
+Subito dopo, `config_report()` valuta il bundle di configurazione *già
+risolto* alla ricerca di contraddizioni strutturali (es. una finestra di
+selezione di Modulo 3 troppo corta per il tasso di arrivo che le è stato
+chiesto di sostenere). Con `strict=True` — il default di `forge()` —
+un esito `FAIL` solleva un `ValueError` prima ancora che il Modulo 0
+inizi: un muro di scarti a valle è indistinguibile da "il segnale è
+debole", per cui rifiutarsi di partire è la risposta onesta, non un bug
+da aggirare con `strict=False`.
+
+Questo livello (issue #173–#221 e successive) chiude una classe di bug
+reale e misurata in cui due impostazioni singolarmente ragionevoli su
+moduli diversi risultavano incompatibili tra loro solo quando combinate —
+v. `docs/analysis/pipeline_parameter_coherence.md` per l'audit completo
+(17 classi di configurazione, 158 campi, 16 findings) che ha motivato
+resolver e `config_report()`.
+
 ---
 
 ## 3. I Moduli
+
+Ogni modulo espone i propri parametri di configurazione (`DiscoveryConfig`,
+`AlphaConfig`, `RuleDiscoveryConfig`, ecc.), ma impostarli a mano modulo per
+modulo rischia di produrre soglie incoerenti tra loro — ad esempio un evento
+ammesso da Event Discovery con `min_tpm=1.0` che Rule Discovery scarta perché
+richiede `min_tpm=2.0`. `forge_preset()` risolve questo problema traducendo
+un'intenzione dichiarativa in una tripla di configurazioni già coerenti:
+
+```python
+from forgedge import forge, forge_preset, PRESETS
+
+# PRESETS == ["sniper", "balanced", "sweep", "burst"]
+disc_cfg, alpha_cfg, rd_cfg = forge_preset("balanced", timeframe="1H", asset="ADA")
+result = forge(df, event_discovery_config=disc_cfg,
+                alpha_config=alpha_cfg, rule_discovery_config=rd_cfg)
+```
+
+I quattro preset incarnano filosofie di ricerca diverse: `sniper` (alta
+precisione, soglie strette), `balanced` (compromesso di default), `sweep`
+(esplorazione permissiva, pensata per lavorare insieme a `RotationCalibrator`)
+e `burst` (adatto a eventi ad alta frequenza). Ogni preset scala `min_tpm`,
+`max_dispersion`/`dispersion_margin`, `fdr_q` e le soglie economiche di Rule
+Discovery in modo coerente per il timeframe scelto — restano comunque
+liberamente sovrascrivibili passando `**overrides`.
 
 ### Modulo 0 — Market Context Module
 
@@ -233,16 +283,36 @@ il forward return**.
 **Input:** KPI Table — tabella con feature native e serie temporali OHLCV
 
 **Output:** Event Candidates — eventi booleani che hanno superato
-il Consistency Gate, con statistiche di attivazione temporale
+il Consistency Gate, con statistiche di attivazione temporale.
+`EventDiscovery.event_distribution_report` (issue #215) affianca un
+riepilogo sempre calcolato della distribuzione di tpm/dispersione
+osservata su *tutti* i candidati grezzi valutati dal gate, confrontata
+con le soglie configurate — sotto un tasso di sopravvivenza del gate
+del 15% suggerisce anche parametri concreti calibrati sulla mediana
+osservata, al posto del solo log "0 candidati" altrimenti indistinguibile
+da una pipeline rotta.
 
-**Parametri del Consistency Gate:**
+**Parametri del Consistency Gate** (`GateParams`, modalità di conteggio
+`event_counting="episode"` di default — un "episodio" è un run di barre
+attive consecutive, non la singola barra):
 
 | Parametro | Significato | Default |
 |---|---|---|
-| `MIN_ACT` | Attivazioni minime nel periodo | 50 |
-| `MIN_MONTHS` | Mesi con almeno 1 attivazione | 8 su 12 |
-| `MAX_CONC` | Max quota in un singolo mese | 0.40 |
-| `MIN_TPM` | Attivazioni minime per mese | 2.0 |
+| `min_tpm` | Episodi minimi per mese (rate) | 0.5 |
+| `min_episodes` | Numero minimo di episodi nel periodo | 10 |
+| `dispersion_margin` | Margine sul floor statistico di Poisson per la dispersione degli episodi | 1.3 |
+| `episode_gap` | Barre di buco ancora tollerate dentro lo stesso episodio | 1 |
+
+Un evento passa il gate se: (a) il tasso di episodi/mese ≥ `min_tpm`,
+(b) il numero di episodi ≥ `min_episodes`, e (c) l'Index of Dispersion
+degli episodi resta entro il floor di Poisson al 95% (dipendente dal
+numero di mesi) moltiplicato per `dispersion_margin`. Non esiste più
+un criterio di copertura mensile minima né di concentrazione massima
+in un singolo mese: la vecchia logica a 4 criteri (`MIN_ACT`/`MIN_MONTHS`/
+`MAX_CONC`/`MIN_TPM`) è stata sostituita da questo disegno basato su
+episodi (issue #134/#205). Una modalità legacy `event_counting="bar"`
+resta disponibile, con i due soli criteri `min_tpm` (barre/mese) e
+`max_dispersion` (default 1.5).
 
 → Documento di dettaglio: **[Event Discovery Module](Event_Discovery_Module.md)**
 
@@ -275,8 +345,26 @@ lift, Cohen's d, regime sensitivity, alpha score
 |---|---|
 | Lift vs base rate | ≥ +8pp |
 | Cohen's d | ≥ 0.15 |
-| p-value (t-test) | < 0.05 |
-| N attivazioni | ≥ 30 |
+| Significatività | False Discovery Rate (Benjamini-Hochberg), `fdr_q` di default 0.10 — varia per preset: 0.05 sniper, 0.15 balanced, 0.25 sweep, 0.10 burst |
+| N casi (floor statistico) | ≥ 10 — costante interna (`_MIN_STATS_CASES`), non un campo configurabile di `PromotionThresholds` |
+
+Il controllo di significatività di default **non** è un semplice t-test
+con soglia fissa p<0.05: `PromotionThresholds.use_fdr=True` applica il
+controllo FDR di Benjamini-Hochberg sull'intera famiglia di candidati
+testati nella sessione, con `fdr_q` come tasso di falsa scoperta
+accettato. Il vecchio `max_p_value` resta presente ma è inerte
+(`UNSET`) a meno di impostare esplicitamente `use_fdr=False`.
+
+**Rotation null a livello di ricerca:** `forge()` esegue di default
+(`fast_null=True`) un `FastRotationNull` sull'intera famiglia di
+Alpha Contract promossi — uno shift circolare della maschera di
+attivazione ripetuto su molti offset per stimare quanto la statistica
+osservata sia spiegabile dal solo caso, correlation-aware sull'intera
+superficie di ricerca. Ogni contratto promosso viene annotato con
+`rotation_p` e `rotation_threshold`, che alimentano un gate rigido
+in Rule Discovery (`SelectionCriteria.max_rotation_p`): un contratto
+con `rotation_p` troppo alto non può ricevere un verdetto `EDGE` pieno,
+indipendentemente da quanto siano buone le metriche di backtest.
 
 → Documento di dettaglio: **[Alpha Discovery Pipeline](Alpha_Discovery_Pipeline.md)**
 
@@ -291,18 +379,49 @@ al netto di fee, fill rate e parametri di rischio.
 
 **Input:** Alpha Contract
 
-**Output:** Verdetto (`EDGE / NON-EDGE / PARTIAL-EDGE`) + regola
-con parametri operativi (`entry_mode`, `buy_drop_pct`, `sell_pct`,
-`holding_period`, `fee`)
+**Output:** Verdetto (`EDGE / NON-EDGE / PARTIAL-EDGE / INSUFFICIENT-DATA`)
++ regola con parametri operativi (`direction`, `entry_mode`, `buy_drop_pct`,
+`buy_delay_bar`, `sell_pct`, `target_h`, `fee`)
+
+Il quarto verdetto, `INSUFFICIENT-DATA`, è governato da
+`SelectionCriteria.power_gate` (default `True`): quando l'evidenza
+out-of-sample non ha potere statistico sufficiente per sostenere un
+giudizio (numero di trade effettivi sotto la soglia minima), Rule
+Discovery non forza un `EDGE`/`NON-EDGE` — dichiara che i dati non
+bastano, distinguendo esplicitamente "non c'è edge" da "non lo sappiamo".
+
+**`entry_mode` di default è `"auto"`**, non `"limit"`: è una valutazione
+a due stadi — Stadio 1 misura la regola a un ingresso a mercato (il
+verdetto di questo stadio è definitivo: lo Stadio 2 non può mai trasformare
+un `NON-EDGE` in edge), lo Stadio 2 ottimizza opzionalmente un limit order
+sopra quel risultato. Questo è un fix comportamentale deliberato (issue
+#185), non un rinominare cosmetico: valutare solo in modalità `"limit"`
+— l'unica modalità che il documento descriveva in precedenza — misura
+il prezzo di ingresso invece del segnale, perché uno stop limit non
+riempito filtra silenziosamente i trade peggiori dal campione. `"limit"`
+resta disponibile esplicitamente per chi lo desidera.
 
 **Metriche di validazione:**
 
 | Metrica | Target |
 |---|---|
 | Profit Factor | ≥ 2.0 |
-| Win Rate | ≥ 70% |
+| Win Rate | ≥ 55% (`SelectionCriteria.min_win_rate`, 0.50–0.60 a seconda del preset) |
 | Mesi zero trade | ≤ 2 su 12 |
 | Deflated Sharpe Ratio | ≥ 1.0 |
+
+**Selezione walk-forward di default:** `RuleDiscoveryConfig.selection_mode`
+ha default `"walk_forward"` — il punto operativo pubblicato viene scelto
+dalle finestre di train del walk-forward, non da un singolo backtest
+in-sample. È il comportamento predefinito, non un'opzione da attivare.
+
+**Strumentazione di sovrapposizione dei trade:** `BacktestSummary` porta
+`n_episodes`, `mean_concurrent_positions` e `max_concurrent_positions`
+(issue #168) per quantificare quante posizioni sono aperte in
+contemporanea. `StatisticalValidation.n_effective` (`total_trades /
+mean_concurrent_positions`) sostituisce il conteggio nominale dei trade
+nei test di significatività: un mucchio di posizioni aperte sulla stessa
+finestra temporale non vale come altrettante osservazioni indipendenti.
 
 → Documento di dettaglio: **[Rule Discovery Pipeline](Rule_Discovery_Pipeline.md)**
 
@@ -352,6 +471,29 @@ FORGE accetta in input una singola tabella — la **KPI Table** — che contiene
 candele OHLCV arricchite con indicatori tecnici precomputati. Non richiede
 connessioni a exchange, database operativi o API esterne.
 
+### Costruire la KPI Table da OHLCV grezzo (`kpi_builder`)
+
+FORGE non impone di arrivare con una KPI Table già arricchita a mano: il
+sottopacchetto `forgedge.kpi_builder` la costruisce a partire dalle sole
+candele OHLCV, esposto come API pubblica di primo livello:
+
+```python
+from forgedge import build_features, candle_features, lag_features
+
+kpi = build_features(candles, timestamp_col="open_time")   # indicatori base + open_dt
+kpi = candle_features(kpi)                                 # geometria candela scale-free
+kpi = lag_features(kpi, "close", like="_ema_", periods=[1, 2, 3])
+```
+
+`build_features()` calcola gli indicatori base (RSI, EMA/SMA, bande di
+Bollinger, ecc.) e la colonna `open_dt`; `candle_features()` aggiunge
+geometria scale-free della candela (corpo, ombre, range); `lag_features()`
+crea versioni laggate delle colonne indicate; `pattern_features()` (non
+mostrato sopra) aggiunge pattern candlestick booleani. Tutte e quattro sono
+esportate direttamente da `forgedge`. Restano comunque valide le colonne
+`{base}_{indicator}_{period}` costruite altrove, purché seguano la naming
+convention (v. sotto) — `kpi_builder` è la via consigliata, non l'unica.
+
 ### Schema minimo
 
 ```
@@ -380,7 +522,7 @@ Colonne consigliate (almeno una famiglia):
 
 ```python
 import pandas as pd
-from forge import EventDiscovery
+from forgedge import EventDiscovery
 
 # Carica la KPI Table da qualsiasi fonte
 df = pd.read_csv("kpi_table.csv", parse_dates=["open_dt"])
@@ -451,11 +593,15 @@ feature_dependencies:
 
 # Parametri operativi validati
 operational_params:
-  entry_mode:     "limit"
+  direction:      "long"
+  entry_mode:     "limit"      # esito di RuleDiscoveryConfig.entry_mode="auto" (default):
+                                # qui lo Stadio 2 ha promosso un limit order sopra la
+                                # baseline a mercato dello Stadio 1 (vedi Sezione 3, Modulo 3)
   buy_drop_pct:   0.010       # 1% sotto il close al momento del segnale
+  buy_delay_bar:  0           # barre di attesa prima di piazzare l'ordine
   sell_pct:       0.040       # +4% target di uscita
-  holding_period: 24          # barre massime di detenzione
-  fee_per_side:   0.002       # 0.2% per lato (tailor per exchange target)
+  target_h:       24          # barre massime di detenzione
+  fee:            0.002       # 0.2% per lato (tailor per exchange target)
 
 # Evidenza statistica
 backtest:
@@ -520,10 +666,10 @@ components:
     threshold_origin: "distributional_p10"
 activation_stats:
   n_activations:  329
+  n_episodes:     41           # run di barre attive consecutive
   n_months:       12
-  zero_months:    0
-  mean_tpm:       27.4
-  max_conc:       0.20
+  mean_tpm:       3.4          # episodi/mese (event_counting="episode")
+  dispersion_index: 1.08       # Index of Dispersion sugli episodi
 consistency_gate: "PASS"
 # Nessun campo economico — il forward return non è stato osservato
 ```
@@ -581,16 +727,16 @@ FASE 1 — GENERAZIONE                               MODULO
 Event Discovery riceve la KPI Table                Event Discovery
 Genera ~2.400 eventi candidati grezzi
   per ogni feature del catalogo:
-  ~81 eventi per feature (5 trasformazioni × soglie)
+  ~81 eventi per feature (4 trasformazioni × soglie)
 
 Consistency Gate filtra:
-  close_rsi_25 < 25.8  → FAIL (concentrazione 58%)
+  close_rsi_25 < 25.8  → FAIL (dispersione episodi oltre il floor di Poisson)
   close_rsi_25 < 30.5  → PASS
   pr_close_rsi_25_96 < 0.10 → PASS (uniforme per costruzione)
 
 AND Composition:
   "close_rsi_25 < 30.5 AND pr_rsi25_96 < 0.10"
-  N=329  mesi=12  zero_months=0  → PASS
+  N=329  episodi=41  mesi=12  → PASS
 
 Output: Event Candidate                            ↓
 
@@ -803,23 +949,16 @@ class ForgeRule:
 - [x] Consistency Gate configurabile
 - [x] Rule Registry
 - [x] Market Context Module (EMAProxyClassifier v1.0)
-
-### v1.1 — FORGE Enricher *(prossima versione)*
-
-Nella versione attuale, FORGE accetta una KPI Table già popolata
-con gli indicatori tecnici. Nella v1.1 verrà integrato un modulo
-**Enricher** che calcola automaticamente tutti gli indicatori
-a partire dalle sole candele OHLCV grezze:
-
-```
-v1.0:   OHLCV + KPI Table precomputata → FORGE
-v1.1:   OHLCV grezzo → Enricher → KPI Table → FORGE
-```
-
-L'Enricher sarà configurabile tramite file YAML che specifica
-quali indicatori calcolare, su quali colonne e con quali parametri.
-La KPI Table rimarrà l'interfaccia interna tra Enricher e il resto
-di FORGE — garantendo la retrocompatibilità con v1.0.
+- [x] Costruzione automatica della KPI Table da OHLCV grezzo
+      (`forgedge.kpi_builder`: `build_features`/`lag_features`/
+      `candle_features`/`pattern_features` — v. Sezione 4)
+- [x] Walk-forward optimization integrata in Rule Discovery
+      (`RuleDiscoveryConfig.selection_mode="walk_forward"` è il default:
+      il punto operativo pubblicato è scelto dalle finestre di train
+      del walk-forward, non da un singolo backtest in-sample)
+- [x] Sistema di preset coerenti (`forge_preset()`: sniper/balanced/sweep/burst)
+- [x] Resolver di configurazione a livello di sessione
+      (`PipelineContext`, `config_report()`, `strict=True` di default — v. Sezione 2)
 
 ### v1.x — Deduplicazione a due livelli *(Rule Registry)*
 
@@ -835,7 +974,6 @@ Evoluzione della deduplicazione da binaria a strutturata:
 
 ### v2.0 — Funzionalità avanzate
 
-- [ ] Walk-forward optimization integrata in Rule Discovery
 - [ ] Bayesian search nello spazio dei parametri (via Optuna)
 - [ ] Multi-asset discovery parallela
 - [ ] Alpha decay monitor (rileva degradazione delle regole in produzione)

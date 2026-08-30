@@ -8,6 +8,15 @@ derivato dai dati, e produce contratti formali pronti per la validazione operati
 
 ---
 
+> **Cerchi un riferimento unico e completo?** Il
+> [manuale di forgedge](../../../../docs/manuale-it.md) è una guida completa,
+> verificata negli esempi, che copre l'installazione, l'architettura di
+> produzione, la risoluzione dei problemi, una FAQ e un glossario. È il punto
+> di partenza consigliato; questo indice e le specifiche dei moduli qui sotto
+> approfondiscono i dettagli interni di ciascuna fase della pipeline.
+
+---
+
 ## Cos'è FORGE
 
 La ricerca sistematica di edge di trading soffre di tre problemi ricorrenti:
@@ -168,6 +177,15 @@ Il target economico è derivato da Alpha Discovery **per ogni evento** su una
 finestra IS, e confermato su un tail OOS che non ha partecipato a nessun calcolo
 precedente.
 
+**Configurazione centralizzata e validata.** Ogni run di `forge()` risolve la
+configurazione dei singoli moduli tramite un `PipelineContext` centrale
+(`resolver.py`), che completa i campi non impostati e poi valida l'intero
+bundle con `config_report()`. Per default (`strict=True`) una configurazione
+strutturalmente incoerente solleva `ValueError` **prima** che la pipeline
+venga eseguita, invece di girare fino in fondo producendo silenziosamente un
+muro di candidati respinti. Passare `strict=False` degrada questi rilievi a
+warning e consente comunque l'esecuzione.
+
 ---
 
 ## Documentazione
@@ -181,5 +199,10 @@ precedente.
 | `modulo_2_it.md` | Alpha Discovery: target derivato, OOS, AlphaContract |
 | `modulo_3_it.md` | Rule Discovery: backtest, verdetto EDGE, walk-forward OOS, report |
 | `modulo_4_it.md` | Rule Registry: deduplicazione, cross-ticker, genericity, export |
+| `configuration_it.md` | Riferimento completo alla configurazione: ogni campo dataclass, tipo, default e descrizione |
 
 Le versioni inglesi sono nei file corrispondenti `*_en.md`.
+
+Lavori su questo codebase con Claude Code? La skill `forgedge` in
+`.claude/skills/forgedge/` copre l'API della libreria, i verdetti e gli
+invarianti della pipeline in una forma che Claude può usare direttamente.

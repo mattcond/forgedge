@@ -3,9 +3,9 @@
 Alpha Discovery è il terzo modulo della pipeline FORGE e il **primo che vede il
 forward return**. Riceve la lista di `EventCandidate` prodotta da Event Discovery
 e, per ogni candidato, **deriva il target economico direttamente dai dati** —
-scegliendo l'orizzonte temporale con il miglior rapporto segnale/orizzonte,
-derivando il take-profit dalla distribuzione delle escursioni favorevoli, e
-misurando il potere predittivo rispetto al target derivato. L'output è una lista
+scegliendo l'orizzonte temporale con l'eccesso standardizzato dalla rotation
+null più forte, derivando il take-profit dalla distribuzione delle escursioni
+favorevoli, e misurando il potere predittivo rispetto al target derivato. L'output è una lista
 di `AlphaContract` — uno per candidato — che registra il target derivato, tutte
 le misure statistiche in-sample, la conferma out-of-sample e il grade A–D.
 
@@ -87,19 +87,52 @@ viene confermato sull'OOS tail.
 ### Step 1 — Derivazione del target per evento
 
 Alpha Discovery **non riceve parametri economici in input**. Per ogni candidato,
-scansiona una grid di orizzonti (`horizon_grid`, default: `(1, 2, 3, 4, 6, 8,
-12, 16, 24, 36, 48)` barre) sull'IS e seleziona:
+scansiona una grid di orizzonti (`horizon_grid`, risolto dalla sessione in base
+alla classe di timeframe — vedi la Configurazione completa) sull'IS e deriva
+l'**eccesso di log-return** a ogni orizzonte:
+
+```python
+Δ_h = μ_cond_h − μ_base_h   # media condizionale meno la baseline incondizionata
+```
+
+`μ_cond_h` è il log-return medio delle barre attive all'orizzonte `h`;
+`μ_base_h` è la media *incondizionata* del log-return su tutte le barre valide
+allo stesso orizzonte. Sottrarre la baseline elimina il drift proprio
+dell'asset dal segnale, così `Δ_h` riflette solo l'edge dell'evento — mai il
+trend prevalente. Per questo la stessa regola (es. `RSI > 80`) può derivare
+*short* in un bull run e *long* in un mercato laterale: si legge solo l'eccesso
+rispetto al drift prevalente, mai un rendimento grezzo che mescola i due.
 
 **Selezione dell'orizzonte `h*`:**
 ```python
-score[h] = |mean_advantage[h]| / sqrt(h)
-h*       = argmax_h score[h]
+z_h = Δ_h / σ_null,h          # eccesso standardizzato da una circular-rotation null
+h*  = argmax_h |z_h|
 ```
 
-Il criterio `|mean_advantage| / √h` è una deflessione simil-Sharpe che
-bilancia la grandezza del vantaggio con la varianza crescente dell'orizzonte.
-Evita il bias sistematico del max-t-stat verso orizzonti brevi, dove il
-denominatore del t-test è strutturalmente piccolo.
+`σ_null,h` **non** è una deflessione `1/√h`. Deriva da una **circular-rotation
+null**: ogni shift circolare non banale della maschera di attivazione
+dell'evento viene correlato con la stessa serie di forward return (calcolati
+tutti insieme via cross-correlazione basata su FFT), e la deviazione standard
+di questa distribuzione null empirica è `σ_null,h`.
+
+Questo sostituisce un criterio precedente, più semplice — `score[h] = |Δ_h| /
+√h`, una deflessione "simil-Sharpe" — abbandonato perché fallisce sugli
+**eventi clusterizzati**. Un t-statistic ingenuo `T_h = Δ_h / (σ_cond / √n)`
+tratta le finestre di forward return sovrapposte come osservazioni
+indipendenti, quindi il suo denominatore si restringe con `√n` (correlato con
+`√h`); per un evento le cui attivazioni arrivano a raffiche — il caso comune —
+questo gonfia `|T_h|` sugli orizzonti lunghi e fissa sistematicamente `h*` al
+bordo lungo della grid anche in assenza di un edge reale. La circular-rotation
+null ricava la standardizzazione dalla struttura di autocorrelazione propria
+dei dati invece di assumere indipendenza, eliminando questo bias.
+
+La rotation null produce anche un p-value bidirezionale per orizzonte
+(`p_value_by_h`); il controllo Benjamini-Hochberg a `fdr_q` su questo insieme
+di p-value produce `h_sig`, gli orizzonti statisticamente distinguibili dalla
+null. `h*` viene comunque sempre scelto come `argmax|z_h|` sull'**intera**
+grid — `h_sig` non restringe mai la ricerca — ma quando `h*` cade fuori da
+`h_sig` il target viene marcato `statistically_weak` (usato nello scoring
+dello Step 6 e nel gate di direzione sotto) invece di essere scartato.
 
 **Derivazione di `sell_pct`:**
 ```python
@@ -115,18 +148,60 @@ garantisce un take-profit operativamente significativo.
 
 **Output — `DerivedTarget`:**
 ```python
-dt.holding_period_h  # int: orizzonte selezionato
-dt.sell_pct          # float: quantile MFE a h*
-dt.direction         # str: "long" | "short" | "undetermined"
-dt.mean_advantage    # float: rendimento medio orientato a h*
-dt.advantage_by_h    # dict[int, float]: rendimento medio per ciascun orizzonte
-dt.t_stat_by_h       # dict[int, float]: t-stat per ciascun orizzonte
-dt.score_by_h        # dict[int, float]: |mean_advantage| / sqrt(h) per orizzonte
+dt.holding_period_h        # int: orizzonte selezionato h*
+dt.sell_pct                # float: quantile MFE a h*
+dt.direction               # str: "long" | "short" | "undetermined"
+dt.mean_advantage          # float: eccesso di log-return con segno Δ_h* a h*
+dt.advantage_by_h          # dict[int, float]: eccesso di log-return Δ_h per orizzonte
+dt.t_stat_by_h             # dict[int, float]: z_h standardizzato per orizzonte
+dt.score_by_h              # dict[int, float]: score di selezione |z_h| per orizzonte
+dt.p_value_by_h            # dict[int, float]: p-value della circular-rotation null per orizzonte (solo diagnostico)
+dt.h_sig                   # tuple[int, ...]: orizzonti che superano il controllo BH a fdr_q (solo diagnostico)
+dt.statistically_weak      # bool: True quando h* non è in h_sig
+dt.fixed_target            # bool: True quando il target è specificato dall'utente (modalità fixed-target) invece che derivato
+dt.data_derived_horizon_h  # int | None: solo modalità fixed-target — l'orizzonte che la derivazione dai dati avrebbe scelto
+dt.data_derived_sell_pct   # float | None: solo modalità fixed-target — il sell_pct che la derivazione dai dati avrebbe prodotto
 ```
 
-Se nessun orizzonte produce un vantaggio finito, `direction = "undetermined"` e
-il contratto viene rifiutato. Tutte le misure successive (IC, win rate, regime)
-sono calcolate **al target derivato** (`h*`, `sell_pct*`, `direction*`).
+`direction = "undetermined"` (il contratto viene rifiutato) quando si
+verifica **una qualsiasi** di queste condizioni:
+- nessun orizzonte produce un eccesso di log-return `Δ_h` finito;
+- `|z_h*| < min_direction_t` (default `0.5`) — l'eccesso all'orizzonte
+  selezionato non è distinguibile dalla rotation null;
+- `require_significant_direction = True` (default, su
+  `PromotionThresholds`) **e** `h*` non è in `h_sig` — nessun orizzonte ha
+  superato il gate Benjamini-Hochberg, quindi `argmax|z_h|` assegnerebbe
+  altrimenti una direction equivalente a un lancio di moneta (spesso il bordo
+  lungo della grid guidato dal drift). Impostare
+  `require_significant_direction = False` per il comportamento legacy non
+  bloccante — una direction viene sempre assegnata soggetta solo a
+  `min_direction_t`, con l'evidenza debole segnalata via
+  `statistically_weak` invece che bloccata.
+
+Tutte le misure successive (IC, win rate, regime) sono calcolate **al target
+derivato** (`h*`, `sell_pct*`, `direction*`).
+
+#### Arricchimento della grid di orizzonti
+
+`AlphaConfig.horizon_enrichment` (default `(0.5, 1.0, 2.0)`) aggiunge, **per
+evento**, orizzonti attorno alla scala temporale strutturale propria
+dell'evento alla `horizon_grid` di base scansionata sopra — un'unione, mai una
+restrizione. Per ogni candidato, `EventCandidate.dominant_window()` restituisce
+`w`, la finestra indicatore/trasformazione più lenta incorporata nelle
+informazioni di condizionamento proprie dell'evento (es. un evento basato su
+`ema_9` ha `w = 9`); per ogni moltiplicatore `m` in `horizon_enrichment`,
+`round(m · w)` viene aggiunto agli orizzonti scansionati per quel candidato.
+Così un evento `ema_9` scansiona anche `h ≈ 5, 9, 18` anche quando la grid di
+base li salta — i moltiplicatori di default coprono la banda empiricamente
+supportata (gli eventi di tipo reazione tendono a risolversi in circa metà
+finestra; quelli di tipo ciclo in una-due finestre). Gli orizzonti arricchiti
+sono limitati a `split // horizon_enrichment_min_obs` (default `20`) così che
+una finestra di condizionamento lenta non possa richiedere un periodo di
+possesso che i dati in-sample non possono sostenere statisticamente; il limite
+non restringe mai la `horizon_grid` di base. Ogni orizzonte aggiunto è
+conteggiato dal ledger di sessione e prezzato dalla rotation null a livello di
+ricerca come ogni altro. Impostare `horizon_enrichment=None` (o `()`) per
+disabilitarlo e scansionare solo la grid di base.
 
 ---
 
@@ -224,14 +299,20 @@ Dependency type: `agnostic` / `conditional` / `specific` / `broken` / `unknown`.
 ### Validazione OOS (non bloccante)
 
 Dopo tutte le misure IS, il target derivato `(h*, sell_pct*, direction*)` viene
-**replicato sull'OOS tail** (l'ultimo `1 - train_ratio` del dataset):
+**replicato sull'OOS tail** (l'ultimo `1 - train_ratio` del dataset, spostato
+di `embargo_bars` se impostato — vedi la Configurazione completa):
 
 - I forward return OOS sono orientati per la direction derivata
 - Si misura win rate, lift, mean_advantage e t-test active vs inactive sull'OOS
-- `oos.passed = True` se:
-  1. `n_oos_activations >= min_oos_activations` (default: 10)
-  2. `mean_advantage > 0` (l'advantage orientato rimane positivo sull'OOS)
-  3. `p_value < oos_max_p` (default: 0.10)
+- `oos.passed = True` se valgono entrambe le condizioni:
+  1. `mean_advantage > 0` (l'advantage orientato rimane positivo sull'OOS)
+  2. `p_value < oos_max_p` (default: 0.10, one-sided)
+
+  Non è imposto un conteggio minimo di attivazioni come gate separato — il
+  p-value incorpora già la dimensione campionaria. Un floor non
+  parametrizzabile di 10 attivazioni innesca invece una diagnostica non
+  bloccante sulla bassa affidabilità statistica; non esiste un campo
+  `min_oos_activations` da configurare.
 
 **La mancata conferma OOS produce una diagnostica non bloccante** —
 `"OOS weak …"` in `diagnostics` — ma non impedisce la
@@ -239,15 +320,16 @@ promozione. Il segnale statistico OOS contribuisce al grade.
 
 Output — `OOSValidation`:
 ```python
-oos.n_bars          # int: barre nell'OOS window
-oos.n_activations   # int: attivazioni con orizzonte completo nell'OOS
-oos.mean_advantage  # float: rendimento medio orientato sull'OOS (>0 = confermato)
-oos.t_stat          # float
-oos.p_value         # float: t-test one-sided
-oos.win_rate        # float: win rate OOS al target derivato
-oos.base_rate       # float: base rate OOS al target derivato
-oos.lift            # float: lift OOS
-oos.passed          # bool
+oos.n_bars                # int: barre nell'OOS window
+oos.n_activations         # int: attivazioni con orizzonte completo nell'OOS
+oos.mean_advantage        # float: rendimento medio orientato sull'OOS (>0 = confermato)
+oos.t_stat                # float
+oos.p_value               # float: t-test one-sided
+oos.win_rate              # float: win rate OOS al target derivato
+oos.base_rate             # float: base rate OOS al target derivato
+oos.lift                  # float: lift OOS
+oos.passed                # bool
+oos.min_detectable_effect # float: Cohen's d minimo rilevabile a oos_max_p data la dimensione campionaria OOS — confrontare con il cohens_d IS per diagnosticare una finestra OOS sotto-potenziata
 ```
 
 Quando `train_ratio = 1.0`, `oos_validation` è `None` per ogni contratto
@@ -257,17 +339,37 @@ Quando `train_ratio = 1.0`, `oos_validation` è `None` per ogni contratto
 
 ### Step 6 — Alpha scoring
 
-Score composito (0–1):
+Score composito (0–1), media pesata di cinque termini di qualità del segnale:
 
 | Componente | Peso default | Normalizzazione |
 |---|---|---|
-| IC magnitude | 0.25 | `min(|IC| / 0.10, 1.0)` |
-| Lift | 0.30 | `min(lift / 0.30, 1.0)` |
-| Cohen's d | 0.25 | `min(d / 0.80, 1.0)` |
-| Regime breadth | 0.20 | `regime_breadth` (0–1) |
+| IC magnitude | 0.20 | `min(|IC| / 0.10, 1.0)` |
+| Lift | 0.25 | `min(lift / 0.30, 1.0)` |
+| Cohen's d | 0.15 | `clip(d / 0.80, -1.0, 1.0)` — **con segno** |
+| `z` (eccesso rotation-null) | 0.25 | `min(|z_h*| / 3.0, 1.0)` |
+| Regime breadth | 0.15 | `regime_breadth` (0–1) |
 
-Quando il regime non è disponibile, il termine breadth è rimosso e i pesi
-rimanenti sono rinormalizzati.
+`z` è `|z_h*|`, la statistica di eccesso standardizzata dalla rotation null
+all'orizzonte selezionato (Step 1) — il rapporto edge/rumore. Il termine
+Cohen's d è normalizzato **con segno** invece che troncato a zero sul lato
+basso: un Cohen's d negativo (il gruppo condizionato performa *peggio* del
+background) penalizza attivamente il composite invece di contribuire nulla.
+Quando il regime non è disponibile, il termine breadth viene rimosso e i pesi
+rimanenti sono rinormalizzati. `score_weights` accetta ancora anche una
+4-tupla legacy `(ic, lift, cohens_d, breadth)`, aggiornata con un peso `z` di
+default.
+
+Due ulteriori aggiustamenti si applicano dopo la somma pesata:
+- se il target derivato è `statistically_weak` (`h*` fuori da `h_sig`, Step
+  1), il composite viene **moltiplicato** per `statistically_weak_penalty`
+  (default `0.6`) — un orizzonte selezionato esattamente dal bias di
+  selezione che il controllo FDR esiste per intercettare non può classificarsi
+  in alto;
+- se la conferma OOS è passata (`oos_validation.passed`), viene **aggiunto**
+  `oos_bonus` (default `0.05`), separando gli edge confermati da quelli non
+  confermati.
+
+Il risultato viene limitato a `[0, 1]`.
 
 **Grade:** A ≥ 0.75 | B ≥ 0.50 | C ≥ 0.25 | D < 0.25
 
@@ -282,14 +384,13 @@ L'**unico gate di rifiuto** è l'assenza di una direzione determinata:
 
 | Gate | Condizione |
 |---|---|
-| **Hard (blocca)** | `direction == "undetermined"` — nessun vantaggio finito su tutta la grid |
+| **Hard (blocca)** | `direction == "undetermined"` — nessun eccesso di log-return finito su tutta la grid, `\|z_h*\| < min_direction_t`, oppure (con `require_significant_direction=True`, default) `h*` non in `h_sig` (vedi Step 1) |
 | **Diagnostiche (non bloccanti)** | IC debole, lift < soglia, cohens_d < soglia, attivazioni insufficienti, non significativo FDR/p-value, OOS debole |
 
 Le diagnostiche vivono in un campo dedicato, `diagnostics`. `rejection_reasons`
 contiene solo ciò che ha effettivamente bloccato la promozione, quindi è **vuoto
 su un contratto promosso**; `diagnostics` documenta le debolezze statistiche
-rilevate ed è normalmente non vuoto sui contratti promossi. Un tempo `rejection_reasons`
-non vuoto — la lista documenta le debolezze statistiche rilevate.
+rilevate ed è normalmente non vuoto sui contratti promossi.
 
 ```python
 for c in contracts:
@@ -410,14 +511,17 @@ diagnostics
 
 | Parametro | Default | Descrizione |
 |---|---|---|
-| `horizon_grid` | `(1,2,3,4,6,8,12,16,24,36,48)` | Grid di orizzonti candidati (barre) |
+| `horizon_grid` | `UNSET` → risolto dalla sessione in base alla classe di timeframe: `(1,2,4,8,12,24)` su 1H/4H, `(1,2,3,5,7,10)` su 1D e oltre, `(1,2,5,10,20,50)` sub-orario (fallback standalone fuori da `forge()`: `(1,2,4,8,12,24)`) | Grid di orizzonti candidati (barre), scansionata nello Step 1 |
 | `mfe_quantile` | `0.5` | Quantile MFE per derivare sell_pct (0.5 = mediana) |
 | `mfe_floor` | `0.005` | Floor di sell_pct (50 bp) dopo il quantile |
 | `train_ratio` | `0.7` | Frazione IS del dataset (0 < x ≤ 1.0) |
-| `thresholds` | `PromotionThresholds()` | Soglie diagnostiche (non gate di promozione) |
+| `embargo_bars` | `0` | Barre di quarantena aggiuntive dopo lo split IS/OOS prima che inizi la conferma OOS — protegge dalla correlazione seriale oltre alla purga meccanica della finestra forward |
+| `horizon_enrichment` | `(0.5, 1.0, 2.0)` | Moltiplicatori per evento di `EventCandidate.dominant_window()` aggiunti a `horizon_grid` (unione, mai restrizione). `None`/`()` disabilita l'arricchimento |
+| `horizon_enrichment_min_obs` | `20` | Limite statistico per gli orizzonti arricchiti: `h <= split // horizon_enrichment_min_obs` |
+| `thresholds` | `PromotionThresholds()` | Gate di ammissione/promozione — per lo più diagnostici (vedi sotto) |
 | `asset` | `"ASSET"` | Metadato tracciabilità (copiato nel contratto e alpha_id) |
 | `exchange` | `""` | Metadato tracciabilità |
-| `timeframe` | `"1H"` | Metadato tracciabilità |
+| `timeframe` | `"1H"` | Non solo metadato: guida la risoluzione di sessione di `horizon_grid` e degli altri campi che contano barre |
 | `fee_per_side` | `0.002` *(risolto dalla sessione)* | Non detratto dal target qui; è la base di costo che M3 addebita, propagata in `BacktestParams.fee` |
 | `close_col` | `"close"` *(risolto dalla sessione)* | Colonna prezzo chiusura; si propaga a `BacktestParams.{target_col, buy_price_anchor}` |
 | `timestamp_col` | `"open_dt"` | Colonna datetime (o nome del DatetimeIndex) |
@@ -431,23 +535,53 @@ diagnostics
 | `statistically_weak_penalty` | `0.6` | Moltiplicatore del composite quando `statistically_weak=True`. |
 | `oos_bonus` | `0.05` | Bonus additivo al composite quando la conferma OOS passa. |
 | `discovery_date` | `None` | Data ISO per i contratti (None → oggi) |
+| `fixed_target` | `None` | `TargetConfig` — se impostato, salta la *derivazione* del target e misura ogni candidato rispetto a questo target specificato dall'utente (vedi Modalità fixed-target sotto) |
+| `fixed_target_diagnostic` | `True` | Solo modalità fixed-target: esegue comunque la derivazione dai dati in sola lettura per popolare le diagnostiche di convergenza `data_derived_*` |
+| `target_mode` | `"proj"` | Definizione del target binario: `"proj"` misura l'eccesso rispetto al trend locale (PROJ_LOG); `"abs"` è il target legacy a rendimento assoluto. PROJ si applica solo ai long |
+| `trend_sma_mult` | `2.0` | Solo PROJ_LOG: finestra SMA del trend = `round(trend_sma_mult · h)` barre |
 
 ### `PromotionThresholds`
 
-Questi parametri controllano le **diagnostiche** — non gate di promozione.
+La maggior parte di questi campi controlla **diagnostiche**, non gate di
+promozione — l'unico gate bloccante in tutta Alpha Discovery è la
+determinazione della direction (Step 1/7), e `min_direction_t` /
+`require_significant_direction` sono i due campi che vi partecipano
+effettivamente.
 
 | Parametro | Default | Descrizione |
 |---|---|---|
-| `ic_min_abs` | `0.02` | Soglia \|IC\| per classificare IC come debole |
-| `ic_max_p` | `0.05` | p-value massimo per classificare IC come debole |
+| `ic_min_abs` | `0.02` | Soglia \|IC\| per classificare IC come debole (diagnostica) |
+| `ic_max_p` | `0.05` | p-value massimo per classificare IC come debole (diagnostica) |
 | `min_lift` | `0.08` | Lift minimo (diagnostica) |
 | `min_cohens_d` | `0.15` | Cohen's d minimo (diagnostica) |
-| `max_p_value` | `0.05` | p-value massimo (se `use_fdr=False`) (diagnostica) |
-| `min_activations` | `30` | Attivazioni IS minime (diagnostica) |
+| `max_p_value` | `0.05` | p-value massimo, raggiungibile solo con `use_fdr=False` (diagnostica; inerte sotto ogni preset, che impostano tutti `use_fdr=True`) |
 | `use_fdr` | `True` | Usa BH invece di `max_p_value` |
-| `fdr_q` | `0.10` | Target false-discovery rate BH |
-| `oos_max_p` | `0.10` | p-value massimo per la conferma OOS (diagnostica) |
-| `min_oos_activations` | `10` | Attivazioni OOS minime per la conferma (diagnostica) |
+| `fdr_q` | `0.10` | Target false-discovery rate BH (guida `h_sig` dello Step 1) |
+| `oos_max_p` | `0.10` | p-value massimo one-sided per la conferma OOS |
+| `min_direction_t` | `0.5` | \|z_h*\| minimo perché venga assegnata una direction — sotto questa soglia, `direction = "undetermined"` (**blocca la promozione**) |
+| `require_significant_direction` | `True` | Una direction viene assegnata solo se `h*` è in `h_sig` (BH-significativo); altrimenti `direction = "undetermined"` (**blocca la promozione**). `False` ripristina il comportamento legacy non bloccante |
+
+`PromotionThresholds` non ha campi `min_activations` o
+`min_oos_activations` — non esiste alcun gate di promozione basato su un
+conteggio minimo di attivazioni in Alpha Discovery; la dimensione campionaria
+è assorbita direttamente nei p-value (i p-value della rotation null dello
+Step 1, il t-test OOS).
+
+### `TargetConfig` (modalità fixed-target)
+
+Passato tramite `AlphaConfig.fixed_target` per bypassare la derivazione del
+target per evento — vedi Modalità fixed-target sotto.
+
+| Parametro | Default | Descrizione |
+|---|---|---|
+| `horizon` | *(obbligatorio)* | Periodo di possesso in barre (`> 0`); aggiunto a `horizon_grid` se assente |
+| `min_return` | *(obbligatorio)* | Soglia take-profit come frazione (es. `0.02` = 2%), usata come `sell_pct` |
+| `side` | *(obbligatorio)* | `"long"` o `"short"` — mai sovrascritto dai dati |
+| `min_activations` | `10` | Floor del workflow TargetOptimizer per uno scoring del lift valido; ignorato dalla modalità fixed-target di Alpha Discovery |
+| `min_lift_atoms` | `1.0` | Soglia di pruning del **1° passaggio** di TargetOptimizer (eventi atomici); ignorata dalla modalità fixed-target |
+| `min_lift_result` | `1.0` | Soglia di pruning del **2° passaggio** di TargetOptimizer (set di risultati finale); ignorata dalla modalità fixed-target |
+| `target_mode` | `"proj"` | `"abs"` o `"proj"` (PROJ_LOG) — vedi `AlphaConfig.target_mode` |
+| `trend_sma_mult` | `2.0` | Moltiplicatore SMA del trend PROJ_LOG — vedi `AlphaConfig.trend_sma_mult` |
 
 ---
 
@@ -476,7 +610,7 @@ for c in promoted:
     dt = c.derived_target
     print(f"{c.event_candidate_id}: h={dt.holding_period_h}, "
           f"direction={dt.direction}, sell_pct={dt.sell_pct:.4f}")
-    # Score per orizzonte (|mean_advantage| / sqrt(h))
+    # Score per orizzonte (|z_h|, l'eccesso standardizzato dalla rotation null)
     best_h = max(dt.score_by_h, key=dt.score_by_h.get)
     print(f"  h* score={dt.score_by_h[best_h]:.5f}  "
           f"mean_adv={dt.advantage_by_h[best_h]:.4f}")
@@ -523,6 +657,77 @@ for c in promoted:
     with open(f"{c.alpha_id}.yaml", "w") as f:
         yaml.dump(c.to_contract_dict(), f)
 ```
+
+---
+
+## Modalità fixed-target
+
+Il flusso di default *deriva* `(h*, sell_pct*, direction*)` per evento (Step
+1). `AlphaConfig.fixed_target` è l'unica eccezione documentata: impostalo a un
+`TargetConfig` e Alpha Discovery **salta interamente la derivazione**,
+misurando ogni candidato rispetto a un singolo `(horizon, min_return, side)`
+specificato dall'utente. Ogni misura downstream — IC, win rate, lift, Cohen's
+d, sensibilità al regime, conferma OOS, scoring dello Step 6 — resta invariata
+e viene calcolata rispetto a quel target fisso. Questo è il meccanismo che
+`TargetOptimizer` usa internamente per valutare molti candidati evento rispetto
+a un unico target economico comune, invece di lasciare che ciascuno scelga il
+proprio.
+
+```python
+from forgedge import AlphaConfig
+from forgedge.alpha_discovery.models import TargetConfig
+
+config = AlphaConfig(
+    asset="BTC",
+    timeframe="1H",
+    fixed_target=TargetConfig(horizon=12, min_return=0.02, side="long"),
+)
+ad = AlphaDiscovery(ed.df, candidates, config)
+contracts = ad.run()
+
+c = contracts[0]
+dt = c.derived_target
+dt.fixed_target            # True
+dt.holding_period_h        # 12 (l'orizzonte dell'utente, aggiunto a horizon_grid se assente)
+dt.sell_pct                # 0.02 (da min_return)
+dt.direction               # "long" (da side — mai sovrascritto dai dati)
+dt.mean_advantage          # nan — non misurato in modalità fixed-target
+dt.data_derived_horizon_h  # l'orizzonte che la derivazione dai dati *avrebbe* scelto
+dt.data_derived_sell_pct   # il sell_pct che la derivazione dai dati *avrebbe* prodotto
+```
+
+Con `fixed_target_diagnostic=True` (default), la derivazione ordinaria dai
+dati viene comunque eseguita **in sola lettura** insieme al target fisso,
+popolando `data_derived_horizon_h`/`data_derived_sell_pct` e le diagnostiche
+per orizzonte sul contratto — un consumer può quindi verificare
+`data_derived_horizon_h ≈ holding_period_h` come segnale di convergenza che i
+dati confermano indipendentemente l'orizzonte scelto dall'utente. Impostarlo a
+`False` per un bypass puro e leggermente più veloce, con quelle diagnostiche
+lasciate vuote.
+
+Il target binario stesso (usato per win rate / lift / base rate) è governato
+da `target_mode` (presente anche su `TargetConfig`, e replicato su
+`AlphaConfig` per il flusso normale a target derivato):
+
+- `"abs"` — il target legacy a rendimento assoluto: il rendimento forward
+  grezzo confrontato con `min_return`.
+- `"proj"` (default) — **PROJ_LOG**: il rendimento forward in eccesso rispetto
+  al trend locale, calcolato contro una SMA di finestra
+  `round(trend_sma_mult · h)` barre (moltiplicatore default `2.0`). Questo
+  elimina il premio di trend di cui un evento long verrebbe altrimenti
+  accreditato in un bull market — la stessa idea di rimozione del drift del
+  target derivato (eccesso di log-return, Step 1), applicata qui al target
+  specificato dall'utente. PROJ si applica solo ai **long**; un target
+  `"short"` torna ad `"abs"` (il trend ribassista *è* l'alpha da catturare,
+  non rumore da sottrarre). Ricade su `"abs"` con un warning quando la storia
+  è più corta del warmup PROJ (`(trend_sma_mult + 1) · h` barre).
+
+`TargetOptimizer` sta al di fuori del resolver di coerenza dei parametri (il
+suo `discover_alpha()` costruisce un `AlphaConfig` interno senza passare dal
+resolver di sessione di `forge()`), quindi sui dati giornalieri-o-più-lenti si
+applica lo stesso fallback sulla grid oraria che colpisce l'uso standalone di
+`AlphaConfig` — passa `horizon_grid` esplicitamente sulla config passata a
+`discover_alpha()` per l'uso giornaliero-o-più-lento.
 
 ---
 

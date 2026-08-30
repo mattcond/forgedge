@@ -220,8 +220,10 @@ the full picture.
 similarity meets or exceeds `overlap_threshold` (default `0.70`).
 
 **Weaker rule.** Within an overlapping pair, the rule with the lower source-
-ticker profit factor (`pf`) is the weaker one. In the event of an exact tie,
-the rule with the higher index in the document list is flagged.
+ticker profit factor (`pf`) is the weaker one — its dominant must have a
+*strictly* higher `pf`. In the event of an exact tie, neither rule is
+considered strictly stronger than the other, so **neither is flagged**: both
+keep `is_duplicate=False`. There is no index-based tiebreak.
 
 **Chain-awareness.** Deduplication is chain-aware. If rule A dominates rule B
 (B is flagged `duplicate_of` A), and rule B also overlaps rule C, then C is
@@ -306,19 +308,32 @@ After all target tickers have been evaluated, each document receives:
 - `is_generic` — `True` when `cross_ticker_score / cross_ticker_total >=
   generic_ratio_threshold` (default `2/3`)
 
-The `classification` field is then set to one of four labels:
+The `classification` field is a *separate*, four-way label derived from the
+same ratio (`ratio = cross_ticker_score / cross_ticker_total`) — but with its
+own thresholds, not simply "`is_generic` or not". `is_duplicate` plays no part
+in either field: deduplication (Step 3) and cross-ticker classification (Step
+4) are independent axes:
 
-| Label | Condition |
+| Label | Condition (on `ratio`) |
 |---|---|
-| `GENERIC` | `is_generic=True` and `is_duplicate=False` |
-| `PARTIAL` | `is_generic=False`, `cross_ticker_score > 0`, `is_duplicate=False` |
-| `SPECIFIC` | `is_generic=False`, `cross_ticker_score = 0`, `is_duplicate=False` |
-| `ISOLATED` | `is_duplicate=True` (regardless of cross-ticker score) |
+| `GENERIC` | `ratio = 1.0` — a **clean sweep**: every tested ticker passed |
+| `PARTIAL` | `generic_ratio_threshold <= ratio < 1.0` |
+| `SPECIFIC` | `0.0 < ratio < generic_ratio_threshold` |
+| `ISOLATED` | `ratio = 0.0`, or `cross_ticker_total = 0` |
+
+**`is_generic` and `classification` are not synonyms.** `is_generic` only asks
+whether the ratio clears `generic_ratio_threshold`; `GENERIC` additionally
+demands that the ratio be exactly `1.0`. A rule that passes exactly 2 of 3
+target tickers has `ratio = 0.6666...`, which clears the default `2/3`
+threshold — so `is_generic=True` — but does **not** reach `1.0`, so
+`classification="PARTIAL"`. The two fields dissociate for every rule that
+clears the ratio threshold without sweeping every ticker; do not treat
+`is_generic=True` as a proxy for `classification == "GENERIC"`.
 
 **Single-ticker sessions.** When the session contains only one ticker, Step 4
 produces no `CrossTickerResult` entries for any document (`cross_ticker_total =
-0`). All documents receive `classification = "ISOLATED"` because the
-genericity ratio is undefined.
+0`). All documents receive `classification = "ISOLATED"` (and `is_generic =
+None`) because the genericity ratio is undefined.
 
 ---
 
@@ -754,11 +769,18 @@ will have `cross_ticker_total = 0` and `classification = "ISOLATED"`. The cross-
 ticker step runs without error — it simply has no target tickers to evaluate.
 The flat table and HTML report are still produced normally.
 
-**Threshold recalibration uses the IS distribution.** In Step 4, absolute
-thresholds are mapped to percentiles using the full in-sample distribution of
-the *source* ticker, and those percentiles are looked up on the full in-sample
-distribution of the *target* ticker. The live (real-time) distribution is not
-used for recalibration.
+**Threshold recalibration uses whatever frame the registry was given.** In
+Step 4, absolute thresholds are mapped to percentiles using the full
+distribution of the `frames[source_ticker]` DataFrame passed to
+`RuleRegistry` (or `ForgeResult.event_frame`, via `from_forge_results`), and
+those percentiles are looked up on the full distribution of
+`frames[target_ticker]`. The registry itself has no in-sample/out-of-sample
+split concept — it recalibrates against whichever frame it received. This
+frame is only "IS" to the extent Event Discovery's own `train_ratio` had
+already truncated it upstream; under the also-default `train_ratio=1.0`,
+`event_frame` spans the entire dataset, not specifically an in-sample slice.
+The live (real-time) distribution is not used for recalibration, but callers
+should not rely on the registry enforcing an IS/OOS boundary on its own.
 
 **`generic_ratio_threshold` precision.** The default value is `2.0 / 3.0`
 (Python floating-point division), not the literal `0.67`. This distinction

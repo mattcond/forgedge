@@ -123,8 +123,9 @@ Variable Catalog (feature native CandleKPI)
 │  STEP 4 — Consistency Gate             │
 │  Filtra per struttura temporale        │
 │  Nessun forward return osservato       │
-│  Criteri: volume, copertura,           │
-│           concentrazione, frequenza    │
+│  Criteri: frequenza (tpm),             │
+│           potenza (n. episodi),        │
+│           dispersione (Poisson-test)   │
 └───────────────┬────────────────────────┘
                 │  Eventi che passano
                 ▼
@@ -340,12 +341,25 @@ Interpretazione: dove si trova il prezzo nel range delle ultime 24h?
 
 ### Selezione delle coppie/triplette
 
-Il Feature Generator non esplora tutte le combinazioni possibili — con 30 feature sarebbero 4.495 coppie e 4.060 triplette. Si usa una regola di selezione a due livelli:
+Il Feature Generator non esplora tutte le combinazioni possibili tra tutte le colonne del catalogo. Il vincolo che tiene lo spazio combinatorio sotto controllo è uno solo:
 
-1. **Stesso cluster semantico** — solo feature della stessa famiglia (EMA con EMA, SMA con SMA, ecc.)
-2. **IC minimo su almeno un input** — almeno una delle feature della coppia deve avere `|IC univariato| > threshold` dal catalogo
+**Stesso cluster semantico** — le coppie arietà-2 "generiche" (ratio/spread/diffnorm) si generano solo tra colonne che condividono la stessa famiglia (stessa base e stesso indicatore: EMA con EMA, SMA con SMA, RSI con RSI, ecc.), oppure tra un prezzo e una sua media mobile, o tra `volume` e le sue medie mobili. All'interno di ogni famiglia le coppie sono **esaustive** — ogni colonna viene accoppiata con ogni altra colonna della stessa famiglia (ordinate per periodo, "veloce" contro "lenta") — quindi la dimensione dello spazio dipende solo da quante colonne condividono una famiglia (tipicamente 3-6 periodi per indicatore), non da un filtro statistico aggiuntivo a valle del raggruppamento.
 
-Questo riduce lo spazio a poche decine di coppie significative.
+**Non esiste un filtro basato su IC/correlazione.** Nessuna soglia `|IC univariato| > threshold` seleziona quali coppie generare — Event Discovery non osserva mai il forward return (invariante #1 della pipeline FORGE), quindi un filtro IC, che richiederebbe di misurare la correlazione con un target, non avrebbe comunque posto in questo modulo.
+
+### Famiglie arietà-2 aggiuntive (sempre attive salvo dove indicato)
+
+Oltre al raggruppamento generico per famiglia semantica sopra, cinque famiglie arietà-2 dedicate e più mirate ampliano il catalogo, ciascuna pensata per una forma di pattern che il raggruppamento generico non può esprimere:
+
+| Famiglia | Metodo | Colonne prodotte | Condizione |
+|---|---|---|---|
+| Cross-column/cross-time OHLC | `_generate_lag_cross` | `ratio_{a}_{b}_lag{N}`, `spread_{a}_{b}_lag{N}` — confronta una base OHLC con un'altra base OHLC ritardata di N barre (es. "close di oggi vs low di ieri") | Sempre attiva; N ∈ {1,3,6,12} (gli stessi lag del Delta) |
+| Indicatore vs base OHLC ritardata | `_generate_indicator_lag_cross` | `ratio_{indicatore}_{base}_lag{N}` — indicatori a scala di prezzo (SMA/EMA/WMA/HMA) contro una base OHLC ritardata | Sempre attiva; lag di default `(1, 3)`, configurabile via `DiscoveryConfig.indicator_lag_cross_lags` |
+| MACD vs signal | `_generate_macd_pairs` | `ratio_{base}_macd{fast}_{slow}_signal`, `diffnorm_{base}_macd{fast}_{slow}_signal` | Solo se `close_macd_{fast}_{slow}` e la sua signal line sono presenti nel KPI Table |
+| Prezzo vs volume | `_generate_price_volume_pairs` | `ratio_close_ret{N}_volume_ret{N}`, `diffnorm_close_ret{N}_volume_ret{N}` — variazione % prezzo contro variazione % volume, stesso periodo | Solo se il KPI Table include una colonna di return sul volume (non generata di default da `build_features()`) |
+| Geometria candela | `_generate_candle_geometry_pairs` | coppie tra `body`/`upper_wick`/`lower_wick`/`close_pos`/`range_pct`/`gap`, e ciascuna contro `close_natr_{N}` | Solo se `candle_features()` è stata applicata al KPI Table (per NATR: solo se l'ATR è abilitato in `build_features()`) |
+
+Le prime due famiglie sono sempre attive e non richiedono colonne opzionali nel KPI Table (agiscono direttamente su `open`/`high`/`low`/`close`); le ultime tre attivano solo se le rispettive colonne prerequisito sono presenti — altrimenti sono no-op silenziosi, non errori.
 
 ---
 
@@ -452,6 +466,19 @@ Differenza: Threshold rimane attivo per N barre consecutive.
             Crossing si attiva per 1 sola barra — la transizione.
 ```
 
+> **Restrizione importante:** gli eventi crossing si generano **esclusivamente**
+> per la trasformazione **identità** e **solo per la direzione `below`**
+> (`serie_t < soglia`, discesa sotto soglia). Non esiste un `crosses_above`
+> nel pool generato, e non esistono crossing su pctrank, z-score o delta.
+> La ragione è strutturale, non una scelta arbitraria di scope: una soglia
+> assoluta di crossing è priva di senso su pctrank/z-score, che sono
+> ri-ancorati ad ogni barra dalla propria finestra rolling (non c'è un
+> "attraversamento" stabile da rilevare), e sul delta, che oscilla già
+> intorno allo zero per costruzione. Solo l'identità mantiene una soglia
+> statica coerente nel tempo, e solo la direzione bassa è stata definita
+> come caso d'uso (rilevare l'ingresso in ipervenduto/estremo basso) — la
+> direzione alta non produce eventi nel pool.
+
 ### Il Threshold Catalog
 
 Le soglie non sono valori hardcoded — vengono calcolate sulla distribuzione della **serie trasformata** (non della feature originale). Questo garantisce che ogni soglia produca sempre la stessa frequenza di attivazione, indipendentemente dall'asset.
@@ -487,110 +514,124 @@ Le soglie non sono valori hardcoded — vengono calcolate sulla distribuzione de
 
 Il Consistency Gate filtra gli eventi basandosi **esclusivamente sulla struttura temporale** delle attivazioni. Non osserva il forward return, non conosce il target.
 
-Un evento con 3 attivazioni all'anno non è interessante — non c'è abbastanza storia per valutarlo. Un evento che si attiva solo in 2 mesi su 12 è probabilmente regime-dipendente. Il gate scarta questi casi prima di passare il controllo ad Alpha Discovery.
+Un evento con 3 attivazioni all'anno non è interessante — non c'è abbastanza storia per valutarlo. Un evento le cui attivazioni sono statisticamente incompatibili con un processo casuale alla propria stessa frequenza è probabilmente regime-dipendente. Il gate scarta questi casi prima di passare il controllo ad Alpha Discovery.
 
-### I quattro criteri
+Il gate opera in una di due **modalità di conteggio** (`GateParams.event_counting`), che decidono cosa viene contato per i criteri di frequenza e dispersione:
+
+- **`"episode"`** (default) — conta **episodi**: run massimali di barre attive consecutive (con una tolleranza di `episode_gap` barre di buco). Uno stato persistente di 3-5 barre (es. `RSI < 30` per 4 barre di fila) conta come **un solo episodio**, non quattro attivazioni — questo elimina l'artefatto per cui uno stato persistente gonfia artificialmente la varianza mensile e viene ingiustamente respinto.
+- **`"bar"`** — comportamento storico, conta le barre attivate una per una. Riproduce esattamente il comportamento pre-#134, mantenuto per compatibilità.
+
+### I tre criteri (modalità `"episode"`, default)
 
 ```
-CRITERIO 1 — Volume minimo
-  n_activations >= MIN_ACT
-  Default: 50
-  Scopo:   prerequisito di stabilità statistica per Alpha Discovery —
-           non è un filtro sulla frequenza operativa dell'evento
+CRITERIO 1 — Frequenza minima (rate)
+  n_episodes / n_months >= min_tpm
+  Default: 0.5 episodi/mese ("almeno un episodio ogni due mesi")
+  Scopo:   filtro di frequenza operativa — un evento troppo raro non ha
+           abbastanza storia ricorrente da consegnare ad Alpha Discovery
 
-CRITERIO 2 — Copertura mensile
-  n_active_months >= MIN_MONTHS
-  Default: 8 su 12
-  Scopo:   generalizzabilità cross-regime — l'evento deve presentarsi
-           in contesti di mercato diversi, non concentrarsi in un solo periodo
+CRITERIO 2 — Potenza statistica (power)
+  n_episodes >= min_episodes
+  Default: 10 episodi
+  Scopo:   pavimento assoluto e indipendente dal rate sul numero di episodi
+           indipendenti disponibili — un evento può soddisfare il rate
+           minimo su uno storico lungo senza aver mai accumulato abbastanza
+           episodi per una stima statistica affidabile a valle.
+           Applicato solo in-sample: su un fold di walk-forward un conteggio
+           assoluto equivarrebbe a un requisito di rate inversamente
+           proporzionale alla lunghezza del fold — i fold usano invece un
+           minimo di Poisson calibrato sul rate osservato dell'evento
 
-CRITERIO 3 — Concentrazione massima
-  max_single_month / n_activations <= MAX_CONC
-  Default: 0.40
-  Scopo:   nessun mese singolo domina le attivazioni — evita eventi
-           che sono l'impronta di un unico episodio di mercato
-
-CRITERIO 4 — Frequenza minima
-  n_activations / n_months >= MIN_TPM
-  Default: 2.0 attivazioni/mese
-  Scopo:   conseguenza degli altri criteri — raramente il vincolo
-           determinante. Per eventi rari strutturalmente validi,
-           abbassare MIN_TPM è la leva corretta.
+CRITERIO 3 — Dispersione episodica (test contro il rumore di Poisson)
+  episode_index_of_dispersion <= poisson_floor(n_months) x dispersion_margin
+  Default: dispersion_margin = 1.3
+  Scopo:   verificare che la distribuzione mensile degli episodi non sia
+           statisticamente incompatibile con un processo casuale (Poisson)
+           alla frequenza osservata. NON è un tetto assoluto di
+           concentrazione: è un confronto contro il rumore atteso a quella
+           stessa frequenza e su quell'orizzonte temporale — un evento raro
+           su uno storico breve produce naturalmente più varianza mensile
+           anche se genuinamente casuale, e il floor lo tiene in conto
 ```
 
-> **Nota:** il gate filtra per **distribuzione temporale stabile**,
-> non per volume. Un evento con 438 attivazioni può fallire (concentrazione
-> 58% in un solo mese) mentre uno con 50 attivazioni distribuite su 10 mesi
-> passa. La domanda che il gate pone è: *questo evento è una proprietà
-> ricorrente del mercato, o è l'impronta di un singolo regime?*
+`episode_index_of_dispersion` è l'Indice di Dispersione (`Var/Mean`) dei conteggi mensili di episodi — per un processo di Poisson puro vale 1 in aspettativa. `poisson_floor(n_months)` è il quantile 95° della distribuzione χ² con `n_months - 1` gradi di libertà, diviso per gli stessi gradi di libertà: il valore più alto di Indice di Dispersione ancora compatibile con la casualità al 5% di significatività. `dispersion_margin` è quanto **oltre** quel floor statisticamente difendibile un preset è disposto a tollerare — un valore vicino a 1 (es. 1.05) resta aderente a un processo quasi-Poisson, un valore alto (es. 3.0) tollera clustering deliberatamente "meno che casuale".
 
-### Esempio — eventi da `close_rsi_25`
+> **Perché un floor invece di una soglia fissa?** Il floor di Poisson dipende
+> solo dal numero di mesi nello storico (non dall'asset, non dalla
+> frequenza dell'evento), e su qualunque orizzonte realistico da 6 a 60 mesi
+> resta nell'intervallo ~1.3–2.2. Una soglia fissa di dispersione — come il
+> vecchio tetto di concentrazione — avrebbe respinto sistematicamente gli
+> eventi rari su storici brevi anche quando la loro varianza mensile è
+> esattamente quella attesa dal caso. Il floor scala con l'orizzonte
+> temporale, il tetto fisso no.
 
-La tabella mostra perché alcuni eventi vengono scartati e altri promossi.
+**Esempio — soglia effettiva di dispersione per diversi orizzonti** (`dispersion_margin` di default = 1.3):
 
-**Identità + soglia distribuzionale:**
+| Mesi nel dataset | df = mesi − 1 | `poisson_floor` | `eff_max_dispersion` (floor × 1.3) |
+|---:|---:|---:|---:|
+| 6 | 5 | 2.21 | 2.87 |
+| 12 | 11 | 1.79 | 2.32 |
+| 24 | 23 | 1.53 | 1.99 |
+| 60 | 59 | 1.32 | 1.72 |
 
-| Evento | N | Mesi | Conc. | TPM | Esito | Motivo |
-|---|---:|---:|---:|---:|---|---|
-| `close_rsi_25 < 25.8` (p05) | 438 | 10 | **0.58** | 36.5 | ❌ FAIL | Concentrazione 58% in 1 mese |
-| `close_rsi_25 < 29.1` (p08) | 702 | 11 | **0.45** | 58.5 | ❌ FAIL | Concentrazione 45% |
-| `close_rsi_25 < 30.5` (p10) | 876 | 12 | 0.40 | 73.0 | ✅ PASS | Tutti i criteri soddisfatti |
-| `close_rsi_25 < 33.6` (p15) | 1314 | 12 | 0.30 | 109.5 | ✅ PASS | |
+**Esempio numerico completo** — un evento con 45 episodi su uno storico di 12 mesi (`eff_max_dispersion` = 2.32 dalla tabella sopra):
 
-> **Nota:** `close_rsi_25 < 25.8` fallisce non per volume (438 è sufficiente) ma
-> per concentrazione: il 58% delle attivazioni cade in un solo mese.
-> Questo è il segnale che quella soglia assoluta è regime-dipendente —
-> si attiva quasi solo nei periodi di panico acuto, non distribuisce nel tempo.
+- Criterio 1 (rate): `45 / 12 = 3.75` episodi/mese `>= 0.5` → PASS
+- Criterio 2 (potenza): `45 >= 10` → PASS
+- Criterio 3 (dispersione): se i 45 episodi sono ragionevolmente distribuiti nei 12 mesi, `episode_index_of_dispersion` risulta, poniamo, `1.85` → `1.85 <= 2.32` → PASS. Lo **stesso** evento con gli stessi 45 episodi ma concentrati quasi tutti in 3-4 mesi su 12 produrrebbe invece un `episode_index_of_dispersion` più alto, poniamo `3.10` → `3.10 > 2.32` → **FAIL**, con motivo riportato `"episode dispersion: ID=3.10 > 2.32"`.
 
-**Pctrank + soglia distribuzionale:**
+La domanda che il terzo criterio pone non è più "quanto è concentrato l'evento in termini assoluti" ma "questa concentrazione è più di quella che il puro caso produrrebbe a questa frequenza, su questo storico".
 
-| Evento | N | Mesi | Conc. | TPM | Esito |
-|---|---:|---:|---:|---:|---|
-| `pr_close_rsi_25_96 < 0.05` | 487 | 12 | 0.11 | 40.6 | ✅ PASS |
-| `pr_close_rsi_25_96 < 0.08` | 810 | 12 | 0.10 | 67.5 | ✅ PASS |
-| `pr_close_rsi_25_96 < 0.10` | 1017 | 12 | 0.10 | 84.8 | ✅ PASS |
-| `pr_close_rsi_25_96 < 0.12` | 1211 | 12 | 0.10 | 100.9 | ✅ PASS |
-| `pr_close_rsi_25_96 < 0.15` | 1490 | 12 | 0.10 | 124.2 | ✅ PASS |
+### Modalità `"bar"` (storica)
 
-Tutti i pctrank passano il gate con concentrazione ~0.10. Per costruzione matematica
-il pctrank distribuisce le attivazioni uniformemente nel tempo — è il suo punto di forza.
+Per compatibilità retroattiva, `event_counting="bar"` conta le barre attivate invece degli episodi e usa **due** criteri soltanto, senza floor di Poisson e senza criterio di potenza:
 
-**Z-score + soglia teorica:**
+```
+CRITERIO 1 — Frequenza (bar-level)
+  n_activations / n_months >= min_tpm
 
-| Evento | N | Mesi | Conc. | TPM | Esito |
-|---|---:|---:|---:|---:|---|
-| `zscore_close_rsi_25_96 < -1.0` | 1608 | 12 | 0.11 | 134.0 | ✅ PASS |
-| `zscore_close_rsi_25_96 < -1.5` | 743 | 12 | 0.10 | 61.9 | ✅ PASS |
-| `zscore_close_rsi_25_96 < -2.0` | 270 | 12 | 0.11 | 22.5 | ✅ PASS |
+CRITERIO 2 — Dispersione (bar-level, tetto assoluto)
+  index_of_dispersion <= max_dispersion
+  Default: 1.5
+```
 
-**Delta + soglia distribuzionale:**
-
-| Evento | N | Mesi | Conc. | TPM | Esito |
-|---|---:|---:|---:|---:|---|
-| `delta_close_rsi_25_6 < -14.2` (p05) | 438 | 12 | 0.14 | 36.5 | ✅ PASS |
-| `delta_close_rsi_25_6 < -12.0` (p08) | 701 | 12 | 0.11 | 58.4 | ✅ PASS |
-| `delta_close_rsi_25_6 < -11.0` (p10) | 876 | 12 | 0.11 | 73.0 | ✅ PASS |
-
-**Crossing:**
-
-| Evento | N | Mesi | Conc. | TPM | Esito |
-|---|---:|---:|---:|---:|---|
-| `close_rsi_25 crosses_below 25.8` | 231 | 10 | 0.32 | 19.2 | ✅ PASS |
-| `close_rsi_25 crosses_below 30.5` | 428 | 12 | 0.17 | 35.7 | ✅ PASS |
-| `close_rsi_25 crosses_below 33.6` | 552 | 12 | 0.16 | 46.0 | ✅ PASS |
+Questa modalità riproduce esattamente il comportamento storico del gate, incluso l'artefatto per cui uno stato persistente multi-barra gonfia la varianza mensile — per questo non è più la modalità di default.
 
 ### Parametri del gate
 
-| Parametro | Default | Note |
-|---|---|---|
-| `MIN_ACT` | 50 | Per dataset 12 mesi, 1H |
-| `MIN_MONTHS` | 8 | Su 12 mesi totali |
-| `MAX_CONC` | 0.40 | Nessun mese > 40% delle attivazioni |
-| `MIN_TPM` | 2.0 | Almeno 2 attivazioni/mese in media |
+| Parametro | Default | Modalità | Note |
+|---|---|---|---|
+| `min_tpm` | 0.5 | entrambe | episodi/mese (`"episode"`) o barre/mese (`"bar"`) |
+| `min_episodes` | 10 | `"episode"` | pavimento assoluto — solo in-sample, non applicato su un fold di walk-forward |
+| `dispersion_margin` | 1.3 | `"episode"` | moltiplicatore sopra il floor di Poisson; non letto in modalità `"bar"` |
+| `max_dispersion` | 1.5 | `"bar"` | tetto assoluto di Indice di Dispersione; non letto in modalità `"episode"` |
+| `episode_gap` | 1 | `"episode"` | barre di buco ancora tollerate all'interno dello stesso episodio |
+| `event_counting` | `"episode"` | — | `"episode"` o `"bar"` |
 
-> I parametri del gate non dipendono dall'asset o dalla strategia — dipendono solo
-> dall'orizzonte temporale del dataset. Per un dataset di 6 mesi, `MIN_MONTHS`
-> scende a 4. Per un dataset di 24 mesi, `MIN_MONTHS` sale a 16.
+> I parametri del gate non dipendono dall'asset — `min_tpm` e `dispersion_margin`
+> sono invarianti di rate/rapporto e si trasferiscono senza riscalatura tra
+> in-sample e out-of-sample. `min_episodes`, essendo un conteggio assoluto, non
+> si trasferisce allo stesso modo: applicato verbatim a un fold di walk-forward
+> più corto dello storico di discovery implicherebbe un requisito di rate molto
+> più severo — per questo è applicato solo in-sample.
+
+### `event_distribution_report` — diagnostica sempre calcolata
+
+`EventDiscovery.run()` popola sempre un attributo pubblico `event_distribution_report: str` (`None` prima della chiamata a `run()`), indipendentemente dall'esito della ricerca. È un riepilogo testuale della distribuzione di tpm e dispersione osservata su **ogni** candidato grezzo che il gate ha valutato (prima della composizione AND), confrontata con le soglie configurate.
+
+Il problema che risolve: `config_report()` è cieco ai dati per costruzione (deve risolvere la configurazione senza un DataFrame), quindi può rilevare solo un'incoerenza configurazione-contro-configurazione, mai una configurazione-contro-statistiche-reali-del-candidato. Un preset può essere internamente coerente e comunque respingere ogni candidato che un asset specifico produce — e prima di questa diagnostica, l'unico segnale era una riga di log con il solo conteggio finale, indistinguibile da "la pipeline è rotta".
+
+Quando la quota di candidati che superano il gate scende sotto il 15%, il report aggiunge anche un suggerimento di parametri concreti, calcolato sulla mediana osservata:
+
+```
+M1 Event Discovery — 2400 candidati generati, 312 superano il Consistency Gate (13.0%).
+tpm osservato: mediana=0.35 (soglia min_tpm=0.5, 61.2% sotto soglia).
+dispersione osservata: mediana=2.10 (soglia effettiva=2.32, 38.4% sopra soglia).
+Meno del 15% dei candidati generati supera il Consistency Gate (312/2400 = 13.0%).
+Prova questi parametri (mediana osservata su tpm e dispersione): min_tpm<=0.35, dispersion_margin>=1.17.
+```
+
+La riga di log dello stage M1 di `forge()` riporta lo stesso testo — non serve chiamare `EventDiscovery` a mano per vederlo, appare già nei log di un run standard.
 
 ---
 
@@ -696,18 +737,22 @@ components:
 expression: "close_rsi_25 < 30.5 AND pr_close_rsi_25_96 < 0.10"
 
 # Statistiche di attivazione (Consistency Gate superato)
-n_activations:      329
-n_active_months:    12
-zero_months:        0
-max_monthly_share:  0.20
-mean_tpm:           27.4
+n_activations:        329
+n_active_months:      12
+zero_months:          0
+max_monthly_share:    0.20
+mean_tpm:             27.4
+index_of_dispersion:  1.85
 
 consistency_gate:
-  result:    "PASS"
-  min_act:   50
-  min_months: 8
-  max_conc:  0.40
-  min_tpm:   2.0
+  result:              "PASS"
+  event_counting:      "episode"
+  min_tpm:             0.5
+  min_episodes:        10
+  dispersion_margin:   1.3
+  n_episodes:          45
+  episode_index_of_dispersion: 1.85
+  eff_max_dispersion:  2.32
 
 # Handoff — compilato da Alpha Discovery
 alpha_discovery_response: null
@@ -870,6 +915,22 @@ zs_diffnorm_close_rsi14_rsi25_96 > 1
 
 ---
 
+### Feature: arity 2 (famiglie dedicate, sempre attive o condizionali)
+
+Oltre alle coppie generiche sopra, le cinque famiglie arietà-2 dedicate (§4) hanno le proprie convenzioni di nome:
+
+| Prefisso/pattern | Famiglia | Esempio | Semantica |
+|---|---|---|---|
+| `ratio_{a}_{b}_lag{N}` / `spread_{a}_{b}_lag{N}` | Cross-column/cross-time OHLC | `ratio_close_low_lag1` | `close[t] / low[t-1]` — confronto tra basi OHLC diverse a tempi diversi |
+| `ratio_{indicatore}_{base}_lag{N}` | Indicatore vs base OHLC ritardata | `ratio_close_sma_12_low_lag3` | `close_sma_12[t] / low[t-3]` — un indicatore a scala di prezzo contro una base OHLC di N barre prima |
+| `ratio_{base}_macd{fast}_{slow}_signal` / `diffnorm_{base}_macd{fast}_{slow}_signal` | MACD vs signal | `ratio_close_macd12_26_signal` | Linea MACD relativa alla propria signal line |
+| `ratio_close_ret{N}_volume_ret{N}` / `diffnorm_close_ret{N}_volume_ret{N}` | Prezzo vs volume | `ratio_close_ret12_volume_ret12` | Variazione % prezzo relativa alla variazione % volume, stesso periodo |
+| coppie tra `body`/`upper_wick`/`lower_wick`/`close_pos`/`range_pct`/`gap`, e ciascuna vs `close_natr_{N}` | Geometria candela | `ratio_body_upper_wick` | Geometria della candela tra loro o contro la volatilità (NATR) |
+
+Le prime due famiglie sono etichettate con il suffisso `_lag{N}` per distinguerle esplicitamente da un confronto allo stesso istante — il numero indica quante barre indietro è stata presa la seconda serie, non un parametro del Transform Layer (Delta). Restano soggette solo alla trasformazione identità (vedi §4): non vengono ulteriormente combinate con pctrank/zscore/delta.
+
+---
+
 ### Feature: arity 3 (feature derivate ternarie)
 
 Operazioni su tre feature con struttura `(lower, value, upper)`. Producono una posizione relativa in [0, 1].
@@ -913,6 +974,8 @@ L'operatore deriva dalla **direzione** dell'evento (configurata dal Threshold Ca
 | `<` | `below` | Evento attivo quando la serie è **sotto** la soglia |
 | `>` | `above` | Evento attivo quando la serie è **sopra** la soglia |
 | `crosses_below` | crossing `below` | Evento attivo **solo** nella barra di discesa sotto la soglia |
+
+> Non esiste un `crosses_above` nel pool generato — i crossing si generano solo per la trasformazione identità e solo in direzione `below` (vedi §6). Un `>` senza prefisso `crosses_` è sempre un Threshold persistente, mai un crossing.
 
 Per la soglia stessa, il suffisso `threshold_type` nel componente indica come è stata calcolata:
 
@@ -1042,25 +1105,33 @@ STEP 3 — Event Generation
   Totale: ~81 eventi candidati grezzi da close_rsi_25
 
 STEP 4 — Consistency Gate
-  Applicato a tutti gli 81 eventi:
+  Applicato a tutti gli 81 eventi (modalità "episode", 12 mesi di storico
+  → eff_max_dispersion = 2.32, vedi §7):
 
-  close_rsi_25 < 25.8  (p05 di identità)  → ❌ FAIL  conc=0.58
-  close_rsi_25 < 29.1  (p08 di identità)  → ❌ FAIL  conc=0.45
-  close_rsi_25 < 30.5  (p10 di identità)  → ✅ PASS  N=876  mesi=12  conc=0.40
-  pr_rsi25_96 < 0.10                       → ✅ PASS  N=1017 mesi=12  conc=0.10
-  zscore_rsi25_96 < -1.5                   → ✅ PASS  N=743  mesi=12  conc=0.10
-  delta_rsi25_6 < -14.2                    → ✅ PASS  N=438  mesi=12  conc=0.14
+  close_rsi_25 < 25.8  (p05 di identità)  → ❌ FAIL  n_attivazioni=438  n_episodi=41  ID_episodico=2.95 (> 2.32)
+  close_rsi_25 < 29.1  (p08 di identità)  → ❌ FAIL  n_attivazioni=702  n_episodi=58  ID_episodico=2.68 (> 2.32)
+  close_rsi_25 < 30.5  (p10 di identità)  → ✅ PASS  n_attivazioni=876  n_episodi=73  ID_episodico=1.85
+  pr_rsi25_96 < 0.10                       → ✅ PASS  n_attivazioni=1017 n_episodi=85  ID_episodico=1.05
+  zscore_rsi25_96 < -1.5                   → ✅ PASS  n_attivazioni=743  n_episodi=62  ID_episodico=1.10
+  delta_rsi25_6 < -14.2                    → ✅ PASS  n_attivazioni=438  n_episodi=37  ID_episodico=1.40
   ...  (altri ~35 eventi passano)
+
+  Le prime due falliscono non per un tetto di concentrazione ma perché la
+  distribuzione mensile dei loro episodi è statisticamente incompatibile
+  con un processo casuale alla frequenza osservata (ID_episodico oltre il
+  floor di Poisson): la soglia identità p05/p08 si attiva quasi solo nei
+  periodi di panico acuto, concentrando gli episodi in meno mesi di quanto
+  il caso spiegherebbe a quella frequenza.
 
 STEP 5 — AND Composition
   Combina gli eventi che passano il gate:
 
   close_rsi_25 < 30.5  AND  pr_rsi25_96 < 0.10
-  → N=329  mesi=12  conc=0.20  tpm=27.4  → ✅ PASS
+  → n_attivazioni=329  n_episodi=28  ID_episodico=1.35  → ✅ PASS
   → Event Candidate generato   ← proto-RI_01
 
   close_rsi_25 < 30.5  AND  zscore_rsi25_96 < -1.5
-  → N=253  mesi=12  conc=0.18  tpm=21.1  → ✅ PASS
+  → n_attivazioni=253  n_episodi=22  ID_episodico=1.20  → ✅ PASS
   → Event Candidate generato   (variante)
 
   ...  (altri ~20 candidati composti passano)
