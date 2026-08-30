@@ -197,8 +197,9 @@ Pass `strict=False` to downgrade these findings to warnings and run anyway.
 | `modulo_3_en.md` | Rule Discovery: backtest, EDGE verdict, walk-forward OOS, reports |
 | `modulo_4_en.md` | Rule Registry: deduplication, cross-ticker, genericity, export |
 | `configuration_en.md` | Complete configuration reference: every dataclass field, type, default, and description |
+| `playground_en.md` | Playground: usage guide for the analysis helpers over pooled `ForgeResult` output |
 
-`forgedge.playground` — a read-only analysis layer over pooled `ForgeResult` output, still evolving (issue #237) — is covered in the main manual (`docs/manual-en.md`, §9) and has its own dedicated reference at [`modules/Playground.md`](../modules/Playground.md).
+`forgedge.playground` — a read-only analysis layer over pooled `ForgeResult` output, still evolving (issue #237) — is covered in the main manual (`docs/manual-en.md`, §9). [`playground_en.md`](playground_en.md) is its detailed usage reference (signatures, parameters, verified examples); [`modules/Playground.md`](../modules/Playground.md) covers the design rationale and internal algorithms instead.
 
 Italian versions are in the corresponding `*_it.md` files.
 
