@@ -67,14 +67,24 @@ stored in `c.expression` and `c.event_formula`.
 
 Not all events are useful. An event that activates once, or always in the same
 month, or at a frequency of 0.1% of bars, cannot support reliable measurements.
-The selection criteria are purely **structural**:
+The selection criteria are purely **structural**. The default counting unit is
+the **episode** (a run of consecutive activations), not the raw activated bar
+— a signal that stays active for several bars in a row counts once, not once
+per bar:
 
 | Criterion | Meaning |
 |---|---|
-| Minimum frequency | The event must fire often enough to allow robust statistical measurements (≥ 30–50 IS activations) |
-| Temporal distribution | Activations must be spread over time — not concentrated in a single month or year |
-| Maximum concentration | No single month may contain more than 40% of total activations |
-| Monthly frequency | At least 2 activations per month on average |
+| Rate | Episodes per month ≥ `min_tpm` (default 0.5 episodes/month) |
+| Power | At least `min_episodes` episodes in the sample (default 10) |
+| Dispersion | Episode-level Index of Dispersion (Var/Mean of monthly episode counts) ≤ a Poisson-χ² floor scaled by `dispersion_margin` (default 1.3) — `eff_max_dispersion = poisson_floor(n_months) × dispersion_margin` |
+
+The gate never rejects an event that is statistically consistent with a
+random process at its own observed rate, while still letting a preset's own
+tolerance for burstiness actually bind. There is no longer a fixed "no month
+above 40% of activations" rule — `max_monthly_share` is still reported, but
+only as a diagnostic; the real dispersion check is the Poisson-χ² test above.
+(A legacy `"bar"` counting mode, closer to the old semantics, remains
+available for backward compatibility.)
 
 The ConsistencyGate in Module 1 filters out all events that do not meet these
 criteria. What passes the gate is an event with **stable temporal structure**
@@ -158,27 +168,58 @@ event.
 
 **Horizon selection `h*`:**
 
-For each event, Alpha Discovery scans a grid of horizons
-(1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48 bars) and computes:
+The horizon grid itself is not a fixed constant — it is session-resolved per
+timeframe class by `PipelineContext`: `(1, 2, 3, 5, 7, 10)` bars on daily
+timeframes, `(1, 2, 4, 8, 12, 24)` on intraday, `(1, 2, 5, 10, 20, 50)` on
+HFT. (Building an `AlphaConfig` standalone, outside `forge()`, falls back to
+the hourly/intraday grid `(1, 2, 4, 8, 12, 24)` regardless of the declared
+timeframe.)
+
+For each event, Alpha Discovery computes the excess log-return at every
+horizon in the grid, `Δ_h = mean_advantage[h]` — the mean active-bar
+log-return minus the *unconditional* baseline over all valid bars at that
+horizon — then standardises it against a **circular-rotation null**: the
+event's own activation pattern is rotated against the actual return series
+many times to build a null distribution of what `Δ_h` looks like under no
+real relationship, giving a standardised score `z_h = Δ_h / σ_null,h` and a
+p-value for each horizon. The selected horizon is:
 
 ```
-score[h] = |mean_advantage[h]| / sqrt(h)
+h* = argmax |z_h|
 ```
 
-where `mean_advantage[h]` is the difference between the mean return of active
-bars and the mean return of inactive bars at horizon h.
+This replaced an earlier, naive `Δ_h / (σ_cond / √n)` deflation (dividing by
+the naive standard error, roughly a `1/√h`-shaped correction) because that
+approach treats the overlapping forward-return windows of a clustered or
+episodic event as independent samples: its denominator shrinks with the
+horizon regardless of whether the event actually clusters in runs, which
+inflates the score at long horizons and pins `h*` to the far edge of the
+grid even with no real edge. Standardising against a null built from the
+event's own activation pattern removes that bias.
 
-The `|mean_advantage| / √h` criterion balances the size of the advantage
-against the growing variance of longer horizons — a 0.5% advantage at 4 bars
-is more meaningful than the same advantage at 36 bars, where the return
-distribution is more dispersed. The selected horizon `h*` is the one with the
-highest score.
+A Benjamini-Hochberg FDR gate is then applied to the p-values across the
+whole grid, producing the set of horizons `h_sig` that clear significance.
+`h*` is always chosen as the `argmax |z_h|` over the *whole* grid — but if
+`h*` falls outside `h_sig`, the target is flagged `statistically_weak` (this
+penalises, rather than discards, the resulting alpha score — see the
+composite score below).
 
 **Direction derivation:**
 
-If `mean_advantage[h*] > 0`, the direction is `"long"` — the event precedes
-positive returns. If `< 0`, it is `"short"`. If non-finite across all horizons,
-`"undetermined"` — the event is rejected.
+`direction` is `"undetermined"` — and the event is rejected — in any of
+three cases:
+
+- no horizon yields a finite excess `Δ_h` (non-finite across the whole grid);
+- the standardised excess at the selected horizon is too small,
+  `|z_h*| < min_direction_t` (default 0.5);
+- (default behaviour, `require_significant_direction=True`) `h*` itself is
+  not BH-significant (`statistically_weak`) — the excess is statistically
+  indistinguishable from the rotation null everywhere, so reading a direction
+  off `argmax|z_h|` would amount to a coin-flip, often biased toward the
+  asset's own drift at the long edge of the grid.
+
+Otherwise the direction is `"long"` when `Δ_h*` (`mean_advantage[h*]`) is
+positive, `"short"` when negative.
 
 **`sell_pct` derivation:**
 
@@ -217,8 +258,11 @@ After the IS measurements, the derived target `(h*, direction*, sell_pct*)` is
 
 - OOS returns are oriented to the derived direction
 - Win rate, lift, mean_advantage, and t-test are measured on the OOS window
-- OOS is considered confirmed when: n_activations ≥ 10, mean_advantage > 0,
-  p-value < 0.10
+- OOS is considered confirmed when: mean_advantage > 0 and p-value < 0.10
+  (`oos_max_p`). There is no separate activation-count floor — the source
+  comment is explicit that "p-value alone determines passed: sample size is
+  already encoded in p" (a small OOS sample simply makes the p-value harder
+  to clear).
 
 OOS confirmation is a **non-blocking diagnostic**: a contract with weak OOS is
 still promoted if it has a determined direction, but its grade reflects the
@@ -227,13 +271,31 @@ where the OOS window has too few activations.
 
 ### The A–D grade
 
-The composite score (0–1) integrates the IS measurements:
+The composite score (0–1) integrates the IS measurements. The default
+weights (`AlphaConfig.score_weights`) are `(0.20, 0.25, 0.15, 0.25, 0.15)`
+for `(ic, lift, cohens_d, z, breadth)` — a **five**-term formula:
 
 ```
-score = 0.25 × IC_norm + 0.30 × lift_norm + 0.25 × d_norm + 0.20 × regime_breadth
+score = 0.20 × IC_norm + 0.25 × lift_norm + 0.15 × d_norm
+      + 0.25 × z_norm  + 0.15 × regime_breadth
 ```
 
-where each component is normalised on a 0–1 scale. The grade:
+`z_norm` is the normalised rotation-null standardised excess at `h*`
+(`|z_h*|`, the edge-to-noise ratio computed above) — a term the naive
+formula omits entirely. `d_norm` is **signed** in `[-1, 1]`: a negative
+Cohen's d (the conditioned group performs worse than the background) actively
+*penalises* the score rather than being clipped to zero.
+
+Two further adjustments are applied after the weighted sum:
+
+- if the selected horizon is `statistically_weak` (outside the BH-significant
+  set), the composite is multiplied by `statistically_weak_penalty` (default
+  `0.6`) — a horizon picked by the very selection bias the FDR control guards
+  against cannot rank highly;
+- if the OOS confirmation passes, `oos_bonus` (default `0.05`) is added.
+
+The result is clamped to `[0, 1]`. Each raw component is normalised on a
+0–1 scale before weighting. The grade:
 
 | Grade | Score | Meaning |
 |---|---|---|
@@ -288,19 +350,42 @@ hasn't moved enough?*
 Statistical evidence measures the separation of distributions. It does not
 measure operational profitability. That is Rule Discovery's responsibility.
 
-### The limit order mechanics
+### The entry mechanics: a two-stage auto evaluation
 
 Rule Discovery translates the `AlphaContract` into a backtest with realistic
-order mechanics:
+order mechanics. Since issue #185, `RuleDiscoveryConfig.entry_mode` defaults
+to `"auto"`, which runs the evaluation in **two stages** rather than
+assuming a limit entry from the start:
 
-**Entry (long):**
-- When the event activates, a limit order is placed at
-  `fill_price = close × (1 − buy_drop_pct)`
-- The order is valid for `buy_delay_bar` bars
-- A fill occurs when the price drops to the limit level in the subsequent bars
-  (using close as the conservative approximation)
+**Stage 1 — market entry (authoritative for the verdict).** The rule is
+backtested entering at the next bar's open (fill ≈ 100%). This isolates the
+*signal's* edge from any entry-price optimisation, and its verdict is final:
+Stage 2 can refine which parameters get published, but it can never turn a
+`NON-EDGE` from Stage 1 into an edge.
 
-**Exit:**
+**Stage 2 — optional limit-price sweep.** On a Stage-1 survivor, Rule
+Discovery optionally sweeps `buy_drop_pct` (a limit order at
+`fill_price = close × (1 − buy_drop_pct)`, valid for `buy_delay_bar` bars,
+filled when price drops to that level in the subsequent bars using close as
+the conservative approximation) and replays the winning candidate
+out-of-sample. The limit price is **adopted** — published in place of the
+market entry — only if it clears all three OOS conditions:
+
+1. `fill_rate >= min_fill_rate_opt` — no PF inflated by rare fills.
+2. `opportunity_sharpe >= market's` — a *per-trade-frequency* Sharpe, so a
+   point that trades less often must earn more per trade to compensate.
+3. `net_gain >= min_net_gain_retention × market's` — a backstop for the case
+   the Sharpe cannot see (a tiny mu with a tiny sigma).
+
+`RuleDiscoveryResponse.entry_optimization.failed_condition` names which of
+the three stopped adoption (`"fill"` / `"sharpe"` / `"net_gain"`), or `None`
+when adopted. This exists because the old limit-only default let a deep,
+rarely-filled limit inflate profit factor on a non-representative subset of
+trades (the "fill confound") — the entry doubled as both order mechanic and
+entry-price optimiser, so the verdict ended up measuring the entry price
+rather than the signal.
+
+**Exit (either entry):**
 - **Take-profit:** exit when the price rises to
   `take_profit = fill_price × (1 + sell_pct)`
 - **Horizon stop:** if take-profit is not reached within `target_h` bars from
@@ -309,21 +394,39 @@ order mechanics:
 
 **Fee:** deducted on both entry and exit on every trade (`fee_per_side`).
 
+`entry_mode="limit"` — the pre-#185 default — is still fully supported: the
+grid varies `buy_drop_pct` directly and the limit entry doubles as an
+entry-price optimiser with no market-entry baseline. It remains the right
+choice when the limit order *is* the strategy, not merely an execution
+refinement. A third mode, `entry_mode="market"`, runs Stage 1 alone with no
+entry optimiser at all.
+
 ### The parameter grid
 
 Rule Discovery does not assume the optimal values of `buy_drop_pct`, `sell_pct`,
-and `target_h`. It explores a grid centred on the values derived from the
-`AlphaContract`:
+and `target_h`. Rather than a fixed menu of candidate values, `build_grid()`
+constructs a small **symmetric fan** arithmetically around each contract-derived
+base value:
 
 ```
-Grid: buy_drop_pct × sell_pct × target_h × buy_delay_bar
-      ─────────────────────────────────────────────────────
-      [0.5%, 1.0%, 1.5%, 2.0%] × [0.03, 0.04, 0.05, 0.06] × [12, 24, 36, 48] × [3, 6]
+buy_drop_pct = [d − 0.005, d − 0.002, d, d + 0.002, d + 0.005]   (floored at 0.001)
+sell_pct     = [s − 0.02,  s − 0.01,  s, s + 0.01,  s + 0.02]    (floored at 0.005)
+target_h     = {round(h × 0.5), round(h × 1.0), round(h × 2.0)}
+buy_delay_bar = [base value]   — a single value, not swept, unless the caller
+                                 sets GridSpec.buy_delay_bar explicitly
 ```
+
+where `d`, `s`, and `h` are `buy_drop_pct`, `sell_pct`, and `target_h` taken
+from the `AlphaContract`'s derived target (via `base.resolved()`). Any axis
+the caller sets explicitly on `GridSpec` overrides this auto-fan.
 
 For each configuration the composite score `pf_score_tpm` is computed,
 balancing Profit Factor, trading frequency, and monthly consistency.
-Configurations with fewer than 20 trades or PF < 1 are discarded immediately.
+Configurations are screened against a dynamic trade-count floor,
+`max(pf_min_trades, n_months × pf_min_tpm)` — `pf_min_trades` defaults to 15
+and `pf_min_tpm` to 2 trades/month, so the floor grows with the length of the
+selection span rather than staying fixed at a flat count. Configurations
+below that floor, or with PF < 1, are discarded immediately.
 
 The best configuration among those that pass the selection thresholds is
 forwarded to statistical validation and walk-forward.
@@ -346,7 +449,7 @@ window the PF is measured with those parameters. `wf.consistency` is the
 fraction of test windows with PF > 1 — the most direct measure of OOS
 robustness.
 
-### The EDGE / PARTIAL-EDGE / NON-EDGE verdict
+### The EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA verdict
 
 The final verdict integrates hard and soft gates:
 
@@ -355,21 +458,37 @@ The final verdict integrates hard and soft gates:
 - All months with negative or zero result (too irregular)
 - No configuration with adequate fill rate
 
-**EDGE:**
+**EDGE** requires all of:
 - PF ≥ 2.0 on IS (`min_profit_factor`)
 - Win rate ≥ 55%
 - Deflated Sharpe ≥ 1.0 (penalised for the number of configurations tested)
 - Regime dependency < 30% (edge is not concentrated in a single regime)
 - Temporal stability: PF first half ≈ PF second half
+- Walk-forward `consistency ≥ 0.5` (at least half the OOS test windows have
+  PF > 1)
+- The search-level rotation null is cleared: `rotation_p ≤ max_rotation_p`.
+  This is the `fast_null`/`FastRotationNull` machinery `forge()` runs by
+  default, pricing the multiple-testing surface of the whole discovery
+  search — a contract that only wins that lottery is capped below full EDGE
+  even if every gate above passes.
 
-**PARTIAL-EDGE:** passes the hard gates but not all EDGE gates.
+**PARTIAL-EDGE:** passes the hard (NON-EDGE) gates but not all EDGE gates.
+
+**INSUFFICIENT-DATA:** a would-be `EDGE`/`PARTIAL-EDGE` verdict is downgraded
+to `INSUFFICIENT-DATA` when the pooled out-of-sample evidence is too thin to
+support a confident positive call (gated by `SelectionCriteria.power_gate`,
+default `True`, via `_power_assessment()`). A `NON-EDGE` is never rescued
+this way — underpowered or not, the operational consequence is the same. The
+verdict is therefore one of **four** values:
+`"EDGE" | "PARTIAL-EDGE" | "NON-EDGE" | "INSUFFICIENT-DATA"`
+(`RuleDiscoveryResponse.verdict`).
 
 ### Artefact: `ValidatedRule` (inside `RuleDiscoveryResponse`)
 
 ```python
 resp = rd.run()
 
-print(f"Verdict: {resp.verdict}")    # "EDGE", "PARTIAL-EDGE" or "NON-EDGE"
+print(f"Verdict: {resp.verdict}")    # "EDGE", "PARTIAL-EDGE", "NON-EDGE" or "INSUFFICIENT-DATA"
 print(f"Is edge: {resp.is_edge}")    # True for EDGE and PARTIAL-EDGE
 
 if resp.is_edge:
@@ -451,7 +570,7 @@ A statistically valid edge may be more robust in certain regimes.
 ```python
 ra = resp.regime_analysis
 print(f"Regimes to avoid: {ra.avoid_in}")
-print(f"Strong regimes: {ra.strong_in}")
+print(f"Regime dependency score: {ra.dependency_score:.2f}")
 
 # Filter the signal by regime
 enriched = MarketContext(new_kpi).run()
@@ -548,6 +667,34 @@ pipeline. OOS data participates in no IS computation — it is an independent
 observer that has never "seen" the thresholds, derived target, or optimal
 operational configuration.
 
+### Two layers that keep the boundaries honest across a session
+
+Two mechanisms, both invisible in the individual module descriptions above,
+sit underneath every `forge()` run and enforce the separation in practice:
+
+**A central parameter resolver.** `forge()` builds a `PipelineContext` (the
+session's single source of truth for timeframe, schema column names, fee,
+and statistical policy — `forgedge.resolver`) and resolves every config
+field a caller left unset against it, before Module 0 ever executes. The
+resolved bundle is then checked for internal contradictions by
+`config_report()` (`ConfigReport`): `forge(strict=True)` — the default —
+raises a `ValueError` rather than running a session whose configuration
+cannot structurally produce a verdict (e.g. an M3 selection window too short
+for the arrival rate it was told to demand). A wall of silent rejections is
+indistinguishable from "the signal is bad"; refusing to start is the honest
+response.
+
+**Rotation-null calibration of the search itself.** Every individual
+`AlphaContract` is already standardised against its own circular-rotation
+null (§2 above). By default `forge()` additionally runs a *search-level*
+rotation null (`fast_null=True`, `calibration.fast_null.FastRotationNull`)
+that prices the multiple-testing surface of the whole discovery session —
+how many candidates were tried, not just how strong one candidate looks in
+isolation — and annotates the result on `AlphaContract.rotation_p`. Rule
+Discovery's EDGE gate reads this value directly (§3 above): a contract that
+only wins the multiple-testing lottery is capped at `PARTIAL-EDGE` even if
+every other gate passes.
+
 ---
 
 ## Summary of the three concepts
@@ -556,7 +703,7 @@ operational configuration.
 |---|---|---|---|---|
 | **Event** | "Is this market configuration stable and repeatable?" | Module 1 | `EventCandidate` | ConsistencyGate (structural, no forward return) |
 | **Alpha** | "Does this event statistically predict an oriented return?" | Module 2 | `AlphaContract` | direction ≠ "undetermined" (single hard gate) |
-| **Rule** | "Is this alpha profitable under realistic order mechanics?" | Module 3 | `ValidatedRule` | EDGE / PARTIAL-EDGE / NON-EDGE |
+| **Rule** | "Is this alpha profitable under realistic order mechanics?" | Module 3 | `ValidatedRule` | EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA |
 
 A trading signal emerges from the intersection of these three verifications: a
 structurally stable market configuration (`Event`), with empirical evidence of
@@ -571,6 +718,9 @@ predictive power (`Alpha`), that holds under realistic operational conditions
 |---|---|
 | `index_en.md` | System overview and quick start |
 | `how_to_use_en.md` | Practical end-to-end guide with full configuration |
+| `configuration_en.md` | Global configuration reference — every config dataclass and field |
+| `modulo_0_en.md` | Market Context: regime classification |
 | `modulo_1_en.md` | Event Discovery: pipeline, ConsistencyGate, EventCandidate |
 | `modulo_2_en.md` | Alpha Discovery: target derivation, IC, OOS, AlphaContract |
 | `modulo_3_en.md` | Rule Discovery: backtest, EDGE verdict, walk-forward, reports |
+| `modulo_4_en.md` | Rule Registry: dedup, cross-ticker replay, genericity |

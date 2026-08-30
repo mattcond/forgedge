@@ -26,12 +26,13 @@ print(f"Trovati {len(candidates)} candidati")
 print(ed.summary().sort_values("mean_tpm", ascending=False).head(10))
 ```
 
-La configurazione di default usa i parametri di produzione (`min_act=50`,
-`min_months=8`, ecc.). Per esplorare con soglie più permissive:
+La configurazione di default usa i parametri di produzione (`min_tpm=0.5`,
+`event_counting="episode"`, `min_episodes=10`, `dispersion_margin=1.3`,
+ecc. — vedi Step 4 più sotto). Per esplorare con soglie più permissive:
 
 ```python
 config = DiscoveryConfig(
-    gate_params=GateParams(min_act=30, min_months=6, max_conc=0.50, min_tpm=1.5),
+    gate_params=GateParams(min_tpm=0.3, min_episodes=5, dispersion_margin=1.6),
     max_and_components=2,
 )
 ed = EventDiscovery(enriched_kpi, config=config)
@@ -142,21 +143,30 @@ Il Threshold Catalog distingue due famiglie di soglie:
 
 **Soglie distribuzionali** (basate sui percentili della serie trasformata):
 ```
-p3, p5, p10, p20, p25    (code basse — condizioni estreme al ribasso)
-p75, p80, p90, p95, p97  (code alte — condizioni estreme al rialzo)
+p3, p5, p8, p10, p15     (code basse — condizioni estreme al ribasso)
+p85, p90, p92, p95, p97  (code alte — condizioni estreme al rialzo)
 ```
 
 **Soglie teoriche** (per la trasformazione zscore):
 ```
--2.0, -1.5, -1.0, 0.0, +1.0, +1.5, +2.0
+-2.0, -1.5, -1.0, +1.0, +1.5, +2.0
 ```
 
-Per ciascuna soglia vengono generati due tipi di evento:
+Per ciascuna soglia viene sempre generato un evento `threshold`. Viene generato
+anche un evento `crossing`, ma **solo per la trasformazione `identity`, e solo
+sulle soglie con `direction="below"`** — le soglie assolute non hanno senso
+per rolling pctrank/zscore (ri-ancorate ad ogni barra) o per delta (che
+oscilla intorno allo zero), quindi i crossing sono ristretti a `identity`.
+All'interno di `identity`, è definita solo la formula del crossing al
+ribasso (`serie_t < soglia AND serie_{t-1} >= soglia`): non esiste nel pool
+generato un crossing simmetrico al rialzo (`above`) — il caso d'uso a cui
+questa parte del generatore è rivolta è la rilevazione di ipervenduto/estremo
+basso, e non ha mai ricevuto una controparte al rialzo.
 
-| Tipo | Descrizione | Quando attivo |
-|---|---|---|
-| `threshold` | Stato persistente | Ogni barra in cui la condizione è vera |
-| `crossing` | Transizione istantanea | Solo la barra in cui la serie attraversa la soglia |
+| Tipo | Descrizione | Quando attivo | Generato per |
+|---|---|---|---|
+| `threshold` | Stato persistente | Ogni barra in cui la condizione è vera | Tutte le trasformazioni, entrambe le direzioni |
+| `crossing` | Transizione istantanea | Solo la barra in cui la serie attraversa la soglia | Solo trasformazione `identity`, `direction="below"` |
 
 Gli eventi di tipo `crossing` segnalano "il segnale è appena entrato in zona",
 utile per logiche di entry. Gli eventi `threshold` catturano "il segnale è in
@@ -175,28 +185,66 @@ distinti vengono escluse perché assimilabili a identificatori.
 
 Il gate filtra gli eventi in base alla loro distribuzione temporale di attivazione.
 La logica è: un evento con struttura temporale instabile (es. tutti i trigger
-concentrati in un solo mese) non è candidato affidabile per l'alpha discovery.
+concentrati in un solo mese, o statisticamente indistinguibile da un processo
+casuale) non è candidato affidabile per l'alpha discovery.
 
-Un evento **passa** se e solo se soddisfa **tutti** i 4 criteri:
+Il gate gira in una di due modalità, selezionata da `GateParams.event_counting`.
+
+**Modalità `"episode"` (default, issue #134)** — conta gli *episodi* (run
+massimali di attivazioni consecutive, che assorbono gap fino a `episode_gap`
+barre) invece delle singole barre. Questo elimina un artefatto di conteggio
+per cui uno stato persistente su più barre (es. un tratto di 3–5 barre con
+`RSI < 30`) gonfia la varianza mensile e viene rigettato erroneamente. Un
+evento **passa** se e solo se soddisfa **tutti e 3** i criteri:
 
 | Criterio | Parametro | Default | Razionale |
 |---|---|---|---|
-| Volume minimo | `min_act` | 50 | Stima statistica affidabile richiede campione sufficiente |
-| Copertura temporale | `min_months` | 8 | L'evento deve essersi attivato in almeno 8 mesi distinti |
-| Concentrazione | `max_conc` | 0.40 | Nessun singolo mese può contenere > 40% delle attivazioni |
-| Frequenza media | `min_tpm` | 2.0 | Almeno 2 attivazioni al mese in media |
+| Frequenza | `min_tpm` | 0.5 | Episodi al mese in media, almeno questo valore |
+| Potenza statistica | `min_episodes` | 10 | Floor assoluto sul numero di episodi, così i test di significatività a valle (Moduli 2/3) hanno campione sufficiente |
+| Dispersione | `dispersion_margin` | 1.3 | L'Index of Dispersion a livello di episodio non deve superare `poisson_floor(n_months) x dispersion_margin` |
+
+Il criterio di dispersione (issue #205) confronta contro un *floor χ² di
+Poisson* — il più grande Index of Dispersion ancora coerente con un processo
+puramente casuale al tasso proprio dell'evento — invece di un valore assoluto
+fisso. Questo garantisce che il gate non rigetti mai un evento che un processo
+casuale avrebbe potuto plausibilmente produrre, pur lasciando che la
+tolleranza alla burstiness propria di un preset (`dispersion_margin`) sia
+effettivamente vincolante: misurato su tutti e quattro i preset e i quattro
+timeframe, una soglia fissa `max_dispersion` non è mai risultata vincolante
+in 12 combinazioni su 16, perché il floor da solo era quasi sempre il vincolo
+più stringente. `max_dispersion` non ha alcun ruolo in modalità `"episode"`.
+
+**Modalità `"bar"`** — il comportamento storico, 100% retrocompatibile:
+conta le singole barre attivate invece degli episodi. Un evento **passa**
+se e solo se soddisfa **entrambi** i criteri:
+
+| Criterio | Parametro | Default | Razionale |
+|---|---|---|---|
+| Frequenza | `min_tpm` | 0.5 | Barre attivate al mese in media, almeno questo valore |
+| Dispersione | `max_dispersion` | 1.5 | L'Index of Dispersion per barra (Var/Media dei conteggi mensili) non deve superare questo valore assoluto — nessun floor di Poisson coinvolto |
+
+`min_episodes` e `dispersion_margin` non hanno alcun ruolo in modalità `"bar"`.
 
 Il `GateResult` include il campo `fail_reason` con il primo criterio fallito
-(utile per debug e tuning dei parametri).
+(utile per debug e tuning dei parametri), più campi diagnostici sempre
+calcolati indipendentemente dalla modalità: `n_episodes` (conteggio episodi),
+`episode_index_of_dispersion` (Index of Dispersion a livello di episodio,
+calcolato quando è disponibile un indice mensile) e `n_eff` — una dimensione
+campionaria effettiva (`n_episodes / max(episode_ID, 1.0)`) pensata per la
+deflazione della significatività a valle nei Moduli 2/3.
 
-```python
-# Analisi degli eventi che non passano il gate
-for candidate in ed.run():
-    pass  # già solo quelli che passano
-
-# Per vedere anche i falliti, inspezionare raw_events (non esposto pubblicamente)
-# ma si può abbassare le soglie del gate per esplorare
-```
+**`min_episodes` differenziato per preset (issue #206):** `forge_preset()`
+non applica un unico default fisso — `sniper`, `balanced` e `burst`
+mantengono 10 (il floor di potenza statistica è proprio lo scopo di questi
+profili), mentre `sweep` lo abbassa a 5, permissivo per design, perché
+delega il rigore statistico al `RotationCalibrator` a valle. Poiché
+`min_episodes` è un conteggio assoluto, la finestra di discovery IS
+necessaria per raggiungerlo con margine di Poisson al 95% dipende sia da
+`min_episodes` sia da `min_tpm` — la finestra naive `min_episodes / min_tpm`
+soddisfa il floor solo in aspettativa. Il warning `m1_is_window_too_short`
+di `config_report()` segnala lo scarto tra la combinazione configurata e
+l'ampiezza di discovery effettivamente disponibile (`span_months x
+train_ratio`).
 
 ---
 
@@ -261,6 +309,44 @@ pctrank(RSI25, w=96) < 0.10           (rolling pctrank, p10)
 
 → "RSI è in zona oversold AND lo è stato raramente nelle ultime 96 barre"
 → Combinazione semanticamente ricca, non ridondante
+```
+
+---
+
+### Diagnostica sulla distribuzione degli eventi (`event_distribution_report`)
+
+Dopo `run()`, `ed.event_distribution_report` è **sempre** popolato (issue
+#215) — un attributo pubblico `str`, indipendente da `config_report()`. I due
+sono complementari: `config_report()` risolve la coerenza config-vs-config
+prima di vedere qualsiasi dato, quindi non può mai rilevare che i candidati
+grezzi di un asset specifico stanno fallendo il gate in modo patologico;
+`event_distribution_report` aggrega gli scalari `GateResult` effettivamente
+raccolti per ogni candidato grezzo (pre-composizione AND) prodotto dallo
+Step 3, indipendentemente dal fatto che `cfg.retain_raw_events` mantenga o
+meno l'intera popolazione di candidati.
+
+Riporta:
+- il numero totale di candidati grezzi e quanti hanno superato il ConsistencyGate;
+- la frequenza (tpm) e la dispersione mediane osservate rispetto alle soglie
+  configurate, e quale frazione di candidati cade dal lato sbagliato di
+  ciascuna;
+- quando la sopravvivenza al gate è **sotto una soglia del 15%**, un
+  suggerimento concreto di parametri alla mediana osservata.
+
+```python
+print(ed.event_distribution_report)
+```
+
+Il testo stesso viene emesso in italiano indipendentemente dal contesto di
+chiamata (è anche la riga di log dello stage M1), ad esempio:
+
+```
+M1 Event Discovery — 8213 candidati generati, 512 superano il
+Consistency Gate (6.2%).
+tpm osservato: mediana=0.31 (soglia min_tpm=0.5, 61.4% sotto soglia).
+dispersione osservata: mediana=2.10 (soglia effettiva=1.69, 38.0% sopra soglia).
+Meno del 15% dei candidati generati supera il Consistency Gate (512/8213 = 6.2%).
+Prova questi parametri (mediana osservata su tpm e dispersione): min_tpm<=0.31, dispersion_margin>=1.62.
 ```
 
 ---
@@ -352,12 +438,21 @@ print(comp.source_cols)       # [] per arity-1, ["col_a", "col_b"] per arity-2
 
 ```python
 stats = cand.activation_stats
-print(stats.n_activations)      # totale attivazioni
-print(stats.n_active_months)    # mesi con almeno un'attivazione
-print(stats.zero_months)        # mesi senza attivazioni
-print(stats.max_monthly_share)  # quota del mese più concentrato
-print(stats.mean_tpm)           # media attivazioni per mese
+print(stats.n_activations)               # totale attivazioni
+print(stats.n_active_months)             # mesi con almeno un'attivazione
+print(stats.zero_months)                 # mesi senza attivazioni
+print(stats.max_monthly_share)           # quota del mese più concentrato
+print(stats.mean_tpm)                    # media attivazioni per mese
+print(stats.index_of_dispersion)         # Index of Dispersion per barra (Var/Media dei conteggi mensili)
+print(stats.n_episodes)                  # numero di episodi di attivazione distinti
+print(stats.episode_index_of_dispersion) # Index of Dispersion dei conteggi mensili di episodi
+print(stats.n_eff)                       # dimensione campionaria effettiva: n_episodes / max(episode_ID, 1.0)
 ```
+
+`index_of_dispersion`, `n_episodes`, `episode_index_of_dispersion` e `n_eff`
+sono gli stessi campi diagnostici che `GateResult` porta con sé (vedi Step
+4) — sempre calcolati, non solo quando i criteri della modalità attiva li
+usano effettivamente.
 
 ---
 
@@ -591,28 +686,58 @@ print(f"{len(stable)} candidati stabili su {len(candidates)}")
 
 1. Il dataset viene diviso: prime `train_ratio` righe = IS, il resto = OOS.
 2. L'intera pipeline (Step 0–5) gira **solo sull'IS**.
-3. Per ogni candidato, l'OOS viene diviso in `n_splits` finestre uguali.
-4. Su ogni finestra, `apply()` ricostruisce la serie booleana.
-   Le ultime 168 barre IS vengono preposte come contesto rolling per
-   evitare warmup NaN all'inizio di ogni fold.
-5. Il ConsistencyGate viene applicato con parametri scalati proporzionalmente
-   alla dimensione della finestra OOS:
-   - `min_act` e `min_months` scalati (floor: 5 e 1 rispettivamente)
-   - `max_conc` e `min_tpm` invariati (sono rate, non conteggi)
-6. Un candidato è OOS-stabile se passa in almeno `min_pass_rate` delle finestre.
+3. Per ogni candidato, l'OOS viene diviso in `n_splits` finestre uguali (fold).
+4. Su ogni fold, `apply()` ricostruisce la serie booleana. Le ultime 168
+   barre IS vengono preposte come contesto rolling per evitare warmup NaN
+   all'inizio del fold.
+5. Il ConsistencyGate viene applicato ad ogni fold con `min_episodes`
+   **forzato a 0** invece che scalato (issue #177): essendo un conteggio
+   assoluto, `min_episodes` non sopravvive all'applicazione su una finestra
+   più corta — su un fold di 2 mesi il default di classe pari a 10 richiede
+   5 episodi/mese contro un requisito in-sample che può essere anche
+   1/mese, ~5x più severo per costruzione. `min_tpm`, `max_dispersion` e
+   `dispersion_margin` sono invarianti rispetto al tasso/rapporto e
+   passano **invariati** dai `gate_params` IS (oppure da
+   `wf.oos_gate_params` quando impostato esplicitamente — comunque sempre
+   con `min_episodes` forzato a 0).
+6. Ogni fold viene inoltre verificato per **testabilità**: il tasso IS
+   proprio del candidato implica un conteggio atteso di episodi `lam =
+   is_rate x n_months` per la durata di quel fold. Quando `lam <
+   MIN_FOLD_LAMBDA` (3.0), un fold vuoto ha probabilità ≥5% anche per un
+   candidato che ha mantenuto perfettamente il proprio tasso IS — un fold
+   simile viene marcato `indeterminate` ed **escluso dal denominatore di
+   `pass_rate`**, mai contato come fallimento.
+7. Un candidato è OOS-stabile (`passed=True`) quando passa il gate in
+   almeno `min_pass_rate` dei fold **testabili** (`n_testable`, non
+   `n_folds`). Quando nessun fold è testabile, `passed` vale `None` —
+   inconcludente, non fallito; il filtro `only_validated_events` di
+   `forge()` tratta `None` in modo distinto da `False`, così un
+   walk-forward che non ha potuto girare non scarta silenziosamente tutti
+   i candidati.
 
 ### Output `ValidationResult`
+
+Campi di `ValidationResult`: `n_folds` (fold totali eseguiti), `n_passed`,
+`n_testable` (fold abbastanza lunghi da dire qualcosa — il denominatore di
+`pass_rate`), `pass_rate` (`n_passed / n_testable`, `nan` quando nulla era
+testabile), `passed` (`bool | None`), `fold_results` (dettaglio per fold,
+inclusi quelli indeterminati). Ogni `FoldResult` porta inoltre
+`indeterminate` (bool) e `lam` (il conteggio atteso di episodi del fold al
+tasso in-sample del candidato).
 
 ```python
 for cand in candidates:
     if cand.validation:
         v = cand.validation
-        print(f"{cand.event_id}: {v.n_passed}/{v.n_folds} folds, "
-              f"pass_rate={v.pass_rate:.2f}, stable={v.passed}")
+        print(f"{cand.event_id}: {v.n_passed}/{v.n_testable} fold testabili "
+              f"({v.n_folds} totali), pass_rate={v.pass_rate:.2f}, stable={v.passed}")
+        # v.passed è None quando nessun fold era testabile — inconcludente, non fallito
         for fold in v.fold_results:
-            print(f"  fold {fold.fold_idx}: {fold.n_rows} barre, "
-                  f"passed={fold.passed}, "
-                  f"{'OK' if fold.passed else fold.gate_result.fail_reason}")
+            if fold.indeterminate:
+                status = f"INDETERMINATE (lam={fold.lam:.2f} < 3.0)"
+            else:
+                status = "OK" if fold.passed else fold.gate_result.fail_reason
+            print(f"  fold {fold.fold_idx}: {fold.n_rows} barre, {status}")
 ```
 
 ---
@@ -635,18 +760,20 @@ for cand in candidates:
 
 | Parametro | Default | Descrizione |
 |---|---|---|
-| `min_act` | 50 | Attivazioni totali minime nel periodo IS |
-| `min_months` | 8 | Mesi di calendario con almeno un'attivazione |
-| `max_conc` | 0.40 | Quota massima di attivazioni concentrate in un singolo mese |
-| `min_tpm` | 2.0 | Media attivazioni per mese (totale / n_mesi_totali_nel_range) |
+| `min_tpm` | 0.5 | Minimo medio di trigger al mese, nell'unità scelta da `event_counting` (episodi/mese in modalità `"episode"`, barre/mese in modalità `"bar"`) |
+| `max_dispersion` | 1.5 | Massimo Index of Dispersion per barra — **solo modalità `"bar"`**; non letto in modalità `"episode"` |
+| `dispersion_margin` | 1.3 | **Solo modalità `"episode"`** — moltiplicatore sopra il floor χ² di Poisson: `eff_max_dispersion = poisson_floor(n_months) x dispersion_margin` |
+| `event_counting` | `"episode"` | Unità di conteggio per i criteri di frequenza/dispersione: `"episode"` o `"bar"` |
+| `min_episodes` | 10 | Floor assoluto sul numero di episodi (guardia di potenza statistica, solo modalità `"episode"`); applicato **solo in-sample**, forzato a 0 nei fold OOS del walk-forward |
+| `episode_gap` | 1 | Gap massimo (in barre) ancora appartenente allo stesso episodio; `0` = run strettamente consecutivi |
 
 ### `EventWalkForwardConfig`
 
 | Parametro | Default | Descrizione |
 |---|---|---|
 | `n_splits` | 3 | Numero di finestre OOS |
-| `min_pass_rate` | 0.60 | Quota minima di finestre che devono passare il gate |
-| `oos_gate_params` | `None` | Gate OOS esplicito; se `None`, i parametri IS vengono scalati proporzionalmente |
+| `min_pass_rate` | 0.60 | Quota minima di finestre **testabili** che devono passare il gate |
+| `oos_gate_params` | `None` | Gate OOS esplicito; se `None`, vengono usati i `gate_params` IS, con `min_episodes` comunque sempre forzato a 0 |
 
 ---
 
@@ -673,8 +800,8 @@ entrare nel TypeClassifier. `ed.df` ha sempre un `DatetimeIndex`.
 summary = ed.summary()
 print(summary.columns.tolist())
 # ['event_id', 'status', 'expression', 'n_activations', 'n_active_months',
-#  'zero_months', 'max_monthly_share', 'mean_tpm', 'gate_passed',
-#  'oos_pass_rate', 'oos_n_passed', 'oos_n_folds', 'oos_stable']  # OOS cols solo se walk-forward configurato
+#  'zero_months', 'max_monthly_share', 'mean_tpm', 'index_of_dispersion',
+#  'gate_passed', 'oos_pass_rate', 'oos_n_passed', 'oos_n_folds', 'oos_stable']  # OOS cols solo se walk-forward configurato
 
 # I candidati con arietà 2 (AND composition)
 and_candidates = [c for c in candidates if len(c.components) == 2]

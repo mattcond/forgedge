@@ -296,7 +296,11 @@ direzione spuria (entrambi gli eventi `long` anche quando uno è textbook short)
 Per separare l'edge dal drift si lavora sull'**excess log-return**.
 
 Per ogni Event Candidate, su una griglia di orizzonti candidati
-(`horizon_grid`, default 1–48 barre):
+(`horizon_grid`, `AlphaConfig.horizon_grid` di default `UNSET` e
+session-resolved per classe di timeframe dal resolver di sessione —
+`(1,2,4,8,12,24)` su 1H/4H, `(1,2,3,5,7,10)` su 1D e oltre, `(1,2,5,10,20,50)`
+sotto l'ora; in standalone, senza sessione, `AlphaConfig.resolved()` ricade
+su `(1,2,4,8,12,24)`):
 
 ```python
 # Forward return in LOG space: r_h(t) = log(close[t+h] / close[t])
@@ -482,10 +486,16 @@ win_rate / base_rate / lift   a (h*, sell_pct*, direction*) su OOS
 `passed = true` quando:
 
 ```
-n_activations_oos >= min_oos_activations   (default 10)
 mean_advantage_oos > 0                     (il segno si conferma)
 p_value_oos < oos_max_p                    (default 0.10)
 ```
+
+Nessun termine di conteggio attivazioni entra nella condizione: il p-value
+codifica già la numerosità campionaria, e `PromotionThresholds` non ha un
+campo `min_oos_activations`. Una soglia non parametrizzabile di 10 attivazioni
+(`_MIN_STATS_CASES`) esiste comunque, ma è una diagnostica separata e non
+bloccante (`"OOS sample too small …"` in `diagnostics`), non un termine di
+`passed`.
 
 La conferma OOS **non è un gate di promozione**: una conferma mancata viene
 registrata come diagnostica non bloccante (`OOS weak …` in `diagnostics`) e pesa
@@ -630,8 +640,13 @@ for i in range(window_bars, len(df)):
 ### 3.4 Soglia di ammissione
 
 Gli Event Candidate la cui feature sottostante ha `|IC| < 0.02` e `p > 0.05`
-vengono scartati — la relazione tra feature e forward return è troppo debole
-per giustificare la valutazione successiva.
+sono marcati `ic.admitted=False` — la relazione tra feature e forward return è
+troppo debole per essere considerata di per sé sufficiente. Questo non è un
+gate: non blocca il candidato, ma aggiunge una diagnostica non bloccante
+(`"IC weak …"`) al contratto. Il candidato prosegue comunque su Win Rate
+Analysis, Regime Sensitivity e conferma OOS, ed è promuovibile come ogni
+altro se la direzione risulta determinata — la soglia IC pesa solo sul voto
+A–D finale, non sull'ammissione allo step successivo.
 
 ---
 
@@ -734,7 +749,9 @@ violazione viene scritta in `diagnostics` sul contratto:
 lift      >= 0.08    (almeno +8pp sopra il base rate)
 cohens_d  >= 0.15    (effect size almeno piccolo)
 p_value   <  0.05    (significatività statistica / FDR)
-n_activations >= 30  (base statistica minima)
+n_activations >= 10  (base statistica minima — sotto questa soglia il t-test
+                      è numericamente inaffidabile a prescindere dal p-value;
+                      stessa soglia applicata anche lato OOS)
 ```
 
 Tutti i contratti con direzione determinata (long/short) passano al Modulo 3:
@@ -989,6 +1006,8 @@ consistency_gate: PASS
 
 ```
 Griglia orizzonti: 1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48
+  (griglia illustrativa custom di questo esempio, non il default
+  session-resolved attuale per 1H — vedi §1.2)
 Δ_h = μ_cond_h − μ_base_h  (excess log-return);  z_h = Δ_h / σ_null,h  (null a rotazione)
 score(h) = |z_h|  massimo a h = 3  →  h* = 3
 Δ_3 = +0.50%  →  direction = long   (segno dell'excess, drift escluso)

@@ -272,9 +272,11 @@ market_context:
 | `ema_proxy.window_unit` | `"day"` | Unità di `window_estimation`/`window_stride`: `"day"` (coerente tra TF) o `"bar"` (per-TF) |
 | `ema_proxy.window_estimation` | `168` | Ampiezza finestra di stima — giorni se `"day"`, barre se `"bar"` |
 | `ema_proxy.window_stride` | `1` | Passo tra le stime, stessa unità di `window_estimation` |
-| `ema_proxy.bar_hours` | `null` | Durata candela (h) per `"day"`; inferita dall'indice se assente |
+| `ema_proxy.bar_hours` | `UNSET` | Durata candela (h) per `"day"`. Session-resolved dal `timeframe` dichiarato quando si passa per `forgedge.forge()` (F5, #179) — evita che Market Context re-inferisca da solo la durata candela quando altri moduli la conoscono già. In standalone (nessuna sessione) resta non impostata e viene inferita dall'indice datetime della KPI Table |
 | `ema_proxy.short_period` | `9` | EMA veloce — fallback se l'analisi non converge |
 | `ema_proxy.long_period` | `25` | EMA lenta — fallback se l'analisi non converge |
+| `ema_proxy.fast_ratio` | `1/2.3` | EMA veloce come frazione della lenta, usata nella derivazione automatica (`long_period * fast_ratio`) |
+| `ema_proxy.min_window_estimates` | `10` | Numero minimo di stime locali dell'half-life convergenti richiesto perché l'auto-derivazione sia considerata affidabile; sotto questa soglia si ricade su `short_period`/`long_period` |
 | `ema_proxy.threshold_mode` | `"fixed"` | Modo di taglio: `"fixed"` (soglie assolute) o `"balanced"` (quantili) |
 | `ema_proxy.threshold_basis` | `"global"` | Stima soglie `"balanced"`: `"global"` (esatto, look-ahead) o `"expanding"` (causale) |
 | `ema_proxy.threshold_warmup` | `200` | Barre iniziali su soglie fisse con `"expanding"` |
@@ -295,9 +297,27 @@ regime          → label categorica ordinata per ogni barra
 
 regime_stable   → True se il regime è invariato nelle ultime N barre consecutive
                   dtype: bool
-                  default N: 12 (parametro configurabile)
+                  default N: session-resolved — 12 ore di regime invariato,
+                  convertite alla durata candela della sessione e con un
+                  minimo di 2 barre (12 su 1H, 3 su 4H, 2 su 1D, 48 su 15m)
                   uso: escludere barre di transizione dall'analisi di regime
 ```
+
+`stable_window` (`market_context.stable_window`) di default è `UNSET`: dentro
+`forgedge.forge()` viene risolto dal resolver di sessione come 12 **ore** di
+regime invariato, convertite alla durata candela dichiarata (`timeframe`) e
+troncate a un minimo di 2 barre — 12 barre su 1H (invariato), 3 su 4H, 2 su
+1D, 48 su 15m (F5, issue #179). Il floor a 2 barre esiste perché
+`stable_window=1` marcherebbe ogni barra come stabile, svuotando di senso il
+campo. Prima di questa risoluzione il default era un flat `12` barre, che su
+candele 1D chiedeva dodici *giorni* di regime invariato e lasciava stabile
+solo il 31,9% delle barre di un fixture di riferimento, contro l'85,7% al
+valore convertito.
+
+In uso standalone (nessuna sessione, nessun `timeframe` dichiarato) il
+sentinel ricade sulla calibrazione oraria: `stable_window=12` barre, cioè
+esattamente il valore che il campo aveva prima di diventare
+session-resolved.
 
 Entrambe le colonne fanno parte del contratto dell'interfaccia:
 ogni implementazione futura di `RegimeClassifier` deve produrle.
@@ -491,10 +511,10 @@ FUNCTION _resolve_ema_windows(prices):
     // half-life OU locale, stimata su finestre rolling (robusta al drift)
     hl_bars = median( rolling_halflife(prices, estimation_window_bars) )
 
-    SE l'half-life converge (abbastanza finestre mean-reverting):
-        long_period  = round(hl_bars)            // EMA lenta ≈ half-life
-        short_period = round(hl_bars * 1/2.3)    // EMA veloce ≈ half-life / 2.3
-        source = "hurst_ou"
+    SE l'half-life converge (almeno min_window_estimates finestre mean-reverting):
+        long_period  = round(hl_bars)                       // EMA lenta ≈ half-life
+        short_period = round(hl_bars * fast_ratio)           // EMA veloce ≈ half-life / 2.3
+        source = "hurst_ou"                                  // fast_ratio default 1/2.3
     ALTRIMENTI:
         long_period  = 25   // fallback
         short_period = 9    // fallback

@@ -91,14 +91,22 @@ riceve il pool aggregato di tutte le regole validate.
 # FORGE separa il CSV per ticker prima di avviare la pipeline
 tickers = df['ticker'].unique()   # es. ['ADAUSDC', 'SOLUSDC', 'BTCUSDC']
 
-all_validated_rules = []
+forge_results = {}
 for ticker in tickers:
     ticker_df = df[df['ticker'] == ticker].copy()
-    rules = run_forge_pipeline(ticker_df, config)
-    all_validated_rules.extend(rules)
+    forge_results[ticker] = run_forge_pipeline(ticker_df, config)  # ForgeResult
 
-rule_registry = RuleRegistry(all_validated_rules)
+# Entry point consigliato: costruisce submissions + frames dai ForgeResult
+rule_registry = RuleRegistry.from_forge_results(forge_results).run()
 ```
+
+`RuleRegistry` non accetta una lista piatta di regole: il costruttore
+diretto richiede `RuleRegistry(submissions, frames, config=None)`, dove
+`submissions` è una lista di `RuleSubmission` (ticker + `RuleDiscoveryResponse`
++ `EventCandidate`) e `frames` è un dizionario `{ticker: kpi_table}` — serve
+per ricalcolare le soglie nel backtest cross-ticker (Step 4). Quando si parte
+già da un `ForgeResult` per ticker, `RuleRegistry.from_forge_results(...)`
+costruisce entrambi automaticamente.
 
 ### Perché per ticker e non tutto insieme
 
@@ -156,6 +164,7 @@ RuleDocument = {
     "expression":       str,    # es. "close_rsi_25 < 30.5 AND pr_96 < 0.10"
     "source_ticker":    str,    # ticker su cui la regola è stata estratta
     "source_alpha_id":  str,    # tracciabilità verso Alpha Discovery
+    "verdict":          str,    # "EDGE" | "PARTIAL-EDGE" (verdetto di Rule Discovery)
 
     # Array paralleli indicizzati sulla KPI Table del ticker sorgente
     # Lunghezza = n. di trade effettivi (barre con fill confermato)
@@ -165,11 +174,13 @@ RuleDocument = {
 
     # Parametri operativi
     "params": {
-        "buy_drop_pct": float,
-        "sell_pct":     float,
-        "target_h":     int,
-        "entry_mode":   str,    # "limit" | "market"
-        "fee":          float,
+        "direction":      str,    # "long" | "short"
+        "entry_mode":     str,    # "limit" | "market"
+        "buy_drop_pct":   float,
+        "buy_delay_bar":  int,
+        "sell_pct":       float,
+        "target_h":       int,
+        "fee":            float,
     },
 
     # Statistiche aggregate sul ticker sorgente (da Rule Discovery)
@@ -198,13 +209,19 @@ RuleDocument = {
 
     # Campi popolati da Rule Registry — Step 4 (inizialmente vuoto)
     "cross_ticker": {
-        # Un sotto-documento per ogni ticker diverso da source_ticker
-        # es. "SOLUSDC": { "pf": 2.41, "wr": 0.79, ... }
-        # ticker_name: CrossTickerResult
+        # Un sotto-documento (CrossTickerResult) per ogni ticker diverso
+        # da source_ticker. Campi: ticker, expression_adapted, pf, win_rate,
+        # total_trades, zero_months, verdict, bar.
+        # "bar" è la soglia PF che QUESTA regola doveva superare su QUESTO
+        # ticker (dipende dal pf_home della regola — vedi Step 4) — registrata
+        # per rendere leggibile perché un ticker è FAIL: soglia non raggiunta
+        # in assoluto, o edge non trasferito a sufficienza.
+        # es. "SOLUSDC": { "pf": 2.41, "wr": 0.79, "bar": 1.5, "verdict": "PASS" }
     },
     "cross_ticker_score":  int   | None,   # n. ticker su cui PF >= soglia
     "cross_ticker_total":  int   | None,   # n. ticker testati
     "is_generic":          bool  | None,   # True se cross_score / total >= threshold
+    "classification":      str   | None,   # "GENERIC" | "PARTIAL" | "SPECIFIC" | "ISOLATED"
 }
 ```
 
@@ -386,6 +403,12 @@ PER OGNI regola R nel registro:
             params     = R.params       // buy_drop, sell_pct, target_h, fee
         )
 
+        // Calcola la soglia (bar) che QUESTA regola deve superare su T:
+        // il maggiore tra il floor assoluto e la frazione di ritenzione
+        // del PF sul ticker sorgente (pf_home) — vedi nota sotto.
+        pf_home = R.stats.pf
+        bar = max(CROSS_PF_THRESHOLD, MIN_CROSS_PF_RETENTION * pf_home)
+
         // Salva il risultato nel documento
         R.cross_ticker[T] = {
             "expression_adapted": expression_T,
@@ -393,7 +416,8 @@ PER OGNI regola R nel registro:
             "win_rate":     result.win_rate,
             "total_trades": result.total_trades,
             "zero_months":  result.zero_months,
-            "verdict":      "PASS" if result.pf >= CROSS_PF_THRESHOLD else "FAIL"
+            "bar":          bar,
+            "verdict":      "PASS" if result.pf >= bar else "FAIL"
         }
 
     // Calcola lo score aggregato
@@ -412,9 +436,41 @@ PER OGNI regola R nel registro:
 | 1/3 (33%) | **SPECIFIC** | La regola funziona solo sul ticker sorgente |
 | 0/3 (0%) | **ISOLATED** | La regola non si generalizza |
 
-> **Nota implementativa:** le soglie `CROSS_PF_THRESHOLD` e
-> `GENERIC_RATIO_THRESHOLD` sono parametri configurabili.
-> I valori di default verranno calibrati in fase di implementazione.
+### Criterio di PASS — due condizioni, non una
+
+Il verdetto `PASS` non dipende da una singola soglia assoluta: dipende
+da **due** condizioni, entrambe necessarie:
+
+```
+PASS ⟺ pf_other >= CROSS_PF_THRESHOLD              (è negoziabile sul ticker target)
+        AND pf_other >= MIN_CROSS_PF_RETENTION * pf_home   (l'edge si trasferisce davvero)
+```
+
+Una sola soglia assoluta confonderebbe due domande diverse — "la regola
+è buona anche altrove?" e "la regola *trasferisce* il suo edge?" — che
+possono divergere in entrambe le direzioni: una regola che trasferisce
+perfettamente un PF modesto (1.6 → 1.6) fallirebbe un bar assoluto di 2.0,
+mentre una regola che perde un terzo del suo edge (3.0 → 2.05) lo
+supererebbe. Il floor assoluto da solo darebbe alle regole più deboli
+il test di genericità più facile; il floor relativo da solo
+promuoverebbe a "generica" una regola che ha perso un terzo del suo
+vantaggio. Le due condizioni insieme misurano il trasferimento — non
+la qualità, che resta compito del verdetto di Rule Discovery e del grade.
+
+`CROSS_PF_THRESHOLD` e `MIN_CROSS_PF_RETENTION` sono parametri
+configurabili con default risolti e già in uso (non più "TBD"):
+
+- `cross_pf_threshold`: risolto a sessione dal `SelectionCriteria.partial_min_profit_factor`
+  — la stessa soglia che ha ammesso la regola in patria è quella che deve
+  superare altrove. Fallback `1.5` quando non risolvibile.
+- `min_cross_pf_retention`: `0.8` — la regola deve conservare almeno l'80%
+  del proprio PF sul ticker sorgente.
+- `generic_ratio_threshold`: `2/3` esatto (non `0.67` arrotondato), così
+  che una regola che passa su 2 ticker su 3 legga correttamente `PARTIAL`.
+
+Il valore restituito da questo calcolo (`bar`) viene salvato in ogni
+sotto-documento `cross_ticker[T]` — vedi Sezione 4 — proprio perché varia
+per regola (dipende dal `pf_home` di quella specifica regola).
 
 ---
 
@@ -452,6 +508,7 @@ IDENTIFICAZIONE
   source_ticker         es. "ADAUSDC"
   grade                 es. "B+"
   source_alpha_id       tracciabilità
+  verdict               "EDGE" | "PARTIAL-EDGE" (verdetto di Rule Discovery)
 
 STATISTICHE SUL TICKER SORGENTE
   pf                    Profit Factor
@@ -463,6 +520,7 @@ STATISTICHE SUL TICKER SORGENTE
 
 PARAMETRI OPERATIVI
   entry_mode            "limit" | "market"
+  direction             "long" | "short"
   buy_drop_pct          es. 0.010
   sell_pct              es. 0.040
   target_h              es. 24
@@ -483,6 +541,8 @@ CROSS-TICKER (Step 4 — una colonna per ticker per ogni metrica)
   wr_{TICKER}           es. wr_SOLUSDC, wr_BTCUSDC
   trades_{TICKER}       es. trades_SOLUSDC, trades_BTCUSDC
   verdict_{TICKER}      "PASS" | "FAIL" per ogni ticker
+  cross_pf_bar          soglia PF richiesta per PASS (una colonna sola —
+                        dipende dal pf_home della regola, non dal ticker)
   cross_ticker_score    n. ticker con verdetto PASS
   cross_ticker_total    n. ticker testati
   is_generic            True | False
@@ -495,12 +555,14 @@ rule_id        | RULE_ADA_01
 expression     | close_rsi_25 < 30.5 AND pr_close_rsi_25_96 < 0.10
 source_ticker  | ADAUSDC
 grade          | B+
+verdict        | EDGE
 pf             | 3.17
 win_rate       | 0.814
 total_trades   | 102
 zero_months    | 0
 dsr            | 1.31
 entry_mode     | limit
+direction      | long
 buy_drop_pct   | 0.010
 sell_pct       | 0.040
 target_h       | 24
@@ -518,6 +580,7 @@ pf_BTCUSDC     | 1.89
 wr_BTCUSDC     | 0.714
 trades_BTCUSDC | 61
 verdict_BTCUSDC| FAIL
+cross_pf_bar   | 2.536
 cross_score    | 1
 cross_total    | 2
 is_generic     | False
@@ -703,8 +766,9 @@ report.html:
 | Parametro | Default | Descrizione | Nota implementativa |
 |---|---|---|---|
 | `OVERLAP_THRESHOLD` | TBD | Soglia Jaccard per deduplicazione | Calibrare su dati reali |
-| `CROSS_PF_THRESHOLD` | TBD | PF minimo per verdetto PASS nel cross-ticker | Calibrare su dati reali |
-| `GENERIC_RATIO_THRESHOLD` | TBD | Frazione minima PASS per badge GENERIC | Es. 0.67 = 2/3 ticker |
+| `cross_pf_threshold` | `1.5` (fallback) | PF minimo assoluto per PASS nel cross-ticker — prima metà del criterio | Risolto a sessione da `SelectionCriteria.partial_min_profit_factor`; non più TBD |
+| `min_cross_pf_retention` | `0.8` | Frazione minima del PF sorgente da conservare sul ticker target — seconda metà del criterio | Non più TBD — vedi Sezione 8 |
+| `generic_ratio_threshold` | `2/3` (≈0.667) | Frazione minima PASS per badge GENERIC/PARTIAL | Esatto, non `0.67` arrotondato — non più TBD |
 | `export_format` | `"excel"` | Formato tabella piatta: `"csv"` / `"excel"` | |
 | `export_duplicates` | `True` | Se includere i duplicati nell'export | |
 | `export_non_generic` | `True` | Se includere le regole non-generiche | |

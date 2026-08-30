@@ -214,7 +214,11 @@ soglia `overlap_threshold` (default `0.70`).
 **Definizione di regola più debole.**
 
 La regola più debole è quella con il Profit Factor inferiore sul ticker
-sorgente. In caso di parità, FORGE marca la seconda in ordine di ingestion.
+sorgente — il suo dominante deve avere un PF *strettamente* superiore. In caso
+di parità esatta, nessuna delle due è considerata strettamente più forte
+dell'altra, quindi **nessuna viene marcata**: entrambe restano
+`is_duplicate=False`. Non esiste alcun criterio di spareggio basato
+sull'indice.
 
 **Propagazione a catena.**
 
@@ -291,24 +295,45 @@ Il valore effettivamente richiesto è riportato in `CrossTickerResult.bar`.
 
 #### Classificazione di genericità
 
-Al termine del cross-ticker, ogni regola viene classificata:
-
-| `cross_ticker_score` | `cross_ticker_total` | `is_generic` | `classification` |
-|---|---|---|---|
-| qualsiasi | qualsiasi | — | `ISOLATED` (se `is_duplicate = True`) |
-| `score / total >= generic_ratio_threshold` | — | `True` | `GENERIC` |
-| `0 < score / total < generic_ratio_threshold` | — | `False` | `PARTIAL` |
-| `score = 0` | — | `False` | `SPECIFIC` |
+Al termine del cross-ticker, ogni regola riceve:
 
 - `cross_ticker_score` — numero di ticker target con verdetto `PASS`
 - `cross_ticker_total` — numero totale di ticker target (altri ticker della
   sessione)
+- `is_generic` — `True` quando `cross_ticker_score / cross_ticker_total >=
+  generic_ratio_threshold` (default `2/3`)
+
+Il campo `classification` è un'etichetta *separata*, a quattro valori,
+derivata dallo stesso rapporto (`ratio = cross_ticker_score /
+cross_ticker_total`) — ma con soglie proprie, non semplicemente "`is_generic`
+sì o no". `is_duplicate` non ha alcun ruolo in nessuno dei due campi: la
+deduplicazione (Step 3) e la classificazione cross-ticker (Step 4) sono assi
+indipendenti:
+
+| Etichetta | Condizione (su `ratio`) |
+|---|---|
+| `GENERIC` | `ratio = 1.0` — **sweep completo**: PASS su ogni ticker testato |
+| `PARTIAL` | `generic_ratio_threshold <= ratio < 1.0` |
+| `SPECIFIC` | `0.0 < ratio < generic_ratio_threshold` |
+| `ISOLATED` | `ratio = 0.0`, oppure `cross_ticker_total = 0` |
+
+**`is_generic` e `classification` non sono sinonimi.** `is_generic` chiede
+solo se il rapporto supera `generic_ratio_threshold`; `GENERIC` richiede
+inoltre che il rapporto sia esattamente `1.0`. Una regola che passa esattamente
+2 ticker su 3 ha `ratio = 0.6666...`, che supera la soglia di default `2/3` —
+quindi `is_generic=True` — ma non raggiunge `1.0`, quindi
+`classification="PARTIAL"`. I due campi divergono per ogni regola che supera
+la soglia del rapporto senza fare sweep completo su tutti i ticker: non trattare
+`is_generic=True` come un proxy di `classification == "GENERIC"`.
+
 - `generic_ratio_threshold` — default `2/3` (non `0.67`): con 3 ticker
-  aggiuntivi bastano 2 `PASS` per essere `GENERIC`
+  aggiuntivi bastano 2 `PASS` per soddisfare `is_generic`, ma non per
+  raggiungere `GENERIC`, che richiede tutti e 3
 
 **Sessione a ticker singolo.** Se il registro contiene un solo ticker, non
 esiste nessun "altro ticker" su cui testare. In questo caso Step 4 non produce
-`cross_ticker_results` e ogni regola riceve `classification = "ISOLATED"`.
+`cross_ticker_results` e ogni regola riceve `classification = "ISOLATED"` (e
+`is_generic = None`).
 
 ---
 
@@ -763,10 +788,18 @@ df_all[mask].to_csv("forge_custom.csv", index=False)
   `classification = "ISOLATED"`. Questo non indica una regola debole — solo
   che la generalizzabilità non è misurabile in questa sessione.
 
-- **Ricalibro delle soglie.** Il ricalibro usa la distribuzione IS del ticker
-  target — non la distribuzione live o OOS. Questo è coerente con il principio
-  di Rule Discovery: tutto ciò che riguarda la calibrazione si basa sul periodo
-  in-sample del dataset fornito.
+- **Ricalibro delle soglie usa qualunque frame sia stato fornito al registro.**
+  In Step 4 le soglie assolute vengono mappate su percentili usando la
+  distribuzione completa del DataFrame `frames[ticker_sorgente]` passato a
+  `RuleRegistry` (o `ForgeResult.event_frame`, tramite `from_forge_results`),
+  e quei percentili vengono cercati sulla distribuzione completa di
+  `frames[ticker_target]`. Il registro in sé non ha alcun concetto di split
+  IS/OOS — ricalibra rispetto a qualunque frame riceva. Questo frame è "IS"
+  solo nella misura in cui il `train_ratio` di Event Discovery lo ha già
+  troncato a monte; con il default `train_ratio=1.0`, `event_frame` copre
+  l'intero dataset, non specificamente una porzione in-sample. La
+  distribuzione live (in tempo reale) non viene usata per il ricalibro, ma non
+  bisogna assumere che il registro imponga da solo un confine IS/OOS.
 
 - **Dipendenza da openpyxl.** L'export Excel richiede `openpyxl`. Se non
   installato, usare `export_format="csv"` oppure installare con

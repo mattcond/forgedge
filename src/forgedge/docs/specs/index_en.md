@@ -9,6 +9,15 @@ validation.
 
 ---
 
+> **Looking for a single, complete reference?** The
+> [forgedge manual](../../../../docs/manual-en.md) is a comprehensive,
+> example-verified guide covering installation through production
+> architecture, troubleshooting, an FAQ, and a glossary. It is the recommended
+> starting point; this index and the module specs below go deeper on the
+> internals of each pipeline stage.
+
+---
+
 ## What FORGE is
 
 Systematic trading edge research suffers from three recurring problems:
@@ -166,6 +175,14 @@ produces different thresholds on different assets (`RSI p10 = 30.5` on ADA,
 economic target is derived by Alpha Discovery **per event** on an IS window and
 confirmed on an OOS tail that has taken no part in any prior computation.
 
+**Centralised, validated configuration.** Every `forge()` run resolves its
+per-module configuration through a central `PipelineContext` (`resolver.py`),
+which fills in unset fields and then validates the whole bundle with
+`config_report()`. By default (`strict=True`) a structurally incoherent
+configuration raises `ValueError` **before** the pipeline runs, instead of
+executing to completion and quietly producing a wall of rejected candidates.
+Pass `strict=False` to downgrade these findings to warnings and run anyway.
+
 ---
 
 ## Documentation
@@ -179,5 +196,10 @@ confirmed on an OOS tail that has taken no part in any prior computation.
 | `modulo_2_en.md` | Alpha Discovery: derived target, OOS, AlphaContract |
 | `modulo_3_en.md` | Rule Discovery: backtest, EDGE verdict, walk-forward OOS, reports |
 | `modulo_4_en.md` | Rule Registry: deduplication, cross-ticker, genericity, export |
+| `configuration_en.md` | Complete configuration reference: every dataclass field, type, default, and description |
 
 Italian versions are in the corresponding `*_it.md` files.
+
+Working on this codebase with Claude Code? The `forgedge` skill in
+`.claude/skills/forgedge/` covers the library's API, verdicts, and pipeline
+invariants in a form Claude can use directly.

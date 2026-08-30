@@ -7,8 +7,10 @@ realistico — con fee, fill rate finito, ordini limite e target discreto — e 
 fuori campione?**
 
 L'output è un `RuleDiscoveryResponse` con verdetto `EDGE` / `PARTIAL-EDGE` /
-`NON-EDGE` e, nei primi due casi, una `ValidatedRule` con i parametri operativi
-validati.
+`NON-EDGE` / `INSUFFICIENT-DATA` e, nei primi tre casi, una `ValidatedRule` con
+i parametri operativi validati (`INSUFFICIENT-DATA` mantiene la sua
+`ValidatedRule` per una futura ri-valutazione ma non è negoziabile — vedi
+*Verdetto* più sotto).
 
 ---
 
@@ -56,13 +58,14 @@ EventCandidate corrispondenti (Modulo 1)
         │
         ▼
   RuleDiscoveryResponse
-  ├─ verdict: EDGE | PARTIAL-EDGE | NON-EDGE
-  ├─ validated_rule   (se EDGE o PARTIAL-EDGE)
+  ├─ verdict: EDGE | PARTIAL-EDGE | NON-EDGE | INSUFFICIENT-DATA
+  ├─ validated_rule   (None solo per NON-EDGE)
   ├─ in_sample_summary
   ├─ execution_envelope + excursion (MAE/MFE)
   ├─ walk_forward OOS
   ├─ statistical_validation
-  └─ regime_analysis
+  ├─ regime_analysis
+  └─ entry_optimization   (solo entry_mode="auto")
         │
         ▼
   Rule Registry (non implementato)
@@ -72,6 +75,64 @@ Rule Discovery è **l'unico modulo che usa i prezzi per una simulazione di
 esecuzione**. Non ri-ottimizza le soglie degli eventi né modifica i parametri
 del target derivato: usa l'espressione dell'evento e `derived_target.sell_pct` /
 `derived_target.holding_period_h` come punto di partenza per la grid operativa.
+
+---
+
+## Entry mode: valutazione a due stadi (default `entry_mode="auto"`)
+
+Dal #185, `RuleDiscoveryConfig.entry_mode` ha default `"auto"`, non più
+`"limit"`. Questo cambia cosa *misura* un verdetto, non solo come viene
+eseguito l'entry:
+
+- **Stage 1 (market, autoritativo).** La regola viene backtestata con un
+  entry a mercato — fill all'apertura della barra successiva, fill rate
+  ≈100%. Questo verdetto, e ogni diagnostica walk-forward / statistica /
+  di regime che lo accompagna, è **autoritativo**: lo Stage 2 non può mai
+  trasformare un `NON-EDGE` dello Stage 1 in un edge, può solo scegliere
+  quale meccanismo di entry pubblicare.
+- **Stage 2 (raffinamento a limite, solo su un edge).** Se lo Stage 1 supera
+  `EDGE`/`PARTIAL-EDGE`, uno sweep su `buy_drop_pct` cerca un raffinamento a
+  ordine limite del *solo prezzo di entry* — la meccanica di uscita, il
+  target e il verdetto restano invariati. Il punto limite vincente viene
+  ripetuto out-of-sample sulle stesse finestre di test dello Stage 1 e
+  adottato solo se soddisfa tutte e tre le condizioni seguenti, ciascuna
+  valutata **out-of-sample**:
+  1. `fill_rate >= criteria.min_fill_rate_opt` (default `0.80`) — nessun PF
+     gonfiato da fill rari.
+  2. `opportunity_sharpe >= quello del market` — uno Sharpe scalato sulla
+     *frequenza di trading*, non `StatisticalValidation.sharpe_ratio`: un
+     punto che opera meno spesso deve guadagnare di più per trade per
+     vincere questo confronto.
+  3. `net_gain >= min_net_gain_retention × quello del market` (default
+     `0.5`) — un backstop contro il caso che lo Sharpe non può vedere, una
+     media piccola con una varianza piccola.
+
+  Questo esiste perché il vecchio default `"limit"`-only permetteva a un
+  limite profondo, che si riempie raramente, di gonfiare il profit factor su
+  un sottoinsieme di trade non rappresentativo (il "fill confound") — il
+  verdetto misurava il prezzo di entry anziché il segnale. `"auto"` mantiene
+  entrambe le letture e le separa.
+
+Entrambi i punti operativi, e quale condizione ha bloccato l'adozione, sono
+riportati su `resp.entry_optimization` (un `EntryOptimization`):
+
+```python
+opt = resp.entry_optimization
+opt.selected_entry     # "market" o "limit" — cosa è stato effettivamente pubblicato
+opt.authoritative       # sempre "market" — da dove viene il verdetto
+opt.adopted             # True se il raffinamento a limite è stato adottato
+opt.failed_condition    # "fill" | "sharpe" | "net_gain" | None (adottato, o nessun candidato)
+opt.market_opportunity_sharpe, opt.limit_opportunity_sharpe
+opt.market_summary, opt.limit_summary   # BacktestSummary, out-of-sample
+```
+
+`entry_mode="market"` esegue solo lo Stage 1 — isola l'edge del solo
+segnale; `min_fill_rate` è allora di fatto inerte. `entry_mode="limit"` è il
+comportamento pre-#185: la grid varia `buy_drop_pct` direttamente e l'entry
+a limite funge anche da ottimizzatore del prezzo di entry. È ancora
+pienamente supportato ed è la scelta corretta quando l'ordine limite è
+davvero **la strategia**, e non un raffinamento di esecuzione sopra un
+segnale già valido a mercato.
 
 ---
 
@@ -115,6 +176,13 @@ La grid operativa esplora il prodotto cartesiano di:
 Quando `GridSpec` è vuoto (default), FORGE costruisce automaticamente una grid
 sensata centrata sui valori derivati dal contratto.
 
+> Quanto segue descrive la meccanica **a ordine limite**, usata direttamente
+> sotto `entry_mode="limit"` e dallo Stage 2 del default `entry_mode="auto"`
+> (vedi *Entry mode* sopra). Sotto lo Stage 1 del default `"auto"`, e sotto
+> `entry_mode="market"`, l'entry è invece un fill a mercato all'apertura
+> della barra successiva (fill rate ≈100%); `buy_drop_pct`/`buy_delay_bar`
+> sono inerti in quello stadio.
+
 **Meccanica di esecuzione per ogni configurazione:**
 
 1. Al segnale, viene piazzato un ordine limite a `anchor * (1 - buy_drop_pct)`
@@ -136,12 +204,39 @@ sensata centrata sui valori derivati dal contratto.
 La configurazione viene valutata tramite il composite score `pf_score_tpm` che
 bilancia Profit Factor, frequenza di trading e consistenza mensile.
 
-**Early elimination (Step 2.3):** configurazioni con < 20 trade, PF < 1.0, o
-`fill_rate < min_fill_rate` vengono scartate prima della validazione costosa
-(walk-forward + diagnostiche). Con `SelectionCriteria(early_elimination=False)`
-la pipeline gira interamente anche per queste configurazioni: il verdetto rimane
-`NON-EDGE`, ma walk-forward e diagnostiche sono popolati — utile per report
-uniformi o per analizzare il comportamento OOS di regole deboli.
+**Early elimination (Step 2.3):** le configurazioni vengono scartate prima
+della validazione costosa (walk-forward + diagnostiche) quando vale una
+delle seguenti:
+
+- trade totali sotto una **soglia dinamica**, `max(10, n_months × min_tpm)`
+  — non un conteggio fisso; scala con l'estensione dell'IS e con
+  `SelectionCriteria.min_tpm` (spec RD-04), così un periodo IS breve non
+  viene penalizzato e uno lungo non viene sotto-richiesto
+- PF < 1.0
+- `fill_rate < min_fill_rate`
+
+Con `SelectionCriteria(early_elimination=False)` la pipeline gira interamente
+anche per queste configurazioni: il verdetto rimane `NON-EDGE`, ma
+walk-forward e diagnostiche sono popolati — utile per report uniformi o per
+analizzare il comportamento OOS di regole deboli.
+
+> **Fix issue #217 — la prima finestra di train del walk-forward usa invece
+> una soglia fissa.** Con `selection_mode="walk_forward"` (default), un
+> pre-screen di early elimination gira anche sulla sola prima finestra di
+> train del walk-forward, prima del walk-forward vero e proprio. La
+> lunghezza di quella finestra (`min_train_months`) è già dimensionata dal
+> resolver, con un margine di Poisson al 95%, per raggiungere esattamente la
+> soglia assoluta (10 trade) a `criteria.min_tpm` — ri-derivare
+> `n_months × min_tpm` su quella stessa finestra breve pone una domanda
+> *più severa* e non correlata, e collassa a una soglia irraggiungibile non
+> appena `min_tpm` è abbastanza alto da far arrotondare la finestra al suo
+> minimo di 1 mese (es. 1 mese × 35.2 tpm = 35 trade richiesti, quando la
+> finestra era dimensionata solo per dimostrarne 10). Questo eliminava
+> erroneamente contratti legittimi con `min_tpm` alto. La correzione: quel
+> pre-screen specifico usa la soglia assoluta fissa (`10`) anziché quella
+> dinamica — cambia solo lo screen sulla prima finestra di train; ogni altro
+> uso della soglia dinamica (la tabella sopra, lo screen sull'intero
+> intervallo) non è interessato.
 
 ---
 
@@ -150,6 +245,26 @@ uniformi o per analizzare il comportamento OOS di regole deboli.
 La configurazione migliore è quella con `pf_score_tpm` massimo tra quelle che
 superano le soglie di `SelectionCriteria`. Se nessuna configurazione è
 selezionabile, il verdetto è `NON-EDGE`.
+
+**Dove avviene la selezione (`RuleDiscoveryConfig.selection_mode`).** Per
+default (`selection_mode="walk_forward"`), questo screening — e ogni
+metrica "IS" citata altrove in questo documento (`in_sample_summary`, lo
+screen di early elimination dello Step 2.3, la validazione statistica dello
+Step 4, il breakdown per regime dello Step 5) — viene calcolata solo sulla
+**selection span**, `[inizio, fine dell'ultima finestra di train)`: le
+finestre di train del walk-forward. Nessuna metrica che alimenta il
+verdetto o la `ValidatedRule` pubblicata legge mai l'ultima finestra di test
+del walk-forward. Il punto operativo pubblicato viene scelto tra i vincitori
+per-split di train secondo `wf_param_policy`: `"last"` (default) — il
+vincitore della finestra di train più recente, cioè cosa negozieresti al
+prossimo giro; `"consensus"` — il set di parametri più frequente tra gli
+split, a parità si preferisce il più recente. `selection_mode="full_sample"`
+torna al comportamento legacy — grid screening e ogni metrica IS calcolati
+sull'intera tabella, sebbene il walk-forward continui a determinare il
+verdetto, quindi i parametri pubblicati sono stati esposti alle sue stesse
+finestre di test. `"walk_forward"` ricade su `"full_sample"` (con una nota
+sulla response) quando l'estensione dei dati è troppo breve anche per un
+solo split di walk-forward.
 
 ---
 
@@ -163,6 +278,7 @@ Sulla configurazione selezionata, sull'IS:
 | `ttest_expectancy_t/p` | t-test expectancy vs zero |
 | `sharpe_ratio` | Sharpe annualizzato |
 | `deflated_sharpe` | Sharpe deflato per n_trials (penalizza data snooping) |
+| `n_effective` | Sample size effettivo, `total_trades / mean_concurrent_positions` (#168/#177) — uguale al conteggio dei trade quando non c'è overlap. I trade che si sovrappongono condividono lo stesso percorso di prezzo e non sono osservazioni indipendenti, quindi è questo — non il conteggio nominale dei trade — a essere consumato dall'errore standard/gradi di libertà dietro `ttest_*_p` e dall'`n_obs` dietro `deflated_sharpe`; le stime puntuali (media, dispersione) usano comunque ogni trade. `nan` quando non è misurabile, nel qual caso viene usato il conteggio nominale |
 | `temporal_stability` | `"PASS"` / `"WARN"` / `"FAIL"`: PF prima metà vs seconda |
 | `n_trials_tested` | Numero di configurazioni testate nella grid |
 
@@ -191,7 +307,7 @@ performance sui trade IS: PF, win rate, expectancy, net gain cumulato.
 
 ---
 
-## Verdetto: EDGE / PARTIAL-EDGE / NON-EDGE
+## Verdetto: EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA
 
 ### Gate `NON-EDGE` (hard — esclusione immediata)
 
@@ -210,18 +326,46 @@ Se uno qualsiasi è violato: `NON-EDGE`.
 |---|---|
 | PF IS ≥ `min_profit_factor` (2.0) | — |
 | Win rate IS ≥ `min_win_rate` (0.55) | — |
-| `zero_months` ≤ `max_zero_months_edge` (1) | — |
+| `active_months / n_months` ≥ `min_active_month_rate` (0.80) | — |
 | DSR ≥ `min_dsr` (1.0) | — |
 | `temporal_stability` ≠ `"FAIL"` | — |
 | `dependency_score` ≤ `max_regime_dependency` (0.30) | — |
 | OOS consistency ≥ 0.50 | — |
+| `AlphaContract.rotation_p` ≤ `max_rotation_p` (0.05), se annotato | — |
 
 Se tutti soddisfatti: `EDGE`. Se solo i gate NON-EDGE sono soddisfatti ma non
 tutti i gate EDGE: `PARTIAL-EDGE`.
 
+Il tasso `active_months`/`n_months` sostituisce un tetto fisso su
+`zero_months` (campo rimosso): un tasso è timeframe-agnostico, un conteggio
+fisso di mesi vuoti tollerati no — su dati 1H (tpm ≫ 1) il tasso attivo sta
+vicino a 1.0 senza alcuna calibrazione speciale, mentre su dati 1D
+(tpm ~ 1.5–4) un processo di Poisson con dispersione fino a `max_dispersion`
+produce naturalmente un tasso attivo nell'intervallo 0.75–0.95, che il
+default `0.80` accomoda correttamente.
+
+### `INSUFFICIENT-DATA` (downgrade power-gated, §3.2)
+
+Quando `SelectionCriteria.power_gate` è `True` (default), un verdetto che
+sarebbe altrimenti `EDGE`/`PARTIAL-EDGE` viene degradato a
+`INSUFFICIENT-DATA` quando l'evidenza OOS **pooled** del walk-forward non può
+sostenerlo: nessun walk-forward è stato possibile, il conteggio di trade OOS
+pooled su tutte le finestre di test è sotto `min_oos_trades` (default `10`),
+oppure l'effetto minimo rilevabile del campione OOS pooled supera
+l'expectancy in-sample dichiarata (l'OOS non potrebbe confermare un effetto
+di quella dimensione anche se fosse reale). La valutazione legge solo il
+ledger concatenato delle finestre di test — mai i conteggi per singola
+finestra, dato che le finestre di walk-forward sono corte per design e non
+vengono gate-ate individualmente. I verdetti `NON-EDGE` non vengono mai
+salvati da questo meccanismo — è un verdetto che sarebbe stato
+*positivo* a essere degradato, mai uno negativo, dato che la conseguenza
+operativa ("non tradare") è comunque la stessa. `INSUFFICIENT-DATA` mantiene
+la sua `validated_rule` per una futura ri-valutazione quando ci saranno più
+dati, ma `resp.is_edge` è `False` e non raggiunge mai il Rule Registry.
+
 ```python
-resp.verdict         # "EDGE" | "PARTIAL-EDGE" | "NON-EDGE"
-resp.is_edge         # True se EDGE o PARTIAL-EDGE
+resp.verdict         # "EDGE" | "PARTIAL-EDGE" | "NON-EDGE" | "INSUFFICIENT-DATA"
+resp.is_edge         # True se EDGE o PARTIAL-EDGE (INSUFFICIENT-DATA non è negoziabile)
 resp.rejection_reasons  # gate falliti (lista vuota se EDGE)
 ```
 
@@ -272,12 +416,12 @@ print(f"MFE medio: {ex.mfe_mean:.4f}, ha raggiunto target: {ex.mfe_reached_targe
 ```python
 resp = rd.run()
 
-resp.verdict             # str: "EDGE" | "PARTIAL-EDGE" | "NON-EDGE"
+resp.verdict             # str: "EDGE" | "PARTIAL-EDGE" | "NON-EDGE" | "INSUFFICIENT-DATA"
 resp.is_edge             # bool: True se EDGE o PARTIAL-EDGE
 resp.alpha_id            # str: ID del contratto sorgente
 resp.asset, resp.timeframe  # str
 
-# Regola validata (None se NON-EDGE)
+# Regola validata (None solo per NON-EDGE)
 resp.validated_rule.expression       # espressione booleana
 resp.validated_rule.params           # BacktestParams con la configurazione ottimale
 resp.validated_rule.event_candidate_id
@@ -304,12 +448,18 @@ resp.walk_forward.oos_excursion        # ExcursionStats OOS
 # Validazione statistica
 resp.statistical_validation.deflated_sharpe
 resp.statistical_validation.ttest_expectancy_p
+resp.statistical_validation.n_effective         # sample size effettivo (#168/#177)
 resp.statistical_validation.temporal_stability  # "PASS"/"WARN"/"FAIL"
 
 # Regime
 resp.regime_analysis.dependency_score
 resp.regime_analysis.avoid_in          # list[str] regimi da evitare
 resp.regime_analysis.per_regime        # list[dict]
+
+# Valutazione entry-mode (solo entry_mode="auto" — vedi "Entry mode" sopra)
+resp.entry_optimization.selected_entry     # "market" | "limit" | None
+resp.entry_optimization.adopted            # bool
+resp.entry_optimization.failed_condition   # "fill" | "sharpe" | "net_gain" | None
 
 # Audit
 resp.rejection_reasons   # list[str]
@@ -318,6 +468,14 @@ resp.grid_results        # list[GridResult]
 ```
 
 ### `BacktestSummary` — campi completi
+
+`run_backtest` apre una posizione su ogni barra attiva, senza controllo dello
+stato flat — una policy deliberata e capital-permitting (l'economia è
+riproducibile in produzione dato abbastanza capitale per finanziare le
+posizioni concorrenti), ma fino all'issue #168 non c'era un modo supportato
+per sapere quanto capitale serve. I tre campi di concorrenza sotto
+rispondono a questo; il trade ledger (`return_trades=True`) porta anche un
+`episode_id` per riga quando servono a livello di singolo trade.
 
 | Campo | Descrizione |
 |---|---|
@@ -337,6 +495,9 @@ resp.grid_results        # list[GridResult]
 | `zero_months` | `n_months - active_months` |
 | `tpm_mu`, `tpm_sigma` | Media e dev. std. trade/mese |
 | `c_norm` | Regolarità mensile: `min(1, 1 / max(indice_di_dispersione, 1))`. Scale-free — un processo di Poisson prende 1 a *qualunque* tasso, e solo la varianza in eccesso rispetto al Poisson viene penalizzata (#178). |
+| `n_episodes` | *Episodi* di attivazione dietro i trade — barre attive consecutive (con gap collegati) contate come un unico evento. Risponde a "quanto spesso spara questo segnale" (#168) |
+| `mean_concurrent_positions` | Posizioni aperte medie sulle barre in cui almeno una è aperta. Risponde a "quando questa regola funziona, quante posizioni sto finanziando" — `total_trades / mean_concurrent_positions` è la dimensione campionaria che l'overlap effettivamente supporta (#168) |
+| `max_concurrent_positions` | Picco di posizioni concorrenti aperte — decide se la regola è dispiegabile su un dato conto (#168) |
 | `pf_score`, `pf_score_tpm` | Score composito: `pf × sigmoid(numero di trade)` e `pf × c_norm` |
 | `exp_score_tpm` | Stessa penalità di regolarità applicata all'expectancy: `expectancy × c_norm` |
 | `sharpe_raw` | Sharpe grezzo (non annualizzato) |
@@ -444,8 +605,10 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `n_splits` | `4` | Numero di finestre test OOS |
 | `train_span_months` | `None` | Mesi di train (None = anchored, cresce) |
 | `test_span_months` | `None` | Mesi di test (None = divisi ugualmente) |
-| `min_train_months` | `6` | Train minimo prima della prima finestra test |
+| `min_train_months` | `6` *(risolto dalla sessione)* | Train minimo prima della prima finestra test — dimensionato da `criteria.min_tpm` con un margine di Poisson al 95% per raggiungere `_MIN_TRADES_ABS` (10) trade |
 | `reoptimise` | `True` | Re-ottimizza la grid su ogni train window |
+| `purge_bars` | `None` *(auto)* | Larghezza di purge, in barre, alla fine di ogni train window — le entrate aperte lì potrebbero riempirsi/uscire dentro la finestra di test adiacente, facendo trapelare la selezione di train nei prezzi di test. `None` (default) dimensiona automaticamente in base al `target_h` più grande della grid risolta più il delay di fill; `0` disabilita il purge |
+| `embargo_bars` | `0` *(risolto dalla sessione)* | Quarantena extra all'inizio di ogni finestra test, in barre — risolto dalla sessione a partire da `AlphaConfig.embargo_bars` (stessa policy "quanta correlazione seriale mettere in quarantena dopo un confine", applicata al confine di fold anziché allo split IS/OOS di sessione); un valore esplicito qui prevale comunque |
 
 ### `SelectionCriteria`
 
@@ -455,13 +618,18 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `min_win_rate` | `0.55` | Win rate minimo (0–1) |
 | `min_tpm` | `2.0` | Trade/mese minimi — definisce anche la soglia dinamica di trade `max(10, n_months × min_tpm)` |
 | `min_pf_score_tpm` | `0.30` | Score composito minimo |
-| `min_fill_rate` | `0.40` | Fill rate minimo |
+| `min_fill_rate` | `0.40` | Fill rate minimo. Inerte sotto il default `entry_mode="auto"` (lo Stage 1 è un entry a mercato, fill ≈100%) — significativo sotto `entry_mode="limit"` |
+| `min_fill_rate_opt` | `0.80` | Soglia di fill rate per lo stadio di ottimizzazione limite di `entry_mode="auto"` — la soglia di fill che vincola davvero per default (vedi *Entry mode* sopra) |
+| `min_net_gain_retention` | `0.5` *(risolto dalla sessione)* | Frazione del net gain OOS del punto market che il punto limite deve mantenere per essere adottato sotto `entry_mode="auto"` — la terza e più permissiva condizione di adozione (backstop per uno Sharpe con media e varianza minuscole) |
+| `min_sell_pct` | `0.005` *(risolto dalla sessione da `AlphaConfig.mfe_floor`)* | Floor operativo sul take-profit derivato dal target del contratto, così un target irraggiungibile intrabar non viene mai pubblicato |
 | `partial_min_profit_factor` | `1.5` | PF minimo per PARTIAL-EDGE |
-| `max_zero_months_edge` | `1` | Mesi zero massimi per EDGE |
-| `max_zero_months_partial` | `4` | Mesi zero massimi per PARTIAL-EDGE |
+| `min_active_month_rate` | `0.80` | Frazione minima di mesi IS con ≥1 trade per un EDGE pieno (`active_months / n_months >= min_active_month_rate`) — sostituto rate-based, timeframe-agnostico dei tetti fissi rimossi `max_zero_months_edge`/`max_zero_months_partial` |
 | `max_regime_dependency` | `0.30` | Score dipendenza regime massimo per EDGE |
 | `min_dsr` | `1.0` | Deflated Sharpe minimo per EDGE |
-| `max_ttest_p` | `0.05` | p-value massimo t-test expectancy |
+| `max_ttest_p` | `0.05` *(risolto dalla sessione da `PipelineContext.alpha`)* | p-value massimo t-test expectancy — l'unico gate hard per-ipotesi della pipeline |
+| `max_rotation_p` | `0.05` *(risolto dalla sessione da `PipelineContext.alpha`)* | p-value massimo della rotation-null a livello di ricerca (`AlphaContract.rotation_p`) per un EDGE pieno — limita a PARTIAL-EDGE le regole che hanno solo vinto la lotteria del multiple-testing. Inerte quando il contratto non porta annotazione di rotazione |
+| `power_gate` | `True` | Se `True`, degrada un `EDGE`/`PARTIAL-EDGE` che sarebbe tale a `INSUFFICIENT-DATA` se l'evidenza OOS pooled non può sostenerlo (vedi *Verdetto* sopra) |
+| `min_oos_trades` | `10` | Trade di test walk-forward pooled minimi (su tutte le finestre di test) per un verdetto positivo con fiducia; sotto questa soglia, `INSUFFICIENT-DATA` quando `power_gate=True` |
 | `early_elimination` | `True` | Se `True`, regole che falliscono lo screen rapido (Step 2.3) vengono rifiutate prima di walk-forward e diagnostiche; se `False`, la pipeline gira per intero — il verdetto rimane `NON-EDGE` ma con tutti i diagnostici popolati |
 
 ### `RuleDiscoveryConfig`
@@ -473,10 +641,14 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `grid` | `GridSpec()` | Grid operativa (vuota = auto) |
 | `walk_forward` | `RuleWalkForwardConfig()` | Impostazioni walk-forward OOS |
 | `criteria` | `SelectionCriteria()` | Soglie di selezione e verdetto |
+| `entry_mode` | `"auto"` | `"auto"` (due stadi market→raffinamento limite, default dal #185), `"market"` (solo Stage 1) o `"limit"` (comportamento pre-#185 — l'entry a limite funge anche da ottimizzatore del prezzo di entry). Vedi *Entry mode* sopra |
 | `use_contract_target` | `True` | Seed sell_pct/target_h dal contratto |
 | `timestamp_col` | `"open_dt"` | Colonna datetime |
 | `signal_col` | `"__rule_signal__"` | Nome colonna segnale iniettata |
 | `discovery_date` | `None` | Data ISO per la response (None = oggi) |
+| `selection_mode` | `"walk_forward"` | `"walk_forward"` (default) — il punto operativo e le metriche IS vengono solo dalle finestre di train del walk-forward; `"full_sample"` — comportamento legacy, intera tabella. Vedi Step 3 sopra |
+| `wf_param_policy` | `"last"` | Come `selection_mode="walk_forward"` sceglie il punto pubblicato tra i vincitori per-split di train: `"last"` (default) o `"consensus"` |
+| `n_trials_upstream` | `1` | Moltiplicatore incorporato nell'`n_trials` del Deflated Sharpe oltre al conteggio delle celle della grid, per un fattore di ricerca a monte esplicito (es. contratti fratelli che ricevono anch'essi un verdetto). Default `1` = solo celle della grid |
 
 ---
 

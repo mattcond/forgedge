@@ -26,12 +26,13 @@ print(f"Found {len(candidates)} candidates")
 print(ed.summary().sort_values("mean_tpm", ascending=False).head(10))
 ```
 
-The default configuration uses production parameters (`min_act=50`,
-`min_months=8`, etc.). To explore with more permissive thresholds:
+The default configuration uses production parameters (`min_tpm=0.5`,
+`event_counting="episode"`, `min_episodes=10`, `dispersion_margin=1.3`,
+etc. — see Step 4 below). To explore with more permissive thresholds:
 
 ```python
 config = DiscoveryConfig(
-    gate_params=GateParams(min_act=30, min_months=6, max_conc=0.50, min_tpm=1.5),
+    gate_params=GateParams(min_tpm=0.3, min_episodes=5, dispersion_margin=1.6),
     max_and_components=2,
 )
 ed = EventDiscovery(enriched_kpi, config=config)
@@ -139,21 +140,30 @@ The Threshold Catalog distinguishes two families:
 
 **Distributional thresholds** (based on percentiles of the transformed series):
 ```
-p3, p5, p10, p20, p25    (lower tails — extreme conditions on the downside)
-p75, p80, p90, p95, p97  (upper tails — extreme conditions on the upside)
+p3, p5, p8, p10, p15     (lower tails — extreme conditions on the downside)
+p85, p90, p92, p95, p97  (upper tails — extreme conditions on the upside)
 ```
 
 **Theoretical thresholds** (for the zscore transform):
 ```
--2.0, -1.5, -1.0, 0.0, +1.0, +1.5, +2.0
+-2.0, -1.5, -1.0, +1.0, +1.5, +2.0
 ```
 
-For each threshold, two event types are generated:
+For each threshold, a `threshold` event is always generated. A `crossing`
+event is generated too, but **only for the `identity` transform, and only
+on `direction="below"` thresholds** — absolute thresholds are not
+meaningful for rolling pctrank/zscore (re-anchored on every bar) or for
+delta (which oscillates around zero), so crossing events are restricted to
+`identity`. Within `identity`, only the downward crossing formula
+(`series_t < threshold AND series_{t-1} >= threshold`) is defined: there is
+no symmetric high-direction (`above`) crossing in the generated pool at
+all — the use case this targets is oversold/extreme-low detection, and it
+was never given an upside counterpart.
 
-| Type | Description | When active |
-|---|---|---|
-| `threshold` | Persistent state | Every bar where the condition is true |
-| `crossing` | Instantaneous transition | Only the bar where the series crosses the threshold |
+| Type | Description | When active | Generated for |
+|---|---|---|---|
+| `threshold` | Persistent state | Every bar where the condition is true | All transforms, both directions |
+| `crossing` | Instantaneous transition | Only the bar where the series crosses the threshold | `identity` transform, `direction="below"` only |
 
 `crossing` events signal "the signal just entered the zone", useful for entry
 logic. `threshold` events capture "the signal has been in zone for an arbitrary
@@ -172,19 +182,64 @@ values are excluded because they resemble identifiers rather than signals.
 
 The gate filters events based on their temporal activation distribution.
 The rationale: an event with an unstable temporal structure (e.g. all triggers
-concentrated in a single month) is not a reliable candidate for alpha discovery.
+concentrated in a single month, or statistically indistinguishable from a
+random process) is not a reliable candidate for alpha discovery.
 
-An event **passes** if and only if it satisfies **all** 4 criteria:
+The gate runs one of two modes, selected by `GateParams.event_counting`.
+
+**`"episode"` mode (default, issue #134)** — counts *episodes* (maximal runs
+of consecutive activations, bridging gaps up to `episode_gap` bars) instead
+of individual bars. This removes a counting artifact whereby a persistent
+multi-bar state (e.g. a 3–5 bar `RSI < 30` stretch) inflates the monthly
+variance and gets wrongly rejected. An event **passes** if and only if it
+satisfies **all 3** criteria:
 
 | Criterion | Parameter | Default | Rationale |
 |---|---|---|---|
-| Minimum volume | `min_act` | 50 | Reliable statistical estimation requires a sufficient sample |
-| Temporal coverage | `min_months` | 8 | The event must have fired in at least 8 distinct months |
-| Concentration | `max_conc` | 0.40 | No single month may contain > 40% of activations |
-| Average frequency | `min_tpm` | 2.0 | At least 2 activations per month on average |
+| Rate | `min_tpm` | 0.5 | Episodes per month on average, at least this |
+| Statistical power | `min_episodes` | 10 | Absolute floor on the number of episodes, so downstream significance tests (Modules 2/3) have enough sample |
+| Dispersion | `dispersion_margin` | 1.3 | Episode-level Index of Dispersion must not exceed `poisson_floor(n_months) x dispersion_margin` |
+
+The dispersion criterion (issue #205) compares against a *Poisson χ² floor*
+— the largest Index of Dispersion still consistent with a purely random
+process at the event's own rate — rather than a fixed absolute value. This
+guarantees the gate never rejects an event that a random process could
+plausibly have produced, while still letting a preset's own tolerance for
+burstiness (`dispersion_margin`) actually bind: measured across all four
+presets and four timeframes, a fixed `max_dispersion` threshold never bound
+in 12 of 16 combinations because the floor alone was almost always the
+stricter constraint. `max_dispersion` plays no role in `"episode"` mode.
+
+**`"bar"` mode** — the historical, 100% backward-compatible behaviour:
+counts individual activated bars rather than episodes. An event **passes**
+if and only if it satisfies **both** criteria:
+
+| Criterion | Parameter | Default | Rationale |
+|---|---|---|---|
+| Rate | `min_tpm` | 0.5 | Activated bars per month on average, at least this |
+| Dispersion | `max_dispersion` | 1.5 | Per-bar Index of Dispersion (Var/Mean of monthly counts) must not exceed this absolute value — no Poisson floor involved |
+
+`min_episodes` and `dispersion_margin` play no role in `"bar"` mode.
 
 `GateResult` includes a `fail_reason` field with the first failing criterion
-(useful for debugging and parameter tuning).
+(useful for debugging and parameter tuning), plus diagnostic fields that are
+always computed regardless of mode: `n_episodes` (episode count),
+`episode_index_of_dispersion` (episode-level Index of Dispersion, computed
+whenever a month index is available) and `n_eff` — an effective sample size
+(`n_episodes / max(episode_ID, 1.0)`) intended for downstream significance
+deflation in Modules 2/3.
+
+**Preset-specific `min_episodes` (issue #206):** `forge_preset()` does not
+apply one flat default — `sniper`, `balanced` and `burst` keep 10 (the
+statistical-power floor is the point for those profiles), while `sweep`
+lowers it to 5, permissive by design, since it delegates statistical rigor
+to the downstream `RotationCalibrator`. Because `min_episodes` is an
+absolute count, the in-sample discovery window needed to clear it with 95%
+confidence depends on both `min_episodes` and `min_tpm` — the naive
+`min_episodes / min_tpm` window satisfies the floor only in expectation.
+`config_report()`'s `m1_is_window_too_short` (WARN) flags the gap between
+the configured combination and the discovery span actually available
+(`span_months x train_ratio`).
 
 ---
 
@@ -246,6 +301,44 @@ pctrank(RSI25, w=96) < 0.10           (rolling pctrank, p10)
 
 → "RSI is in the oversold zone AND it has rarely been so in the last 96 bars"
 → Semantically rich, non-redundant combination
+```
+
+---
+
+### Event-distribution diagnostic (`event_distribution_report`)
+
+After `run()`, `ed.event_distribution_report` is **always** populated (issue
+#215) — a public `str` attribute, independent of `config_report()`. The two
+are complementary: `config_report()` resolves config-vs-config coherence
+before any data is seen, so it can never detect that a specific asset's raw
+candidates are pathologically failing the gate; `event_distribution_report`
+aggregates the actual `GateResult` scalars collected for every raw
+(pre-AND-composition) candidate produced by Step 3, whether or not
+`cfg.retain_raw_events` keeps the full candidate population around
+afterward.
+
+It reports:
+- the total raw candidate count and how many survived the ConsistencyGate;
+- the observed median rate (tpm) and dispersion against the configured
+  thresholds, and what fraction of candidates land on the wrong side of
+  each;
+- when gate survival is **below a 15% threshold**, a concrete parameter
+  suggestion at the observed median.
+
+```python
+print(ed.event_distribution_report)
+```
+
+The text itself is emitted in Italian regardless of the calling context
+(it is also the M1 stage log line), for example:
+
+```
+M1 Event Discovery — 8213 candidati generati, 512 superano il
+Consistency Gate (6.2%).
+tpm osservato: mediana=0.31 (soglia min_tpm=0.5, 61.4% sotto soglia).
+dispersione osservata: mediana=2.10 (soglia effettiva=1.69, 38.0% sopra soglia).
+Meno del 15% dei candidati generati supera il Consistency Gate (512/8213 = 6.2%).
+Prova questi parametri (mediana osservata su tpm e dispersione): min_tpm<=0.31, dispersion_margin>=1.62.
 ```
 
 ---
@@ -337,12 +430,21 @@ print(comp.source_cols)       # [] for arity-1, ["col_a", "col_b"] for arity-2
 
 ```python
 stats = cand.activation_stats
-print(stats.n_activations)      # total activations
-print(stats.n_active_months)    # months with at least one activation
-print(stats.zero_months)        # months with no activations
-print(stats.max_monthly_share)  # share of the most concentrated month
-print(stats.mean_tpm)           # average activations per month
+print(stats.n_activations)               # total activations
+print(stats.n_active_months)             # months with at least one activation
+print(stats.zero_months)                 # months with no activations
+print(stats.max_monthly_share)           # share of the most concentrated month
+print(stats.mean_tpm)                    # average activations per month
+print(stats.index_of_dispersion)         # per-bar Index of Dispersion (Var/Mean of monthly counts)
+print(stats.n_episodes)                  # number of distinct activation episodes
+print(stats.episode_index_of_dispersion) # Index of Dispersion of monthly episode counts
+print(stats.n_eff)                       # effective sample size: n_episodes / max(episode_ID, 1.0)
 ```
+
+`index_of_dispersion`, `n_episodes`, `episode_index_of_dispersion` and
+`n_eff` are the same diagnostic fields `GateResult` carries (see Step 4) —
+always computed, not only when the active mode's criteria actually read
+them.
 
 ---
 
@@ -578,28 +680,56 @@ print(f"{len(stable)} stable candidates out of {len(candidates)}")
 
 1. The dataset is split: first `train_ratio` rows = IS, the rest = OOS.
 2. The full pipeline (Steps 0–5) runs **on IS data only**.
-3. For each candidate, the OOS period is divided into `n_splits` equal windows.
-4. On each window, `apply()` reconstructs the boolean series.
-   The last 168 IS bars are prepended as rolling context to avoid NaN warmup
-   at the start of each fold.
-5. The ConsistencyGate is applied with parameters scaled proportionally
-   to the OOS window size:
-   - `min_act` and `min_months` scaled (floor: 5 and 1 respectively)
-   - `max_conc` and `min_tpm` unchanged (they are rates, not counts)
-6. A candidate is OOS-stable if it passes in at least `min_pass_rate` of the windows.
+3. For each candidate, the OOS period is divided into `n_splits` equal
+   windows (folds).
+4. On each fold, `apply()` reconstructs the boolean series. The last 168 IS
+   bars are prepended as rolling context to avoid NaN warmup at the start of
+   the fold.
+5. The ConsistencyGate is applied to each fold with `min_episodes` **forced
+   to 0** rather than scaled (issue #177): being an absolute count,
+   `min_episodes` does not survive being applied to a shorter window — on a
+   2-month fold the class default of 10 demands 5 episodes/month against an
+   in-sample requirement that can be as low as 1/month, ~5x stricter by
+   construction. `min_tpm`, `max_dispersion` and `dispersion_margin` are
+   rate/ratio invariant and carry over **unchanged** from the IS
+   `gate_params` (or from `wf.oos_gate_params` when explicitly set — still
+   with `min_episodes` forced to 0 either way).
+6. Each fold is separately checked for **testability**: the candidate's own
+   in-sample rate implies an expected episode count `lam = is_rate x
+   n_months` for that fold's length. When `lam < MIN_FOLD_LAMBDA` (3.0), an
+   empty fold has ≥5% probability of occurring even for a candidate that
+   kept its in-sample rate perfectly — such a fold is marked
+   `indeterminate` and **excluded from the `pass_rate` denominator**, never
+   counted as a failure.
+7. A candidate is OOS-stable (`passed=True`) when it passes the gate in at
+   least `min_pass_rate` of the **testable** folds (`n_testable`, not
+   `n_folds`). When no fold is testable, `passed` is `None` — inconclusive,
+   not failed; `forge()`'s `only_validated_events` filter treats `None`
+   distinctly from `False` so a walk-forward that could not run does not
+   silently drop every candidate.
 
 ### `ValidationResult` output
+
+`ValidationResult` fields: `n_folds` (total folds run), `n_passed`, `n_testable`
+(folds long enough to say anything — the `pass_rate` denominator), `pass_rate`
+(`n_passed / n_testable`, `nan` when nothing was testable), `passed`
+(`bool | None`), `fold_results` (per-fold detail, including the indeterminate
+folds). Each `FoldResult` additionally carries `indeterminate` (bool) and
+`lam` (the fold's expected episode count at the candidate's in-sample rate).
 
 ```python
 for cand in candidates:
     if cand.validation:
         v = cand.validation
-        print(f"{cand.event_id}: {v.n_passed}/{v.n_folds} folds, "
-              f"pass_rate={v.pass_rate:.2f}, stable={v.passed}")
+        print(f"{cand.event_id}: {v.n_passed}/{v.n_testable} testable folds "
+              f"({v.n_folds} total), pass_rate={v.pass_rate:.2f}, stable={v.passed}")
+        # v.passed is None when no fold was testable — inconclusive, not failed
         for fold in v.fold_results:
-            print(f"  fold {fold.fold_idx}: {fold.n_rows} bars, "
-                  f"passed={fold.passed}, "
-                  f"{'OK' if fold.passed else fold.gate_result.fail_reason}")
+            if fold.indeterminate:
+                status = f"INDETERMINATE (lam={fold.lam:.2f} < 3.0)"
+            else:
+                status = "OK" if fold.passed else fold.gate_result.fail_reason
+            print(f"  fold {fold.fold_idx}: {fold.n_rows} bars, {status}")
 ```
 
 ---
@@ -622,18 +752,20 @@ for cand in candidates:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `min_act` | 50 | Minimum total activations in the IS period |
-| `min_months` | 8 | Calendar months with at least one activation |
-| `max_conc` | 0.40 | Maximum share of activations concentrated in a single month |
-| `min_tpm` | 2.0 | Average activations per month (total / total_months_in_range) |
+| `min_tpm` | 0.5 | Minimum average triggers per month, in the unit chosen by `event_counting` (episodes/month in `"episode"` mode, bars/month in `"bar"` mode) |
+| `max_dispersion` | 1.5 | Maximum per-bar Index of Dispersion — **`"bar"` mode only**; not read in `"episode"` mode |
+| `dispersion_margin` | 1.3 | **`"episode"` mode only** — multiplier over the Poisson χ² floor: `eff_max_dispersion = poisson_floor(n_months) x dispersion_margin` |
+| `event_counting` | `"episode"` | Counting unit for the rate/dispersion criteria: `"episode"` or `"bar"` |
+| `min_episodes` | 10 | Absolute floor on episode count (statistical-power guard, `"episode"` mode only); applied **in-sample only**, forced to 0 on walk-forward OOS folds |
+| `episode_gap` | 1 | Maximum gap (bars) that still belongs to the same episode; `0` = strict consecutive runs |
 
 ### `EventWalkForwardConfig`
 
 | Parameter | Default | Description |
 |---|---|---|
 | `n_splits` | 3 | Number of OOS windows |
-| `min_pass_rate` | 0.60 | Minimum fraction of windows that must pass the gate |
-| `oos_gate_params` | `None` | Explicit OOS gate; if `None`, IS parameters are scaled proportionally |
+| `min_pass_rate` | 0.60 | Minimum fraction of **testable** windows that must pass the gate |
+| `oos_gate_params` | `None` | Explicit OOS gate; if `None`, the IS `gate_params` are used, with `min_episodes` always forced to 0 regardless |
 
 ---
 
@@ -660,8 +792,8 @@ enter the TypeClassifier. `ed.df` always has a `DatetimeIndex`.
 summary = ed.summary()
 print(summary.columns.tolist())
 # ['event_id', 'status', 'expression', 'n_activations', 'n_active_months',
-#  'zero_months', 'max_monthly_share', 'mean_tpm', 'gate_passed',
-#  'oos_pass_rate', 'oos_n_passed', 'oos_n_folds', 'oos_stable']  # OOS cols only if walk-forward configured
+#  'zero_months', 'max_monthly_share', 'mean_tpm', 'index_of_dispersion',
+#  'gate_passed', 'oos_pass_rate', 'oos_n_passed', 'oos_n_folds', 'oos_stable']  # OOS cols only if walk-forward configured
 
 # Candidates with arity 2 (AND composition)
 and_candidates = [c for c in candidates if len(c.components) == 2]

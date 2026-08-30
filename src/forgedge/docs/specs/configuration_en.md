@@ -91,12 +91,32 @@ enriched = MarketContext(
 Thresholds for the ConsistencyGate — the structural filter that verifies whether
 an event has stable temporal structure.
 
+Since issue #134, the gate operates in one of two counting modes, selected by
+`event_counting`: **`"episode"`** (the default) counts maximal runs of
+consecutive activations rather than raw bars, so a persistent multi-bar state
+(a 3–5 bar `RSI < 30` stretch) is not wrongly penalised as if it were several
+independent triggers; **`"bar"`** reproduces the pre-#134 counting exactly,
+bar by bar. The two modes are identical for impulse events (crossovers,
+candlestick patterns — one bar per episode).
+
+The dual mode changes which dispersion field the gate actually reads
+(issue #205): `max_dispersion` is the raw Index-of-Dispersion threshold, but
+it is read **only in `"bar"` mode**. In `"episode"` mode the gate instead
+compares against `poisson_floor(n_months) × dispersion_margin` — a margin
+over the statistically-defensible Poisson floor, not an absolute ID — because
+the floor almost always dominated a fixed `max_dispersion` in practice
+(measured: 12 of 16 preset×timeframe combinations never had `max_dispersion`
+bind). So on the default `event_counting="episode"`, tune `dispersion_margin`,
+not `max_dispersion`.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `min_act` | int | `50` | Minimum number of IS activations. |
-| `min_months` | int | `8` | Minimum number of distinct calendar months with at least one activation. |
-| `max_conc` | float | `0.40` | Maximum allowed concentration in a single month (fraction of total activations). |
-| `min_tpm` | float | `2.0` | Minimum average activation frequency (trades per month). |
+| `min_tpm` | float | `0.5` | Minimum average *triggers* per month, in the unit chosen by `event_counting` (episodes/month in `"episode"` mode, bars/month in `"bar"` mode). Default 0.5 ≈ "at least one episode every two months". |
+| `max_dispersion` | float | `1.5` | Maximum allowed Index of Dispersion (`Var/Mean` of monthly counts). **`"bar"` mode only** — in `"episode"` mode (the default) this field is not read by the gate at all; see `dispersion_margin`. |
+| `dispersion_margin` | float | `1.3` | **`"episode"` mode's dispersion tolerance** — a margin over the Poisson χ² floor (`eff_max_dispersion = poisson_floor(n_months) × dispersion_margin`), not an absolute Index of Dispersion. `1.05` stays close to what a Poisson process itself would produce; `3.0` tolerates Poisson-implausible clustering on purpose. Unread in `"bar"` mode. |
+| `event_counting` | `"episode"` \| `"bar"` | `"episode"` | Counting unit for the rate/dispersion criteria — see above. |
+| `min_episodes` | int | `10` | Absolute floor on the number of episodes required to pass in `"episode"` mode (statistical-power guard). Ignored in `"bar"` mode, and applied in-sample only. `forge_preset()` lowers this to `5` on `"sweep"` (permissive by design); other presets keep `10`. |
+| `episode_gap` | int | `1` | Maximum gap, in bars, that still belongs to the same episode. With the default `1`, a single missing bar inside a run does not start a new episode. `0` gives strict consecutive runs. |
 
 ```python
 from forgedge import DiscoveryConfig
@@ -104,13 +124,19 @@ from forgedge.event_discovery.models import GateParams
 
 config = DiscoveryConfig(
     gate_params=GateParams(
-        min_act=30,        # less strict for shorter datasets
-        min_months=6,
-        max_conc=0.50,
-        min_tpm=1.5,
+        min_tpm=0.3,             # less strict for shorter datasets
+        dispersion_margin=1.6,   # more slack above the Poisson floor
+        min_episodes=5,
+        event_counting="episode",  # default; "bar" reproduces pre-#134 behaviour
     )
 )
 ```
+
+> The fields above replaced an older `GateParams(min_act, min_months,
+> max_conc, min_tpm)` schema; none of `min_act`/`min_months`/`max_conc` exist
+> any more, and constructing `GateParams` with them raises `TypeError`
+> today. Several of this repo's own `examples/*.py` scripts still use the old
+> schema — see the `forgedge` skill's pitfall list before copying from them.
 
 ---
 
@@ -152,12 +178,14 @@ IS/OOS split, and walk-forward.
 | `gate_params` | GateParams | `GateParams()` | ConsistencyGate thresholds. |
 | `max_categorical_classes` | int | `20` | Categorical columns with more distinct values than this limit are classified but excluded from event generation. |
 | `scale_free_overrides` | dict[str,bool] \| None | `None` | Manual scale-free flag overrides for specific columns (e.g. `{"rsi_14": True}`). Useful when the auto-heuristic fails on short history. |
-| `timestamp_col` | str | `"open_dt"` | Datetime column name in the KPI Table (or DatetimeIndex name). |
+| `timestamp_col` | str | `"open_dt"` *(session-resolved)* | Datetime column name in the KPI Table (or DatetimeIndex name). |
 | `max_and_components` | int | `2` | Maximum number of single events to combine in one AND composition. Values > 3 are accepted but strongly discouraged (structural overfitting risk). |
 | `train_ratio` | float | `1.0` | IS fraction (0 < train_ratio ≤ 1.0). Default 1.0 = all IS, no split. |
 | `walk_forward` | EventWalkForwardConfig \| None | `None` | Walk-forward OOS configuration. Active only when `train_ratio < 1.0`. |
 | `diversity_gate_enabled` | bool | `False` | When True, applies Jaccard-based deduplication of single events after the ConsistencyGate and before AND composition. Opt-in — no breaking change. |
 | `diversity_threshold` | float | `0.85` | Maximum tolerated Jaccard similarity between any two kept events. Only used when `diversity_gate_enabled=True`. At p99 of the inter-event Jaccard distribution (12 months of 1H data), Jaccard=0.47 — values above 0.70 are genuine near-duplicates. |
+| `indicator_lag_cross_lags` | tuple[int,...] | `(1, 3)` | Lag set for the indicator × OHLC-base cross-time feature family (issue #165, e.g. `close_sma_12[t] > low[t-3]`), restricted to price-scale indicators (SMA/EMA/WMA/HMA) vs a raw OHLC base. Pass `()` to disable this always-on family entirely. |
+| `retain_raw_events` | bool | `True` | Whether `EventDiscovery.raw_events` (the full pre-gate candidate population, every one carrying its own full-length activation series) stays resident after `.run()` (issue #232). Keep `True` for `TargetOptimizer`, which reads `.raw_events` directly; a `forge()`-only config (which never reads it) can set `False` for a measured 4.2x reduction in retained memory. |
 
 ```python
 from forgedge import EventDiscovery, DiscoveryConfig
@@ -168,11 +196,12 @@ ed = EventDiscovery(
     config=DiscoveryConfig(
         train_ratio=0.80,
         max_and_components=2,
-        gate_params=GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0),
+        gate_params=GateParams(min_tpm=0.5, dispersion_margin=1.3, min_episodes=10),
         walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         scale_free_overrides={"rsi_14": True},  # force scale-free on RSI
         diversity_gate_enabled=True,            # opt-in Jaccard deduplication
         diversity_threshold=0.85,
+        retain_raw_events=False,                # forge()-only config: skip the memory cost
     ),
 )
 candidates = ed.run()
@@ -194,13 +223,17 @@ promotion (except in extreme cases) — they inform the grade.
 | `min_lift` | float | `0.08` | Minimum lift (win_rate − base_rate). |
 | `min_cohens_d` | float | `0.15` | Minimum Cohen's d (distribution separation between active and inactive bars). |
 | `max_p_value` | float | *(resolved: `ctx.alpha` = 0.05)* | Maximum t-test p-value on the mean advantage. Session-resolved (#182), but **reachable only with `use_fdr=False`** — every preset and the class default set `use_fdr=True`, so under any preset this field is inert. |
-| `min_activations` | int | `30` | Minimum IS activations for a contract to be promoted. |
 | `use_fdr` | bool | `True` | Apply Benjamini-Hochberg FDR correction across the test family. |
 | `fdr_q` | float | `0.10` | Target FDR level (q). **Not** tied to `ctx.alpha`: a `q` is a false-discovery rate over a family, an alpha is a per-test error rate. Chosen by the preset, because the right `q` depends on how wide the search is (#182). |
 | `oos_max_p` | float | `0.10` | Maximum OOS confirmation p-value. **Not** tied to `ctx.alpha`, and legitimately looser: a confirmation level for an already-selected hypothesis — one pre-specified test, no multiplicity, on a small sample by construction (#182). |
-| `min_oos_activations` | int | `10` | Minimum OOS activations to treat OOS confirmation as reliable. |
 | `min_direction_t` | float | `0.5` | Minimum `\|z_h*\|` (rotation-standardised excess) to assign a direction; below it → `undetermined`. |
 | `require_significant_direction` | bool | `True` | When True, a direction is assigned only if `h*` clears Benjamini-Hochberg (not `statistically_weak`); otherwise → `undetermined`. False = legacy non-blocking behaviour. |
+
+> `min_activations`/`min_oos_activations` do **not** exist on this dataclass
+> any more — the IS/OOS sample-size check is now a hardcoded module constant,
+> `_MIN_STATS_CASES = 10`, in `alpha_discovery/discovery.py` (a non-blocking
+> diagnostic, not a configurable field). Constructing `PromotionThresholds`
+> with either name raises `TypeError` today.
 
 ```python
 from forgedge import AlphaConfig, PromotionThresholds
@@ -212,7 +245,6 @@ config = AlphaConfig(
         ic_min_abs=0.03,
         min_lift=0.10,
         min_cohens_d=0.20,
-        min_activations=40,
         oos_max_p=0.05,
     ),
 )
@@ -231,6 +263,9 @@ IS/OOS split, and traceability metadata.
 | `mfe_quantile` | float | `0.5` | Quantile of the MFE distribution of active bars used as baseline `sell_pct`. |
 | `mfe_floor` | float | `0.005` | Floor for `sell_pct`: take-profit cannot be < 0.5% regardless of MFE. |
 | `train_ratio` | float | `0.7` | IS fraction for statistical measurement. The remaining `1 - train_ratio` is the OOS tail. |
+| `embargo_bars` | int | `0` | Extra quarantine after the IS/OOS split: OOS confirmation starts `embargo_bars` bars after the split. Default `0` — the purge already removes the mechanical forward-window overlap; this additionally guards against serial correlation. |
+| `horizon_enrichment` | tuple[float,...] \| None | `(0.5, 1.0, 2.0)` | Per-event horizon-grid enrichment from the event's own structural timescale: for every candidate, `round(m · w)` for each multiplier `m` (where `w` is `EventCandidate.dominant_window()`) is **added** to the base `horizon_grid` (union, never a restriction), capped by `horizon_enrichment_min_obs`. `None`/`()` disables enrichment. |
+| `horizon_enrichment_min_obs` | int | `20` | Statistical cap for enriched horizons: an added `h` must leave at least this many non-overlapping forward windows in the IS span (`h <= split // min_obs`). Never restricts the base `horizon_grid`. |
 | `thresholds` | PromotionThresholds | `PromotionThresholds()` | IS thresholds for statistical metrics. |
 | `asset` | str | `"ASSET"` | Asset name (traceability in AlphaContracts). |
 | `exchange` | str | `""` | Exchange/market (optional, traceability). |
@@ -262,8 +297,10 @@ User-specified economic target for `AlphaConfig.fixed_target` and the TargetOpti
 | `horizon` | int | — | Holding period in bars (`> 0`). |
 | `min_return` | float | — | Take-profit threshold as a fraction (e.g. `0.02` = 2%), used as `sell_pct` (`> 0`). |
 | `side` | str | — | `"long"` or `"short"` — never overwritten by the data. |
-| `min_activations` | int | `10` | TargetOptimizer: min activations for valid lift scoring. |
-| `min_lift` | float | `1.0` | TargetOptimizer: prune threshold on conditional lift. |
+| `min_activations` | int | `10` | TargetOptimizer: min activations for valid lift scoring. Candidates firing on fewer bars are skipped (conditional win rate too noisy). Ignored by Alpha Discovery's fixed-target mode. |
+| `min_lift_atoms` | float | `1.0` | TargetOptimizer's **1st pass** (atomic events, pre-AND): prune threshold on conditional lift. The "lossless" pruning property holds only at the default `1.0` — values above it actively suppress AND compositions with emergent lift. |
+| `min_lift_result` | float | `1.0` | TargetOptimizer's **2nd pass**: prune threshold on the final result set (surviving atoms *and* compositions). Raise it to shorten the result list without touching AND discovery. |
+| `min_lift` | float \| None | `None` | **Deprecated** — use `min_lift_atoms`/`min_lift_result` instead. When set, applies to both passes (the legacy single-threshold behaviour) and raises `DeprecationWarning`; a value above `1.0` then also suppresses AND discovery, since the legacy field drove the 1st pass too. |
 | `target_mode` | `"abs"` \| `"proj"` | `"proj"` | Binary-target definition (see `AlphaConfig.target_mode`). |
 | `trend_sma_mult` | float | `2.0` | PROJ_LOG trend SMA window multiplier (see `AlphaConfig.trend_sma_mult`). |
 
@@ -282,7 +319,6 @@ ad = AlphaDiscovery(
         thresholds=PromotionThresholds(
             min_lift=0.08,
             min_cohens_d=0.15,
-            min_activations=30,
             oos_max_p=0.10,
         ),
     ),
@@ -376,6 +412,8 @@ has always resolved to this one).
 | `test_span_months` | int \| None | `None` | Test window width in months. When None, computed automatically. |
 | `min_train_months` | int | *derived* *(session-resolved)* | Minimum months required for the training window — the span the early-elimination screen runs on. **Derived from `criteria.min_tpm`** with a 95 % Poisson margin, so the window can actually supply the trade floor it is about to demand (#173): 20 months at `min_tpm=0.80`, not the old fixed 6. The naive `floor / rate` gives 12.5 and comes up short about 44 % of the time. |
 | `reoptimise` | bool | `True` | When True, re-optimises parameters on each training window. When False, uses the fixed IS configuration. |
+| `purge_bars` | int \| None | `None` | Purge width, in bars, at the end of every **train** window — entries opened in the last `purge_bars` bars have fill/exit windows reaching into the adjacent test window, so parameter selection would otherwise be scored on test prices. `None` (default) sizes the purge automatically from the resolved grid (largest `target_h` plus the fill delay); `0` disables purging (pre-`TimeBudget` behaviour). Deliberately **not** unified with `TimeBudget.purge_bars` (F6, #180) — that one is the forward-return horizon, this one is the worst-case trade span; different crossings of different boundaries. |
+| `embargo_bars` | int | `UNSET` *(session-resolved)* | Extra quarantine at the start of every **test** window, in bars. Same policy as `AlphaConfig.embargo_bars` ("how many bars of serial correlation to quarantine after a boundary"), so it is session-resolved from it — an explicit value here still wins. |
 
 ---
 
@@ -384,23 +422,41 @@ has always resolved to this one).
 Module 3 promotion gates. Defines the conditions for EDGE, PARTIAL-EDGE, and
 NON-EDGE verdicts.
 
+Four of these fields are **preset-parametrized** (#207) rather than flat
+universal defaults — `forge_preset()` sets them per profile because the
+presets' own descriptions explicitly diverge on precision-vs-volume:
+
+| field | class default | `sniper` | `balanced` | `sweep` | `burst` |
+|---|---|---|---|---|---|
+| `min_profit_factor` | `2.0` | `2.5` | `2.0` | `1.8` | `2.0` |
+| `min_win_rate` | `0.55` | `0.60` | `0.55` | `0.50` | `0.55` |
+| `min_pf_score_tpm` | `0.30` | `0.40` | `0.30` | `0.25` | `0.30` |
+| `min_fill_rate_opt` | `0.80` | `0.80` | `0.80` | `0.70` | `0.80` |
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `min_profit_factor` | float | `2.0` | Minimum IS PF for EDGE. |
-| `min_win_rate` | float | `0.55` | Minimum IS win rate for EDGE (55%). |
-| `min_tpm` | float | `2.0` | Minimum average trading frequency (trades/month) for EDGE. Also the sole trade-count gate: the minimum executed-trade count is dynamic, `max(10, n_months × min_tpm)`, scaling with the IS length (spec RD-04) instead of a fixed absolute threshold. |
-| `min_pf_score_tpm` | float | `0.30` | Minimum composite PF×TPM score to include a configuration in the selection. |
-| `min_fill_rate` | float | `0.40` | Minimum limit order fill rate: at least 40% of events must result in a trade. |
+| `min_profit_factor` | float | `2.0` | Minimum IS PF for EDGE. Preset-parametrized — see table above. |
+| `min_win_rate` | float | `0.55` | Minimum IS win rate for EDGE (55%). Preset-parametrized — see table above. |
+| `min_tpm` | float | `2.0` *(session-resolved)* | Minimum average trading frequency (trades/month) for EDGE. Also the sole trade-count gate: the minimum executed-trade count is dynamic, `max(10, n_months × min_tpm)`, scaling with the IS length (spec RD-04) instead of a fixed absolute threshold. Resolved from `PipelineContext.target_rate_tpm × rate_retention` when M1's rate was declared; otherwise the documented `2.0` stands. |
+| `min_pf_score_tpm` | float | `0.30` | Minimum composite PF×TPM score to include a configuration in the selection. Preset-parametrized — see table above. |
+| `min_fill_rate` | float | `0.40` | Minimum limit order fill rate: at least 40% of events must result in a trade. **Inert under the default `entry_mode="auto"`** (Stage 1 is a market entry, fill ≈ 100%) — meaningful only under `entry_mode="limit"`; the floor that actually bites under `"auto"` is `min_fill_rate_opt`. |
 | `min_sell_pct` | float | `0.005` *(session-resolved)* | Operational floor on the take-profit seeded from the contract's derived target. Resolved from `AlphaConfig.mfe_floor`; it used to be a hardcoded `max(0.01, …)` inside `_seed_base_params`, so the binding constraint was the one the caller could not configure (F11). |
-| `min_fill_rate_opt` | float | `0.80` | First adoption condition: the limit point may be published only if it still fills at ≥ 80% **out-of-sample**, avoiding the fill-collapse confound. |
+| `min_fill_rate_opt` | float | `0.80` | First adoption condition under `entry_mode="auto"`: the limit point may be published only if it still fills at ≥ this rate **out-of-sample**, avoiding the fill-collapse confound. Preset-parametrized — see table above. |
 | `min_net_gain_retention` | float | `0.5` *(session-resolved)* | Third adoption condition: the fraction of the market point's OOS net gain the limit point must retain. Deliberately loose — a backstop against a tiny mu with a tiny sigma, which the Sharpe cannot see because it is scale-free in mu. |
 | `partial_min_profit_factor` | float | `1.5` | Minimum IS PF for PARTIAL-EDGE (does not reach EDGE but not NON-EDGE). |
-| `max_zero_months_edge` | int | `1` | Maximum zero-or-negative months allowed for EDGE. |
-| `max_zero_months_partial` | int | `4` | Maximum zero-or-negative months allowed for PARTIAL-EDGE. |
+| `min_active_month_rate` | float | `0.80` | Minimum fraction of IS months that must contain at least one trade for a full EDGE: `active_months / n_months >= min_active_month_rate`. Rate-based (replacing the older absolute `max_zero_months_edge`/`max_zero_months_partial`, which no longer exist) so it is timeframe-agnostic: on 1H data the rate is naturally near 1.0, on 1D data a Poisson process with dispersion up to `max_dispersion` yields 0.75–0.95, which the default accommodates. |
 | `max_regime_dependency` | float | `0.30` | Maximum regime dependency: if > 30% of trades are concentrated in a single regime, this triggers as a soft gate. |
-| `min_dsr` | float | `1.0` | Minimum Deflated Sharpe Ratio (corrected for the number of configurations tested). |
-| `max_ttest_p` | float | *(resolved: `ctx.alpha` = 0.05)* | Maximum t-test p-value on mean net gain. Session-resolved (#182). The pipeline's **only hard per-hypothesis gate** — it produces `NON-EDGE` in `_decide`. |
+| `min_dsr` | float | `1.0` | Minimum Deflated Sharpe Ratio (corrected for the number of configurations tested). An undefined DSR (selection haircut's radicand went negative — selection bias too severe to be credible) also blocks a full EDGE. |
+| `max_ttest_p` | float | *(resolved: `ctx.alpha` = 0.05)* | Maximum t-test p-value on mean net gain. Session-resolved (#182). The pipeline's **only hard per-hypothesis gate** — it produces `NON-EDGE` in `_decide`. No preset has ever touched it. |
+| `max_rotation_p` | float | *(resolved: `ctx.alpha` = 0.05)* | Maximum search-level rotation-null p-value (`AlphaContract.rotation_p`) for a full EDGE — prices the whole discovery surface, so a rule that only won the multiple-testing lottery is capped at PARTIAL-EDGE. Session-resolved (#182); inert when the contract carries no rotation-null annotation. A strict value under `"sweep"` is intentional: `"sweep"`'s upstream permissiveness (`fdr_q=0.25`) is predicated on this gate filtering downstream, paired with `RotationConfig(k>=100)`. |
+| `power_gate` | bool | `True` | §3.2 power-aware verdicts: when True, an EDGE/PARTIAL-EDGE is degraded to `INSUFFICIENT-DATA` when the OOS evidence can't support it — no walk-forward was possible, pooled OOS trades below `min_oos_trades`, or the pooled OOS sample's minimum detectable expectancy exceeds the IS expectancy being claimed. `NON-EDGE` verdicts are never rescued. |
+| `min_oos_trades` | int | `10` | Minimum pooled walk-forward test trades (across all test windows) for a confident positive verdict under `power_gate`. Below it → `INSUFFICIENT-DATA`. Never applied per window. |
 | `early_elimination` | bool | `True` | When True (default), immediately rejects configurations that fail the fast IS screen (< 20 trades, PF < 1, insufficient fill rate) without running the walk-forward — saves compute. When False, the full pipeline always runs — useful for uniform diagnostics on NON-EDGE rules. |
+
+> `max_zero_months_edge`/`max_zero_months_partial` do **not** exist on this
+> dataclass any more — replaced by the rate-based `min_active_month_rate`
+> above. Constructing `SelectionCriteria` with either name raises
+> `TypeError` today.
 
 ```python
 from forgedge import RuleDiscovery, RuleDiscoveryConfig, SelectionCriteria
@@ -433,6 +489,9 @@ Main configuration for Module 3. Aggregates all sub-configurators.
 | `timestamp_col` | str | `"open_dt"` | Datetime column. |
 | `signal_col` | str | `"__rule_signal__"` | Internal temporary column for the event signal. |
 | `discovery_date` | str \| None | `None` | Discovery date (ISO). |
+| `selection_mode` | `"walk_forward"` \| `"full_sample"` | `"walk_forward"` | Where the published operating point is *selected* (§3.4). `"walk_forward"` (default): the operating point comes from the walk-forward's train windows only (per `wf_param_policy`); no metric feeding the verdict or the published `ValidatedRule` ever reads the final test window. `"full_sample"` falls back to the pre-#217 selection over the whole IS span. |
+| `wf_param_policy` | `"last"` \| `"consensus"` | `"last"` | How `selection_mode="walk_forward"` picks the published operating point from the per-split train selections: `"last"` (default) — the most recent train window's winner (what you would trade next); `"consensus"` — the most frequent parameter set across splits, ties broken toward the most recent. |
+| `n_trials_upstream` | int | `1` | Multiplier folded into the Deflated-Sharpe `n_trials` on top of the grid-cell count, for an explicit upstream search factor (e.g. sibling contracts receiving a verdict). Default `1` = grid cells only (historical behaviour). |
 
 ```python
 from forgedge import (
@@ -500,6 +559,47 @@ registry = RuleRegistry.from_forge_results(results, config=config).run()
 ```
 
 ---
+
+## Presets — `forge_preset()`
+
+The defaults documented above (`GateParams`, `SelectionCriteria`, and several
+`AlphaConfig`/`PromotionThresholds` fields) are routinely overridden as a
+group by four named presets, chosen by **search profile**, not by asset:
+
+| Preset | Profile |
+|---|---|
+| `"sniper"` | Rare/regular events, high precision. Requires a long IS window. Do **not** pair with the rotation calibrator. |
+| `"balanced"` | Sensible default — moderate frequency, good IS/OOS balance. |
+| `"sweep"` | Wide/permissive search, many candidates. Pair with `rotation_calibration=RotationConfig(k>=100)` and a `min_lift` filter on `promoted_contracts()`. |
+| `"burst"` | Time-concentrated events (momentum, regime-change) — high dispersion tolerated on purpose. |
+
+```python
+from forgedge import forge, forge_preset
+
+disc_cfg, alpha_cfg, rd_cfg = forge_preset("balanced", timeframe="1D", asset="BTC")
+result = forge(kpi, event_discovery_config=disc_cfg, alpha_config=alpha_cfg,
+                rule_discovery_config=rd_cfg)
+```
+
+`forge_preset(preset, timeframe, asset="ASSET", train_ratio=0.70, **overrides)`
+sets M1/M2/M3's frequency criteria (and several dependent fields) consistently
+for the chosen timeframe, and returns the ready-to-use `(DiscoveryConfig,
+AlphaConfig, RuleDiscoveryConfig)` triple. Any of the parameters it computes
+can be overridden by name via `**overrides`:
+
+| Module | Accepted override keys |
+|---|---|
+| M1 (Event Discovery) | `min_tpm`, `max_dispersion`, `dispersion_margin`, `min_episodes`, `max_and_components`, `timestamp_col`, `event_counting` |
+| M2 (Alpha Discovery) | `min_lift`, `min_cohens_d`, `fdr_q`, `oos_max_p`, `horizon_grid`, `bars_per_day` |
+| M3 (Rule Discovery) | `rd_min_tpm`, `min_profit_factor`, `min_win_rate`, `min_pf_score_tpm`, `min_fill_rate_opt` |
+
+`forgedge.presets.preset_info()` prints the resolved numeric parameters for
+any (or all) presets, useful for checking what a preset actually resolves to
+on a given timeframe before running it. See the `forgedge` skill's pitfall
+list for two real, timeframe-specific gotchas: `"1D"` presets can raise
+`config_report()`'s `oos_span_too_short` on a modest history (the checker
+doing its job, not a broken preset), and `"sniper"` should not be combined
+with the rotation calibrator.
 
 ---
 
