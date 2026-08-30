@@ -197,9 +197,12 @@ Pass `strict=False` to downgrade these findings to warnings and run anyway.
 | `modulo_3_en.md` | Rule Discovery: backtest, EDGE verdict, walk-forward OOS, reports |
 | `modulo_4_en.md` | Rule Registry: deduplication, cross-ticker, genericity, export |
 | `configuration_en.md` | Complete configuration reference: every dataclass field, type, default, and description |
-| `playground_en.md` | Playground: usage guide for the analysis helpers over pooled `ForgeResult` output |
+| `playground_en.md` | Playground: usage guide for the analysis helpers over pooled `ForgeResult` output (all 11 use cases, issue #237) |
+| `deployment_en.md` | Deployment: usage guide for the promotion-gate/export/monitoring functions that put discovered rules into production |
 
-`forgedge.playground` — a read-only analysis layer over pooled `ForgeResult` output, still evolving (issue #237) — is covered in the main manual (`docs/manual-en.md`, §9). [`playground_en.md`](playground_en.md) is its detailed usage reference (signatures, parameters, verified examples); [`modules/Playground.md`](../modules/Playground.md) covers the design rationale and internal algorithms instead.
+`forgedge.playground` — a read-only analysis layer over pooled `ForgeResult` output — is covered in the main manual (`docs/manual-en.md`, §9). Its tracking checklist (issue #237) is complete (10 functions + the cross-cutting `conversion_funnel`), but it remains a diagnostic layer, not a stable core API. [`playground_en.md`](playground_en.md) is its detailed usage reference (signatures, parameters, verified examples); [`modules/Playground.md`](../modules/Playground.md) covers the design rationale and internal algorithms instead.
+
+`forgedge.deployment` — its sibling module for putting promoted rules into production (quality-gating, disk export, a monitoring manifest) — was split out of `forgedge.playground` by PR #247 (issue #245) because those functions have real effects a read-only name no longer described honestly. [`deployment_en.md`](deployment_en.md) is its usage reference; [`modules/Deployment.md`](../modules/Deployment.md) covers the design rationale.
 
 Italian versions are in the corresponding `*_it.md` files.
 

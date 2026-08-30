@@ -995,7 +995,8 @@ Evoluzione della deduplicazione da binaria a strutturata:
 | **[Alpha Discovery Pipeline](Alpha_Discovery_Pipeline.md)** | Alpha Contract format, definizione del target, analisi Hurst/ACF, IC Measurement, Win Rate Analysis, Regime Sensitivity, Alpha Scoring, False Discovery Rate (BH), handoff a Rule Discovery |
 | **[Rule Discovery Pipeline](Rule_Discovery_Pipeline.md)** | Parse Alpha Contract, backtest con meccanica limit order, selezione parametri, validazione statistica (t-test, DSR), analisi regime, checklist |
 | **[Rule Registry Module](Rule_Registry_Module.md)** | Registro in-memory, input multi-ticker, matrici Jaccard e Spearman, deduplicazione, cross-ticker backtest con ricalcolo soglie, classificazione genericità (GENERIC/PARTIAL/SPECIFIC/ISOLATED), tabella piatta, report HTML |
-| **[Playground Module](modules/Playground.md)** | Non un modulo della pipeline: helper di analisi di sola lettura su `list[ForgeResult]` — nervosismo dei confini di regime, asset prigionieri di un regime, ragioni di scarto M3 per grado alpha, famiglie di feature che M2 non orienta mai. In evoluzione (issue #237, 4/11 casi d'uso implementati) |
+| **[Playground Module](modules/Playground.md)** | Non un modulo della pipeline: helper di analisi di sola lettura su `list[ForgeResult]` — nervosismo dei confini di regime, eventi "morti" M1→M2, ragioni di scarto M3 per grado alpha, famiglie di feature che M2 non orienta mai, diagnostics M2 vs verdetto M3, generalizzazione cross-ticker per grade, cluster di deduplicazione, funnel di conversione end-to-end. Checklist completa (issue #237, 11/11 casi d'uso) |
+| **[Deployment Module](modules/Deployment.md)** | Modulo gemello del Playground, con effetti reali: gate di promozione configurabile, export su disco (pkl+yaml) delle regole promosse, manifest per il monitoraggio periodico. Separato dal Playground da PR #247 (issue #245) |
 
 ### Esempio applicato
 
