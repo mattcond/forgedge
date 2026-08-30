@@ -1294,6 +1294,61 @@ RotationCalibrator(event_frame, candidates, alpha_config, time_budget=None).run(
 
 Entrambi coperti in profondità in §14-15.
 
+### `forgedge.playground` — helper di analisi sopra `ForgeResult`
+
+Tutto quanto visto finora in questa sezione legge da *una* singola chiamata a `forge()` e chiede "cosa ha prodotto questa run." `forgedge.playground` è un livello diverso: un piccolo insieme, in crescita, di funzioni di sola lettura che prendono **R**, l'*insieme* di oggetti `ForgeResult` che una sessione di ricerca accumula — più ticker, più preset, più run ripetute nel tempo — e pongono domande trasversali sul comportamento della pipeline stessa a cui nessun singolo campo di una singola run può rispondere da solo. Non tocca mai la pipeline: ogni funzione legge solo attributi già presenti su `ForgeResult` (`.enriched`, `.rule_responses`, `.candidates`, `.contracts`, `.ticker`, …) e restituisce un `pandas.DataFrame`.
+
+```python
+from forgedge.playground import *   # l'import previsto — vedi forgedge/playground/__init__.py
+```
+
+Due scelte di design valgono per ogni funzione qui e conviene interiorizzarle una volta sola invece che per-funzione:
+
+- **L'input è sempre `Iterable[ForgeResult]`** — uno o più output di `forge()`/`forge_multi()`, mai rieseguiti. Metti in un'unica lista i risultati di un'intera sessione e passa quella stessa lista a ogni funzione del playground con cui vuoi interrogarla.
+- **L'output è sempre in formato long** — una riga per osservazione elementare (una transizione, una ragione di rigetto, un componente), mai pre-aggregata. Il docstring di ogni funzione mostra il `groupby`/l'aggregazione che ci si aspetta di concatenare dopo — quella composizione è deliberatamente lasciata al chiamante invece di essere incorporata nella funzione, così la stessa tabella lunga risponde a domande che l'autore della funzione non aveva previsto.
+
+**Questo modulo è esplicitamente un lavoro in corso, non un'API core stabile al livello di `forge()` o `RuleDiscovery`.** Segue una checklist aperta di casi d'uso diagnostici (issue #237) — quattro sono implementati oggi, uno per stadio della pipeline resta ancora da fare:
+
+| Funzione | Modulo | Domanda a cui risponde |
+|---|---|---|
+| `regime_transitions(results)` | M0 | Con che frequenza — e dopo quanto poco — flippa `regime`? Un confine "nervoso" che flippa ogni barra o due inquina qualunque evento M1 condizionato al regime a valle. |
+| `regime_time_share(results)` | M0 | Quale quota della propria storia passa ciascun ticker in ciascun regime? Un asset di fatto prigioniero di un solo regime fa sembrare generiche regole che in realtà sono regime-specifiche — non c'è mai stato abbastanza di un altro regime presente per dimostrarlo. |
+| `discard_reasons_by_grade(results, grade="A")` | M2→M3 | Perché Rule Discovery emette verdetto `NON-EDGE` proprio sui contratti alpha di un dato grade? Esplode `rejection_reasons` una riga per ragione, abbinata a `entry_optimization.failed_condition` quando presente. |
+| `undetermined_direction_by_family(results)` | M1→M2 | Quali famiglie di feature sorgente (RSI, EMA, coppie cross-colonna, …) alimentano eventi che Alpha Discovery non riesce sistematicamente a orientare (`direction="undetermined"`)? Una riga per componente di `EventCandidate`, così una famiglia che compare solo dentro un evento AND composto viene comunque contata. |
+
+Ancora aperti sulla stessa checklist, non ancora implementati: altri due casi d'uso M1 (eventi "morti" che non raggiungono mai un contratto; tasso di sopravvivenza al gate osservato vs atteso per preset/asset), due casi M3 (diagnostics M2 non bloccanti che correlano con un `NON-EDGE` in M3; contratti `PARTIAL-EDGE` solo perché il rotation null non è stato superato), due casi M4 (un grade alpha più alto generalizza meglio cross-ticker; quali regole dominano un cluster di deduplicazione), e un caso trasversale (tasso di conversione end-to-end `candidati → contratti → promossi → edge` per asset).
+
+**Verificato**, mettendo in pool due run `forge()` (`ADAUSDC`, e una seconda serie sintetica etichettata `BTCUSDC`) in un'unica lista `results = [result_ada, result_btc]`:
+
+```python
+from forgedge.playground import regime_transitions, regime_time_share, undetermined_direction_by_family
+
+rt = regime_transitions(results)
+print(rt.shape)                                            # (236, 6)
+print(rt[rt["run_length_before"] <= 2].groupby("ticker").size())
+# ADAUSDC    45
+# BTCUSDC    41
+
+share = regime_time_share(results)
+top = share.sort_values("share", ascending=False).groupby("ticker").head(1)
+print(top[["ticker", "regime", "share"]].to_string(index=False))
+#  ticker      regime    share
+# BTCUSDC STRONG_BEAR 0.438776
+# ADAUSDC STRONG_BEAR 0.407029
+
+fam = undetermined_direction_by_family([result_ada])
+rate = fam.groupby("family")["direction"].apply(lambda s: (s == "undetermined").mean())
+print(rate.sort_values(ascending=False))
+# family
+# cross_triple    0.945455
+# cross_pair      0.915001
+# other           0.908046
+```
+
+Quest'ultimo esempio è di per sé una piccola illustrazione onesta di a cosa serve questo modulo: su questo fixture, il tasso di `undetermined` sta intorno al 90-95% su *ogni* famiglia raggiunta, e nessun `EventCandidate` su questo dataset si risolve in una famiglia nativa semplice (`rsi`, `ema`, …) tra i componenti che sono arrivati fino a un contratto — un fatto che non si vedrebbe da nessun singolo `AlphaContract`, solo mettendo in pool ogni componente di ogni contratto e ponendo la domanda in formato long su tutti insieme.
+
+Ogni funzione ha una regola specifica e deliberata su "saltare vs sollevare eccezione", sempre documentata nel proprio docstring invece di lasciata implicita — es. `regime_transitions`/`regime_time_share` saltano silenziosamente qualunque risultato il cui frame `.enriched` non abbia una colonna `regime` (Market Context disabilitato) invece di sollevare, e `undetermined_direction_by_family` salta silenziosamente un contratto il cui `event_candidate_id` non si risolve contro `result.candidates` invece di sollevare un `KeyError`. Nessuna delle due è un bug da aggirare — vedi i docstring del modulo stesso, o `src/forgedge/docs/modules/Playground.md` per il riferimento completo, per sapere esattamente quali funzioni saltano cosa e perché.
+
 ---
 
 ## 10. Configurazione
