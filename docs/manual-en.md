@@ -1292,16 +1292,23 @@ Two design choices apply to every function here and are worth internalising once
 - **Input is always `Iterable[ForgeResult]`** — one or many `forge()`/`forge_multi()` outputs, never re-executed. Pool a whole session's results into a list and hand the same list to every playground function you want to ask of it.
 - **Output is always long-format** — one row per elementary observation (one transition, one rejection reason, one component), never pre-aggregated. Every function's docstring shows the `groupby`/aggregation you're expected to chain afterward — that composition is deliberately left to the caller rather than baked into the function, so the same long table answers questions the function's author didn't anticipate.
 
-**This module is explicitly a work in progress, not a stable core API on the level of `forge()` or `RuleDiscovery`.** It tracks an open checklist of diagnostic use cases (issue #237) — four are implemented today, one per pipeline stage still to come:
+**This module is explicitly a diagnostic layer, not a stable core API on the level of `forge()` or `RuleDiscovery`.** It follows a tracking checklist of use cases (issue #237) — **all 11 are now implemented**:
 
 | Function | Module | Question it answers |
 |---|---|---|
 | `regime_transitions(results)` | M0 | How often — and after how short a run — does `regime` flip? A boundary that flips every bar or two is "nervous," and pollutes any M1 event conditioned on regime downstream. |
 | `regime_time_share(results)` | M0 | What share of its history does each ticker spend in each regime? An asset effectively imprisoned in one regime makes rules discovered on it look generic when they're actually regime-specific — there was never enough of another regime present to prove otherwise. |
+| `dead_event_candidates(results)` | M1→M2 | Which gate-surviving `EventCandidate`s never turn into an actionable contract downstream? Labels each `"dead"` (zero contracts), `"undetermined_only"`, or `"actionable"` — quantifying M1→M2 waste. |
+| `gate_survival_observed(results)` | M1 | For every raw pre-gate candidate, the observed Consistency Gate statistics (tpm, dispersion, pass/fail) alongside the configured thresholds — so a preset/asset mismatch is diagnosable before it shows up as "0 candidates" in M2. |
 | `discard_reasons_by_grade(results, grade="A")` | M2→M3 | Why does Rule Discovery verdict `NON-EDGE` specifically on alpha contracts of a given letter grade? Explodes `rejection_reasons` one row per reason, paired with `entry_optimization.failed_condition` when present. |
 | `undetermined_direction_by_family(results)` | M1→M2 | Which source-feature families (RSI, EMA, cross-column pairs, …) feed events that Alpha Discovery systematically can't orient (`direction="undetermined"`)? One row per `EventCandidate` component, so a family that only ever appears inside a composed AND-event is still counted. |
+| `diagnostics_vs_verdict(results)` | M2→M3 | Which non-blocking M2 `AlphaContract.diagnostics` correlate with a later M3 `NON-EDGE`, stratified by grade — candidates to promote from FYI into an actual gate. |
+| `lottery_only_winners(results)` | M3 | Which `PARTIAL-EDGE` contracts cleared every economic/statistical gate and lost only the search-level rotation null — versus contracts still genuinely weak on PF/DSR/OOS consistency. |
+| `classification_by_grade(registries)` | M4 | Does a higher alpha grade actually generalise better cross-ticker? Links `RuleDocument.classification` (`GENERIC`/`PARTIAL`/`SPECIFIC`/`ISOLATED`) to its originating grade. Takes `Iterable[RuleRegistry]`, not `ForgeResult` — see below. |
+| `duplicate_clusters(registries)` | M4 | How much dedup weight is there, and which surviving rules absorb it? One row per `RuleDocument` with `is_duplicate`/`duplicate_of`. Also takes `Iterable[RuleRegistry]`. |
+| `conversion_funnel(results)` | cross-module | The end-to-end `candidates → contracts → promoted → edges` population per ticker, in one long table — the only use case not anchored to a single module. |
 
-Still open on the same checklist, not yet implemented: two more M1 use cases (dead events that never reach a contract; observed vs. expected gate-survival rate per preset/asset), two M3 use cases (non-blocking M2 diagnostics that correlate with an M3 `NON-EDGE`; contracts that are `PARTIAL-EDGE` only because the rotation null wasn't cleared), two M4 use cases (does a higher alpha grade generalise cross-ticker better; which rules dominate a deduplication cluster), and one cross-module case (end-to-end conversion rate `candidates → contracts → promoted → edges` per asset).
+`classification_by_grade`/`duplicate_clusters` are the two functions that deviate from the "always `Iterable[ForgeResult]`" rule below: cross-ticker classification lives on the **pooled** `RuleRegistry` that `forge_multi()` returns separately (each per-ticker `ForgeResult.registry` is `None` on that path) — pass `[result.registry]` for a single-ticker run, or `[registry]` for a pooled one.
 
 **Verified**, pooling two `forge()` runs (`ADAUSDC`, and a second synthetic series labelled `BTCUSDC`) into one `results = [result_ada, result_btc]` list:
 
@@ -1333,9 +1340,47 @@ print(rate.sort_values(ascending=False))
 # mdd             0.850000
 ```
 
-The `undetermined` rate on this fixture sits in a narrow 85–95% band across every family reached — no single family stands out as reliably orientable, which is itself the kind of fact only visible by pooling every contract's components and asking the question long-format across all of them, not from any one `AlphaContract`. (This example also doubles as a real illustration of why this module is still marked evolving rather than stable: the family-bucketing logic itself had a bug — `EventComponent.source_cols` turned out to be non-empty even for native, arity-1 features, so every native component was silently misrouted into the cross-feature branch and this table showed no `rsi`/`ema`/`ret`/… family at all, only `cross_pair`/`cross_triple`/`other`. Fixed by dispatching on `len(source_cols)` instead of its truthiness; the numbers above are from the corrected function.)
+The `undetermined` rate on this fixture sits in a narrow 85–95% band across every family reached — no single family stands out as reliably orientable, which is itself the kind of fact only visible by pooling every contract's components and asking the question long-format across all of them, not from any one `AlphaContract`. (This example also doubles as a real illustration of why this module is treated as diagnostic rather than stable even with a complete checklist: the family-bucketing logic itself had a bug — `EventComponent.source_cols` turned out to be non-empty even for native, arity-1 features, so every native component was silently misrouted into the cross-feature branch and this table showed no `rsi`/`ema`/`ret`/… family at all, only `cross_pair`/`cross_triple`/`other`. Fixed by dispatching on `len(source_cols)` instead of its truthiness; the numbers above are from the corrected function.)
 
-Each function has a specific, deliberate "skip vs. raise" rule, always documented in its own docstring rather than left implicit — e.g. `regime_transitions`/`regime_time_share` silently skip any result whose `.enriched` frame has no `regime` column (Market Context disabled) instead of raising, and `undetermined_direction_by_family` silently skips a contract whose `event_candidate_id` doesn't resolve against `result.candidates` rather than raising a `KeyError`. Neither is a bug to route around — see the module's own docstrings, or `src/forgedge/docs/specs/playground_en.md` for the full usage reference (signatures, return columns, every skip rule, verified examples), for exactly which functions skip what and why. `src/forgedge/docs/modules/Playground.md` covers the design rationale and internal algorithms instead.
+Each function has a specific, deliberate "skip vs. raise" rule, always documented in its own docstring rather than left implicit — e.g. `regime_transitions`/`regime_time_share` silently skip any result whose `.enriched` frame has no `regime` column (Market Context disabled) instead of raising, and `undetermined_direction_by_family` silently skips a contract whose `event_candidate_id` doesn't resolve against `result.candidates` rather than raising a `KeyError`. Neither is a bug to route around — see the module's own docstrings, or `src/forgedge/docs/specs/playground_en.md` for the full usage reference (signatures, return columns, every skip rule, verified examples for all 10 functions, including the six added after this manual's initial pass), for exactly which functions skip what and why. `src/forgedge/docs/modules/Playground.md` covers the design rationale and internal algorithms instead.
+
+### `forgedge.deployment` — from analysis to production
+
+`forgedge.playground` answers "why did the pipeline behave this way"; it never decides what happens next. `forgedge.deployment` is the sibling module that picks up from there: given the tradeable contracts a session produced, it gates which ones are solid enough to go live, exports them to disk in a replayable format, and indexes the export for a periodic monitoring job. Unlike everything above, this module has **real effects** — it was in fact born inside `forgedge.playground` (issue #245) and moved to its own top-level package once that stopped being an honest name for something that writes files and makes go/no-go decisions (PR #247):
+
+```python
+from forgedge.deployment import PromotionGateConfig, promotion_gate, export_rules, monitoring_manifest
+```
+
+The intended sequence is `forge() → promotion_gate() [filter] → export_rules() [write to disk, on the promotable rules only] → monitoring_manifest() [index the export]`. `PromotionGateConfig` blocks on four independent flags by default-tuned combination: a rotation-only `PARTIAL-EDGE` miss is *not* blocked by default (`block_rotation_only=False` — usually an acceptable trade-off, not a red flag), while a duplicate or cross-ticker-`"ISOLATED"` rule *is* blocked by default, and a `walk_forward.consistency` floor of `0.5` (the same floor the pipeline itself uses internally) always applies unless `require_consistency=False`. Every flag is always computed and reported regardless of whether it participates in the final `promotable` column, so turning a check off never loses visibility into what it would have flagged.
+
+**Verified**, on a `forge_multi()` pool over ADAUSDC and a second, synthetic
+BTCUSDC series (`forge_multi()`, not a plain `forge()` per ticker like the
+regime example above, so a genuine pooled cross-ticker `RuleRegistry` is
+available):
+
+```python
+from forgedge import forge_multi
+from forgedge.deployment import promotion_gate, export_rules
+
+results, registry = forge_multi({"ADAUSDC": kpi_ada, "BTCUSDC": kpi_btc}, timeframe="1D")
+
+gate = promotion_gate(list(results.values()), registries=[registry])
+print(gate.shape)                              # (96, 9)
+print(gate.groupby("ticker")["promotable"].sum())
+# ADAUSDC    0
+# BTCUSDC    5
+
+exported = export_rules(list(results.values()), "exported_rules/", registries=[registry])
+print(len(exported))                           # 5 — one row per contract actually written to disk
+```
+
+Every `ADAUSDC` contract is blocked on this fixture — over half of the
+pooled contracts are duplicates and most classify `"ISOLATED"` on
+cross-ticker replay (both blocked by default), so this is the gate being
+conservative by design, not a bug.
+
+Full parameter/return reference, `PromotionGateConfig`'s complete field table, and every verified example: `src/forgedge/docs/specs/deployment_en.md`. Design rationale — why the sequence is fixed, why only `export_rules` touches the filesystem: `src/forgedge/docs/modules/Deployment.md`.
 
 ---
 

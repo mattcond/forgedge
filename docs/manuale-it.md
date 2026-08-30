@@ -1307,16 +1307,23 @@ Due scelte di design valgono per ogni funzione qui e conviene interiorizzarle un
 - **L'input è sempre `Iterable[ForgeResult]`** — uno o più output di `forge()`/`forge_multi()`, mai rieseguiti. Metti in un'unica lista i risultati di un'intera sessione e passa quella stessa lista a ogni funzione del playground con cui vuoi interrogarla.
 - **L'output è sempre in formato long** — una riga per osservazione elementare (una transizione, una ragione di rigetto, un componente), mai pre-aggregata. Il docstring di ogni funzione mostra il `groupby`/l'aggregazione che ci si aspetta di concatenare dopo — quella composizione è deliberatamente lasciata al chiamante invece di essere incorporata nella funzione, così la stessa tabella lunga risponde a domande che l'autore della funzione non aveva previsto.
 
-**Questo modulo è esplicitamente un lavoro in corso, non un'API core stabile al livello di `forge()` o `RuleDiscovery`.** Segue una checklist aperta di casi d'uso diagnostici (issue #237) — quattro sono implementati oggi, uno per stadio della pipeline resta ancora da fare:
+**Questo modulo è esplicitamente uno strato diagnostico, non un'API core stabile al livello di `forge()` o `RuleDiscovery`.** Segue una checklist di casi d'uso (issue #237) — **tutti gli 11 sono oggi implementati**:
 
 | Funzione | Modulo | Domanda a cui risponde |
 |---|---|---|
 | `regime_transitions(results)` | M0 | Con che frequenza — e dopo quanto poco — flippa `regime`? Un confine "nervoso" che flippa ogni barra o due inquina qualunque evento M1 condizionato al regime a valle. |
 | `regime_time_share(results)` | M0 | Quale quota della propria storia passa ciascun ticker in ciascun regime? Un asset di fatto prigioniero di un solo regime fa sembrare generiche regole che in realtà sono regime-specifiche — non c'è mai stato abbastanza di un altro regime presente per dimostrarlo. |
+| `dead_event_candidates(results)` | M1→M2 | Quali `EventCandidate` sopravvissuti al gate non producono mai un contratto actionable a valle? Etichetta ciascuno `"dead"` (zero contratti), `"undetermined_only"`, o `"actionable"` — quantifica lo spreco M1→M2. |
+| `gate_survival_observed(results)` | M1 | Per ogni candidato grezzo pre-gate, le statistiche osservate del Consistency Gate (tpm, dispersione, passato/fallito) affiancate alle soglie configurate — così un mismatch preset/asset è diagnosticabile prima di manifestarsi come "0 candidati" in M2. |
 | `discard_reasons_by_grade(results, grade="A")` | M2→M3 | Perché Rule Discovery emette verdetto `NON-EDGE` proprio sui contratti alpha di un dato grade? Esplode `rejection_reasons` una riga per ragione, abbinata a `entry_optimization.failed_condition` quando presente. |
 | `undetermined_direction_by_family(results)` | M1→M2 | Quali famiglie di feature sorgente (RSI, EMA, coppie cross-colonna, …) alimentano eventi che Alpha Discovery non riesce sistematicamente a orientare (`direction="undetermined"`)? Una riga per componente di `EventCandidate`, così una famiglia che compare solo dentro un evento AND composto viene comunque contata. |
+| `diagnostics_vs_verdict(results)` | M2→M3 | Quali `AlphaContract.diagnostics` non bloccanti di M2 correlano con un `NON-EDGE` in M3 più tardi, per grado — candidati a essere promossi da semplice FYI a un vero gate. |
+| `lottery_only_winners(results)` | M3 | Quali contratti `PARTIAL-EDGE` hanno superato ogni gate economico/statistico e hanno perso solo il rotation null a livello di ricerca — contro contratti ancora genuinamente deboli su PF/DSR/consistenza OOS. |
+| `classification_by_grade(registries)` | M4 | Un grade alpha più alto generalizza davvero meglio cross-ticker? Lega `RuleDocument.classification` (`GENERIC`/`PARTIAL`/`SPECIFIC`/`ISOLATED`) al grade di origine. Prende `Iterable[RuleRegistry]`, non `ForgeResult` — vedi sotto. |
+| `duplicate_clusters(registries)` | M4 | Quanto pesa la deduplicazione, e quali regole sopravvissute la assorbono? Una riga per `RuleDocument` con `is_duplicate`/`duplicate_of`. Prende anch'essa `Iterable[RuleRegistry]`. |
+| `conversion_funnel(results)` | trasversale | La popolazione end-to-end `candidati → contratti → promossi → edge` per ticker, in un'unica tabella long — l'unico caso d'uso non ancorato a un singolo modulo. |
 
-Ancora aperti sulla stessa checklist, non ancora implementati: altri due casi d'uso M1 (eventi "morti" che non raggiungono mai un contratto; tasso di sopravvivenza al gate osservato vs atteso per preset/asset), due casi M3 (diagnostics M2 non bloccanti che correlano con un `NON-EDGE` in M3; contratti `PARTIAL-EDGE` solo perché il rotation null non è stato superato), due casi M4 (un grade alpha più alto generalizza meglio cross-ticker; quali regole dominano un cluster di deduplicazione), e un caso trasversale (tasso di conversione end-to-end `candidati → contratti → promossi → edge` per asset).
+`classification_by_grade`/`duplicate_clusters` sono le due funzioni che deviano dalla regola "sempre `Iterable[ForgeResult]`" sotto: la classificazione cross-ticker vive sul `RuleRegistry` **pooled** che `forge_multi()` restituisce separatamente (ogni `ForgeResult.registry` per-ticker è `None` su quel percorso) — passa `[result.registry]` per una run a singolo ticker, o `[registry]` per uno pooled.
 
 **Verificato**, mettendo in pool due run `forge()` (`ADAUSDC`, e una seconda serie sintetica etichettata `BTCUSDC`) in un'unica lista `results = [result_ada, result_btc]`:
 
@@ -1348,9 +1355,47 @@ print(rate.sort_values(ascending=False))
 # mdd             0.850000
 ```
 
-Il tasso di `undetermined` su questo fixture sta in una fascia stretta 85-95% su ogni famiglia raggiunta — nessuna famiglia spicca come affidabilmente orientabile, ed è esattamente il tipo di fatto visibile solo mettendo in pool ogni componente di ogni contratto e ponendo la domanda in formato long su tutti insieme, non da nessun singolo `AlphaContract`. (Questo esempio è anche una vera illustrazione del perché questo modulo è ancora segnato come in evoluzione e non stabile: la logica di bucketing delle famiglie aveva essa stessa un bug — `EventComponent.source_cols` risultava non vuoto anche per feature native, di arità 1, quindi ogni componente nativo veniva silenziosamente instradato nel ramo delle feature cross e questa tabella non mostrava alcuna famiglia `rsi`/`ema`/`ret`/… ma solo `cross_pair`/`cross_triple`/`other`. Corretto dispatchando su `len(source_cols)` invece che sulla sua truthiness; i numeri sopra sono della funzione corretta.)
+Il tasso di `undetermined` su questo fixture sta in una fascia stretta 85-95% su ogni famiglia raggiunta — nessuna famiglia spicca come affidabilmente orientabile, ed è esattamente il tipo di fatto visibile solo mettendo in pool ogni componente di ogni contratto e ponendo la domanda in formato long su tutti insieme, non da nessun singolo `AlphaContract`. (Questo esempio è anche una vera illustrazione del perché questo modulo resta trattato come diagnostico e non stabile anche con checklist completa: la logica di bucketing delle famiglie aveva essa stessa un bug — `EventComponent.source_cols` risultava non vuoto anche per feature native, di arità 1, quindi ogni componente nativo veniva silenziosamente instradato nel ramo delle feature cross e questa tabella non mostrava alcuna famiglia `rsi`/`ema`/`ret`/… ma solo `cross_pair`/`cross_triple`/`other`. Corretto dispatchando su `len(source_cols)` invece che sulla sua truthiness; i numeri sopra sono della funzione corretta.)
 
-Ogni funzione ha una regola specifica e deliberata su "saltare vs sollevare eccezione", sempre documentata nel proprio docstring invece di lasciata implicita — es. `regime_transitions`/`regime_time_share` saltano silenziosamente qualunque risultato il cui frame `.enriched` non abbia una colonna `regime` (Market Context disabilitato) invece di sollevare, e `undetermined_direction_by_family` salta silenziosamente un contratto il cui `event_candidate_id` non si risolve contro `result.candidates` invece di sollevare un `KeyError`. Nessuna delle due è un bug da aggirare — vedi i docstring del modulo stesso, o `src/forgedge/docs/specs/playground_it.md` per il riferimento completo all'utilizzo (firme, colonne restituite, ogni regola di skip, esempi verificati), per sapere esattamente quali funzioni saltano cosa e perché. `src/forgedge/docs/modules/Playground.md` copre invece la motivazione di design e gli algoritmi interni.
+Ogni funzione ha una regola specifica e deliberata su "saltare vs sollevare eccezione", sempre documentata nel proprio docstring invece di lasciata implicita — es. `regime_transitions`/`regime_time_share` saltano silenziosamente qualunque risultato il cui frame `.enriched` non abbia una colonna `regime` (Market Context disabilitato) invece di sollevare, e `undetermined_direction_by_family` salta silenziosamente un contratto il cui `event_candidate_id` non si risolve contro `result.candidates` invece di sollevare un `KeyError`. Nessuna delle due è un bug da aggirare — vedi i docstring del modulo stesso, o `src/forgedge/docs/specs/playground_it.md` per il riferimento completo all'utilizzo (firme, colonne restituite, ogni regola di skip, esempi verificati per tutte e 10 le funzioni, incluse le sei aggiunte dopo il primo passaggio di questo manuale), per sapere esattamente quali funzioni saltano cosa e perché. `src/forgedge/docs/modules/Playground.md` copre invece la motivazione di design e gli algoritmi interni.
+
+### `forgedge.deployment` — dall'analisi alla produzione
+
+`forgedge.playground` risponde a "perché la pipeline si è comportata così"; non decide mai cosa succede dopo. `forgedge.deployment` è il modulo gemello che riprende da lì: dati i contratti tradeable prodotti da una sessione, decide quali sono abbastanza solidi da andare live, li esporta su disco in un formato replicabile, e indicizza l'export per un job di monitoraggio periodico. A differenza di tutto ciò che precede, questo modulo ha **effetti reali** — è nato infatti dentro `forgedge.playground` (issue #245) ed è stato spostato nel proprio pacchetto top-level una volta che quel nome ha smesso di essere onesto per qualcosa che scrive file e prende decisioni di go/no-go (PR #247):
+
+```python
+from forgedge.deployment import PromotionGateConfig, promotion_gate, export_rules, monitoring_manifest
+```
+
+La sequenza prevista è `forge() → promotion_gate() [filtra] → export_rules() [scrive su disco, sulle sole regole promuovibili] → monitoring_manifest() [indicizza l'export]`. `PromotionGateConfig` blocca su quattro flag indipendenti con una combinazione di default ponderata: un `PARTIAL-EDGE` bloccato solo dal rotation only *non* è bloccato per default (`block_rotation_only=False` — di solito un compromesso accettabile, non un campanello d'allarme), mentre una regola duplicata o classificata `"ISOLATED"` cross-ticker *è* bloccata per default, e una soglia di `walk_forward.consistency` di `0.5` (la stessa soglia che la pipeline usa internamente) si applica sempre a meno di `require_consistency=False`. Ogni flag è sempre calcolato e riportato indipendentemente dal fatto che partecipi alla colonna finale `promotable`, così disattivare un controllo non fa mai perdere visibilità su cosa avrebbe segnalato.
+
+**Verificato**, su un pool `forge_multi()` su ADAUSDC e una seconda serie
+sintetica BTCUSDC (`forge_multi()`, non un `forge()` per ticker come
+nell'esempio del regime sopra, così da avere un `RuleRegistry` cross-ticker
+pooled genuino):
+
+```python
+from forgedge import forge_multi
+from forgedge.deployment import promotion_gate, export_rules
+
+results, registry = forge_multi({"ADAUSDC": kpi_ada, "BTCUSDC": kpi_btc}, timeframe="1D")
+
+gate = promotion_gate(list(results.values()), registries=[registry])
+print(gate.shape)                              # (96, 9)
+print(gate.groupby("ticker")["promotable"].sum())
+# ADAUSDC    0
+# BTCUSDC    5
+
+exported = export_rules(list(results.values()), "exported_rules/", registries=[registry])
+print(len(exported))                           # 5 — una riga per contratto effettivamente scritto su disco
+```
+
+Ogni contratto `ADAUSDC` è bloccato su questo fixture — oltre metà dei
+contratti in pool sono duplicati e la maggior parte si classifica
+`"ISOLATED"` sul replay cross-ticker (entrambi bloccati per default), quindi
+è il gate che fa il suo lavoro conservativo per design, non un bug.
+
+Riferimento completo su parametri/ritorni, tabella completa dei campi di `PromotionGateConfig`, e ogni esempio verificato: `src/forgedge/docs/specs/deployment_it.md`. Motivazione di design — perché la sequenza è fissa, perché solo `export_rules` tocca il filesystem: `src/forgedge/docs/modules/Deployment.md`.
 
 ---
 

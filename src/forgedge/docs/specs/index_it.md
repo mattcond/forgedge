@@ -200,9 +200,12 @@ warning e consente comunque l'esecuzione.
 | `modulo_3_it.md` | Rule Discovery: backtest, verdetto EDGE, walk-forward OOS, report |
 | `modulo_4_it.md` | Rule Registry: deduplicazione, cross-ticker, genericity, export |
 | `configuration_it.md` | Riferimento completo alla configurazione: ogni campo dataclass, tipo, default e descrizione |
-| `playground_it.md` | Playground: guida all'utilizzo degli helper di analisi sopra i `ForgeResult` messi in pool |
+| `playground_it.md` | Playground: guida all'utilizzo degli helper di analisi sopra i `ForgeResult` messi in pool (tutti gli 11 casi d'uso, issue #237) |
+| `deployment_it.md` | Deployment: guida all'utilizzo delle funzioni di gate/export/monitoraggio che portano le regole scoperte in produzione |
 
-`forgedge.playground` — un livello di analisi di sola lettura sopra i `ForgeResult` messi in pool, ancora in evoluzione (issue #237) — è coperto nel manuale principale (`docs/manuale-it.md`, §9). [`playground_it.md`](playground_it.md) è il suo riferimento dettagliato all'utilizzo (firme, parametri, esempi verificati); [`modules/Playground.md`](../modules/Playground.md) copre invece la motivazione di design e gli algoritmi interni.
+`forgedge.playground` — un livello di analisi di sola lettura sopra i `ForgeResult` messi in pool — è coperto nel manuale principale (`docs/manuale-it.md`, §9). La sua checklist di tracciamento (issue #237) è completa (10 funzioni più il trasversale `conversion_funnel`), ma resta uno strato diagnostico, non un'API core stabile. [`playground_it.md`](playground_it.md) è il suo riferimento dettagliato all'utilizzo (firme, parametri, esempi verificati); [`modules/Playground.md`](../modules/Playground.md) copre invece la motivazione di design e gli algoritmi interni.
+
+`forgedge.deployment` — il suo modulo gemello per portare le regole promosse in produzione (gate di qualità, export su disco, manifest di monitoraggio) — è stato separato da `forgedge.playground` da PR #247 (issue #245) perché quelle funzioni hanno effetti reali che un nome di sola lettura non descriveva più onestamente. [`deployment_it.md`](deployment_it.md) è il suo riferimento all'utilizzo; [`modules/Deployment.md`](../modules/Deployment.md) copre la motivazione di design.
 
 Le versioni inglesi sono nei file corrispondenti `*_en.md`.
 
