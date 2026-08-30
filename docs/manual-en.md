@@ -1279,6 +1279,64 @@ RotationCalibrator(event_frame, candidates, alpha_config, time_budget=None).run(
 
 Both are covered in depth in §14–15.
 
+### `forgedge.playground` — analysis helpers over `ForgeResult`
+
+Everything so far in this section reads from *one* `forge()` call and asks "what did this run produce." `forgedge.playground` is a different layer: a small, growing set of read-only functions that take **R**, the *set* of `ForgeResult` objects a whole research session accumulates — several tickers, several presets, several re-runs over time — and ask cross-cutting questions about the pipeline's own behaviour that no single run's fields answer on their own. It never touches the pipeline: every function only reads attributes already sitting on `ForgeResult` (`.enriched`, `.rule_responses`, `.candidates`, `.contracts`, `.ticker`, …) and returns a `pandas.DataFrame`.
+
+```python
+from forgedge.playground import *   # the intended import — see forgedge/playground/__init__.py
+```
+
+Two design choices apply to every function here and are worth internalising once rather than per-function:
+
+- **Input is always `Iterable[ForgeResult]`** — one or many `forge()`/`forge_multi()` outputs, never re-executed. Pool a whole session's results into a list and hand the same list to every playground function you want to ask of it.
+- **Output is always long-format** — one row per elementary observation (one transition, one rejection reason, one component), never pre-aggregated. Every function's docstring shows the `groupby`/aggregation you're expected to chain afterward — that composition is deliberately left to the caller rather than baked into the function, so the same long table answers questions the function's author didn't anticipate.
+
+**This module is explicitly a work in progress, not a stable core API on the level of `forge()` or `RuleDiscovery`.** It tracks an open checklist of diagnostic use cases (issue #237) — four are implemented today, one per pipeline stage still to come:
+
+| Function | Module | Question it answers |
+|---|---|---|
+| `regime_transitions(results)` | M0 | How often — and after how short a run — does `regime` flip? A boundary that flips every bar or two is "nervous," and pollutes any M1 event conditioned on regime downstream. |
+| `regime_time_share(results)` | M0 | What share of its history does each ticker spend in each regime? An asset effectively imprisoned in one regime makes rules discovered on it look generic when they're actually regime-specific — there was never enough of another regime present to prove otherwise. |
+| `discard_reasons_by_grade(results, grade="A")` | M2→M3 | Why does Rule Discovery verdict `NON-EDGE` specifically on alpha contracts of a given letter grade? Explodes `rejection_reasons` one row per reason, paired with `entry_optimization.failed_condition` when present. |
+| `undetermined_direction_by_family(results)` | M1→M2 | Which source-feature families (RSI, EMA, cross-column pairs, …) feed events that Alpha Discovery systematically can't orient (`direction="undetermined"`)? One row per `EventCandidate` component, so a family that only ever appears inside a composed AND-event is still counted. |
+
+Still open on the same checklist, not yet implemented: two more M1 use cases (dead events that never reach a contract; observed vs. expected gate-survival rate per preset/asset), two M3 use cases (non-blocking M2 diagnostics that correlate with an M3 `NON-EDGE`; contracts that are `PARTIAL-EDGE` only because the rotation null wasn't cleared), two M4 use cases (does a higher alpha grade generalise cross-ticker better; which rules dominate a deduplication cluster), and one cross-module case (end-to-end conversion rate `candidates → contracts → promoted → edges` per asset).
+
+**Verified**, pooling two `forge()` runs (`ADAUSDC`, and a second synthetic series labelled `BTCUSDC`) into one `results = [result_ada, result_btc]` list:
+
+```python
+from forgedge.playground import regime_transitions, regime_time_share, undetermined_direction_by_family
+
+rt = regime_transitions(results)
+print(rt.shape)                                            # (236, 6)
+print(rt[rt["run_length_before"] <= 2].groupby("ticker").size())
+# ADAUSDC    45
+# BTCUSDC    41
+
+share = regime_time_share(results)
+top = share.sort_values("share", ascending=False).groupby("ticker").head(1)
+print(top[["ticker", "regime", "share"]].to_string(index=False))
+#  ticker      regime    share
+# BTCUSDC STRONG_BEAR 0.438776
+# ADAUSDC STRONG_BEAR 0.407029
+
+fam = undetermined_direction_by_family([result_ada])
+rate = fam.groupby("family")["direction"].apply(lambda s: (s == "undetermined").mean())
+print(rate.sort_values(ascending=False))
+# family
+# cross_triple    0.945455
+# ret             0.915367
+# cross_pair      0.915001
+# vol             0.903101
+# other           0.892857
+# mdd             0.850000
+```
+
+The `undetermined` rate on this fixture sits in a narrow 85–95% band across every family reached — no single family stands out as reliably orientable, which is itself the kind of fact only visible by pooling every contract's components and asking the question long-format across all of them, not from any one `AlphaContract`. (This example also doubles as a real illustration of why this module is still marked evolving rather than stable: the family-bucketing logic itself had a bug — `EventComponent.source_cols` turned out to be non-empty even for native, arity-1 features, so every native component was silently misrouted into the cross-feature branch and this table showed no `rsi`/`ema`/`ret`/… family at all, only `cross_pair`/`cross_triple`/`other`. Fixed by dispatching on `len(source_cols)` instead of its truthiness; the numbers above are from the corrected function.)
+
+Each function has a specific, deliberate "skip vs. raise" rule, always documented in its own docstring rather than left implicit — e.g. `regime_transitions`/`regime_time_share` silently skip any result whose `.enriched` frame has no `regime` column (Market Context disabled) instead of raising, and `undetermined_direction_by_family` silently skips a contract whose `event_candidate_id` doesn't resolve against `result.candidates` rather than raising a `KeyError`. Neither is a bug to route around — see the module's own docstrings, or `src/forgedge/docs/modules/Playground.md` for the full reference, for exactly which functions skip what and why.
+
 ---
 
 ## 10. Configuration

@@ -198,6 +198,8 @@ Pass `strict=False` to downgrade these findings to warnings and run anyway.
 | `modulo_4_en.md` | Rule Registry: deduplication, cross-ticker, genericity, export |
 | `configuration_en.md` | Complete configuration reference: every dataclass field, type, default, and description |
 
+`forgedge.playground` — a read-only analysis layer over pooled `ForgeResult` output, still evolving (issue #237) — is covered in the main manual (`docs/manual-en.md`, §9) and has its own dedicated reference at [`modules/Playground.md`](../modules/Playground.md).
+
 Italian versions are in the corresponding `*_it.md` files.
 
 Working on this codebase with Claude Code? The `forgedge` skill in

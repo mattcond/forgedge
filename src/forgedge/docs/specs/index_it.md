@@ -201,6 +201,8 @@ warning e consente comunque l'esecuzione.
 | `modulo_4_it.md` | Rule Registry: deduplicazione, cross-ticker, genericity, export |
 | `configuration_it.md` | Riferimento completo alla configurazione: ogni campo dataclass, tipo, default e descrizione |
 
+`forgedge.playground` — un livello di analisi di sola lettura sopra i `ForgeResult` messi in pool, ancora in evoluzione (issue #237) — è coperto nel manuale principale (`docs/manuale-it.md`, §9) e ha un proprio riferimento dedicato in [`modules/Playground.md`](../modules/Playground.md).
+
 Le versioni inglesi sono nei file corrispondenti `*_en.md`.
 
 Lavori su questo codebase con Claude Code? La skill `forgedge` in
