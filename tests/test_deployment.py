@@ -1,4 +1,4 @@
-"""Tests for forgedge.playground.production — promotion gate, export, monitoring manifest."""
+"""Tests for forgedge.deployment — promotion gate, export, monitoring manifest."""
 
 import pickle
 from types import SimpleNamespace
@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from forgedge.playground import (
+from forgedge.deployment import (
     PromotionGateConfig,
     export_rules,
     monitoring_manifest,
@@ -262,7 +262,7 @@ class TestMonitoringManifest:
             name="A-1", candidate=candidate, is_end=None, verdict="EDGE", oos_expectancy=0.01
         )
         monkeypatch.setattr(
-            "forgedge.playground.production.RuleSpec.from_forge_result",
+            "forgedge.deployment.rules.RuleSpec.from_forge_result",
             lambda r: [fake_spec],
         )
 
@@ -274,7 +274,7 @@ class TestMonitoringManifest:
 
     def test_no_matches_returns_empty_frame_with_expected_columns(self, monkeypatch):
         monkeypatch.setattr(
-            "forgedge.playground.production.RuleSpec.from_forge_result",
+            "forgedge.deployment.rules.RuleSpec.from_forge_result",
             lambda r: [],
         )
 
