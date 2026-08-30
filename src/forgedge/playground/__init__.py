@@ -12,9 +12,12 @@ Usage::
     from forgedge.playground import *
 """
 
+from .funnel import conversion_funnel
 from .m0 import regime_time_share, regime_transitions
 from .m1 import dead_event_candidates, gate_survival_observed
 from .m2 import discard_reasons_by_grade, undetermined_direction_by_family
+from .m3 import diagnostics_vs_verdict, lottery_only_winners
+from .m4 import classification_by_grade, duplicate_clusters
 
 __all__ = [
     "regime_transitions",
@@ -23,4 +26,9 @@ __all__ = [
     "gate_survival_observed",
     "discard_reasons_by_grade",
     "undetermined_direction_by_family",
+    "diagnostics_vs_verdict",
+    "lottery_only_winners",
+    "classification_by_grade",
+    "duplicate_clusters",
+    "conversion_funnel",
 ]
