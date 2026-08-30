@@ -134,10 +134,10 @@ Per **ogni** contratto valutato (`result.contracts` — promossi e rigettati ind
 
 **Perché esiste:** `direction == "undetermined"` è l'unico gate di rigetto rigido di Alpha Discovery (manuale §8/§9) — capire se certe famiglie di feature sorgente (RSI, EMA, coppie cross-colonna, …) alimentano eventi che M2 non riesce quasi mai a orientare, sistematicamente, è la domanda diagnostica diretta per decidere se investire nel migliorare quella famiglia di feature o abbandonarla.
 
-**Classificazione della famiglia** (`_feature_family`, interna):
-- Colonne native che seguono la convenzione `{base}_{indicatore}_{periodo}` (es. `close_rsi_25`) → il gruppo indicatore (`"rsi"`).
-- Feature composte con `source_cols` popolato (coppie/triple cross-colonna — cross-OHLC, MACD-vs-signal, prezzo-vs-volume, geometria candela, …), che non seguono quella convenzione sul proprio nome sintetico → bucket per arità: `"cross_pair"` (2 colonne sorgente), `"cross_triple"` (3 colonne sorgente), `"other"` per ogni altra arità.
-- Qualunque altro nome non conforme → `"other"`.
+**Classificazione della famiglia** (`_feature_family`, interna) — il dispatch avviene su `len(source_cols)`, non sulla sua truthiness:
+- `len(source_cols) == 2` (coppie cross-colonna — cross-OHLC, MACD-vs-signal, prezzo-vs-volume, …, che non seguono la convenzione di naming sul proprio nome sintetico) → `"cross_pair"`.
+- `len(source_cols) == 3` (triple — es. geometria candela) → `"cross_triple"`.
+- Qualunque altra lunghezza (incluse `0`/assente, e le feature native, per cui `source_cols` in pratica **non è affidabilmente vuoto** — vedi la nota storica più sotto) → ricade sul regex `{base}_{indicatore}_{periodo}` (es. `close_rsi_25` → `"rsi"`); `"other"` è il fallback finale solo se il regex non trova corrispondenza.
 
 **Eventi composti (AND):** un evento con più componenti contribuisce **una riga per componente**, tutte con la stessa `direction` del contratto — così una famiglia che compare solo all'interno di un evento composto viene comunque contata, invece di sparire dietro l'`event_id` dell'intero composto.
 
@@ -222,12 +222,17 @@ print(rate.sort_values(ascending=False))
 ```
 family
 cross_triple    0.945455
+ret             0.915367
 cross_pair      0.915001
-other           0.908046
+vol             0.903101
+other           0.892857
+mdd             0.850000
 Name: direction, dtype: float64
 ```
 
-Nota onesta su questo specifico fixture: nessun componente arrivato fino a un contratto valutato appartiene a una famiglia nativa semplice (`rsi`, `ema`, …) — tutti i 7356 componenti osservati ricadono in `cross_pair`/`cross_triple`/`other`. Non è un difetto della funzione: è esattamente il tipo di fatto — invisibile guardando un `AlphaContract` alla volta — che mettere in pool tutti i componenti di tutti i contratti e interrogarli in formato long rende visibile.
+Su questo fixture il tasso di `undetermined` sta in una fascia stretta 85-95% su ogni famiglia raggiunta, nativa o composta — nessuna famiglia spicca come affidabilmente orientabile. È esattamente il tipo di fatto — invisibile guardando un `AlphaContract` alla volta — che mettere in pool tutti i componenti di tutti i contratti e interrogarli in formato long rende visibile.
+
+**Nota storica, non più attuale:** una prima versione di `_feature_family` aveva un bug reale — `EventComponent.source_cols` risulta non vuoto (lunghezza 1) anche per feature native di arità 1, nonostante il proprio docstring dichiari il contrario, quindi il vecchio controllo di truthiness instradava ogni feature nativa nel ramo cross-feature prima ancora che il regex sul nome potesse mai girare. Il sintomo era esattamente `cross_pair`/`cross_triple`/`other` come uniche famiglie osservate, mai una famiglia nativa (`rsi`, `ema`, `ret`, …) — un risultato che in una versione precedente di questo documento era stato descritto per errore come una caratteristica reale del fixture invece che come il sintomo di un bug. Corretto dispatchando su `len(source_cols)` invece che sulla sua truthiness (verificato di nuovo contro una run reale); i numeri sopra sono già quelli della funzione corretta.
 
 ---
 

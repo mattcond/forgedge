@@ -1341,11 +1341,14 @@ rate = fam.groupby("family")["direction"].apply(lambda s: (s == "undetermined").
 print(rate.sort_values(ascending=False))
 # family
 # cross_triple    0.945455
+# ret             0.915367
 # cross_pair      0.915001
-# other           0.908046
+# vol             0.903101
+# other           0.892857
+# mdd             0.850000
 ```
 
-Quest'ultimo esempio è di per sé una piccola illustrazione onesta di a cosa serve questo modulo: su questo fixture, il tasso di `undetermined` sta intorno al 90-95% su *ogni* famiglia raggiunta, e nessun `EventCandidate` su questo dataset si risolve in una famiglia nativa semplice (`rsi`, `ema`, …) tra i componenti che sono arrivati fino a un contratto — un fatto che non si vedrebbe da nessun singolo `AlphaContract`, solo mettendo in pool ogni componente di ogni contratto e ponendo la domanda in formato long su tutti insieme.
+Il tasso di `undetermined` su questo fixture sta in una fascia stretta 85-95% su ogni famiglia raggiunta — nessuna famiglia spicca come affidabilmente orientabile, ed è esattamente il tipo di fatto visibile solo mettendo in pool ogni componente di ogni contratto e ponendo la domanda in formato long su tutti insieme, non da nessun singolo `AlphaContract`. (Questo esempio è anche una vera illustrazione del perché questo modulo è ancora segnato come in evoluzione e non stabile: la logica di bucketing delle famiglie aveva essa stessa un bug — `EventComponent.source_cols` risultava non vuoto anche per feature native, di arità 1, quindi ogni componente nativo veniva silenziosamente instradato nel ramo delle feature cross e questa tabella non mostrava alcuna famiglia `rsi`/`ema`/`ret`/… ma solo `cross_pair`/`cross_triple`/`other`. Corretto dispatchando su `len(source_cols)` invece che sulla sua truthiness; i numeri sopra sono della funzione corretta.)
 
 Ogni funzione ha una regola specifica e deliberata su "saltare vs sollevare eccezione", sempre documentata nel proprio docstring invece di lasciata implicita — es. `regime_transitions`/`regime_time_share` saltano silenziosamente qualunque risultato il cui frame `.enriched` non abbia una colonna `regime` (Market Context disabilitato) invece di sollevare, e `undetermined_direction_by_family` salta silenziosamente un contratto il cui `event_candidate_id` non si risolve contro `result.candidates` invece di sollevare un `KeyError`. Nessuna delle due è un bug da aggirare — vedi i docstring del modulo stesso, o `src/forgedge/docs/modules/Playground.md` per il riferimento completo, per sapere esattamente quali funzioni saltano cosa e perché.
 

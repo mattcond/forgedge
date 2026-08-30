@@ -1326,11 +1326,14 @@ rate = fam.groupby("family")["direction"].apply(lambda s: (s == "undetermined").
 print(rate.sort_values(ascending=False))
 # family
 # cross_triple    0.945455
+# ret             0.915367
 # cross_pair      0.915001
-# other           0.908046
+# vol             0.903101
+# other           0.892857
+# mdd             0.850000
 ```
 
-That last example is itself a small, honest illustration of what this module is for: on this fixture, the `undetermined` rate sits around 90–95% across *every* family reached, and no `EventCandidate` on this dataset resolves to a plain native family (`rsi`, `ema`, …) among the components that made it as far as a contract — a fact you would not see from any single `AlphaContract`, only from pooling every contract's components and asking the question long-format across all of them.
+The `undetermined` rate on this fixture sits in a narrow 85–95% band across every family reached — no single family stands out as reliably orientable, which is itself the kind of fact only visible by pooling every contract's components and asking the question long-format across all of them, not from any one `AlphaContract`. (This example also doubles as a real illustration of why this module is still marked evolving rather than stable: the family-bucketing logic itself had a bug — `EventComponent.source_cols` turned out to be non-empty even for native, arity-1 features, so every native component was silently misrouted into the cross-feature branch and this table showed no `rsi`/`ema`/`ret`/… family at all, only `cross_pair`/`cross_triple`/`other`. Fixed by dispatching on `len(source_cols)` instead of its truthiness; the numbers above are from the corrected function.)
 
 Each function has a specific, deliberate "skip vs. raise" rule, always documented in its own docstring rather than left implicit — e.g. `regime_transitions`/`regime_time_share` silently skip any result whose `.enriched` frame has no `regime` column (Market Context disabled) instead of raising, and `undetermined_direction_by_family` silently skips a contract whose `event_candidate_id` doesn't resolve against `result.candidates` rather than raising a `KeyError`. Neither is a bug to route around — see the module's own docstrings, or `src/forgedge/docs/modules/Playground.md` for the full reference, for exactly which functions skip what and why.
 
