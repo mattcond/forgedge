@@ -18,6 +18,7 @@ from .m1 import dead_event_candidates, gate_survival_observed
 from .m2 import discard_reasons_by_grade, undetermined_direction_by_family
 from .m3 import diagnostics_vs_verdict, lottery_only_winners
 from .m4 import classification_by_grade, duplicate_clusters
+from .production import PromotionGateConfig, export_rules, monitoring_manifest, promotion_gate
 
 __all__ = [
     "regime_transitions",
@@ -31,4 +32,8 @@ __all__ = [
     "classification_by_grade",
     "duplicate_clusters",
     "conversion_funnel",
+    "PromotionGateConfig",
+    "promotion_gate",
+    "export_rules",
+    "monitoring_manifest",
 ]
