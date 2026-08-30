@@ -1,13 +1,23 @@
-"""Playground use cases for putting discovered rules into production (#245).
+"""forgedge.deployment — putting discovered rules into production (#245).
+
+Split out of ``forgedge.playground`` (see #245's discussion): unlike the
+read-only analysis functions in ``forgedge.playground`` — built for
+exploring *why* forge() decided what it decided — this module has real
+effects: it gates which rules are allowed to go live and writes files to
+disk. "Playground" stopped fitting once the module did more than look.
 
 Three use cases, meant to run in sequence:
 
     forge() -> promotion_gate() [filter] -> export_rules() [write to disk]
             -> monitoring_manifest() [index the export for periodic re-checks]
 
-Unlike the analysis-only modules (m0-m4, funnel), ``export_rules`` performs
-filesystem I/O — deliberately isolated to that one function so the rest of
-the sequence stays pure and easy to test.
+``export_rules`` is the only function that performs filesystem I/O —
+deliberately isolated so the rest of the sequence stays pure and easy to
+test.
+
+Usage::
+
+    from forgedge.deployment import *
 """
 
 from __future__ import annotations
