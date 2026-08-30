@@ -12,9 +12,12 @@ Usage::
     from forgedge.playground import *
 """
 
+from .m0 import regime_time_share, regime_transitions
 from .m2 import discard_reasons_by_grade, undetermined_direction_by_family
 
 __all__ = [
+    "regime_transitions",
+    "regime_time_share",
     "discard_reasons_by_grade",
     "undetermined_direction_by_family",
 ]
