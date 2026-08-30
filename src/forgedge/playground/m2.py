@@ -95,17 +95,20 @@ def _feature_family(source_feature: str, source_cols: Optional[list]) -> str:
 
     Native columns follow ``{base}_{indicator}_{period}`` (e.g.
     ``close_rsi_25`` -> ``"rsi"``). Arity-2/3 paired features (``source_cols``
-    populated — cross-OHLC, MACD-vs-signal, price-vs-volume, etc.) don't carry
-    that naming convention on their synthetic ``source_feature``, so they are
-    bucketed by arity instead. Anything else falls back to ``"other"``.
+    of length 2 or 3 — cross-OHLC, MACD-vs-signal, price-vs-volume, etc.)
+    don't carry that naming convention on their synthetic ``source_feature``,
+    so they are bucketed by arity instead. ``source_cols`` is *not* reliably
+    empty for arity-1/native features in practice (observed non-empty
+    length-1 on real candidates, despite the arity-1 docstring on
+    ``EventComponent.source_cols``), so length — not truthiness — is what
+    selects the cross-feature branch; anything else falls through to the
+    native-name regex, with ``"other"`` as the final fallback.
     """
-    if source_cols:
-        n = len(source_cols)
-        if n == 2:
-            return "cross_pair"
-        if n == 3:
-            return "cross_triple"
-        return "other"
+    n = len(source_cols) if source_cols else 0
+    if n == 2:
+        return "cross_pair"
+    if n == 3:
+        return "cross_triple"
     match = _FAMILY_RE.match(source_feature)
     return match.group(1) if match else "other"
 
