@@ -167,6 +167,13 @@ class TestFeatureFamily:
     def test_triple_features_bucketed_by_arity(self):
         assert _feature_family("band_position", ["close", "lower", "upper"]) == "cross_triple"
 
+    def test_native_feature_with_nonempty_length_one_source_cols_still_resolves_by_name(self):
+        # Regression: EventComponent.source_cols is documented "empty for
+        # arity-1 (native) features" but observed non-empty (length 1) on
+        # real candidates (e.g. "close_ret_03") — truthiness alone must not
+        # route a native feature into the cross-feature buckets.
+        assert _feature_family("close_ret_03", ["close"]) == "ret"
+
 
 class TestUndeterminedDirectionByFamily:
     def test_emits_one_row_per_component(self):
