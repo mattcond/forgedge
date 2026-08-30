@@ -200,8 +200,9 @@ warning e consente comunque l'esecuzione.
 | `modulo_3_it.md` | Rule Discovery: backtest, verdetto EDGE, walk-forward OOS, report |
 | `modulo_4_it.md` | Rule Registry: deduplicazione, cross-ticker, genericity, export |
 | `configuration_it.md` | Riferimento completo alla configurazione: ogni campo dataclass, tipo, default e descrizione |
+| `playground_it.md` | Playground: guida all'utilizzo degli helper di analisi sopra i `ForgeResult` messi in pool |
 
-`forgedge.playground` — un livello di analisi di sola lettura sopra i `ForgeResult` messi in pool, ancora in evoluzione (issue #237) — è coperto nel manuale principale (`docs/manuale-it.md`, §9) e ha un proprio riferimento dedicato in [`modules/Playground.md`](../modules/Playground.md).
+`forgedge.playground` — un livello di analisi di sola lettura sopra i `ForgeResult` messi in pool, ancora in evoluzione (issue #237) — è coperto nel manuale principale (`docs/manuale-it.md`, §9). [`playground_it.md`](playground_it.md) è il suo riferimento dettagliato all'utilizzo (firme, parametri, esempi verificati); [`modules/Playground.md`](../modules/Playground.md) copre invece la motivazione di design e gli algoritmi interni.
 
 Le versioni inglesi sono nei file corrispondenti `*_en.md`.
 
