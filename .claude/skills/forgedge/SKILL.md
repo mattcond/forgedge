@@ -563,6 +563,28 @@ median. `forge()`'s M1 stage line carries this text; `result.event_discovery
     you're on an older `forgedge` running M1 on a wide KPI Table with
     permissive gate params, this is a real OOM risk that tightening
     `min_tpm` only works around, not fixes — upgrade instead.
+22. **`forge(only_validated_events=True)` silently filtering nothing on a
+    preset.** Fixed in #250. `only_validated_events` drops any `EventCandidate`
+    whose `validation.passed` is not `True` — but that field is only ever set
+    when M1's *own* walk-forward (`EventDiscovery._run_walk_forward`, distinct
+    from M3's) actually ran, which needs **both**
+    `DiscoveryConfig.walk_forward` configured **and** `train_ratio<1.0`.
+    `forge_preset()` fixes `train_ratio=1.0` for M1 deliberately (its
+    thresholds are purely distributional and never see the forward return —
+    invariant #1 already rules out look-ahead bias unconditionally, so an
+    M1-side OOS tail buys no extra safety, only less visibility into rare
+    events) and does not accept `walk_forward` as an override key at all
+    (`TypeError: Unexpected override keys`). So `only_validated_events=True`
+    paired with an as-shipped preset leaves every candidate's
+    `validation.passed=None` — the filter drops nothing, silently, and the
+    caller has no signal the validation they asked for never ran.
+    `config_report()`/`forge()` now surface this as the `WARN`-level
+    `only_validated_events_inert` finding whenever `PipelineContext
+    .only_validated_events` is `True` and the resolved `event_discovery`
+    config can't run its own walk-forward. To actually use
+    `only_validated_events`, override the preset's `DiscoveryConfig`
+    directly: `dataclasses.replace(disc_cfg, train_ratio=0.7,
+    walk_forward=EventWalkForwardConfig(n_splits=...))`.
 
 ### Entry mode and what a verdict now measures
 

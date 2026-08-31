@@ -556,7 +556,8 @@ def forge(
     context = collect_context(
         _bundle,
         PipelineContext.from_frame(kpi_table, timeframe=timeframe,
-                                   timeframe_declared=timeframe_declared),
+                                   timeframe_declared=timeframe_declared,
+                                   only_validated_events=only_validated_events),
     )
     coherence = config_report(
         _bundle["event_discovery"], _bundle["alpha"], _bundle["rule_discovery"],

@@ -235,6 +235,7 @@ PipelineContext(
     target_rate_tpm: float | None = None, rate_retention: float = 1.0,
     bars_per_episode: float = 1.76,
     cross_pf_retention: float = 0.8, net_gain_retention: float = 0.5,
+    only_validated_events: bool = False,
     n_bars: int = 0, span_months: float = 0.0,
     inferred_bar_hours: float | None = None,
 )
@@ -258,7 +259,17 @@ count at once). `bars_per_episode` (default `1.76`, measured median on
 `ADA_1D_TRAIN`) converts a *declared* `event_counting="episode"` rate to the
 bar rate M3 actually counts — it opens a trade on every active bar, no
 episode concept — before `rate_retention` applies; unread in `"bar"` mode,
-where M1 and M3 already share a unit (#204).
+where M1 and M3 already share a unit (#204). `only_validated_events`
+(default `False`, #250) mirrors `forge()`'s own parameter of the same name
+so the resolver can see it — `config_report()` never receives it otherwise,
+since it is a `forge()` argument, not a field of any of the three module
+configs. Session-only: it is not read by any `derive`, only by the
+`only_validated_events_inert` check (below), which fires `WARN` when it is
+`True` but the resolved `event_discovery` config cannot run M1's own
+walk-forward (`walk_forward is None` or `train_ratio>=1.0` — both true of
+`forge_preset()`'s output, which fixes `train_ratio=1.0` for M1 on purpose
+and does not accept `walk_forward` as an override key), the condition under
+which `only_validated_events=True` is a silent no-op.
 
 ```
 Derivation(order: int, field: str, default: Any, resolved: Any, rule: str,
@@ -339,12 +350,14 @@ Three `FAIL`-level constraints (a stage judged structurally incapable of
 producing a verdict): `wf_bucket_too_short` (M3's selection window vs. its
 own declared rate — the fix for issue #173), `m1_oos_fold_too_short` (an M1
 walk-forward fold too short to test its own rate), `oos_span_too_short` (the
-pooled OOS span can't reach `min_oos_trades` at the declared rate). Ten
-`WARN`-level constraints: `m3_stricter_than_m1`, `scoring_uncalibrated`,
-`timeframe_mismatch`, `split_disagreement`, `registry_stricter_than_m3`,
-`alpha_level_drift`, `tp_floor_conflict`, `entry_mode_inert_gate`,
-`schema_mismatch`, `fee_mismatch`. Every message carries the value to set,
-not just the failure.
+pooled OOS span can't reach `min_oos_trades` at the declared rate). `WARN`-level
+constraints include `m1_is_window_too_short` (M1's own IS discovery window
+vs. `min_episodes`), `only_validated_events_inert` (`only_validated_events=True`
+requested but M1's own walk-forward can't run — #250), `m3_stricter_than_m1`,
+`scoring_uncalibrated`, `timeframe_mismatch`, `split_disagreement`,
+`registry_stricter_than_m3`, `alpha_level_drift`, `tp_floor_conflict`,
+`entry_mode_inert_gate`, `schema_mismatch`, `fee_mismatch`. Every message
+carries the value to set, not just the failure.
 
 **What the resolver fills in by default** (session facts, propagated to
 every config that materialises them): the timestamp column (all four

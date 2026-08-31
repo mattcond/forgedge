@@ -502,8 +502,8 @@ context   = PipelineContext(timeframe='1D', timeframe_declared=True, timestamp_c
                              close_col='close', regime_col='regime', regime_stable_col='regime_stable',
                              fee_per_side=0.002, alpha=0.05, min_sample=10, target_rate_tpm=None,
                              rate_retention=1.0, bars_per_episode=1.76, cross_pf_retention=0.8,
-                             net_gain_retention=0.5, n_bars=882, span_months=29.37,
-                             inferred_bar_hours=24.0)
+                             net_gain_retention=0.5, only_validated_events=False,
+                             n_bars=882, span_months=29.37, inferred_bar_hours=24.0)
 resolution.describe() = 'resolution: 30 field(s) derived, 0 left at their documented default'
 coherence.one_line()  = two WARN findings — m1_is_window_too_short (the IS span is short of
                          what gate_params.min_episodes=10 needs at min_tpm=0.5 with a 95% Poisson
@@ -1183,11 +1183,17 @@ if rep.has_critical:
     raise ValueError(rep.one_line())
 ```
 
-Thirteen constraints, each relating materialisations of one latent parameter.
+Fourteen constraints, each relating materialisations of one latent parameter.
 Three are `FAIL` — reserved for a configuration that makes a stage
 **structurally incapable** of producing a verdict: `wf_bucket_too_short`
-(issue #173), `m1_oos_fold_too_short`, `oos_span_too_short`. The other ten are
-`WARN`. Every message carries the value to set, not just the failure.
+(issue #173), `m1_oos_fold_too_short`, `oos_span_too_short`. The other eleven
+are `WARN`, including `only_validated_events_inert` (#250): fires when
+`forge(only_validated_events=True)` is requested but the resolved
+`event_discovery` config cannot actually run M1's own walk-forward
+(`walk_forward` unset, or `train_ratio>=1.0` — both true of `forge_preset()`'s
+output, which fixes M1's `train_ratio=1.0` on purpose), the condition under
+which the filter silently drops nothing at all. Every message carries the
+value to set, not just the failure.
 
 > **`forge(strict=True)` is the default, and this is a behaviour change.** A
 > `FAIL` now raises `ValueError` instead of running. Such a run cannot tell you

@@ -503,8 +503,8 @@ context   = PipelineContext(timeframe='1D', timeframe_declared=True, timestamp_c
                              close_col='close', regime_col='regime', regime_stable_col='regime_stable',
                              fee_per_side=0.002, alpha=0.05, min_sample=10, target_rate_tpm=None,
                              rate_retention=1.0, bars_per_episode=1.76, cross_pf_retention=0.8,
-                             net_gain_retention=0.5, n_bars=882, span_months=29.37,
-                             inferred_bar_hours=24.0)
+                             net_gain_retention=0.5, only_validated_events=False,
+                             n_bars=882, span_months=29.37, inferred_bar_hours=24.0)
 resolution.describe() = 'resolution: 30 field(s) derived, 0 left at their documented default'
 coherence.one_line()  = due finding WARN — m1_is_window_too_short (lo span IS è corto di
                          ciò che gate_params.min_episodes=10 richiede a min_tpm=0.5 con un
@@ -1194,12 +1194,18 @@ if rep.has_critical:
     raise ValueError(rep.one_line())
 ```
 
-Tredici vincoli, ciascuno una relazione fra materializzazioni di un parametro
-latente. Tre sono `FAIL` — riservati a una configurazione che rende uno stage
-**strutturalmente incapace** di produrre un verdetto: `wf_bucket_too_short`
-(issue #173), `m1_oos_fold_too_short`, `oos_span_too_short`. Gli altri dieci
-sono `WARN`. Ogni messaggio porta il valore da impostare, non solo il
-fallimento.
+Quattordici vincoli, ciascuno una relazione fra materializzazioni di un
+parametro latente. Tre sono `FAIL` — riservati a una configurazione che rende
+uno stage **strutturalmente incapace** di produrre un verdetto:
+`wf_bucket_too_short` (issue #173), `m1_oos_fold_too_short`,
+`oos_span_too_short`. Gli altri undici sono `WARN`, incluso
+`only_validated_events_inert` (#250): scatta quando si richiede
+`forge(only_validated_events=True)` ma la configurazione `event_discovery`
+risolta non può effettivamente far girare il walk-forward proprio di M1
+(`walk_forward` non impostato, oppure `train_ratio>=1.0` — entrambi veri per
+l'output di `forge_preset()`, che fissa `train_ratio=1.0` per M1 di
+proposito), la condizione per cui il filtro non scarta silenziosamente
+nulla. Ogni messaggio porta il valore da impostare, non solo il fallimento.
 
 > **`forge(strict=True)` è il default, ed è un cambiamento di comportamento.**
 > Un `FAIL` ora solleva `ValueError` invece di girare. Un run del genere non può
