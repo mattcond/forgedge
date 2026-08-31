@@ -339,6 +339,17 @@ class PipelineContext:
         Fraction of the market point's OOS net gain the limit point must retain
         to be adopted (M3, #185).  The same shape as ``cross_pf_retention`` and
         here for the same reason.
+    only_validated_events : bool
+        Mirrors :func:`forgedge.forge`'s own ``only_validated_events`` — kept
+        here too (#250) so the resolver can see it: it is otherwise invisible
+        to :func:`config_report`, which never receives it (it is a parameter
+        of ``forge()``, not of any of the three module configs), so nothing
+        could previously check it against ``DiscoveryConfig.walk_forward``/
+        ``.train_ratio``. Filters M1's candidates by
+        ``EventCandidate.validation.passed`` — silently a no-op when M1's own
+        walk-forward never ran, which needs *both* ``walk_forward`` set *and*
+        ``train_ratio < 1.0`` (a reserved OOS tail); ``forge_preset()`` sets
+        neither. See ``only_validated_events_inert`` below.
     n_bars, span_months : int, float
         Data facts.  **Read by check mode only.**
     inferred_bar_hours : float or None
@@ -368,6 +379,7 @@ class PipelineContext:
     bars_per_episode: float = 1.76
     cross_pf_retention: float = 0.8
     net_gain_retention: float = 0.5
+    only_validated_events: bool = False
     # data facts — check mode only
     n_bars: int = 0
     span_months: float = 0.0
@@ -1360,6 +1372,54 @@ def _check_m1_is_window(values: Dict[str, Any], ctx: PipelineContext) -> Optiona
             f"oppure alzare min_tpm, oppure allungare la storia.")
 
 
+def _check_only_validated_events_inert(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """``only_validated_events=True`` requires M1's own walk-forward to have run (#250).
+
+    :func:`forgedge.forge`'s ``only_validated_events`` filters M1's surviving
+    candidates by ``EventCandidate.validation.passed`` — a field
+    :meth:`EventDiscovery._run_walk_forward` only ever sets when it actually
+    runs, which needs *both* ``event_discovery.walk_forward`` configured *and*
+    ``event_discovery.train_ratio < 1.0`` (a reserved OOS tail for M1 itself).
+    ``forge_preset()`` sets neither — it fixes ``train_ratio=1.0`` on
+    ``DiscoveryConfig`` deliberately, since M1's thresholds are purely
+    distributional and never see the forward return (invariant #1 already
+    guards against look-ahead bias unconditionally, so withholding an M1-side
+    OOS tail buys no additional safety, only less visibility into rare
+    events). The combination ``only_validated_events=True`` + a preset (or any
+    config that leaves ``walk_forward``/``train_ratio`` untouched) is a
+    **silent no-op**: every candidate's ``validation.passed`` stays ``None``,
+    so the filter drops nothing and the caller gets no signal that the
+    validation they asked for never executed.
+
+    Reads ``event_discovery.walk_forward`` directly out of ``values`` rather
+    than through :func:`_need`, because :func:`_need` treats an explicit
+    ``None`` the same as "field absent" — exactly the value this check must
+    detect, not skip.
+    """
+    if not ctx.only_validated_events:
+        return None
+    disc = values.get("event_discovery.train_ratio", _MISSING)
+    if disc is _MISSING:
+        return None
+    train_ratio = float(disc)
+    wf = values.get("event_discovery.walk_forward", _MISSING)
+    if wf is _MISSING:
+        return None
+    if wf is not None and train_ratio < 1.0:
+        return None
+    return (f"only_validated_events=True richiesto, ma il walk-forward di M1 non può "
+            f"girare con questa configurazione (walk_forward="
+            f"{'non impostato' if wf is None else 'impostato'}, train_ratio={train_ratio:g}): "
+            f"servono entrambi event_discovery.walk_forward configurato e train_ratio<1.0. "
+            f"forge_preset() fissa train_ratio=1.0 per M1 di proposito (le soglie sono "
+            f"puramente distribuzionali, l'invariante #1 già esclude il look-ahead bias "
+            f"senza bisogno di una coda OOS qui) — con un preset invariato ogni candidato "
+            f"avrà validation.passed=None e il filtro non scarterà nulla, silenziosamente. "
+            f"Per usare only_validated_events, sostituisci event_discovery con "
+            f"dataclasses.replace(disc_cfg, train_ratio=0.7, walk_forward="
+            f"EventWalkForwardConfig(n_splits=...)) prima di chiamare forge().")
+
+
 def _check_oos_span(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
     """F4 — the pooled walk-forward test span versus ``min_oos_trades``."""
     got = _need(values,
@@ -1631,6 +1691,10 @@ def _statistical_constraints() -> List[Constraint]:
                          "event_discovery.gate_params.min_episodes",
                          "event_discovery.gate_params.event_counting"),
                    check=_check_m1_is_window),
+        Constraint(code="only_validated_events_inert", level="WARN", stage=STATISTICAL,
+                   free=("event_discovery.train_ratio",
+                         "event_discovery.walk_forward"),
+                   check=_check_only_validated_events_inert),
         Constraint(code="oos_span_too_short", level="FAIL", stage=STRUCTURAL,
                    free=("rule_discovery.criteria.min_tpm",
                          "rule_discovery.criteria.min_oos_trades",

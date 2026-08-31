@@ -295,6 +295,42 @@ class TestWarnConstraints:
         assert "m1_is_window_too_short" in _codes(rep)
         assert not rep.has_critical
 
+    def test_only_validated_events_inert_without_walk_forward(self):
+        """#250 — the reported case: `only_validated_events=True` on a plain
+        `DiscoveryConfig()` (or any `forge_preset()` output, which fixes
+        `train_ratio=1.0` deliberately) is a silent no-op, because M1's own
+        walk-forward never runs and `EventCandidate.validation.passed` stays
+        `None` for every candidate — the filter drops nothing."""
+        disc = DiscoveryConfig()
+        rep = config_report(disc, None, None, ctx=_ctx(only_validated_events=True))
+
+        assert "only_validated_events_inert" in _codes(rep)
+        msg = _message(rep, "only_validated_events_inert")
+        assert "walk_forward" in msg
+        assert "train_ratio" in msg
+
+    def test_only_validated_events_inert_with_walk_forward_but_train_ratio_one(self):
+        """Configuring `walk_forward` alone is not enough — M1's discovery
+        run never reserves an OOS tail unless `train_ratio<1.0` too."""
+        disc = DiscoveryConfig(walk_forward=EventWalkForwardConfig(n_splits=3))
+        rep = config_report(disc, None, None, ctx=_ctx(only_validated_events=True))
+        assert "only_validated_events_inert" in _codes(rep)
+
+    def test_only_validated_events_silent_when_walk_forward_can_run(self):
+        disc = DiscoveryConfig(train_ratio=0.8,
+                                walk_forward=EventWalkForwardConfig(n_splits=3))
+        rep = config_report(disc, None, None, ctx=_ctx(only_validated_events=True))
+        assert "only_validated_events_inert" not in _codes(rep)
+
+    def test_only_validated_events_silent_when_not_requested(self):
+        disc = DiscoveryConfig()
+        rep = config_report(disc, None, None, ctx=_ctx(only_validated_events=False))
+        assert "only_validated_events_inert" not in _codes(rep)
+
+    def test_only_validated_events_silent_without_event_discovery_config(self):
+        rep = config_report(None, None, None, ctx=_ctx(only_validated_events=True))
+        assert "only_validated_events_inert" not in _codes(rep)
+
     def test_m3_stricter_than_m1(self):
         disc = DiscoveryConfig(gate_params=GateParams(min_tpm=1.0))
         rd = RuleDiscoveryConfig(criteria=SelectionCriteria(min_tpm=3.0))
