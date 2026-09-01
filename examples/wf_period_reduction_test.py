@@ -34,6 +34,20 @@ Verifiche
      OOS walk-forward di forge aveva già riportato in iterazione 1 per la
      stessa finestra — tre stime indipendenti dello stesso numero.
 
+Riproducibilità
+---------------
+``forge()`` non è bit-per-bit deterministico tra run identiche: alcuni punti
+di ``feature_generator.py`` iterano intersezioni di ``set()`` di stringhe
+(es. ``set(roll_min) & set(roll_max)``), il cui ordine dipende dall'hash
+delle stringhe — randomizzato per processo in Python di default
+(``PYTHONHASHSEED`` non impostato). Quell'ordine si propaga fino a quale
+candidato sopravvive quando un pool viene troncato a valle (es. i cap
+``_MAX_PAIRS``/``_MAX_TRIPLES`` dell'AND-composer), per cui due run identiche
+possono promuovere un numero leggermente diverso di contratti e, in casi
+limite, selezionare una regola diversa come "migliore". Per questo lo script
+si ri-esegue da solo con ``PYTHONHASHSEED=0`` fissato se non è già impostato,
+così la stessa invocazione dà sempre lo stesso risultato.
+
 Esecuzione
 ----------
     python examples/wf_period_reduction_test.py [path/to/data_1D.csv] \\
@@ -41,9 +55,19 @@ Esecuzione
 """
 from __future__ import annotations
 
+import os
+import sys
+
+# Deve girare prima di ogni altro import: PYTHONHASHSEED è letto dall'interprete
+# all'avvio, quindi impostarlo con os.environ non ha effetto sul processo
+# corrente — ci si ri-esegue con la variabile già in ambiente (si veda la nota
+# "Riproducibilità" sopra).
+if os.environ.get("PYTHONHASHSEED") != "0":
+    os.environ["PYTHONHASHSEED"] = "0"
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 import argparse
 import re
-import sys
 import warnings
 from pathlib import Path
 
