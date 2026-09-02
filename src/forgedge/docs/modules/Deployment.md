@@ -24,7 +24,7 @@
 1. [Posizionamento e Responsabilità](#1-posizionamento-e-responsabilità)
 2. [Principi di design](#2-principi-di-design)
 3. [Logica interna — la sequenza produttiva](#3-logica-interna--la-sequenza-produttiva)
-4. [`PromotionGateConfig` — le cinque leve](#4-promotiongateconfig--le-cinque-leve)
+4. [`PromotionGateConfig` — le sei leve](#4-promotiongateconfig--le-sei-leve)
 5. [Stabilità e garanzie](#5-stabilità-e-garanzie)
 
 ---
@@ -66,7 +66,7 @@
 ## 2. Principi di design
 
 1. **Le tre funzioni sono pensate per girare in sequenza, mai isolate.** `forge() → promotion_gate() [filtra] → export_rules() [scrive, sulle sole regole promosse] → monitoring_manifest() [indicizza l'export]`. `export_rules()` non è un wrapper leggero attorno a `promotion_gate()`: **ricalcola internamente la stessa identica logica di gate** (stesso `_compute_rows`/`_promotable_mask`) invece di richiedere in input il `pd.DataFrame` che `promotion_gate()` ha già prodotto — scelta deliberata per garantire che le due funzioni non possano mai disaccordare su cosa sia promuovibile, al costo di ricalcolare il filtro due volte se un chiamante le invoca entrambe.
-2. **Ogni flag è sempre calcolato e sempre riportato, indipendentemente da cosa `PromotionGateConfig` blocca davvero.** `rotation_only`, `is_duplicate`, `is_isolated`, `consistency` compaiono come colonne del `DataFrame` anche quando il corrispondente `block_*`/`require_consistency` è `False` — solo `promotable`, la colonna finale, riflette la configurazione. Questo separa nettamente "cosa osserviamo" da "cosa decidiamo di bloccare oggi": disattivare un controllo non fa sparire il dato che avrebbe prodotto, così un audit successivo può sempre chiedersi "e se avessimo bloccato anche X?" senza dover rieseguire nulla.
+2. **Ogni flag è sempre calcolato e sempre riportato, indipendentemente da cosa `PromotionGateConfig` blocca davvero.** `rotation_only`, `is_duplicate`, `is_isolated`, `consistency`, `fold_stability_score` compaiono come colonne del `DataFrame` anche quando il corrispondente `block_*`/`require_consistency`/`min_fold_stability_score` non blocca nulla (rispettivamente `False` o `None`) — solo `promotable`, la colonna finale, riflette la configurazione. Questo separa nettamente "cosa osserviamo" da "cosa decidiamo di bloccare oggi": disattivare un controllo non fa sparire il dato che avrebbe prodotto, così un audit successivo può sempre chiedersi "e se avessimo bloccato anche X?" senza dover rieseguire nulla.
 3. **`registries` è sempre opzionale, mai un requisito silenzioso.** `is_duplicate`/`is_isolated` richiedono un `RuleRegistry` per essere calcolati (vengono letti da `RuleDocument`, non da `ForgeResult`); quando `registries=None` quelle due colonne restano semplicemente `None` per ogni riga, e i corrispondenti `block_duplicate`/`block_isolated` non bloccano mai nulla (un `None` non soddisfa mai la condizione di blocco). Un chiamante con un solo `forge()` single-ticker senza registro esplicito ottiene comunque un `DataFrame` utilizzabile, solo con due colonne meno informative — mai un errore per l'assenza di un input opzionale.
 4. **Solo `export_rules()` tocca il filesystem, ed è isolato apposta.** Le altre due funzioni sono `Iterable[...] -> pd.DataFrame` pure, testabili senza `tmp_path`/mock — lo stesso principio "nessuna dipendenza aggiuntiva, nessun effetto collaterale non dichiarato" di `forgedge.playground`, applicato qui a due funzioni su tre invece che a tutte.
 
@@ -105,9 +105,9 @@ Applica `RuleSpec.from_forge_result` (già esistente in `forgedge.rule_report`, 
 
 ---
 
-## 4. `PromotionGateConfig` — le cinque leve
+## 4. `PromotionGateConfig` — le sei leve
 
-Dataclass con cinque campi, ciascuno indipendente dagli altri (nessuna combinazione è mutuamente esclusiva):
+Dataclass con sei campi di gating (più un settimo, `fold_pf_cap`, che non blocca nulla da solo ma calibra uno di essi), ciascuno indipendente dagli altri (nessuna combinazione è mutuamente esclusiva):
 
 | Campo | Default | Effetto |
 |---|---|---|
@@ -116,8 +116,10 @@ Dataclass con cinque campi, ciascuno indipendente dagli altri (nessuna combinazi
 | `block_rotation_only` | `False` | Se `True`, blocca un `PARTIAL-EDGE` il cui unico ostacolo era il rotation null. Default `False` perché — come `forgedge.playground.lottery_only_winners` documenta — un rotation-only miss è tipicamente un compromesso accettabile, non un segnale di debolezza reale. |
 | `block_duplicate` | `True` | Blocca una regola che il Rule Registry ha marcato `is_duplicate=True`. |
 | `block_isolated` | `True` | Blocca una regola classificata `"ISOLATED"` sul replay cross-ticker. Nessun effetto (`is_isolated` resta `None`) se `registries` non è stato passato. |
+| `min_fold_stability_score` | `None` | Soglia sul `fold_stability_score` (#253): `mean(fold_pf) - std(fold_pf)` sui fold walk-forward di M3. `None` per default — il gate è spento finché non lo si attiva esplicitamente. |
+| `fold_pf_cap` | `10.0` | Non è un gate: è il cap applicato a ciascun `test_summary.profit_factor` di fold prima di calcolare `fold_stability_score`, per evitare che il sentinel `9999.0` "zero perdite" domini media e deviazione standard. |
 
-*Perché questi cinque e non altri:* ognuno corrisponde esattamente a un segnale che uno degli altri playground/moduli della pipeline già calcola (`lottery_only_winners`, `duplicate_clusters`, `classification_by_grade`, `RuleDiscoveryResponse.walk_forward.consistency`) — `PromotionGateConfig` non introduce alcuna nuova soglia statistica, combina soltanto giudizi già esistenti in una singola decisione binaria di andare o non andare in produzione. I due default `True` (`block_duplicate`, `block_isolated`) sono la scelta conservativa: bloccare per default ciò che la pipeline stessa ha già segnalato come ridondante o non generalizzabile.
+*Perché questi campi e non altri:* i primi cinque corrispondono esattamente a un segnale che uno degli altri playground/moduli della pipeline già calcola (`lottery_only_winners`, `duplicate_clusters`, `classification_by_grade`, `RuleDiscoveryResponse.walk_forward.consistency`) — fino a #253, `PromotionGateConfig` non introduceva alcuna nuova soglia statistica, ma combinava soltanto giudizi già esistenti in una singola decisione binaria di andare o non andare in produzione. `min_fold_stability_score` è la prima eccezione deliberata: nessun altro modulo calcola già la dispersione fold-per-fold del profit factor walk-forward, quindi questo è un segnale nuovo, motivato dal caso concreto in #253 (una regola con PF aggregato alto ma un solo fold "fortunato" che collassa su dati OOS freschi). I due default `True` (`block_duplicate`, `block_isolated`) restano la scelta conservativa: bloccare per default ciò che la pipeline stessa ha già segnalato come ridondante o non generalizzabile; `min_fold_stability_score` resta invece `None` per default — a differenza di quelli, non c'è ancora una soglia "giusta" nota a priori, quindi va scelta esplicitamente da chi la usa.
 
 ---
 

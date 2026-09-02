@@ -70,9 +70,12 @@ turning a check off never loses visibility into what it would have flagged.
 | `block_rotation_only` | `False` | Block a `PARTIAL-EDGE` whose only obstacle to a full `EDGE` was the search-level rotation null. Default `False` — a rotation-only miss is usually an acceptable trade-off, not a red flag. |
 | `block_duplicate` | `True` | Block a rule the Rule Registry marked `is_duplicate=True`. |
 | `block_isolated` | `True` | Block a rule classified `"ISOLATED"` on cross-ticker replay. No effect (`is_isolated` stays `None`) when no `registries` were supplied. |
+| `min_fold_stability_score` | `None` | Floor on the fold-variance-penalized stability score (#253): `mean(fold_pf) - std(fold_pf)` over `RuleDiscoveryResponse.walk_forward.splits`' per-fold `test_summary.profit_factor` (each capped at `fold_pf_cap` first). Catches a rule whose pooled walk-forward PF looks strong only because one high-variance fold (often the `9999.0` "zero losing trades" sentinel) dominates the aggregate. `None` disables the gate; a rule with fewer than two walk-forward splits always passes it (sample std is undefined for one fold). |
+| `fold_pf_cap` | `10.0` | Cap applied to each fold's `test_summary.profit_factor` before computing `fold_stability_score`, so a single sentinel-value fold can't dominate the mean/std. |
 
 ```python
 config = PromotionGateConfig(block_rotation_only=True, min_consistency=0.6)
+config = PromotionGateConfig(min_fold_stability_score=1.0)   # #253
 ```
 
 ---
@@ -85,8 +88,9 @@ contract.
 Computes, per contract, the same flags the M3/M4 playground functions
 expose individually (`lottery_only_winners`'s `rotation_only`,
 `duplicate_clusters`'s `is_duplicate`, `classification_by_grade`'s
-`"ISOLATED"` classification, and walk-forward `consistency`), then combines
-them into `promotable` per `config`. Pure — no filesystem I/O.
+`"ISOLATED"` classification, walk-forward `consistency`, and the
+fold-variance-penalized `fold_stability_score`, #253), then combines them
+into `promotable` per `config`. Pure — no filesystem I/O.
 
 **Parameters:**
 - `results: Iterable[ForgeResult]` — R, one or more `forge()`/`forge_multi()` outputs.
@@ -94,7 +98,8 @@ them into `promotable` per `config`. Pure — no filesystem I/O.
 - `config: PromotionGateConfig` — which checks block promotion, and at what threshold.
 
 **Returns columns:** `ticker`, `alpha_id`, `grade`, `verdict`,
-`rotation_only`, `is_duplicate`, `is_isolated`, `consistency`, `promotable`.
+`rotation_only`, `is_duplicate`, `is_isolated`, `consistency`,
+`fold_stability_score`, `promotable`.
 
 ```python
 gate = promotion_gate(results, registries=[result_ada.registry, result_btc.registry])
@@ -107,7 +112,7 @@ same pool used by every "Verified" example in `playground_en.md`'s M1/M3/M4
 sections and below:
 
 ```
-pg.shape == (96, 9)
+pg.shape == (96, 10)
 pg["promotable"].value_counts()
 # False    91
 # True      5
@@ -115,6 +120,10 @@ pg.groupby("ticker")["promotable"].sum()
 # ADAUSDC    0
 # BTCUSDC    5
 ```
+
+`min_fold_stability_score` is `None` by default, so it contributes nothing
+to `promotable` here — the counts above are unchanged from before #253; the
+new `fold_stability_score` column is populated for audit regardless.
 
 Every `ADAUSDC` contract is blocked on this fixture — `duplicate_clusters`
 (`forgedge.playground`) already showed 51% of pooled contracts are
