@@ -1373,7 +1373,7 @@ Ogni funzione ha una regola specifica e deliberata su "saltare vs sollevare ecce
 from forgedge.deployment import PromotionGateConfig, promotion_gate, export_rules, monitoring_manifest
 ```
 
-La sequenza prevista è `forge() → promotion_gate() [filtra] → export_rules() [scrive su disco, sulle sole regole promuovibili] → monitoring_manifest() [indicizza l'export]`. `PromotionGateConfig` blocca su quattro flag indipendenti con una combinazione di default ponderata: un `PARTIAL-EDGE` bloccato solo dal rotation only *non* è bloccato per default (`block_rotation_only=False` — di solito un compromesso accettabile, non un campanello d'allarme), mentre una regola duplicata o classificata `"ISOLATED"` cross-ticker *è* bloccata per default, e una soglia di `walk_forward.consistency` di `0.5` (la stessa soglia che la pipeline usa internamente) si applica sempre a meno di `require_consistency=False`. Ogni flag è sempre calcolato e riportato indipendentemente dal fatto che partecipi alla colonna finale `promotable`, così disattivare un controllo non fa mai perdere visibilità su cosa avrebbe segnalato.
+La sequenza prevista è `forge() → promotion_gate() [filtra] → export_rules() [scrive su disco, sulle sole regole promuovibili] → monitoring_manifest() [indicizza l'export]`. `PromotionGateConfig` blocca su flag indipendenti con una combinazione di default ponderata: un `PARTIAL-EDGE` bloccato solo dal rotation only *non* è bloccato per default (`block_rotation_only=False` — di solito un compromesso accettabile, non un campanello d'allarme), mentre una regola duplicata o classificata `"ISOLATED"` cross-ticker *è* bloccata per default, e una soglia di `walk_forward.consistency` di `0.5` (la stessa soglia che la pipeline usa internamente) si applica sempre a meno di `require_consistency=False`. `min_fold_stability_score` (#253, default `None` — spento) aggiunge una soglia opzionale su `mean(fold_pf) - std(fold_pf)` calcolato sui profit factor per-fold dello stesso walk-forward (ciascuno prima limitato a `fold_pf_cap`, default 10.0): una regola può superare un walk-forward PF aggregato sano solo perché un singolo fold ad alta varianza domina l'aggregato, mentre la sua performance fold-per-fold è in realtà instabile e tende a collassare su dati genuinamente freschi — questo cattura direttamente quel caso, invece di guardare solo il numero aggregato. Ogni flag è sempre calcolato e riportato indipendentemente dal fatto che partecipi alla colonna finale `promotable`, così disattivare un controllo non fa mai perdere visibilità su cosa avrebbe segnalato.
 
 **Verificato**, su un pool `forge_multi()` su ADAUSDC e una seconda serie
 sintetica BTCUSDC (`forge_multi()`, non un `forge()` per ticker come
@@ -1387,7 +1387,7 @@ from forgedge.deployment import promotion_gate, export_rules
 results, registry = forge_multi({"ADAUSDC": kpi_ada, "BTCUSDC": kpi_btc}, timeframe="1D")
 
 gate = promotion_gate(list(results.values()), registries=[registry])
-print(gate.shape)                              # (96, 9)
+print(gate.shape)                              # (96, 10)
 print(gate.groupby("ticker")["promotable"].sum())
 # ADAUSDC    0
 # BTCUSDC    5

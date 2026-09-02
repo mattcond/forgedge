@@ -1358,7 +1358,7 @@ Each function has a specific, deliberate "skip vs. raise" rule, always documente
 from forgedge.deployment import PromotionGateConfig, promotion_gate, export_rules, monitoring_manifest
 ```
 
-The intended sequence is `forge() → promotion_gate() [filter] → export_rules() [write to disk, on the promotable rules only] → monitoring_manifest() [index the export]`. `PromotionGateConfig` blocks on four independent flags by default-tuned combination: a rotation-only `PARTIAL-EDGE` miss is *not* blocked by default (`block_rotation_only=False` — usually an acceptable trade-off, not a red flag), while a duplicate or cross-ticker-`"ISOLATED"` rule *is* blocked by default, and a `walk_forward.consistency` floor of `0.5` (the same floor the pipeline itself uses internally) always applies unless `require_consistency=False`. Every flag is always computed and reported regardless of whether it participates in the final `promotable` column, so turning a check off never loses visibility into what it would have flagged.
+The intended sequence is `forge() → promotion_gate() [filter] → export_rules() [write to disk, on the promotable rules only] → monitoring_manifest() [index the export]`. `PromotionGateConfig` blocks on independent flags by default-tuned combination: a rotation-only `PARTIAL-EDGE` miss is *not* blocked by default (`block_rotation_only=False` — usually an acceptable trade-off, not a red flag), while a duplicate or cross-ticker-`"ISOLATED"` rule *is* blocked by default, and a `walk_forward.consistency` floor of `0.5` (the same floor the pipeline itself uses internally) always applies unless `require_consistency=False`. `min_fold_stability_score` (#253, default `None` — off) adds an optional floor on `mean(fold_pf) - std(fold_pf)` over the walk-forward's own per-fold profit factors (each capped at `fold_pf_cap`, default 10.0): a rule can clear a healthy pooled walk-forward PF purely because one high-variance fold dominates the aggregate while its fold-to-fold performance is actually erratic and prone to collapsing on genuinely fresh data — this catches that case directly instead of only looking at the pooled number. Every flag is always computed and reported regardless of whether it participates in the final `promotable` column, so turning a check off never loses visibility into what it would have flagged.
 
 **Verified**, on a `forge_multi()` pool over ADAUSDC and a second, synthetic
 BTCUSDC series (`forge_multi()`, not a plain `forge()` per ticker like the
@@ -1372,7 +1372,7 @@ from forgedge.deployment import promotion_gate, export_rules
 results, registry = forge_multi({"ADAUSDC": kpi_ada, "BTCUSDC": kpi_btc}, timeframe="1D")
 
 gate = promotion_gate(list(results.values()), registries=[registry])
-print(gate.shape)                              # (96, 9)
+print(gate.shape)                              # (96, 10)
 print(gate.groupby("ticker")["promotable"].sum())
 # ADAUSDC    0
 # BTCUSDC    5

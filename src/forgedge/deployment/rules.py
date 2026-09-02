@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Union
 
+import numpy as np
 import pandas as pd
 
 from ..forge import ForgeResult
@@ -52,6 +53,30 @@ def _contract_grade(contract) -> Optional[str]:
     return str(score.grade).strip().upper()
 
 
+def _fold_stability_score(response, fold_pf_cap: float) -> Optional[float]:
+    """Mean walk-forward-fold profit factor minus its std (#253).
+
+    Per-fold ``test_summary.profit_factor`` is capped at ``fold_pf_cap``
+    first to blunt the ``9999.0`` "zero losing trades" sentinel a single
+    lucky fold can hit, which would otherwise dominate both the mean and the
+    std. A pooled walk-forward PF can look strong purely because one such
+    fold inflates the aggregate while the rest are mediocre or losing; this
+    score penalises that dispersion directly instead of only looking at the
+    pooled number.
+
+    ``None`` when there's no walk-forward result or fewer than two splits —
+    sample std (``ddof=1``) is undefined for a single fold, so the gate that
+    reads this score skips rather than blocking on absent evidence.
+    """
+    wf = response.walk_forward
+    if wf is None or not wf.splits or len(wf.splits) < 2:
+        return None
+    fold_pfs = [min(sp.test_summary.profit_factor, fold_pf_cap) for sp in wf.splits]
+    mean_pf = float(np.mean(fold_pfs))
+    std_pf = float(np.std(fold_pfs, ddof=1))
+    return mean_pf - std_pf
+
+
 def _document_index(registries: Optional[Iterable[RuleRegistry]]) -> Dict[str, object]:
     """Map ``AlphaContract.alpha_id`` -> its ``RuleDocument``, across registries."""
     index: Dict[str, object] = {}
@@ -63,7 +88,11 @@ def _document_index(registries: Optional[Iterable[RuleRegistry]]) -> Dict[str, o
     return index
 
 
-def _compute_rows(results: Iterable[ForgeResult], registries: Optional[Iterable[RuleRegistry]]) -> List[dict]:
+def _compute_rows(
+    results: Iterable[ForgeResult],
+    registries: Optional[Iterable[RuleRegistry]],
+    fold_pf_cap: float = 10.0,
+) -> List[dict]:
     """One dict per tradeable (EDGE/PARTIAL-EDGE) contract, flags plus live refs.
 
     Internal — carries the actual ``contract``/``response``/``candidate``
@@ -95,6 +124,8 @@ def _compute_rows(results: Iterable[ForgeResult], registries: Optional[Iterable[
             if response.walk_forward is not None:
                 consistency = response.walk_forward.consistency
 
+            fold_stability_score = _fold_stability_score(response, fold_pf_cap)
+
             candidate = candidates_by_id.get(contract.event_candidate_id)
 
             rows.append(
@@ -107,6 +138,7 @@ def _compute_rows(results: Iterable[ForgeResult], registries: Optional[Iterable[
                     "is_duplicate": is_duplicate,
                     "is_isolated": is_isolated,
                     "consistency": consistency,
+                    "fold_stability_score": fold_stability_score,
                     "_contract": contract,
                     "_response": response,
                     "_candidate": candidate,
@@ -127,6 +159,12 @@ def _promotable_mask(rows: List[dict], config: "PromotionGateConfig") -> List[bo
         if config.block_isolated and row["is_isolated"] is True:
             blocked = True
         if config.require_consistency and row["consistency"] is not None and row["consistency"] < config.min_consistency:
+            blocked = True
+        if (
+            config.min_fold_stability_score is not None
+            and row["fold_stability_score"] is not None
+            and row["fold_stability_score"] < config.min_fold_stability_score
+        ):
             blocked = True
         mask.append(not blocked)
     return mask
@@ -166,6 +204,24 @@ class PromotionGateConfig:
     require_consistency : bool
         Whether the ``min_consistency`` floor participates in ``promotable``
         at all. Default ``True``.
+    min_fold_stability_score : float or None
+        Floor on the fold-variance-penalized stability score (#253):
+        ``mean(fold_pf) - std(fold_pf)`` over
+        ``RuleDiscoveryResponse.walk_forward.splits``' per-fold
+        ``test_summary.profit_factor``, each capped at ``fold_pf_cap`` first.
+        Catches a rule whose pooled walk-forward PF looks strong only
+        because one high-variance fold (often the ``9999.0`` "zero losing
+        trades" sentinel) dominates the aggregate, while its fold-to-fold
+        performance is actually inconsistent and prone to collapsing
+        out-of-sample. Default ``None`` — the gate is off; a rule with fewer
+        than two walk-forward splits always passes it (sample std is
+        undefined for one fold, so there's no variance evidence to penalize
+        on).
+    fold_pf_cap : float
+        Cap applied to each fold's ``test_summary.profit_factor`` before
+        computing ``fold_stability_score``, blunting the ``9999.0``
+        "zero losing trades" sentinel so it doesn't dominate the mean/std.
+        Default 10.0.
     """
 
     min_consistency: float = 0.5
@@ -173,6 +229,8 @@ class PromotionGateConfig:
     block_duplicate: bool = True
     block_isolated: bool = True
     require_consistency: bool = True
+    min_fold_stability_score: Optional[float] = None
+    fold_pf_cap: float = 10.0
 
 
 def promotion_gate(
@@ -186,8 +244,9 @@ def promotion_gate(
     expose individually (:func:`~forgedge.playground.lottery_only_winners`'s
     ``rotation_only``, :func:`~forgedge.playground.duplicate_clusters`'s
     ``is_duplicate``, :func:`~forgedge.playground.classification_by_grade`'s
-    ``ISOLATED`` classification, and walk-forward ``consistency``), then
-    combines them into ``promotable`` per ``config``.
+    ``ISOLATED`` classification, walk-forward ``consistency``, and the
+    fold-variance-penalized ``fold_stability_score``, #253), then combines
+    them into ``promotable`` per ``config``.
 
     Parameters
     ----------
@@ -206,9 +265,9 @@ def promotion_gate(
     pd.DataFrame
         Columns: ``ticker``, ``alpha_id``, ``grade``, ``verdict``,
         ``rotation_only``, ``is_duplicate``, ``is_isolated``,
-        ``consistency``, ``promotable``.
+        ``consistency``, ``fold_stability_score``, ``promotable``.
     """
-    rows = _compute_rows(results, registries)
+    rows = _compute_rows(results, registries, fold_pf_cap=config.fold_pf_cap)
     promotable = _promotable_mask(rows, config)
 
     columns = [
@@ -220,6 +279,7 @@ def promotion_gate(
         "is_duplicate",
         "is_isolated",
         "consistency",
+        "fold_stability_score",
     ]
     df = pd.DataFrame(
         [{k: row[k] for k in columns} for row in rows],
@@ -306,7 +366,7 @@ def export_rules(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = _compute_rows(results, registries)
+    rows = _compute_rows(results, registries, fold_pf_cap=config.fold_pf_cap)
     promotable = _promotable_mask(rows, config)
 
     manifest_rows: List[dict] = []
