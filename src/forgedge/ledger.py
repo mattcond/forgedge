@@ -68,6 +68,13 @@ class HypothesisLedger:
     # Exact count of (candidate, horizon) tests when the per-event horizon
     # enrichment makes the grid non-uniform; 0 = fall back to the product.
     m2_return_tests: int = 0
+    # Two-pass, grade-guided composition only (issue #254): size of Alpha
+    # Discovery's *first* (grading) pass, before composition. 0 in
+    # single-pass mode. `m1_candidates` above already reflects the *final*
+    # surface Alpha Discovery's return-hypothesis tests actually ran
+    # against — pass 2's pooled candidates in two-pass mode — so this field
+    # is purely descriptive, not part of `m2_surface`'s own computation.
+    m2_pass1_candidates: int = 0
 
     @property
     def m2_surface(self) -> int:
@@ -98,9 +105,14 @@ class HypothesisLedger:
             and self.m2_return_tests != self.m1_candidates * self.m2_horizons
             else f"{self.m2_horizons} horizons"
         )
+        two_pass = (
+            f" [two-pass: {self.m2_pass1_candidates} graded → "
+            f"{self.m1_candidates} pooled for pass 2]"
+            if self.m2_pass1_candidates else ""
+        )
         return (
             f"hypothesis surface: {self.m1_candidates} candidates × "
             f"{grid} = {self.m2_surface} return-tests; "
             f"{self.m2_promoted} promoted; ~{max(self.m3_grid_cells, 0)} grid "
-            f"cells/rule (total ≲ {self.total_surface})"
+            f"cells/rule (total ≲ {self.total_surface}){two_pass}"
         )

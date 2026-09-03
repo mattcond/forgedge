@@ -404,6 +404,160 @@ class TestForgeGradeFilter:
         assert result.registry.documents == []
 
 
+class TestForgeTwoPassComposition:
+    """two_pass_composition (issue #254): grade-guided event composition."""
+    pytestmark = pytest.mark.slow
+
+    def test_default_off_never_calls_grade_guided_compose(self, monkeypatch):
+        """Off-by-default: with two_pass_composition left at its default
+        (False), forge() must not even import/invoke the composition stage,
+        and the two-pass-only ForgeResult fields must stay None."""
+        import importlib
+
+        # `import forgedge.forge as forge_module` would silently bind to the
+        # `forge()` *function* instead of the module: forgedge/__init__.py's
+        # `from .forge import forge` rebinds the `forge` attribute on the
+        # `forgedge` package to the function, and `pkg.submodule` attribute
+        # access is what `import pkg.submodule as x` resolves through.
+        forge_module = importlib.import_module("forgedge.forge")
+
+        def _must_not_be_called(*args, **kwargs):
+            raise AssertionError(
+                "grade_guided_compose must not be called when two_pass_composition=False"
+            )
+        monkeypatch.setattr(forge_module, "grade_guided_compose", _must_not_be_called)
+
+        result = forge(
+            _ohlc_kpi_table(),
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            progress=False,
+        )
+        assert result.grading_candidates is None
+        assert result.grading_contracts is None
+        assert result.composition_timing is None
+
+    def test_max_and_components_conflict_raises(self):
+        with pytest.raises(ValueError, match="max_and_components"):
+            forge(
+                _ohlc_kpi_table(),
+                timeframe="4H",
+                event_discovery_config=DiscoveryConfig(max_and_components=2),
+                two_pass_composition=True,
+                progress=False,
+            )
+
+    def test_max_and_components_conflict_raises_on_omitted_event_discovery_config(self):
+        """An OMITTED event_discovery_config still resolves to DiscoveryConfig()'s
+        own class default (max_and_components=2), which must be rejected too --
+        two_pass_composition can't silently coexist with the legacy structural
+        composer just because the caller never set the field explicitly."""
+        with pytest.raises(ValueError, match="max_and_components"):
+            forge(_ohlc_kpi_table(), timeframe="4H", two_pass_composition=True, progress=False)
+
+    def test_manual_events_mode_is_exempt_from_the_max_and_components_check(self):
+        """manual_events and event_discovery_config are already mutually
+        exclusive -- the max_and_components validation must not fire on a
+        None event_discovery_config that only exists because manual events
+        were used instead of automatic discovery."""
+        kpi = _ohlc_kpi_table(n=600)
+        events = [CustomEvent("feat < 0.3")]
+        # Must not raise -- reaches AlphaDiscovery's grading pass instead.
+        result = forge(
+            kpi, timeframe="4H", manual_events=events,
+            two_pass_composition=True, run_rule_discovery=False, progress=False,
+        )
+        assert result.grading_candidates is not None
+
+    def test_composed_contracts_reach_m3_and_pass_two_pools_correctly(self):
+        """The concrete regression test for the wiring bug found during
+        design review (docs/analysis/issue_254_two_pass_composition_plan.md):
+        M3's candidate lookup is built from `candidates`, not
+        `alpha_candidates` -- rebinding only the latter would leave every
+        composed contract's event_candidate_id unresolvable, and
+        RuleDiscovery would silently skip it. This proves at least one
+        composed contract actually gets backtested, not just promoted."""
+        from forgedge.composition import GradePairingConfig
+
+        kpi = _ohlc_kpi_table(n=2600, seed=11)
+        result = forge(
+            kpi,
+            timeframe="4H",
+            event_discovery_config=DiscoveryConfig(
+                max_and_components=1, gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
+            ),
+            rule_discovery_config=_FAST_RD_CONFIG,
+            two_pass_composition=True,
+            grade_pairing_config=GradePairingConfig(per_stratum_pair_cap=20, per_stratum_triple_cap=10),
+            progress=False,
+        )
+
+        # Pass-1 artefacts preserved for audit.
+        assert result.grading_candidates is not None
+        assert result.grading_contracts is not None
+        assert len(result.grading_candidates) == len(result.grading_contracts)
+        grading_ids = {c.event_id for c in result.grading_candidates}
+        assert grading_ids <= {c.event_id for c in result.candidates}
+
+        # Pass 2's pool is strictly larger: composition actually added candidates.
+        composed_ids = {c.event_id for c in result.candidates} - grading_ids
+        assert composed_ids, "grade-guided composition must add candidates on this fixture"
+
+        assert result.composition_timing is not None
+        assert set(result.composition_timing) == {
+            "pass1_seconds", "composition_seconds", "pass2_seconds",
+        }
+        assert all(v >= 0 for v in result.composition_timing.values())
+
+        # The rebinding fix itself: a composed contract must reach Rule
+        # Discovery, not be silently dropped.
+        composed_responses = [
+            (c, r) for c, r in result.rule_responses if c.event_candidate_id in composed_ids
+        ]
+        assert composed_responses, "at least one composed contract must reach Rule Discovery"
+
+    def test_ledger_reports_two_pass_surface(self):
+        kpi = _ohlc_kpi_table(n=2600, seed=11)
+        result = forge(
+            kpi,
+            timeframe="4H",
+            event_discovery_config=DiscoveryConfig(
+                max_and_components=1, gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
+            ),
+            run_rule_discovery=False,
+            two_pass_composition=True,
+            progress=False,
+        )
+        assert result.ledger.m2_pass1_candidates == len(result.grading_candidates)
+        assert result.ledger.m1_candidates == len(result.candidates)
+        assert "two-pass" in result.ledger.describe()
+
+    def test_include_singles_in_pass2_false_drops_the_originals(self):
+        from forgedge.composition import GradePairingConfig
+
+        kpi = _ohlc_kpi_table(n=2600, seed=11)
+        result = forge(
+            kpi,
+            timeframe="4H",
+            event_discovery_config=DiscoveryConfig(
+                max_and_components=1, gate_params=GateParams(min_tpm=2.0, max_dispersion=2.5),
+            ),
+            run_rule_discovery=False,
+            two_pass_composition=True,
+            grade_pairing_config=GradePairingConfig(
+                per_stratum_pair_cap=20, include_singles_in_pass2=False,
+            ),
+            progress=False,
+        )
+        grading_ids = {c.event_id for c in result.grading_candidates}
+        pooled_ids = {c.event_id for c in result.candidates}
+        assert pooled_ids.isdisjoint(grading_ids), (
+            "include_singles_in_pass2=False must exclude the original 1D pool "
+            "from pass 2 entirely"
+        )
+
+
 class TestForgeMulti:
     pytestmark = pytest.mark.slow
     def test_pools_tickers_into_one_cross_ticker_registry(self):
