@@ -1,4 +1,4 @@
-"""Tests for forgedge.composition.grade_pairing (issue #254, Phase 2)."""
+"""Tests for forgedge.composition.grade_pairing (issue #254, Phases 2 and 4)."""
 from types import SimpleNamespace
 
 import numpy as np
@@ -79,6 +79,15 @@ def _overlapping_pair(rng, n, p_base=0.30, p_thin=0.85):
     s1 = pd.Series((base & (rng.random(n) < p_thin)).astype(float))
     s2 = pd.Series((base & (rng.random(n) < p_thin)).astype(float))
     return s1, s2
+
+
+def _overlapping_group(rng, n, k, p_base=0.30, p_thin=0.85):
+    """``k`` independently-thinned draws from a shared random base -- the
+    same construction as ``_overlapping_pair``, generalised so a k-way AND
+    (needed for triple tests, issue #254 Phase 4) reliably clears the gate
+    too, not just each pairwise AND."""
+    base = rng.random(n) < p_base
+    return [pd.Series((base & (rng.random(n) < p_thin)).astype(float)) for _ in range(k)]
 
 
 def _make_kpi_table(n: int = 4380, seed: int = 42) -> pd.DataFrame:
@@ -335,6 +344,151 @@ class TestGradeGuidedCompose:
 
         assert grade_guided_compose([only], contracts, ts, config, gate) == []
         assert grade_guided_compose([], [], ts, config, gate) == []
+
+
+class TestGradeGuidedComposeTriples:
+    """max_components=3 (issue #254 Phase 4): triple composition keyed on
+    the seed pair's root grade, not just pairwise structural admissibility."""
+
+    def test_max_components_2_produces_no_triples_by_default(self):
+        """Phase 4 is opt-in -- a pool that COULD produce triples must not,
+        unless max_components=3 is set explicitly."""
+        gate, ts, month_idx, n_months = _gate_and_ts()
+        rng = np.random.default_rng(254)
+        n = len(ts)
+        s0, s1, s2 = _overlapping_group(rng, n, 3)
+
+        candidates, contracts = [], []
+        for i, s in enumerate([s0, s1, s2]):
+            eid = f"EVT-a{i}"
+            candidates.append(_candidate(eid, f"feat_a{i}", s, gate, month_idx, n_months))
+            contracts.append(_contract(eid, "A"))
+
+        config = GradePairingConfig(per_stratum_pair_cap=10, per_stratum_triple_cap=10)
+        composed = grade_guided_compose(candidates, contracts, ts, config, gate)
+
+        assert composed, "fixture must produce at least the pairs"
+        assert all(len(ev.components) == 2 for ev in composed), (
+            "max_components=2 (the default) must never produce a 3-component candidate"
+        )
+
+    def test_max_components_3_composes_a_root_adjacent_triple(self):
+        gate, ts, month_idx, n_months = _gate_and_ts()
+        rng = np.random.default_rng(254)
+        n = len(ts)
+        s_a0, s_a1, s_b0 = _overlapping_group(rng, n, 3)
+
+        candidates = [
+            _candidate("EVT-a0", "feat_a0", s_a0, gate, month_idx, n_months),
+            _candidate("EVT-a1", "feat_a1", s_a1, gate, month_idx, n_months),
+            _candidate("EVT-b0", "feat_b0", s_b0, gate, month_idx, n_months),
+        ]
+        contracts = [_contract("EVT-a0", "A"), _contract("EVT-a1", "A"), _contract("EVT-b0", "B")]
+
+        config = GradePairingConfig(max_components=3, per_stratum_pair_cap=10, per_stratum_triple_cap=10)
+        composed = grade_guided_compose(candidates, contracts, ts, config, gate)
+
+        triples = [ev for ev in composed if len(ev.components) == 3]
+        assert triples, "the A-A-B triple must survive composition (root=A admits B)"
+        grade_of_expr = _grade_lookup_by_expression(candidates, contracts)
+        for ev in triples:
+            grades = tuple(sorted(grade_of_expr[c.expression] for c in ev.components))
+            assert grades == ("A", "A", "B")
+
+    def test_triple_third_component_is_constrained_by_the_root_grade(self):
+        """A third component reachable from neither seed member under the
+        adjacency scheme's ROOT-grade relation must never appear, even when
+        the underlying 3-way AND would otherwise pass the gate easily."""
+        gate, ts, month_idx, n_months = _gate_and_ts()
+        rng = np.random.default_rng(254)
+        n = len(ts)
+        s_a0, s_a1, s_d0 = _overlapping_group(rng, n, 3)
+
+        candidates = [
+            _candidate("EVT-a0", "feat_a0", s_a0, gate, month_idx, n_months),
+            _candidate("EVT-a1", "feat_a1", s_a1, gate, month_idx, n_months),
+            _candidate("EVT-d0", "feat_d0", s_d0, gate, month_idx, n_months),
+        ]
+        # root of the (A, A) seed pair is "A"; "D" is unreachable from "A"
+        # under the default adjacency (only B is) -- fixture setup deliberately
+        # gives the D event strong 3-way overlap so a false negative here
+        # would be a filter bug, not a fixture that never had a chance.
+        contracts = [_contract("EVT-a0", "A"), _contract("EVT-a1", "A"), _contract("EVT-d0", "D")]
+
+        config = GradePairingConfig(max_components=3, per_stratum_pair_cap=10, per_stratum_triple_cap=10)
+        composed = grade_guided_compose(candidates, contracts, ts, config, gate)
+
+        triples = [ev for ev in composed if len(ev.components) == 3]
+        assert triples == [], (
+            "an A-A-D triple must never form: D is not reachable from root grade A"
+        )
+
+    def test_no_duplicate_triple_constituent_sets(self):
+        """The and_composer.py invariant Phase 4 relies on (k > idx_b combined
+        with seeds always satisfying idx_a < idx_b means each unique index
+        triple is generated from exactly one seed) -- verified here through
+        grade_guided_compose's own output on a pool large enough to produce
+        several distinct triples."""
+        gate, ts, month_idx, n_months = _gate_and_ts()
+        rng = np.random.default_rng(254)
+        n = len(ts)
+        group = _overlapping_group(rng, n, 6)
+
+        candidates, contracts = [], []
+        for i, s in enumerate(group):
+            eid = f"EVT-a{i}"
+            candidates.append(_candidate(eid, f"feat_a{i}", s, gate, month_idx, n_months))
+            contracts.append(_contract(eid, "A"))
+
+        config = GradePairingConfig(max_components=3, per_stratum_pair_cap=50, per_stratum_triple_cap=50)
+        composed = grade_guided_compose(candidates, contracts, ts, config, gate)
+
+        triples = [ev for ev in composed if len(ev.components) == 3]
+        assert len(triples) >= 2, "fixture must produce enough triples to meaningfully check for duplicates"
+        constituent_sets = [frozenset(c.expression for c in ev.components) for ev in triples]
+        assert len(constituent_sets) == len(set(constituent_sets)), (
+            "no two composed triples may share the same constituent set"
+        )
+
+    def test_per_stratum_triple_cap_bounds_the_total_triple_budget(self):
+        gate, ts, month_idx, n_months = _gate_and_ts()
+        rng = np.random.default_rng(254)
+        n = len(ts)
+        group = _overlapping_group(rng, n, 8)
+
+        candidates, contracts = [], []
+        for i, s in enumerate(group):
+            eid = f"EVT-a{i}"
+            candidates.append(_candidate(eid, f"feat_a{i}", s, gate, month_idx, n_months))
+            contracts.append(_contract(eid, "A"))
+
+        # Only one stratum present ("A_same") -> effective_max_triples ==
+        # 1 * per_stratum_triple_cap exactly.
+        config = GradePairingConfig(
+            max_components=3, per_stratum_pair_cap=50, per_stratum_triple_cap=3,
+        )
+        composed = grade_guided_compose(candidates, contracts, ts, config, gate)
+        triples = [ev for ev in composed if len(ev.components) == 3]
+        assert len(triples) <= 3
+
+    def test_fresh_triple_event_ids_never_reused(self):
+        gate, ts, month_idx, n_months = _gate_and_ts()
+        rng = np.random.default_rng(254)
+        n = len(ts)
+        s_a0, s_a1, s_b0 = _overlapping_group(rng, n, 3)
+        candidates = [
+            _candidate("EVT-a0", "feat_a0", s_a0, gate, month_idx, n_months),
+            _candidate("EVT-a1", "feat_a1", s_a1, gate, month_idx, n_months),
+            _candidate("EVT-b0", "feat_b0", s_b0, gate, month_idx, n_months),
+        ]
+        contracts = [_contract("EVT-a0", "A"), _contract("EVT-a1", "A"), _contract("EVT-b0", "B")]
+        config = GradePairingConfig(max_components=3, per_stratum_pair_cap=10, per_stratum_triple_cap=10)
+
+        composed = grade_guided_compose(candidates, contracts, ts, config, gate)
+        input_ids = {c.event_id for c in candidates}
+        composed_ids = {c.event_id for c in composed}
+        assert composed_ids.isdisjoint(input_ids)
+        assert len(composed_ids) == len(composed)
 
 
 class TestGradeGuidedComposeRealPipeline:

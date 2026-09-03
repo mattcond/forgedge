@@ -265,6 +265,7 @@ class ANDComposer:
         stratify_fn: Optional[Callable[[RawEvent, RawEvent], Optional[str]]] = None,
         max_pairs: Optional[int] = None,
         max_triples: Optional[int] = None,
+        triple_third_filter: Optional[Callable[[RawEvent, RawEvent, RawEvent], bool]] = None,
     ) -> list[RawEvent]:
         """Generate valid AND compositions and return those passing the gate.
 
@@ -409,6 +410,31 @@ class ANDComposer:
             (default) keeps today's module-level caps (2000 / 500). A
             pairing policy that evaluates a much larger candidate pool (e.g.
             grade-guided composition, issue #254) may need to raise these.
+        triple_third_filter : callable or None, keyword-only
+            Constrains a triple's *third* component beyond ``_validity_mask``
+            (issue #254 Phase 4). ``None`` (default) reproduces today's
+            behaviour: any structurally-valid third candidate is eligible,
+            in an order fixed only by ``_shuffle_order`` (unaffected by
+            ``stratify_fn``, which governs pair order/seeding only, not the
+            third-candidate search within one seed).
+
+            When provided, ``triple_third_filter(pool[idx_a], pool[idx_b],
+            pool[k])`` is called once per structurally-valid third candidate
+            of each seed pair; a third failing the filter (returning falsy)
+            is dropped before the shuffle, exactly like ``stratify_fn``
+            returning ``None`` drops a pair. A caller building a grade-guided
+            triple policy would key this off the seed pair's root grade, not
+            the third's own pairwise relation to each seed member
+            individually — see ``forgedge.composition.grade_guided_compose``.
+
+            Does not change which (seed-pair, third) triples are
+            *structurally* reachable in the first place: a unique index
+            triple ``{p, q, r}`` (``p < q < r``) is only ever generated from
+            seed ``(p, q)`` with third ``r`` — the ``k > idx_b`` ordering
+            constraint combined with seeds always satisfying ``idx_a <
+            idx_b`` already rules out any other seed producing the same
+            triple, so no deduplication step is needed here or in a filter
+            built on top of this hook.
 
         Returns
         -------
@@ -570,6 +596,14 @@ class ANDComposer:
                 valid_k = valid_k[valid_k > idx_b]
                 if len(valid_k) == 0:
                     continue
+                if triple_third_filter is not None:
+                    valid_k = np.array(
+                        [k for k in valid_k
+                         if triple_third_filter(pool[idx_a], pool[idx_b], pool[k])],
+                        dtype=valid_k.dtype,
+                    )
+                    if len(valid_k) == 0:
+                        continue
                 # Same enumeration-order fix as the pair loop, scoped to this
                 # seed's own third-candidates (#230) — a single seed's
                 # ascending-index valid_k can otherwise fill all of
