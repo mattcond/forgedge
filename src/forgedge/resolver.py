@@ -1671,6 +1671,48 @@ def _check_entry_mode_gate(values: Dict[str, Any], ctx: PipelineContext) -> Opti
             f"min_fill_rate_opt.")
 
 
+def _check_grade_pairing_caps(values: Dict[str, Any], ctx: PipelineContext) -> Optional[str]:
+    """``GradePairingConfig``'s per-stratum caps must stay internally coherent (#254).
+
+    Self-contained within ``grade_pairing`` — no other module's config is
+    read — since these three fields relate only to each other, not to a
+    session-wide latent parameter. Two structural checks, entirely
+    data-independent (this constraint never sees a candidate pool or a
+    stratum count, per this module's own "never read the data" rule):
+
+    1. ``per_stratum_pair_cap <= 0`` makes grade-guided composition
+       structurally inert — every pair round-robin-interleaved into the
+       traversal order (``ANDComposer._stratified_pair_order``, #254 Phase 1)
+       is truncated away before any gate check runs.
+    2. ``per_stratum_triple_cap > per_stratum_pair_cap`` while
+       ``max_components >= 3``: every triple is seeded from a pair that must
+       itself survive the pair cap first (``ANDComposer.compose``'s
+       pair-seeded triple search), so a triple cap above the pair cap can
+       never be reached in a stratum whose own pair cap binds first — the
+       surplus is not an error, but it is never usable, which is exactly the
+       kind of jointly-impossible-but-individually-reasonable pair of values
+       this resolver exists to catch (module docstring, issue #173's shape).
+    """
+    max_components = values.get("grade_pairing.max_components", _MISSING)
+    pair_cap = values.get("grade_pairing.per_stratum_pair_cap", _MISSING)
+    triple_cap = values.get("grade_pairing.per_stratum_triple_cap", _MISSING)
+    if pair_cap is _MISSING or not is_set(pair_cap):
+        return None
+    if pair_cap <= 0:
+        return (f"grade_pairing.per_stratum_pair_cap={pair_cap} <= 0: nessuna coppia "
+                f"potrà mai sopravvivere al cap per strato, rendendo la composizione "
+                f"guidata dal grado strutturalmente inerte.")
+    if (max_components is not _MISSING and is_set(max_components) and max_components >= 3
+            and triple_cap is not _MISSING and is_set(triple_cap) and triple_cap > pair_cap):
+        return (f"grade_pairing.per_stratum_triple_cap={triple_cap} supera "
+                f"per_stratum_pair_cap={pair_cap}: ogni tripla nasce da una coppia seed "
+                f"che deve prima sopravvivere al cap delle coppie, quindi il surplus del "
+                f"cap delle triple in uno strato il cui cap-coppie satura per primo non è "
+                f"mai raggiungibile — abbassare per_stratum_triple_cap a "
+                f"<= per_stratum_pair_cap, oppure alzare per_stratum_pair_cap.")
+    return None
+
+
 def _statistical_constraints() -> List[Constraint]:
     return [
         Constraint(code="wf_bucket_too_short", level="FAIL", stage=STATISTICAL,
@@ -1734,6 +1776,11 @@ def _statistical_constraints() -> List[Constraint]:
                    free=("rule_discovery.entry_mode",
                          "rule_discovery.criteria.min_fill_rate"),
                    check=_check_entry_mode_gate),
+        Constraint(code="grade_pairing_cap_incoherent", level="WARN", stage=STRUCTURAL,
+                   free=("grade_pairing.max_components",
+                         "grade_pairing.per_stratum_pair_cap",
+                         "grade_pairing.per_stratum_triple_cap"),
+                   check=_check_grade_pairing_caps),
     ]
 
 

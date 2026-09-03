@@ -1158,3 +1158,62 @@ class TestPresetsDifferentiateEconomicQuality:
             _d, _a, r = forge_preset("sweep", tf, asset="X")
             assert r.criteria.min_profit_factor == 1.8, tf
             assert r.criteria.min_win_rate == 0.50, tf
+
+
+# ---------------------------------------------------------------------------
+# grade_pairing_cap_incoherent (issue #254, Phase 2)
+# ---------------------------------------------------------------------------
+
+class TestGradePairingCapConstraint:
+    """`GradePairingConfig`'s own coherence check — self-contained (no other
+    module's config is read), so every case here passes `grade_pairing` alone
+    to `config_report()`."""
+
+    def test_default_config_is_coherent(self):
+        from forgedge.composition import GradePairingConfig
+
+        rep = config_report(grade_pairing=GradePairingConfig(), ctx=_ctx())
+        assert "grade_pairing_cap_incoherent" not in _codes(rep)
+
+    def test_zero_pair_cap_is_flagged(self):
+        from forgedge.composition import GradePairingConfig
+
+        rep = config_report(grade_pairing=GradePairingConfig(per_stratum_pair_cap=0), ctx=_ctx())
+        assert "grade_pairing_cap_incoherent" in _codes(rep)
+        msg = _message(rep, "grade_pairing_cap_incoherent")
+        assert "per_stratum_pair_cap" in msg
+
+    def test_negative_pair_cap_is_flagged(self):
+        from forgedge.composition import GradePairingConfig
+
+        rep = config_report(grade_pairing=GradePairingConfig(per_stratum_pair_cap=-5), ctx=_ctx())
+        assert "grade_pairing_cap_incoherent" in _codes(rep)
+
+    def test_triple_cap_above_pair_cap_is_flagged_at_max_components_3(self):
+        from forgedge.composition import GradePairingConfig
+
+        cfg = GradePairingConfig(max_components=3, per_stratum_pair_cap=10, per_stratum_triple_cap=50)
+        rep = config_report(grade_pairing=cfg, ctx=_ctx())
+        assert "grade_pairing_cap_incoherent" in _codes(rep)
+        msg = _message(rep, "grade_pairing_cap_incoherent")
+        assert "per_stratum_triple_cap" in msg and "per_stratum_pair_cap" in msg
+
+    def test_triple_cap_above_pair_cap_is_silent_when_pairs_only(self):
+        """A large per_stratum_triple_cap is inert (Phase 2's max_components
+        default is 2, no triples), so it isn't worth flagging."""
+        from forgedge.composition import GradePairingConfig
+
+        cfg = GradePairingConfig(max_components=2, per_stratum_pair_cap=10, per_stratum_triple_cap=50)
+        rep = config_report(grade_pairing=cfg, ctx=_ctx())
+        assert "grade_pairing_cap_incoherent" not in _codes(rep)
+
+    def test_triple_cap_at_or_below_pair_cap_is_silent(self):
+        from forgedge.composition import GradePairingConfig
+
+        cfg = GradePairingConfig(max_components=3, per_stratum_pair_cap=10, per_stratum_triple_cap=10)
+        rep = config_report(grade_pairing=cfg, ctx=_ctx())
+        assert "grade_pairing_cap_incoherent" not in _codes(rep)
+
+    def test_silent_without_a_grade_pairing_config(self):
+        rep = config_report(ctx=_ctx())
+        assert "grade_pairing_cap_incoherent" not in _codes(rep)
