@@ -1,4 +1,4 @@
-"""Grade-guided pairing/composition (issue #254, Phase 2).
+"""Grade-guided pairing/composition (issue #254, Phases 2 and 4).
 
 Replaces M1's purely structural AND-pairing criterion (tpm, dispersion,
 ``transform_key``) with the A-D letter grade Alpha Discovery's first pass
@@ -43,7 +43,11 @@ class GradePairingConfig:
     ----------
     max_components : int
         ``2`` (default) composes pairs only; ``3`` also composes triples
-        (Phase 4). Passed straight through to ``ANDComposer.compose()``.
+        (issue #254 Phase 4) — a triple's third component is constrained by
+        the seed pair's own *root* grade (the better, alphabetically-first
+        of the two — A<B<C<D), via the same adjacency relation that governs
+        pairs, not merely by structural admissibility. Passed straight
+        through to ``ANDComposer.compose()``.
     adjacency : dict[str, tuple[str, ...]]
         For each root grade, which grades (including itself) it may pair
         with. Default ``{"A": ("A","B"), "B": ("B","C"), "C": ("C","D")}`` —
@@ -58,8 +62,8 @@ class GradePairingConfig:
         see :func:`grade_guided_compose`'s docstring for the precise
         fairness property this delivers and why. Default ``100``.
     per_stratum_triple_cap : int
-        Same, for triples (only relevant when ``max_components >= 3``,
-        Phase 4). Default ``50``.
+        Same, for triples (only relevant when ``max_components >= 3``).
+        Default ``50``.
     include_singles_in_pass2 : bool
         Whether the caller (``forge()``'s two-pass orchestration, Phase 3)
         should pool the original 1D candidates alongside the composed ones
@@ -103,6 +107,27 @@ def _stratum_key(config: GradePairingConfig, grade_of: Dict[int, str], a: RawEve
     return None
 
 
+def _triple_third_grade_ok(
+    config: GradePairingConfig, grade_of: Dict[int, str], root_grade: str, third: RawEvent
+) -> bool:
+    """Is ``third``'s grade admissible as a triple's third component, given
+    the seed pair's own root grade (issue #254 Phase 4)?
+
+    Reuses the exact same same-grade/adjacency relation ``_stratum_key``
+    applies to pairs — a triple's third component must relate to the
+    *root* grade the same way a valid pairing partner would, not just be
+    structurally distinct (``_validity_mask``) or reachable from either seed
+    member individually via two separate pairwise checks.
+    """
+    g3 = grade_of.get(id(third))
+    if g3 is None:
+        return False
+    if g3 == root_grade:
+        return True
+    lo, hi = sorted((root_grade, g3))
+    return hi in config.adjacency.get(lo, ()) or lo in config.adjacency.get(hi, ())
+
+
 def _count_strata(config: GradePairingConfig, grades_present: set) -> int:
     """Number of distinct grade strata the pool in front of us can produce.
 
@@ -137,7 +162,10 @@ def grade_guided_compose(
     single-component, graded candidate, and calls
     ``ANDComposer.compose()`` once with a grade-derived ``stratify_fn``
     (Phase 1, #254) so round-robin interleaving — not concatenation — decides
-    traversal order across strata.
+    traversal order across strata. At ``max_components >= 3`` a
+    ``triple_third_filter`` (Phase 1's other composition hook) additionally
+    constrains each triple's third component by the seed pair's own root
+    grade (Phase 4, #254) — see ``_triple_third_grade_ok``.
 
     Fairness property of the pair/triple budget
     ---------------------------------------------
@@ -224,6 +252,18 @@ def grade_guided_compose(
     def stratify(a: RawEvent, b: RawEvent) -> Optional[str]:
         return _stratum_key(config, grade_of, a, b)
 
+    def triple_third_filter(a: RawEvent, b: RawEvent, c: RawEvent) -> bool:
+        # The seed pair (a, b) already passed `stratify` (same-grade or
+        # adjacent), so both grades are known; the pair's "root" is the
+        # better (alphabetically-first, A<B<C<D) of the two — the same
+        # grade `_stratum_key`'s own sorted(lo, hi) treats as the
+        # adjacency-dict key that validated the pair in the first place.
+        ga, gb = grade_of.get(id(a)), grade_of.get(id(b))
+        if ga is None or gb is None:
+            return False
+        root_grade = min(ga, gb)
+        return _triple_third_grade_ok(config, grade_of, root_grade, c)
+
     composer = ANDComposer(gate)
     composed_raw = composer.compose(
         raw_events, timestamps, max_components=config.max_components,
@@ -232,6 +272,7 @@ def grade_guided_compose(
         stratify_fn=stratify,
         max_pairs=effective_max_pairs,
         max_triples=effective_max_triples,
+        triple_third_filter=triple_third_filter if config.max_components >= 3 else None,
         max_constituent_jaccard=config.max_constituent_jaccard,
     )
 

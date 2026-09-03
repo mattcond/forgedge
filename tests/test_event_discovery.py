@@ -2273,6 +2273,103 @@ class TestBugRegressions:
         assert via_method.components == via_function.components
         assert via_method.activation_stats == via_function.activation_stats
 
+    # ── Issue #254 (Phase 4): ANDComposer.compose() gains an optional
+    # triple_third_filter hook, constraining a triple's third component
+    # beyond structural admissibility -- zero change to existing behaviour
+    # when omitted.
+
+    def test_triple_third_filter_default_none_reproduces_unchanged_behaviour(self):
+        rng = np.random.default_rng(2541)
+        n = 2000
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=3.0, min_episodes=1))
+
+        base = rng.random(n) < 0.30
+        events = []
+        for i in range(6):
+            s = pd.Series((base & (rng.random(n) < 0.85)).astype(float))
+            events.append(RawEvent(series=s, component=_make_component(f"feat_{i}", "identity", {}, [])))
+        passing = gate.filter(events, ts)
+
+        composer = ANDComposer(gate)
+        baseline = composer.compose(passing, ts, max_components=3)
+        explicit_none = composer.compose(passing, ts, max_components=3, triple_third_filter=None)
+
+        def _key(ev):
+            return (ev.component.source_feature, ev.gate_result.n_activations)
+
+        assert list(map(_key, baseline)) == list(map(_key, explicit_none))
+
+    def test_triple_third_filter_excludes_rejected_thirds(self):
+        """A third candidate the filter rejects must never appear in any
+        composed triple, even though the underlying 3-way AND would
+        otherwise pass the gate easily (fixture built so a false negative
+        here would be a filter bug, not a fixture that never had a chance)."""
+        rng = np.random.default_rng(2542)
+        n = 2000
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=3.0, min_episodes=1))
+
+        base = rng.random(n) < 0.30
+        s_a0 = pd.Series((base & (rng.random(n) < 0.85)).astype(float))
+        s_a1 = pd.Series((base & (rng.random(n) < 0.85)).astype(float))
+        s_ok = pd.Series((base & (rng.random(n) < 0.85)).astype(float))
+        s_rejected = pd.Series((base & (rng.random(n) < 0.85)).astype(float))
+
+        ev_a0 = RawEvent(series=s_a0, component=_make_component("feat_a0", "identity", {}, []))
+        ev_a1 = RawEvent(series=s_a1, component=_make_component("feat_a1", "identity", {}, []))
+        ev_ok = RawEvent(series=s_ok, component=_make_component("feat_ok", "identity", {}, []))
+        ev_rejected = RawEvent(series=s_rejected, component=_make_component("feat_rejected", "identity", {}, []))
+        passing = gate.filter([ev_a0, ev_a1, ev_ok, ev_rejected], ts)
+        assert len(passing) == 4, "fixture setup failed: all four singles must pass the gate"
+
+        def reject_feat_rejected(a, b, c):
+            return c.component.source_feature != "feat_rejected"
+
+        composer = ANDComposer(gate)
+        result = composer.compose(passing, ts, max_components=3, triple_third_filter=reject_feat_rejected)
+
+        triples = [ev for ev in result if len(ev.component.components) == 3]
+        assert triples, "fixture must produce at least one triple to meaningfully check exclusion"
+        for ev in triples:
+            features = {c.source_feature for c in ev.component.components}
+            assert "feat_rejected" not in features
+
+    def test_triple_third_filter_receives_the_seed_pair_and_candidate_third(self):
+        """The filter must be called with (pool[idx_a], pool[idx_b], pool[k])
+        -- not some other ordering -- so a caller can key its decision off
+        the seed pair specifically (e.g. grade_guided_compose's root-grade
+        logic, issue #254 Phase 4)."""
+        rng = np.random.default_rng(2543)
+        n = 2000
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=3.0, min_episodes=1))
+
+        base = rng.random(n) < 0.30
+        events = [
+            RawEvent(
+                series=pd.Series((base & (rng.random(n) < 0.85)).astype(float)),
+                component=_make_component(f"feat_{i}", "identity", {}, []),
+            )
+            for i in range(4)
+        ]
+        passing = gate.filter(events, ts)
+
+        seen_triples = []
+
+        def recording_filter(a, b, c):
+            seen_triples.append((a.component.source_feature, b.component.source_feature, c.component.source_feature))
+            return True
+
+        composer = ANDComposer(gate)
+        composer.compose(passing, ts, max_components=3, triple_third_filter=recording_filter)
+
+        assert seen_triples, "fixture must exercise the triple loop at least once"
+        for a_feat, b_feat, c_feat in seen_triples:
+            assert a_feat != c_feat and b_feat != c_feat, (
+                "the third argument must be a distinct candidate, not the seed pair itself"
+            )
+
     # ── Issue #232: EventDiscovery must not have to keep every raw
     # candidate's full series resident just to gate it
 
