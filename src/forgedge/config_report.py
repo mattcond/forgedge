@@ -156,6 +156,7 @@ def config_report(
     registry: Any = None,
     market_context: Any = None,
     *,
+    grade_pairing: Any = None,
     ctx: Optional[PipelineContext] = None,
     kpi: Any = None,
     timeframe: str = "1H",
@@ -168,6 +169,11 @@ def config_report(
     event_discovery, alpha, rule_discovery, registry, market_context
         The module configs, in pipeline order.  Any subset is fine — a
         constraint whose inputs are absent simply has nothing to say.
+    grade_pairing : GradePairingConfig, optional
+        The grade-guided composition stage's config (``forgedge.composition``,
+        issue #254). Self-contained — its own coherence checks
+        (``grade_pairing_cap_incoherent``) never read another module's
+        config — so passing it is independent of every other argument here.
     ctx : PipelineContext, optional
         Session facts.  When omitted one is built from ``kpi``/``timeframe`` and
         seeded from whatever the configs set explicitly.
@@ -201,6 +207,7 @@ def config_report(
         "alpha": alpha,
         "rule_discovery": rule_discovery,
         "registry": registry,
+        "grade_pairing": grade_pairing,
     }
     if ctx is None:
         base = (PipelineContext.from_frame(kpi, timeframe=timeframe)
