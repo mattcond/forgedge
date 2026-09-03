@@ -723,60 +723,17 @@ class EventDiscovery:
     ) -> EventCandidate:
         """Promote a passing RawEvent to an EventCandidate.
 
-        Extracts the component list (handling the AND-composition case where
-        components are stored in the ``components`` field), computes
-        the zero-months statistic, aggregates all stats into an
-        ``ActivationStats`` object, and constructs the final ``EventCandidate``.
-
-        Parameters
-        ----------
-        ev : RawEvent
-            A passing event (gate_result.passed == True).
-        idx : int
-            Sequential index within the final ``all_passing`` list, used to
-            produce a unique event ID suffix.
-        timestamps : pd.Series
-            Datetime series needed for zero-month counting.
-
-        Returns
-        -------
-        EventCandidate
+        Thin wrapper around the module-level :func:`raw_event_to_candidate`,
+        supplying this instance's ``timestamp_col``/``gate_params``. Kept as
+        a method so the rest of ``run()`` doesn't change; the free function
+        exists so a composition stage outside ``EventDiscovery`` (e.g. a
+        grade-guided composer running after Alpha Discovery, issue #254) can
+        promote its own composed ``RawEvent``s to fresh ``EventCandidate``s
+        without needing an ``EventDiscovery`` instance.
         """
-        g = ev.gate_result  # always set after gate.filter / composer.compose
-
-        # Retrieve actual components list
-        comp = ev.component
-        if comp.transform == "and_composition":
-            components: list[EventComponent] = comp.components if comp.components else [comp]
-        else:
-            components = [comp]
-
-        zero_months = _count_zero_months(ev.series, timestamps)
-
-        stats = ActivationStats(
-            n_activations=g.n_activations if g else 0,
-            n_active_months=g.n_active_months if g else 0,
-            zero_months=zero_months,
-            max_monthly_share=g.max_monthly_share if g else float("nan"),
-            mean_tpm=g.mean_tpm if g else float("nan"),
-            index_of_dispersion=g.index_of_dispersion if g else float("nan"),
-            n_episodes=g.n_episodes if g else 0,
-            episode_index_of_dispersion=g.episode_index_of_dispersion if g else float("nan"),
-            n_eff=g.n_eff if g else float("nan"),
-        )
-
-        # Attach DatetimeIndex so callers can call .resample() directly
-        series_dt = ev.series.copy()
-        series_dt.index = pd.DatetimeIndex(timestamps.values, name=self.config.timestamp_col)
-
-        return EventCandidate(
-            event_id=_make_event_id(components, idx),
-            status="CANDIDATE",
-            components=components,
-            expression=comp.expression,
-            activation_stats=stats,
-            consistency_gate=g,
-            event_series=series_dt,
+        return raw_event_to_candidate(
+            ev, idx, timestamps,
+            timestamp_col=self.config.timestamp_col,
             gate_params=self.config.gate_params,
         )
 
@@ -930,6 +887,91 @@ def _infer_timestamp_unit(series: pd.Series) -> str:
     if median_val < 1e16:
         return "us"
     return "ns"
+
+
+def raw_event_to_candidate(
+    ev: RawEvent,
+    idx: int,
+    timestamps: pd.Series,
+    *,
+    timestamp_col: str,
+    gate_params: Optional[GateParams],
+) -> EventCandidate:
+    """Promote a passing ``RawEvent`` to an ``EventCandidate``.
+
+    Extracts the component list (handling the AND-composition case where
+    components are stored in the ``components`` field), computes the
+    zero-months statistic, aggregates all stats into an ``ActivationStats``
+    object, and constructs the final ``EventCandidate``.
+
+    A module-level free function (not a method) so it can be called both by
+    ``EventDiscovery._to_candidate`` (its original use, M1's own Step 5) and
+    by a composition stage running outside ``EventDiscovery`` entirely — e.g.
+    a grade-guided composer that runs after Alpha Discovery's first pass and
+    needs to promote its own newly-composed ``RawEvent``s to fresh
+    ``EventCandidate``s, with brand-new ``event_id``s never inherited from
+    the pre-composition candidates (issue #254).
+
+    Parameters
+    ----------
+    ev : RawEvent
+        A passing event (``gate_result.passed == True``).
+    idx : int
+        Sequential index within the caller's own candidate list, used to
+        produce a unique event ID suffix.
+    timestamps : pd.Series
+        Datetime series needed for zero-month counting.
+    timestamp_col : str
+        Name to give the resulting ``EventCandidate.event_series``'s
+        ``DatetimeIndex``. On ``EventDiscovery``, this is
+        ``self.config.timestamp_col``.
+    gate_params : GateParams or None
+        Stored on the resulting ``EventCandidate.gate_params`` so
+        ``update_event()`` can re-evaluate ``consistency_gate.passed`` on new
+        data later without needing the original config. On
+        ``EventDiscovery``, this is ``self.config.gate_params``.
+
+    Returns
+    -------
+    EventCandidate
+    """
+    g = ev.gate_result  # always set after gate.filter / composer.compose
+
+    # Retrieve actual components list
+    comp = ev.component
+    if comp.transform == "and_composition":
+        components: list[EventComponent] = comp.components if comp.components else [comp]
+    else:
+        components = [comp]
+
+    zero_months = _count_zero_months(ev.series, timestamps)
+
+    stats = ActivationStats(
+        n_activations=g.n_activations if g else 0,
+        n_active_months=g.n_active_months if g else 0,
+        zero_months=zero_months,
+        max_monthly_share=g.max_monthly_share if g else float("nan"),
+        mean_tpm=g.mean_tpm if g else float("nan"),
+        index_of_dispersion=g.index_of_dispersion if g else float("nan"),
+        n_episodes=g.n_episodes if g else 0,
+        episode_index_of_dispersion=g.episode_index_of_dispersion if g else float("nan"),
+        n_eff=g.n_eff if g else float("nan"),
+    )
+
+    # Attach DatetimeIndex so callers can call .resample() directly
+    series_dt = ev.series.copy()
+    series_dt.index = pd.DatetimeIndex(timestamps.values, name=timestamp_col)
+
+    return EventCandidate(
+        event_id=_make_event_id(components, idx),
+        status="CANDIDATE",
+        components=components,
+        expression=comp.expression,
+        activation_stats=stats,
+        consistency_gate=g,
+        event_series=series_dt,
+        gate_params=gate_params,
+    )
 
 
 def _count_zero_months(series: pd.Series, timestamps: pd.Series) -> int:
