@@ -66,7 +66,9 @@ from .alpha_discovery.discovery import AlphaDiscovery
 from .alpha_discovery.models import AlphaConfig, AlphaContract
 from .calibration import FastRotationNull, RotationCalibrator
 from .calibration.models import CalibrationReport, RotationConfig
+from .composition import GradePairingConfig, grade_guided_compose
 from .ledger import HypothesisLedger
+from .event_discovery.consistency_gate import ConsistencyGate
 from .event_discovery.discovery import DiscoveryConfig, EventDiscovery
 from .event_discovery.models import (
     ActivationStats,
@@ -184,10 +186,19 @@ class ForgeResult:
         and ``regime_stable``.  When Market Context is skipped this is the
         table actually fed to Event Discovery.
     candidates : list[EventCandidate]
-        Every Event Candidate that passed the Consistency Gate (Modulo 1).
+        Every Event Candidate that passed the Consistency Gate (Modulo 1) —
+        or, when ``two_pass_composition=True``, the *pooled* candidates
+        Alpha Discovery's second pass actually evaluated (M1's 1D pool plus
+        the grade-guided composed candidates, per
+        ``grade_pairing_config.include_singles_in_pass2``). In two-pass mode
+        this is what Rule Discovery and the rotation null operated on; the
+        1D-only pool Module 1 itself produced is on ``grading_candidates``
+        instead.
     contracts : list[AlphaContract]
         Every evaluated Alpha Contract (promoted *and* rejected), so rejections
-        can be audited via ``contract.rejection_reasons``.
+        can be audited via ``contract.rejection_reasons``. In two-pass mode
+        this is the second pass's output; the first (grading) pass's
+        contracts are on ``grading_contracts``.
     promoted : list[AlphaContract]
         The subset of ``contracts`` that cleared every promotion gate
         (``status == "HYPOTHESIS"``) and were handed to Rule Discovery.
@@ -235,6 +246,24 @@ class ForgeResult:
         violation found in *check* mode.  Produced by the **same** resolver call
         the pipeline ran with, so ``coherence.configs`` is literally what
         executed, not a reconstruction.
+    grading_candidates : list[EventCandidate] or None
+        Only set when ``two_pass_composition=True`` (issue #254): Module 1's
+        own 1D-only candidate pool, before grade-guided composition — the
+        first-pass artefact preserved for audit, per the invariant that a
+        later stage never reaches back into an earlier one's internals by
+        inference. ``None`` in single-pass (default) mode.
+    grading_contracts : list[AlphaContract] or None
+        Only set when ``two_pass_composition=True``: Alpha Discovery's
+        *first*-pass contracts (the grading pass) over ``grading_candidates``
+        — never fed to Rule Discovery or the rotation null, which both
+        operate on the second pass's ``contracts``/``promoted`` instead.
+        ``None`` in single-pass mode.
+    composition_timing : dict[str, float] or None
+        Only set when ``two_pass_composition=True``: wall-clock seconds for
+        each two-pass stage (``pass1_seconds``, ``composition_seconds``,
+        ``pass2_seconds``) — free instrumentation for judging the real cost
+        of running Alpha Discovery twice, ahead of a full cost-measurement
+        follow-up. ``None`` in single-pass mode.
     """
 
     enriched: pd.DataFrame
@@ -254,6 +283,9 @@ class ForgeResult:
     context: Optional[PipelineContext] = None
     resolution: Optional[ResolutionTrace] = None
     coherence: Optional[ConfigReport] = None
+    grading_candidates: Optional[List[EventCandidate]] = None
+    grading_contracts: Optional[List[AlphaContract]] = None
+    composition_timing: Optional[Dict[str, float]] = None
 
     # ------------------------------------------------------------------
     # Convenience accessors
@@ -324,6 +356,8 @@ def forge(
     market_context_config: Optional[MarketContextConfig] = None,
     event_discovery_config: Optional[DiscoveryConfig] = None,
     alpha_config: Optional[AlphaConfig] = None,
+    two_pass_composition: bool = False,
+    grade_pairing_config: Optional[GradePairingConfig] = None,
     rotation_calibration: Optional[RotationConfig] = None,
     fast_null: bool = True,
     time_budget: Optional[TimeBudget] = None,
@@ -392,6 +426,35 @@ def forge(
         something else entirely kept the hourly grid — which on daily candles
         scanned holding periods of up to 48 *days* — and produced a warning
         instead of a conversion.
+    two_pass_composition : bool, default False
+        Run the grade-guided, two-pass composition design from issue #254
+        instead of Module 1's own structural AND-composition: Event
+        Discovery stays 1D-only (requires
+        ``event_discovery_config.max_and_components <= 1``, else
+        ``ValueError`` — composition happens here instead, not in M1), a
+        first Alpha Discovery pass grades every 1D candidate A-D, a
+        grade-guided composer (:mod:`forgedge.composition`) pairs them using
+        the grade as the pairing criterion instead of M1's purely structural
+        tpm/dispersion/``transform_key`` criterion, and a second Alpha
+        Discovery pass evaluates the composed candidates from scratch (no
+        target/grade inherited from their constituents). Everything
+        downstream — the hypothesis ledger, the rotation null, Rule
+        Discovery, the Rule Registry — then operates on the second pass's
+        pooled output, exactly as it would on a single-pass run.
+
+        Default ``False`` reproduces today's single-pass, structural-pairing
+        behaviour exactly (this parameter changes nothing when left at its
+        default). See ``docs/analysis/issue_254_two_pass_composition_plan.md``
+        for the full design and empirical motivation.
+        ``ForgeResult.grading_candidates`` / ``.grading_contracts`` preserve
+        the first pass's pre-composition artefacts for audit;
+        ``ForgeResult.composition_timing`` reports the wall-clock cost of
+        each two-pass stage.
+    grade_pairing_config : GradePairingConfig, optional
+        Pairing scheme and budget for ``two_pass_composition=True`` (see
+        :class:`forgedge.composition.GradePairingConfig`). Defaults to
+        ``GradePairingConfig()`` when the flag is on and this is omitted.
+        Has no effect when ``two_pass_composition=False``.
     rotation_calibration : RotationConfig, optional
         When set, run the search-level rotation null calibrator inline after
         Alpha Discovery.  Rotates only the ``close`` column K times and re-runs
@@ -495,6 +558,22 @@ def forge(
             "manual_events and event_discovery_config are mutually exclusive. "
             "Pass one or the other, not both."
         )
+    if two_pass_composition and manual_events is None:
+        # M1 must stay 1D-only under two-pass composition (issue #254) —
+        # composition happens in the grade-guided stage instead. Checked
+        # against the config the caller actually passed (falling back to
+        # DiscoveryConfig()'s own class default, since an omitted
+        # event_discovery_config still resolves to max_and_components=2)
+        # so a silent structural mismatch fails loudly instead (invariant #9).
+        _effective_max_and = (event_discovery_config or DiscoveryConfig()).max_and_components
+        if _effective_max_and > 1:
+            raise ValueError(
+                "forge(): two_pass_composition=True requires "
+                "event_discovery_config.max_and_components <= 1 — Module 1 must "
+                "stay 1D-only; composition happens in the two-pass grade-guided "
+                "stage instead (forgedge.composition.grade_guided_compose). Got "
+                f"max_and_components={_effective_max_and}."
+            )
 
     # Whether the caller *chose* a bar size or inherited one.  Only the
     # declared-versus-measured check cares (F5, #179): a default nobody has
@@ -661,11 +740,73 @@ def forge(
             )
 
     # ── Modulo 2 — Alpha Discovery ────────────────────────────────────────
-    report.stage(f"M2 Alpha Discovery — evaluating {len(alpha_candidates)} candidate(s)…")
-    ad = AlphaDiscovery(alpha_frame, alpha_candidates, cfg, time_budget=time_budget)
-    contracts = ad.run()
-    promoted = ad.promoted_contracts()
-    report.stage(f"M2 Alpha Discovery — {len(promoted)}/{len(contracts)} promoted")
+    grading_candidates: Optional[List[EventCandidate]] = None
+    grading_contracts: Optional[List[AlphaContract]] = None
+    composition_timing: Optional[Dict[str, float]] = None
+    if not two_pass_composition:
+        report.stage(f"M2 Alpha Discovery — evaluating {len(alpha_candidates)} candidate(s)…")
+        ad = AlphaDiscovery(alpha_frame, alpha_candidates, cfg, time_budget=time_budget)
+        contracts = ad.run()
+        promoted = ad.promoted_contracts()
+        report.stage(f"M2 Alpha Discovery — {len(promoted)}/{len(contracts)} promoted")
+    else:
+        # Two-pass, grade-guided composition (issue #254) — see
+        # docs/analysis/issue_254_two_pass_composition_plan.md for the design.
+        # M1 stayed 1D-only (validated above); a first Alpha Discovery pass
+        # grades every candidate, a grade-guided composer pairs them, and a
+        # second Alpha Discovery pass evaluates the composed candidates from
+        # scratch, pooled with the originals per
+        # grade_pairing_config.include_singles_in_pass2.
+        _t_pass1_start = time.perf_counter()
+        report.stage(
+            f"M2 pass 1 — grading {len(alpha_candidates)} candidate(s) for "
+            f"grade-guided composition…"
+        )
+        ad_pass1 = AlphaDiscovery(alpha_frame, alpha_candidates, cfg, time_budget=time_budget)
+        contracts_pass1 = ad_pass1.run()
+        grading_candidates = alpha_candidates
+        grading_contracts = contracts_pass1
+        report.stage(f"M2 pass 1 — {len(contracts_pass1)} candidate(s) graded")
+        _t_pass1_end = time.perf_counter()
+
+        effective_gpc = grade_pairing_config or GradePairingConfig()
+        gate_for_composition = ConsistencyGate(
+            event_discovery_config.gate_params
+            if event_discovery_config is not None else GateParams()
+        )
+        composed = grade_guided_compose(
+            alpha_candidates, contracts_pass1,
+            _timestamps_from_frame(alpha_frame), effective_gpc, gate_for_composition,
+        )
+        report.stage(f"Grade-guided composition — {len(composed)} composed candidate(s)")
+        _t_composition_end = time.perf_counter()
+
+        pass2_candidates = (
+            alpha_candidates + composed if effective_gpc.include_singles_in_pass2 else composed
+        )
+        report.stage(f"M2 pass 2 — evaluating {len(pass2_candidates)} candidate(s)…")
+        ad = AlphaDiscovery(alpha_frame, pass2_candidates, cfg, time_budget=time_budget)
+        contracts = ad.run()
+        promoted = ad.promoted_contracts()
+        report.stage(f"M2 pass 2 — {len(promoted)}/{len(contracts)} promoted")
+        _t_pass2_end = time.perf_counter()
+
+        composition_timing = {
+            "pass1_seconds": _t_pass1_end - _t_pass1_start,
+            "composition_seconds": _t_composition_end - _t_pass1_end,
+            "pass2_seconds": _t_pass2_end - _t_composition_end,
+        }
+
+        # Rebind BOTH `alpha_candidates` and `candidates` to pass 2's pooled
+        # output before the ledger/rotation-null/M3 blocks below run. M3's
+        # `by_id` lookup and ForgeResult.candidates key off `candidates`, not
+        # `alpha_candidates` — rebinding only `alpha_candidates` would leave
+        # every composed contract's event_candidate_id absent from that
+        # lookup, and RuleDiscovery would silently skip it (see
+        # docs/analysis/issue_254_two_pass_composition_plan.md, §"Principi guida").
+        alpha_candidates = pass2_candidates
+        candidates = pass2_candidates
+
     # M2 may have widened the purge for enriched horizons; the split and M1's
     # own cut are untouched, so this is still the one session axis.
     effective_budget = ad._budget if ad._budget is not None else time_budget
@@ -678,6 +819,7 @@ def forge(
         m2_horizons=len(cfg.horizon_grid),
         m2_promoted=len(promoted),
         m2_return_tests=getattr(ad, "n_return_tests", 0),
+        m2_pass1_candidates=len(grading_candidates) if grading_candidates is not None else 0,
     )
     report.stage(ledger.describe())
 
@@ -758,6 +900,9 @@ def forge(
         context=context,
         resolution=resolution,
         coherence=coherence,
+        grading_candidates=grading_candidates,
+        grading_contracts=grading_contracts,
+        composition_timing=composition_timing,
     )
     if run_rule_discovery:
         report.stage(f"M3 Rule Discovery — {len(result.edges())} tradeable rule(s)")
