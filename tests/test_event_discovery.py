@@ -2017,6 +2017,262 @@ class TestBugRegressions:
             "near-duplicate pair must be rejected once max_constituent_jaccard is set"
         )
 
+    # ── Issue #254 (Phase 1): ANDComposer.compose() gains optional
+    # pool_selector/stratify_fn/max_pairs/max_triples hooks, plus a
+    # standalone RawEvent<->EventCandidate adapter, with zero change to
+    # existing (all-default) behaviour.
+
+    def test_new_compose_kwargs_default_to_unchanged_behaviour(self):
+        """compose() with every new kwarg explicitly passed as its default
+        (None) must reproduce the exact same composed events, in the exact
+        same order, as a call that omits them entirely."""
+        rng = np.random.default_rng(2540)
+        n = 4380
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=2.0, min_episodes=1))
+
+        events = []
+        for i in range(15):
+            p_act = rng.uniform(0.1, 0.3)
+            s = pd.Series((rng.random(n) < p_act).astype(float))
+            events.append(RawEvent(series=s, component=_make_component(f"feat_{i}", "identity", {}, [])))
+        passing = gate.filter(events, ts)
+
+        composer = ANDComposer(gate)
+        baseline = composer.compose(passing, ts, max_components=3)
+        explicit_defaults = composer.compose(
+            passing, ts, max_components=3,
+            pool_selector=None, stratify_fn=None, max_pairs=None, max_triples=None,
+        )
+
+        def _key(ev):
+            return (ev.component.source_feature, ev.gate_result.n_activations)
+
+        assert list(map(_key, baseline)) == list(map(_key, explicit_defaults))
+
+    def test_pool_selector_override_restricts_composition_pool(self):
+        """A custom pool_selector must be used in place of
+        _build_composition_pool -- composed events must only draw
+        constituents from what the selector returns."""
+        rng = np.random.default_rng(11)
+        n = 2000
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=3.0, min_episodes=1))
+
+        events = []
+        for i in range(10):
+            p_act = rng.uniform(0.15, 0.35)
+            s = pd.Series((rng.random(n) < p_act).astype(float))
+            events.append(RawEvent(series=s, component=_make_component(f"feat_{i}", "identity", {}, [])))
+        passing = gate.filter(events, ts)
+        assert len(passing) >= 4, "fixture must produce enough passing singles"
+
+        allowed = {"feat_0", "feat_1", "feat_2"}
+
+        def only_allowed(pool):
+            return [ev for ev in pool if ev.component.source_feature in allowed]
+
+        composer = ANDComposer(gate)
+        result = composer.compose(passing, ts, max_components=2, pool_selector=only_allowed)
+
+        for ev in result:
+            constituents = {c.source_feature for c in ev.component.components}
+            assert constituents <= allowed, (
+                f"pool_selector was bypassed: composed event drew from {constituents}"
+            )
+
+    def test_stratify_fn_round_robin_interleaves_strata_not_concatenates(self):
+        """A custom stratify_fn's round-robin interleaving (issue #254) must
+        put the sole pair of a tiny stratum ahead of a much larger stratum's
+        pairs in traversal order -- concatenating strata and then truncating
+        at a flat max_pairs would starve the tiny stratum entirely, exactly
+        the v1 under-sampling bug issue #254 itself reports (51 edges found
+        vs. 76 from a tighter baseline, fixed by round-robin interleaving in
+        v2)."""
+        n = 2000
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=3.0, min_episodes=1))
+
+        rng = np.random.default_rng(254)
+        # Strongly overlapping shared-base pair -- the sole member of the
+        # "small" stratum, reliably passing both individually and AND-composed
+        # (same construction as test_and_composer_max_conc_matches_single_gate).
+        base = rng.random(n) < 0.30
+        s0 = pd.Series((base & (rng.random(n) < 0.85)).astype(float))
+        s1 = pd.Series((base & (rng.random(n) < 0.85)).astype(float))
+
+        events = [
+            RawEvent(series=s0, component=_make_component("feat_0", "identity", {}, [])),
+            RawEvent(series=s1, component=_make_component("feat_1", "identity", {}, [])),
+        ]
+        # A "big" stratum with far more valid pairs than max_pairs below.
+        for i in range(2, 17):
+            p_act = rng.uniform(0.15, 0.35)
+            s = pd.Series((rng.random(n) < p_act).astype(float))
+            events.append(RawEvent(series=s, component=_make_component(f"feat_{i}", "identity", {}, [])))
+
+        passing = gate.filter(events, ts)
+        passing_features = {ev.component.source_feature for ev in passing}
+        assert {"feat_0", "feat_1"} <= passing_features, "fixture setup failed: feat_0/feat_1 must pass the gate"
+        assert len(passing) >= 12, "fixture must produce a 'big' stratum much larger than max_pairs"
+
+        small_pair = frozenset({"feat_0", "feat_1"})
+
+        def stratify(a, b):
+            pair = frozenset({a.component.source_feature, b.component.source_feature})
+            return "small" if pair == small_pair else "big"
+
+        composer = ANDComposer(gate)
+        result = composer.compose(
+            passing, ts, max_components=2, stratify_fn=stratify, max_pairs=2,
+        )
+        composed_pairs = {frozenset(c.source_feature for c in ev.component.components) for ev in result}
+        assert small_pair in composed_pairs, (
+            "round-robin interleaving must not starve the tiny stratum even though "
+            "the 'big' stratum has far more valid pairs than max_pairs"
+        )
+
+    def test_stratify_fn_none_key_drops_the_pair(self):
+        """A stratify_fn returning None for a pair must exclude it from the
+        composed output entirely, not merely deprioritise it."""
+        n = 2000
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=3.0, min_episodes=1))
+
+        rng = np.random.default_rng(254)
+        base = rng.random(n) < 0.30
+        s0 = pd.Series((base & (rng.random(n) < 0.85)).astype(float))
+        s1 = pd.Series((base & (rng.random(n) < 0.85)).astype(float))
+
+        events = [
+            RawEvent(series=s0, component=_make_component("feat_0", "identity", {}, [])),
+            RawEvent(series=s1, component=_make_component("feat_1", "identity", {}, [])),
+        ]
+        passing = gate.filter(events, ts)
+        assert len(passing) == 2
+
+        composer = ANDComposer(gate)
+        excluded = composer.compose(passing, ts, max_components=2, stratify_fn=lambda a, b: None)
+        assert excluded == []
+
+    def test_max_pairs_max_triples_override_the_module_caps(self):
+        """max_pairs/max_triples override _MAX_PAIRS/_MAX_TRIPLES for a
+        single call without touching the module-level defaults."""
+        import forgedge.event_discovery.and_composer as and_composer_mod
+
+        rng = np.random.default_rng(230)
+        n = 2000
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        gate = ConsistencyGate(GateParams(min_tpm=0.5, dispersion_margin=3.0, min_episodes=1))
+
+        events = []
+        for i in range(40):
+            p_act = rng.uniform(0.15, 0.35)
+            s = pd.Series((rng.random(n) < p_act).astype(float))
+            events.append(RawEvent(series=s, component=_make_component(f"feat_{i}", "identity", {}, [])))
+        passing = gate.filter(events, ts)
+        assert len(passing) >= 22, "fixture must produce more valid pairs than the override cap"
+
+        composer = ANDComposer(gate)
+        capped = composer.compose(passing, ts, max_components=3, max_pairs=5, max_triples=3)
+        assert len(capped) <= 5 + 3
+
+        # The module-level defaults must be untouched by the override.
+        assert and_composer_mod._MAX_PAIRS == 2000
+        assert and_composer_mod._MAX_TRIPLES == 500
+
+    def test_raw_event_from_candidate_round_trips_single_component(self):
+        from forgedge.event_discovery.and_composer import raw_event_from_candidate
+        from forgedge.event_discovery.discovery import raw_event_to_candidate
+        from forgedge.event_discovery.models import ActivationStats, GateResult
+
+        n = 500
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        series = pd.Series((np.arange(n) % 4 == 0).astype(float))
+        comp = _make_component("feat_x", "identity", {}, [])
+        g = GateResult(
+            passed=True, n_activations=125, n_active_months=1,
+            max_monthly_share=1.0, mean_tpm=125.0,
+        )
+        candidate = EventCandidate(
+            event_id="EVT-feat_x-ID-0000",
+            status="CANDIDATE",
+            components=[comp],
+            expression=comp.expression,
+            activation_stats=ActivationStats(
+                n_activations=125, n_active_months=1, zero_months=0,
+                max_monthly_share=1.0, mean_tpm=125.0,
+            ),
+            consistency_gate=g,
+            event_series=series,
+        )
+
+        raw = raw_event_from_candidate(candidate)
+        assert raw.component is comp
+        assert raw.gate_result is g
+        assert raw.series is series
+
+        # Round-trips back to a fresh EventCandidate with a new event_id.
+        rebuilt = raw_event_to_candidate(
+            raw, idx=7, timestamps=ts, timestamp_col="open_dt", gate_params=None,
+        )
+        assert rebuilt.event_id != candidate.event_id
+        assert rebuilt.components == [comp]
+
+    def test_raw_event_from_candidate_rejects_multi_component_candidate(self):
+        from forgedge.event_discovery.and_composer import raw_event_from_candidate
+        from forgedge.event_discovery.models import ActivationStats, GateResult
+
+        comp_a = _make_component("feat_a", "identity", {}, [])
+        comp_b = _make_component("feat_b", "identity", {}, [])
+        g = GateResult(passed=True, n_activations=10, n_active_months=1, max_monthly_share=1.0, mean_tpm=10.0)
+        composed_candidate = EventCandidate(
+            event_id="EVT-feat_a AND feat_b-IDxID-0000",
+            status="CANDIDATE",
+            components=[comp_a, comp_b],
+            expression="feat_a AND feat_b",
+            activation_stats=ActivationStats(
+                n_activations=10, n_active_months=1, zero_months=0,
+                max_monthly_share=1.0, mean_tpm=10.0,
+            ),
+            consistency_gate=g,
+            event_series=pd.Series([1.0, 0.0, 1.0]),
+        )
+
+        with pytest.raises(ValueError, match="single-component"):
+            raw_event_from_candidate(composed_candidate)
+
+    def test_raw_event_to_candidate_matches_instance_method(self):
+        """The module-level free function extracted from
+        EventDiscovery._to_candidate must produce identical output to the
+        (now one-line wrapper) instance method for the same inputs -- proof
+        the extraction changed nothing."""
+        df = _make_kpi_table(n=1500, seed=11)
+        cfg = DiscoveryConfig(gate_params=GateParams(min_tpm=0.5, dispersion_margin=2.0, min_episodes=1))
+        ed = EventDiscovery(df, cfg)
+        ed.run()  # populates ed.config with the resolved session config
+
+        from forgedge.event_discovery.discovery import raw_event_to_candidate
+
+        n = 500
+        ts = pd.Series(pd.date_range("2024-01-01", periods=n, freq="1h"))
+        series = pd.Series((np.arange(n) % 3 == 0).astype(float))
+        comp = _make_component("feat_y", "identity", {}, [])
+        g = GateResult(passed=True, n_activations=167, n_active_months=1, max_monthly_share=1.0, mean_tpm=167.0)
+        ev = RawEvent(series=series, component=comp)
+        ev.gate_result = g
+
+        via_method = ed._to_candidate(ev, idx=3, timestamps=ts)
+        via_function = raw_event_to_candidate(
+            ev, idx=3, timestamps=ts,
+            timestamp_col=ed.config.timestamp_col,
+            gate_params=ed.config.gate_params,
+        )
+
+        assert via_method.event_id == via_function.event_id
+        assert via_method.components == via_function.components
+        assert via_method.activation_stats == via_function.activation_stats
+
     # ── Issue #232: EventDiscovery must not have to keep every raw
     # candidate's full series resident just to gate it
 

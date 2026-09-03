@@ -63,14 +63,15 @@ without fixing the underlying skew — see issue #230).
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Optional
+from itertools import zip_longest
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
 
 from ..episodes import episode_starts
 from .consistency_gate import ConsistencyGate, _build_month_index, _eff_max_dispersion, _gate_pass
-from .models import EventComponent, GateResult, RawEvent
+from .models import EventCandidate, EventComponent, GateResult, RawEvent
 
 # Sentinel used as the default for the ``gate`` parameter of
 # ``ANDComposer.compose()``.  Distinguishes "caller did not pass gate"
@@ -147,6 +148,69 @@ def _shuffle_order(n: int, rng: np.random.Generator) -> np.ndarray:
     return rng.permutation(n)
 
 
+def _stratified_pair_order(
+    pool: list[RawEvent],
+    ii_all: np.ndarray,
+    jj_all: np.ndarray,
+    stratify_fn: Callable[[RawEvent, RawEvent], Optional[str]],
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reorder valid pairs by ``stratify_fn``'s stratum, round-robin interleaved.
+
+    Used by ``ANDComposer.compose()`` when a caller passes ``stratify_fn`` in
+    place of the default flat ``_shuffle_order`` traversal (issue #254). Each
+    valid pair ``(pool[i], pool[j])`` is assigned a stratum key via
+    ``stratify_fn``; pairs whose key is ``None`` are dropped. Each stratum is
+    then shuffled independently (same deterministic ``rng``, so still fully
+    reproducible for a given input), and the strata are interleaved
+    round-robin — one pair from each stratum in turn — rather than
+    concatenated and truncated.
+
+    This is deliberate, not cosmetic: concatenating strata and then applying
+    a flat cap downstream systematically starves whichever stratum is
+    smaller or later in iteration order, independent of (and in addition to)
+    the single-root-domination bug #230 already fixed for the unstratified
+    case.
+
+    Parameters
+    ----------
+    pool : list[RawEvent]
+        The composition pool ``ii_all``/``jj_all`` index into.
+    ii_all, jj_all : np.ndarray
+        Row/column indices of every structurally valid pair, as produced by
+        ``np.where(np.triu(valid_mask, k=1))``.
+    stratify_fn : callable
+        ``(RawEvent, RawEvent) -> Optional[str]``, called once per valid
+        pair.
+    rng : np.random.Generator
+        Shared, seeded generator — its state advances with each stratum's
+        shuffle, in stratum-insertion order, so the result is deterministic
+        for a given pool + stratify_fn.
+
+    Returns
+    -------
+    (np.ndarray, np.ndarray)
+        Reordered (and possibly shortened) ``(ii, jj)``, ready to feed the
+        same chunked pair-evaluation loop ``compose()`` already runs.
+    """
+    strata: dict[str, list[int]] = defaultdict(list)
+    for pos in range(len(ii_all)):
+        i, j = int(ii_all[pos]), int(jj_all[pos])
+        key = stratify_fn(pool[i], pool[j])
+        if key is not None:
+            strata[key].append(pos)
+
+    for positions in strata.values():
+        perm = _shuffle_order(len(positions), rng)
+        positions[:] = [positions[p] for p in perm]
+
+    interleaved = [
+        pos for group in zip_longest(*strata.values()) for pos in group if pos is not None
+    ]
+    order = np.array(interleaved, dtype=int)
+    return ii_all[order], jj_all[order]
+
+
 def _pair_chunk_size(n_rows: int) -> int:
     """Chunk size (``K``, candidates per vectorized batch) for
     ``ANDComposer.compose()``'s pair and triple loops (#228).
@@ -197,6 +261,10 @@ class ANDComposer:
         *,
         gate: Optional[ConsistencyGate] = _COMPOSE_DEFAULT,
         max_constituent_jaccard: Optional[float] = None,
+        pool_selector: Optional[Callable[[list[RawEvent]], list[RawEvent]]] = None,
+        stratify_fn: Optional[Callable[[RawEvent, RawEvent], Optional[str]]] = None,
+        max_pairs: Optional[int] = None,
+        max_triples: Optional[int] = None,
     ) -> list[RawEvent]:
         """Generate valid AND compositions and return those passing the gate.
 
@@ -302,6 +370,45 @@ class ANDComposer:
             enumeration-order fix above), a small real one layered on top of
             it (roughly 1-2% of examined pairs at a threshold of 0.5 on a
             realistic pool).
+        pool_selector : callable or None, keyword-only
+            Overrides pool construction (step 1). ``None`` (default) uses
+            ``_build_composition_pool`` — today's structural slot-grouping
+            (top ``_MAX_PER_SLOT`` events per (feature, transform, params)
+            slot). A caller (e.g. a grade-guided composition stage running
+            after Alpha Discovery, issue #254) can pass a different
+            ``list[RawEvent] -> list[RawEvent]`` reduction instead. Every
+            other step — validity, chunked gate, caps — is unaffected by
+            this choice.
+        stratify_fn : callable or None, keyword-only
+            Overrides the *priority order* pairs are evaluated/kept in
+            (issue #254). ``None`` (default) reproduces today's behaviour: a
+            single flat, seed-deterministic shuffle of every valid pair
+            (``_shuffle_order``, #230), so "stop once ``max_pairs`` is
+            reached" samples the whole pool rather than exhausting one
+            index's row first.
+
+            When provided, ``stratify_fn(pool[i], pool[j])`` is called once
+            per valid pair and must return a stratum key (any hashable, e.g.
+            ``"A_same"``) or ``None`` to drop that pair entirely. Pairs are
+            then grouped by key, each group independently shuffled with the
+            same deterministic seed, and the groups **round-robin
+            interleaved** — never concatenated-then-truncated — before the
+            ``max_pairs``/``_MAX_PAIRS`` cap is applied downstream. This is
+            deliberate: concatenating groups and truncating at a flat cap
+            systematically starves whichever stratum happens to be smaller
+            or later in iteration order, independent of and in addition to
+            the single-root-domination bug #230 already fixed for the
+            unstratified case.
+
+            Does not change triple enumeration's own third-candidate order
+            (each seed pair's ``valid_k`` is still shuffled by
+            ``_shuffle_order`` alone) — only which pairs become seeds, and in
+            what order, is affected.
+        max_pairs, max_triples : int or None, keyword-only
+            Override ``_MAX_PAIRS``/``_MAX_TRIPLES`` for this call. ``None``
+            (default) keeps today's module-level caps (2000 / 500). A
+            pairing policy that evaluates a much larger candidate pool (e.g.
+            grade-guided composition, issue #254) may need to raise these.
 
         Returns
         -------
@@ -326,9 +433,13 @@ class ANDComposer:
         # criteria as a single one, mode-aware (#226, the tail of #205).
         eff_max_dispersion = _eff_max_dispersion(n_total_months, p.dispersion_margin)
 
-        pool = _build_composition_pool(passing_events)
+        select_pool = pool_selector if pool_selector is not None else _build_composition_pool
+        pool = select_pool(passing_events)
         if len(pool) < 2:
             return []
+
+        effective_max_pairs = _MAX_PAIRS if max_pairs is None else max_pairs
+        effective_max_triples = _MAX_TRIPLES if max_triples is None else max_triples
 
         one_hot = _build_one_hot_f32(month_index, n_total_months)
         bool_matrix = np.stack(
@@ -352,9 +463,13 @@ class ANDComposer:
 
         valid_mask = _validity_mask(pool)
         ii_all, jj_all = np.where(np.triu(valid_mask, k=1))
+        if stratify_fn is None:
+            n_pairs = len(ii_all)
+            pair_perm = _shuffle_order(n_pairs, shuffle_rng)
+            ii_all, jj_all = ii_all[pair_perm], jj_all[pair_perm]
+        else:
+            ii_all, jj_all = _stratified_pair_order(pool, ii_all, jj_all, stratify_fn, shuffle_rng)
         n_pairs = len(ii_all)
-        pair_perm = _shuffle_order(n_pairs, shuffle_rng)
-        ii_all, jj_all = ii_all[pair_perm], jj_all[pair_perm]
 
         vol_passing_ii: list[int] = []
         vol_passing_jj: list[int] = []
@@ -363,7 +478,7 @@ class ANDComposer:
         # Pair enumeration — two-pass: cheap volume filter, then matmul
         # ----------------------------------------------------------------
         for chunk_start in range(0, n_pairs, chunk_size):
-            if len(pairs) >= _MAX_PAIRS:
+            if len(pairs) >= effective_max_pairs:
                 break
             chunk_end = min(chunk_start + chunk_size, n_pairs)
             ii = ii_all[chunk_start:chunk_end]
@@ -417,7 +532,7 @@ class ANDComposer:
             else:
                 passing = np.arange(len(sub_idx))
 
-            remaining = _MAX_PAIRS - len(pairs)
+            remaining = effective_max_pairs - len(pairs)
             if len(passing) > remaining:
                 passing = passing[:remaining]
 
@@ -445,7 +560,7 @@ class ANDComposer:
         # ----------------------------------------------------------------
         if max_components >= 3 and vol_passing_ii:
             for idx_a, idx_b in zip(vol_passing_ii, vol_passing_jj):
-                if len(triples) >= _MAX_TRIPLES:
+                if len(triples) >= effective_max_triples:
                     break
 
                 and_ij = bool_matrix[idx_a] & bool_matrix[idx_b]  # (n_rows,)
@@ -462,7 +577,7 @@ class ANDComposer:
                 valid_k = valid_k[_shuffle_order(len(valid_k), shuffle_rng)]
 
                 for k_start in range(0, len(valid_k), chunk_size):
-                    if len(triples) >= _MAX_TRIPLES:
+                    if len(triples) >= effective_max_triples:
                         break
                     k_end = min(k_start + chunk_size, len(valid_k))
                     k_chunk = valid_k[k_start:k_end]
@@ -500,7 +615,7 @@ class ANDComposer:
                     else:
                         passing_t = np.arange(len(sub_t))
 
-                    remaining = _MAX_TRIPLES - len(triples)
+                    remaining = effective_max_triples - len(triples)
                     if len(passing_t) > remaining:
                         passing_t = passing_t[:remaining]
 
@@ -594,6 +709,49 @@ class ANDComposer:
             and self._is_valid_pair(a, c)
             and self._is_valid_pair(b, c)
         )
+
+
+def raw_event_from_candidate(candidate: EventCandidate) -> RawEvent:
+    """Adapt a single-component ``EventCandidate`` back into a ``RawEvent``.
+
+    The standalone entry point for invoking ``ANDComposer.compose()`` on a
+    list of ``EventCandidate`` objects rather than only on the ``RawEvent``s
+    ``EventDiscovery.run()``'s own Step 5 produces internally — e.g. a
+    grade-guided composition stage running after Alpha Discovery's first
+    pass (issue #254), where the input is M1's promoted ``EventCandidate``
+    pool, not raw pre-promotion events.
+
+    Parameters
+    ----------
+    candidate : EventCandidate
+        A single-component candidate (``len(candidate.components) == 1``).
+        An already-composed candidate cannot be composed further this way —
+        see Raises.
+
+    Returns
+    -------
+    RawEvent
+        ``series=candidate.event_series``,
+        ``component=candidate.components[0]``,
+        ``gate_result=candidate.consistency_gate``.
+
+    Raises
+    ------
+    ValueError
+        If ``candidate`` has more than one component (i.e. is itself already
+        an AND composition).
+    """
+    if len(candidate.components) != 1:
+        raise ValueError(
+            "raw_event_from_candidate expects a single-component candidate, "
+            f"got {len(candidate.components)} components on "
+            f"{candidate.event_id!r}"
+        )
+    return RawEvent(
+        series=candidate.event_series,
+        component=candidate.components[0],
+        gate_result=candidate.consistency_gate,
+    )
 
 
 # ---------------------------------------------------------------------------
