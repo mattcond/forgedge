@@ -408,10 +408,11 @@ class TestForgeTwoPassComposition:
     """two_pass_composition (issue #254): grade-guided event composition."""
     pytestmark = pytest.mark.slow
 
-    def test_default_off_never_calls_grade_guided_compose(self, monkeypatch):
-        """Off-by-default: with two_pass_composition left at its default
-        (False), forge() must not even import/invoke the composition stage,
-        and the two-pass-only ForgeResult fields must stay None."""
+    def test_explicit_off_never_calls_grade_guided_compose(self, monkeypatch):
+        """two_pass_composition=True is the default since issue #254 Phase 8
+        -- this pins the *opt-out* path instead: passed explicitly False,
+        forge() must not even import/invoke the composition stage, and the
+        two-pass-only ForgeResult fields must stay None."""
         import importlib
 
         # `import forgedge.forge as forge_module` would silently bind to the
@@ -432,11 +433,26 @@ class TestForgeTwoPassComposition:
             timeframe="4H",
             event_discovery_config=_FAST_ED_CONFIG,
             rule_discovery_config=_FAST_RD_CONFIG,
+            two_pass_composition=False,
             progress=False,
         )
         assert result.grading_candidates is None
         assert result.grading_contracts is None
         assert result.composition_timing is None
+
+    def test_default_on_calls_grade_guided_compose(self):
+        """two_pass_composition left at its default (True since #254 Phase 8):
+        forge() runs the two-pass path without the caller asking for it."""
+        result = forge(
+            _ohlc_kpi_table(),
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+            progress=False,
+        )
+        assert result.grading_candidates is not None
+        assert result.grading_contracts is not None
+        assert result.composition_timing is not None
 
     def test_max_and_components_conflict_raises(self):
         with pytest.raises(ValueError, match="max_and_components"):
@@ -448,13 +464,16 @@ class TestForgeTwoPassComposition:
                 progress=False,
             )
 
-    def test_max_and_components_conflict_raises_on_omitted_event_discovery_config(self):
-        """An OMITTED event_discovery_config still resolves to DiscoveryConfig()'s
-        own class default (max_and_components=2), which must be rejected too --
-        two_pass_composition can't silently coexist with the legacy structural
-        composer just because the caller never set the field explicitly."""
-        with pytest.raises(ValueError, match="max_and_components"):
-            forge(_ohlc_kpi_table(), timeframe="4H", two_pass_composition=True, progress=False)
+    def test_omitted_event_discovery_config_no_longer_conflicts(self):
+        """An OMITTED event_discovery_config resolves to DiscoveryConfig()'s own
+        class default -- max_and_components=1 since issue #254 Phase 8, coherent
+        with two_pass_composition's own new default (True). Must NOT raise: the
+        whole point of Phase 8 is that the two defaults agree with each other
+        even when the caller sets neither explicitly. (The explicit-conflict
+        case -- max_and_components=2 forced alongside two_pass_composition=True
+        -- is covered above by test_max_and_components_conflict_raises.)"""
+        result = forge(_ohlc_kpi_table(), timeframe="4H", progress=False)
+        assert result.grading_candidates is not None
 
     def test_manual_events_mode_is_exempt_from_the_max_and_components_check(self):
         """manual_events and event_discovery_config are already mutually
@@ -660,7 +679,10 @@ class TestForgeProgress:
         with caplog.at_level(logging.INFO, logger="forgedge.forge"):
             forge(kpi, manual_events=self._MANUAL, rule_discovery_config=_FAST_RD_CONFIG)
         msgs = [r.getMessage() for r in caplog.records]
-        for needle in ("M0 Market Context", "M2 Alpha Discovery", "M3 Rule Discovery", "done"):
+        # two_pass_composition=True is the default since issue #254 Phase 8,
+        # so M2 logs "M2 pass 1"/"M2 pass 2" milestones instead of a single
+        # "M2 Alpha Discovery" line.
+        for needle in ("M0 Market Context", "M2 pass 1", "M2 pass 2", "M3 Rule Discovery", "done"):
             assert any(needle in m for m in msgs), needle
 
     def test_progress_false_is_silent_on_stderr(self, kpi, capsys):

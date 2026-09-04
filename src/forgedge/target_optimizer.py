@@ -168,7 +168,14 @@ class TargetOptimizer:
         self.target_cfg = target_cfg
         # Full-frame discovery: the whole train_df is in-sample, so raw atoms,
         # ed.df and the target share one index.  walk_forward stays off.
-        self.discovery_cfg = discovery_cfg or DiscoveryConfig(train_ratio=1.0)
+        # max_and_components/retain_raw_events set explicitly, decoupled from
+        # DiscoveryConfig's own defaults (issue #254 Phase 8 changed those to
+        # 1/False for forge()'s two-pass default — this module's own guided
+        # composition, re-run here under lift guidance rather than structural
+        # criteria, and its direct read of ed.raw_events, are unaffected).
+        self.discovery_cfg = discovery_cfg or DiscoveryConfig(
+            train_ratio=1.0, max_and_components=2, retain_raw_events=True
+        )
 
         # Populated by run().
         self._ed: Optional[EventDiscovery] = None

@@ -117,11 +117,17 @@ class DiscoveryConfig:
         Name of the datetime column in the KPI table.  Also accepted as the
         index name when the DataFrame uses a DatetimeIndex.
     max_and_components : int
-        Maximum number of single events to combine in one AND composition.
-        ``1`` disables AND composition entirely (only single events are
-        returned).  ``2`` generates single + pair events.  ``3`` generates
-        single + pair + triple events.  Values above 3 are technically
-        accepted but strongly discouraged — they risk structural overfitting.
+        Maximum number of single events to combine in one AND composition
+        *inside Module 1* (structural, returns-blind pairing — tpm/dispersion/
+        ``transform_key`` only). ``1`` disables AND composition entirely (only
+        single events are returned) — the default, and the precondition
+        ``forge(two_pass_composition=True)`` requires, since composition
+        happens after M2's first pass instead (issue #254). ``2`` generates
+        single + pair events structurally; ``3`` adds triples. Raise this only
+        when running the legacy single-pass path (``two_pass_composition=False``)
+        or a caller — like :class:`~forgedge.target_optimizer.TargetOptimizer`,
+        which composes atoms before any return is seen and sets its own value
+        explicitly — that never goes through the two-pass stage at all.
     train_ratio : float
         Fraction of bars (0 < train_ratio ≤ 1.0) used for the in-sample
         discovery pipeline.  The remaining ``1 - train_ratio`` fraction
@@ -171,33 +177,33 @@ class DiscoveryConfig:
     retain_raw_events : bool
         Whether ``self.raw_events`` (the full pre-gate candidate population,
         every one carrying its own full-length activation series) stays
-        resident after ``.run()`` completes. Default ``True`` — unchanged
-        behaviour, required by ``TargetOptimizer`` (reads ``ed.raw_events``
-        directly, before the Consistency Gate) and by anyone else reading
-        the ``.raw_events`` property. Set ``False`` for a memory-constrained
-        run through the standard ``forge()`` pipeline, which never reads
-        ``.raw_events``: a gate-failing candidate's series is freed as soon
-        as it's evaluated instead of staying alive for the rest of the run
-        (#232) — measured 4.2x less memory retained by the candidate
-        population on a 50874-candidate pool where ~24% passed the gate.
-        ``event_distribution_report`` is unaffected either way — it only
-        ever needed each candidate's already-computed ``GateResult`` scalars,
-        never the series itself. Sharing one ``DiscoveryConfig`` between a
-        ``forge()`` call with this ``False`` and a ``TargetOptimizer`` call
-        loses the atom pool the latter needs — set it per use, not globally.
+        resident after ``.run()`` completes. Default ``False`` (issue #254
+        Phase 8) — the common case is the standard ``forge()`` pipeline, which
+        never reads ``.raw_events``: a gate-failing candidate's series is
+        freed as soon as it's evaluated instead of staying alive for the rest
+        of the run (#232) — measured 4.2x less memory retained by the
+        candidate population on a 50874-candidate pool where ~24% passed the
+        gate, and ~2x less peak RSS end-to-end at realistic scale.
+        ``event_distribution_report`` is unaffected either way — it only ever
+        needed each candidate's already-computed ``GateResult`` scalars, never
+        the series itself. :class:`~forgedge.target_optimizer.TargetOptimizer`
+        reads ``ed.raw_events`` directly (before the Consistency Gate) and
+        sets ``True`` explicitly on its own default config rather than relying
+        on this one. Set it per use, not globally, for any other caller that
+        reads ``.raw_events``.
     """
 
     gate_params: GateParams = field(default_factory=GateParams)
     max_categorical_classes: int = 20
     scale_free_overrides: Optional[dict[str, bool]] = None
     timestamp_col: str = UNSET
-    max_and_components: int = 2
+    max_and_components: int = 1
     train_ratio: float = 1.0
     walk_forward: Optional[EventWalkForwardConfig] = None
     diversity_gate_enabled: bool = False
     diversity_threshold: float = 0.85
     indicator_lag_cross_lags: tuple[int, ...] = (1, 3)
-    retain_raw_events: bool = True
+    retain_raw_events: bool = False
 
 
 class EventDiscovery:
