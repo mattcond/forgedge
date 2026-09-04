@@ -261,7 +261,7 @@ _PRESET_SPECS: dict = {
         "min_cohens_d": 0.10,
         "fdr_q": 0.15,
         "oos_max_p": 0.20,
-        "max_and_components": 2,
+        "max_and_components": 1,        # composition moved to two-pass (#254 Phase 8)
     },
     "sweep": {
         "description": (
@@ -285,7 +285,7 @@ _PRESET_SPECS: dict = {
         "min_cohens_d": 0.05,
         "fdr_q": 0.25,
         "oos_max_p": 0.20,
-        "max_and_components": 2,
+        "max_and_components": 1,        # composition moved to two-pass (#254 Phase 8)
     },
     "burst": {
         "description": (
@@ -307,7 +307,7 @@ _PRESET_SPECS: dict = {
         "min_cohens_d": 0.12,
         "fdr_q": 0.10,
         "oos_max_p": 0.10,
-        "max_and_components": 2,
+        "max_and_components": 1,        # composition moved to two-pass (#254 Phase 8)
     },
 }
 

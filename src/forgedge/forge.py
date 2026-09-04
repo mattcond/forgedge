@@ -356,7 +356,7 @@ def forge(
     market_context_config: Optional[MarketContextConfig] = None,
     event_discovery_config: Optional[DiscoveryConfig] = None,
     alpha_config: Optional[AlphaConfig] = None,
-    two_pass_composition: bool = False,
+    two_pass_composition: bool = True,
     grade_pairing_config: Optional[GradePairingConfig] = None,
     rotation_calibration: Optional[RotationConfig] = None,
     fast_null: bool = True,
@@ -426,13 +426,14 @@ def forge(
         something else entirely kept the hourly grid — which on daily candles
         scanned holding periods of up to 48 *days* — and produced a warning
         instead of a conversion.
-    two_pass_composition : bool, default False
+    two_pass_composition : bool, default True
         Run the grade-guided, two-pass composition design from issue #254
         instead of Module 1's own structural AND-composition: Event
         Discovery stays 1D-only (requires
         ``event_discovery_config.max_and_components <= 1``, else
-        ``ValueError`` — composition happens here instead, not in M1), a
-        first Alpha Discovery pass grades every 1D candidate A-D, a
+        ``ValueError`` — composition happens here instead, not in M1; the
+        default config and every ``forge_preset()`` preset already satisfy
+        this), a first Alpha Discovery pass grades every 1D candidate A-D, a
         grade-guided composer (:mod:`forgedge.composition`) pairs them using
         the grade as the pairing criterion instead of M1's purely structural
         tpm/dispersion/``transform_key`` criterion, and a second Alpha
@@ -442,14 +443,24 @@ def forge(
         Discovery, the Rule Registry — then operates on the second pass's
         pooled output, exactly as it would on a single-pass run.
 
-        Default ``False`` reproduces today's single-pass, structural-pairing
-        behaviour exactly (this parameter changes nothing when left at its
-        default). See ``docs/analysis/issue_254_two_pass_composition_plan.md``
-        for the full design and empirical motivation.
+        Default ``True`` since issue #254 Phase 8: the Phase 5/6 validation
+        (``docs/analysis/issue_254_two_pass_composition_plan.md``) found the
+        grade-guided edge-rate improvement generalised across every asset
+        class tested on 1D (8/8, 1.44x-3.05x), while on 1H neither path found
+        more than one asset with a confirmable edge out of eight — baseline
+        and two-pass agreed everywhere they disagreed with, i.e. two-pass
+        never did *worse*, so defaulting it on means an intraday exploration
+        that does turn up an edge gets the composition benefit for free. Pass
+        ``False`` to reproduce the pre-#254 single-pass, structural-pairing
+        behaviour exactly. See the design doc above for the full design and
+        empirical motivation.
         ``ForgeResult.grading_candidates`` / ``.grading_contracts`` preserve
         the first pass's pre-composition artefacts for audit;
         ``ForgeResult.composition_timing`` reports the wall-clock cost of
-        each two-pass stage.
+        each two-pass stage (at realistic 1D scale, +44%-75% total wall time
+        over single-pass, dominated by the composition search itself —
+        40-59% of the two-pass-specific cost — not by the extra grading
+        pass, ~20-29%).
     grade_pairing_config : GradePairingConfig, optional
         Pairing scheme and budget for ``two_pass_composition=True`` (see
         :class:`forgedge.composition.GradePairingConfig`). Defaults to
