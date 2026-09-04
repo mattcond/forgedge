@@ -408,6 +408,85 @@ Il BH FDR è applicato ai p-value IS di tutti i candidati simultaneamente;
 
 ---
 
+### Step 8 — Composizione guidata dal grado (two-pass, issue #254 Fase 8)
+
+Il percorso di default di `forge()` (`two_pass_composition=True`) esegue gli
+step 1-7 sopra **due volte**. Il Modulo 1 resta 1D-only
+(`max_and_components<=1`); questa prima passata assegna un voto A-D a ogni
+candidato 1D via il composite score dello step 6. Invece di far comporre al
+Modulo 1 coppie AND a partire dalla similarità puramente strutturale di
+tpm/dispersione/`transform_key`, `forgedge.composition.grade_guided_compose()`
+accoppia (e, con `GradePairingConfig.max_components=3`, mette in tripla) i
+candidati usando **quel voto** come criterio di pairing:
+
+```python
+from forgedge.composition import GradePairingConfig, grade_guided_compose
+
+composed = grade_guided_compose(
+    candidates,       # pool EventCandidate della passata 1 (1D)
+    contracts,         # pool AlphaContract della passata 1 (stessi candidati, votati)
+    timestamps,
+    GradePairingConfig(max_components=2),  # 3 compone anche triple
+    gate,               # il ConsistencyGate che coppie/triple composte devono superare
+)
+```
+
+Schema di pairing: stesso grado per primo, poi grado adiacente via uno
+schema radice+partner letto da `GradePairingConfig.adjacency` (default
+`A<->{A,B}`, `B<->{B,C}`, `C<->{C,D}` — `D` non è mai radice, viene
+raggiunto solo come partner di `B`/`C`). Il terzo componente di una tripla è
+vincolato dal grado *radice* della coppia seme (il migliore, in ordine
+alfabetico, dei due), via la stessa relazione di adiacenza.
+`per_stratum_pair_cap`/`per_stratum_triple_cap` garantiscono a ogni strato
+di grado una rappresentazione minima, interlacciata round-robin invece che
+concatenata-e-poi-troncata — la correzione per il bug di sotto-campionamento
+che un cap condiviso piatto riprodurrebbe altrimenti (la sola coppia di uno
+strato piccolo scavalcata da uno strato molto più grande prima che il cap
+sia raggiunto). I candidati composti ottengono `event_id` nuovi e non
+ereditano alcun voto o target derivato dai loro costituenti; una seconda
+passata indipendente di `AlphaDiscovery` esegue gli step 1-7 su di essi da
+zero. `GradePairingConfig.include_singles_in_pass2=True` (default)
+raggruppa i candidati 1D originali insieme a quelli composti per quella
+seconda passata — replicando il comportamento storico proprio del Modulo 1,
+`all_passing = passing_single + passing_composed`.
+
+Tutto ciò che sta a valle del Modulo 2 (il ledger delle ipotesi, il null di
+rotazione, il Modulo 3, il Modulo 4) opera sull'**output pooled di questa
+seconda passata** — `forge()` ribinda sia `candidates` sia `alpha_candidates`
+a esso prima che quella logica giri, così un contratto composto che viene
+promosso raggiunge il Modulo 3 esattamente come farebbe uno a singolo
+evento. `ForgeResult.grading_candidates`/`.grading_contracts` mantengono gli
+artefatti pre-composizione della prima passata disponibili per audit;
+`ForgeResult.composition_timing` riporta il costo in wall-clock di ogni
+stadio.
+
+**Perché questo ha sostituito la composizione propria del Modulo 1 come
+default.** L'esperimento originale dell'issue su AMZN 1D ha trovato che il
+pairing strutturale (correlazione phi tra le serie di attivazione degli
+eventi) è un pessimo proxy della qualità *economica* di una coppia — 256
+candidati composti strutturalmente hanno prodotto 5 contratti PARTIAL-EDGE/
+EDGE (1,95%), mentre lo stesso pool accoppiato per voto ne ha prodotti
+~1400+ e 122 (~8-9%), con il primo attraversamento della soglia di
+significatività del null di rotazione (p=0,0497) osservato in tutta la
+sessione. La validazione delle Fasi 5/6
+(`docs/analysis/issue_254_two_pass_composition_plan.md`) ha poi confermato
+che questo generalizza su ogni asset 1D testato (8/8, 1,44x-3,05x più edge)
+senza essere peggiore su 1H, motivando il cambio di default
+(`two_pass_composition: bool = True`, `DiscoveryConfig.max_and_components:
+int = 1`) nella Fase 8. Passa `forge(two_pass_composition=False)` per
+riottenere esattamente la composizione dello step 5 propria del Modulo 1,
+come prima di #254.
+
+`TargetOptimizer` (§ *Modalità fixed-target* sotto) **non** è toccato da
+nulla di tutto questo — compone gli atomi prima che sia visto un ritorno
+qualsiasi (il target è fissato dal chiamante, non derivato dal voto), quindi
+non può strutturalmente usare il composer guidato dal grado, e la propria
+`DiscoveryConfig` di fallback fissa esplicitamente
+`max_and_components=2, retain_raw_events=True` invece di ereditare i
+default di classe di `DiscoveryConfig`.
+
+---
+
 ## Struttura dati: `AlphaContract`
 
 ```python

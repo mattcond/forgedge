@@ -1,5 +1,25 @@
 # Two-pass, grade-guided event composition — implementation plan
 
+> **Status: fully implemented (Phases 1-8 shipped).** Phases 1-4 (this
+> document's mechanical core) landed first, one PR per phase. Phase 5
+> (multi-asset/timeframe validation) confirmed the improvement generalises
+> on 1D (8/8 assets tested, 1.44x-3.05x more EDGE/PARTIAL-EDGE contracts)
+> and is non-worse on 1H. Phase 6 measured real cost (+44%-75% total wall
+> time over single-pass at realistic 1D scale, dominated by the composition
+> search itself). Given a real, generalising 1D win and a *non-destructive*
+> (not negative) 1H result, the project made `two_pass_composition=True`
+> and `DiscoveryConfig.retain_raw_events=False` **the new defaults** in
+> Phase 8 — a stronger outcome than this document's own §5 originally
+> scoped ("no default changes until Phases 5-6 confirm"; they did, and the
+> defaults changed). Phase 7 (this document's own listed doc surface)
+> is complete. `forge(two_pass_composition=False)` still reproduces the
+> pre-#254 single-pass behaviour this plan calls "the regression anchor"
+> exactly. The rest of this document is kept as the historical design
+> record — see `docs/manual-en.md`/`manuale-it.md` §8/§10, the `forgedge`
+> skill, and `src/forgedge/docs/specs/modulo_1_{en,it}.md`/
+> `modulo_2_{en,it}.md` for the current, defaults-accurate description of
+> the shipped behaviour.
+
 **Starting point:** issue [#254](https://github.com/mattcond/forgedge/issues/254) —
 `ANDComposer` (`event_discovery/and_composer.py`) composes pairs/triples of events
 today entirely inside `EventDiscovery.run()` ("Step 5"), using only structural

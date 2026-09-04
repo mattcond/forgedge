@@ -256,7 +256,7 @@ config = DiscoveryConfig(
         min_tpm=0.5,             # ≥0.5 episodi/mese in media (default)
         dispersion_margin=1.3,   # margine sopra il floor di Poisson, modalità "episode" (default, #205)
     ),
-    max_and_components=2,       # 1=solo singoli, 2=+coppie, 3=+coppie+triple (default conservativo)
+    max_and_components=2,       # 1=solo singoli (default dalla #254 Fase 8), 2=+coppie, 3=+coppie+triple (composizione single-pass legacy, o un chiamante con una propria fase di composizione)
 )
 ed = EventDiscovery(enriched, config=config)
 candidates = ed.run()
@@ -994,8 +994,13 @@ Switch utili:
 
 ### Costruirla passo per passo
 
-Per un controllo più fine, lo stesso flusso può essere scritto esplicitamente —
-è esattamente ciò che `forge` esegue internamente:
+Per un controllo più fine, lo stesso flusso può essere scritto esplicitamente.
+Riproduce esattamente il percorso single-pass di `forge(two_pass_composition=False)`
+— il percorso **di default** di `forge()` (`two_pass_composition=True`,
+issue #254 Fase 8) esegue in più il Modulo 2 due volte, con uno step di
+composizione guidata dal grado tra le due passate; vedi la spec del
+Modulo 2 per quel flusso, o `forgedge.composition.grade_guided_compose` se
+serve scrivere a mano anche la versione two-pass:
 
 ```python
 import pandas as pd
@@ -1053,7 +1058,8 @@ def run_forge_pipeline(
         train_ratio=0.80,
         walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         gate_params=GateParams(min_tpm=0.5, dispersion_margin=1.3),
-        max_and_components=2,
+        max_and_components=2,  # composizione single-pass qui; il default di
+                                 # forge() compone invece a valle (#254 Fase 8)
     )
     ed = EventDiscovery(enriched, config=ed_config)
     candidates = ed.run()

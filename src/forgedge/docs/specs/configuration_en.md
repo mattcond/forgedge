@@ -179,13 +179,13 @@ IS/OOS split, and walk-forward.
 | `max_categorical_classes` | int | `20` | Categorical columns with more distinct values than this limit are classified but excluded from event generation. |
 | `scale_free_overrides` | dict[str,bool] \| None | `None` | Manual scale-free flag overrides for specific columns (e.g. `{"rsi_14": True}`). Useful when the auto-heuristic fails on short history. |
 | `timestamp_col` | str | `"open_dt"` *(session-resolved)* | Datetime column name in the KPI Table (or DatetimeIndex name). |
-| `max_and_components` | int | `2` | Maximum number of single events to combine in one AND composition. Values > 3 are accepted but strongly discouraged (structural overfitting risk). |
+| `max_and_components` | int | `1` *(was `2` pre-issue #254 Phase 8)* | Maximum number of single events to combine in one AND composition; `1` disables this module's own AND composition, the precondition for `forge(two_pass_composition=True)` — the default (composition happens downstream instead, see Module 2's spec). Raise for the legacy single-pass path (`forge(two_pass_composition=False)`) or a caller with its own composition stage (e.g. `TargetOptimizer`). Values > 3 are accepted but strongly discouraged (structural overfitting risk). |
 | `train_ratio` | float | `1.0` | IS fraction (0 < train_ratio ≤ 1.0). Default 1.0 = all IS, no split. |
 | `walk_forward` | EventWalkForwardConfig \| None | `None` | Walk-forward OOS configuration. Active only when `train_ratio < 1.0`. |
 | `diversity_gate_enabled` | bool | `False` | When True, applies Jaccard-based deduplication of single events after the ConsistencyGate and before AND composition. Opt-in — no breaking change. |
 | `diversity_threshold` | float | `0.85` | Maximum tolerated Jaccard similarity between any two kept events. Only used when `diversity_gate_enabled=True`. At p99 of the inter-event Jaccard distribution (12 months of 1H data), Jaccard=0.47 — values above 0.70 are genuine near-duplicates. |
 | `indicator_lag_cross_lags` | tuple[int,...] | `(1, 3)` | Lag set for the indicator × OHLC-base cross-time feature family (issue #165, e.g. `close_sma_12[t] > low[t-3]`), restricted to price-scale indicators (SMA/EMA/WMA/HMA) vs a raw OHLC base. Pass `()` to disable this always-on family entirely. |
-| `retain_raw_events` | bool | `True` | Whether `EventDiscovery.raw_events` (the full pre-gate candidate population, every one carrying its own full-length activation series) stays resident after `.run()` (issue #232). Keep `True` for `TargetOptimizer`, which reads `.raw_events` directly; a `forge()`-only config (which never reads it) can set `False` for a measured 4.2x reduction in retained memory. |
+| `retain_raw_events` | bool | `False` *(was `True` pre-issue #254 Phase 8)* | Whether `EventDiscovery.raw_events` (the full pre-gate candidate population, every one carrying its own full-length activation series) stays resident after `.run()` (issue #232). Set `True` explicitly for `TargetOptimizer`, which reads `.raw_events` directly and pins this on its own fallback config — the standard `forge()` path never reads it, hence the default flip for a measured 4.2x reduction in retained memory. |
 
 ```python
 from forgedge import EventDiscovery, DiscoveryConfig
@@ -195,16 +195,54 @@ ed = EventDiscovery(
     enriched,
     config=DiscoveryConfig(
         train_ratio=0.80,
-        max_and_components=2,
+        max_and_components=2,                   # legacy single-pass composition (see below)
         gate_params=GateParams(min_tpm=0.5, dispersion_margin=1.3, min_episodes=10),
         walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         scale_free_overrides={"rsi_14": True},  # force scale-free on RSI
         diversity_gate_enabled=True,            # opt-in Jaccard deduplication
         diversity_threshold=0.85,
-        retain_raw_events=False,                # forge()-only config: skip the memory cost
+        retain_raw_events=True,                 # e.g. for TargetOptimizer, which needs .raw_events
     ),
 )
 candidates = ed.run()
+```
+
+### `forge()` composition parameters (issue #254 Phase 8)
+
+Not `DiscoveryConfig` fields — orchestrator-level parameters on `forge()`
+itself that decide *where* AND composition happens:
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `two_pass_composition` | bool | `True` | Compose after Module 2's first grading pass, using the letter grade as the pairing criterion, instead of Module 1's own `max_and_components`-driven composition. Requires `event_discovery_config.max_and_components <= 1` — `ValueError` otherwise (composition must happen in exactly one place). `False` reproduces the pre-#254 single-pass behaviour exactly. |
+| `grade_pairing_config` | GradePairingConfig \| None | `None` → `GradePairingConfig()` | Pairing scheme/budget for `two_pass_composition=True`; ignored otherwise. |
+
+### `GradePairingConfig` (`forgedge.composition`)
+
+Read only when `two_pass_composition=True`.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_components` | int | `2` | `3` also composes triples (issue #254 Phase 4); a triple's third component is constrained by the seed pair's own root grade. |
+| `adjacency` | dict[str, tuple[str,...]] | `{"A": ("A","B"), "B": ("B","C"), "C": ("C","D")}` | Which grades a root grade may pair with. Symmetric — an `(X, Y)` pair is allowed whenever `Y` is listed under `X` or vice versa. |
+| `per_stratum_pair_cap` | int | `100` | Guaranteed minimum representation per grade stratum present in the pool, round-robin interleaved (not a hard ceiling). |
+| `per_stratum_triple_cap` | int | `50` | Same, for triples. |
+| `include_singles_in_pass2` | bool | `True` | Pool the original 1D candidates alongside composed ones for the second Alpha Discovery pass. |
+| `max_constituent_jaccard` | float \| None | `None` | Forwarded to `ANDComposer.compose()` — reject a pair whose constituents' Jaccard similarity exceeds this. |
+
+```python
+from forgedge import forge, DiscoveryConfig
+from forgedge.composition import GradePairingConfig
+
+result = forge(
+    kpi,
+    timeframe="1D",
+    event_discovery_config=DiscoveryConfig(max_and_components=1),  # required
+    two_pass_composition=True,          # the default — explicit here for clarity
+    grade_pairing_config=GradePairingConfig(max_components=3, per_stratum_pair_cap=150),
+)
+result.grading_candidates   # pass-1, pre-composition 1D pool
+result.candidates            # pass-2 pooled output — what M3 actually operated on
 ```
 
 ---

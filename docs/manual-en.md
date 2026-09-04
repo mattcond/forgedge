@@ -256,7 +256,7 @@ You called `EventDiscovery(kpi)` with no `config=` argument. That means `Discove
 
 - `train_ratio=1.0` — the *entire* table was used for discovery, no OOS split was reserved (there's no walk-forward validation happening here; see §10 for how to enable it).
 - `gate_params=GateParams()` — the default Consistency Gate thresholds: `min_tpm=0.5` (at least 0.5 qualifying "episodes" per month), `event_counting="episode"` (§15), `dispersion_margin=1.3` (activations shouldn't cluster more than 1.3x what a Poisson process at the observed rate would — the field that actually governs dispersion in this default mode; `max_dispersion=1.5` is present but unread here, it only matters under `event_counting="bar"`, #205).
-- `max_and_components=2` — Event Discovery also tried composing pairs of single-column events with AND, subject to the same gate.
+- `max_and_components=1` (issue #254 Phase 8 — was `2`) — Event Discovery composed no pairs here; `forge()`'s own default path composes downstream instead, in Alpha Discovery's grade-guided composition (§8, Module 2 walkthrough, step 8), not inside Event Discovery. Raise this to `2`/`3` only when running the legacy single-pass path (`forge(two_pass_composition=False)`) or when using `EventDiscovery` standalone, as in this example, and wanting its own structural AND-composition (§8, Module 1 walkthrough, step 5).
 
 None of these choices involved the forward return of `close` — that concept doesn't exist yet at this stage of the pipeline.
 
@@ -389,7 +389,7 @@ This is a five-step internal pipeline (`EventDiscovery.run()`), and it's worth k
    All of these except the first are genuinely recent additions (landed after most of this manual's Module 1 walkthrough was drafted, and corrected here after re-reading the current source directly, per this manual's own verification discipline, §21). The ones gated on a non-default `kpi_builder` config (MACD, volume returns, ATR/NATR) cost nothing on a default KPI Table; the indicator-vs-lagged-OHLC-base pairing is unconditional and does add measurable cost — quantified in §17.
 3. **Temporal transforms** (`TransformLayer`) — every feature from steps 1–2 additionally gets rolling-percentile-rank, rolling-z-score, and simple-delta versions over several window lengths (48/96/168 bars for pctrank/zscore; 1/3/6/12 bars for delta).
 4. **Event generation** (`EventGenerator`) — for every (feature, transform) pair, tries a catalog of distributional thresholds (percentiles p3…p97 of that series' own history) and — for z-scored series only — fixed theoretical thresholds (±1.0, ±1.5, ±2.0). Each threshold produces both a "persistent" event (active on every bar the condition holds) and a "crossing" event (active only on the bar where the condition first becomes true).
-5. **Consistency Gate** (§10, §15) — every raw event candidate must pass a rate/dispersion filter before it becomes an `EventCandidate`. Gate-passing single events are then combined pairwise (or in triples, if `max_and_components=3`) with AND, and each composition is re-submitted to the same gate — only compositions that themselves pass become AND-composed candidates. "The same gate" is literal, not just the same thresholds: `ANDComposer`'s batched re-submission and the single-event path both call one shared, mode-aware gate decision, so a composed pair/triple is judged by episode rate/count/dispersion under the default `event_counting="episode"` exactly as a single event would be, not by a separate bar-only reimplementation (#226). That batched episode computation is itself memory-bounded regardless of dataset length (#228): under a permissive M1 gate (a low `min_tpm`, including the library's own default) most of a candidate batch survives the cheap pre-filter and reaches the expensive episode computation at full batch size, so `ANDComposer` sizes its internal batches from a fixed memory budget rather than a constant tuned for short histories — an implementation detail, not something you configure, but the reason a multi-year hourly-or-finer run doesn't risk an out-of-memory crash that a shorter one wouldn't. Under that same permissive M1 gate, which specific pairs/triples fill `_MAX_PAIRS`/`_MAX_TRIPLES` also used to be structurally skewed (#230): the pre-fix enumeration order exhausted every pair involving one single pool event before ever trying a second one, so all 2000 kept pairs could share the same component — permuting that order (a fixed seed, so composed events stay reproducible run to run) fixed it, and `ANDComposer.compose()` also gained an opt-in `max_constituent_jaccard` parameter to reject a pair whose two constituents overlap too much, at no extra cost. Generating raw candidates (step 4 above) and gating them used to be two fully separate passes — every raw candidate's own activation series stayed resident for the whole run, gate-failing ones included — which on a wide KPI Table could exceed available memory before M1 even finished (#232): measured 9.5 GB for 50874 raw candidates' series alone on a 186-column table, before the gate freed any of it. Generation and gating are now interleaved per batch instead, freeing a failing candidate's series immediately (4.2x less memory retained, measured on the same table) — `DiscoveryConfig.retain_raw_events=True` (default, unchanged) keeps the full pre-gate population available afterward via `EventDiscovery.raw_events`, which `TargetOptimizer` needs; set it `False` only on a `forge()`-only config, which never reads that property.
+5. **Consistency Gate** (§10, §15) — every raw event candidate must pass a rate/dispersion filter before it becomes an `EventCandidate`. Gate-passing single events are then combined pairwise (or in triples, if `max_and_components=3`) with AND, and each composition is re-submitted to the same gate — only compositions that themselves pass become AND-composed candidates. **This composition sub-step only runs when `max_and_components>1`, which since issue #254 Phase 8 is no longer the default** (`DiscoveryConfig()` now defaults to `max_and_components=1`, composition off): `forge()`'s own default path (`two_pass_composition=True`) composes downstream instead, after Alpha Discovery's first grading pass — see the new step 8 in the Module 2 walkthrough below. What follows describes the (still fully supported) legacy path, active when you raise `max_and_components` yourself — on `EventDiscovery` used standalone, as throughout this manual's §6-§7 examples, or via `forge(two_pass_composition=False)`. "The same gate" is literal, not just the same thresholds: `ANDComposer`'s batched re-submission and the single-event path both call one shared, mode-aware gate decision, so a composed pair/triple is judged by episode rate/count/dispersion under the default `event_counting="episode"` exactly as a single event would be, not by a separate bar-only reimplementation (#226). That batched episode computation is itself memory-bounded regardless of dataset length (#228): under a permissive M1 gate (a low `min_tpm`, including the library's own default) most of a candidate batch survives the cheap pre-filter and reaches the expensive episode computation at full batch size, so `ANDComposer` sizes its internal batches from a fixed memory budget rather than a constant tuned for short histories — an implementation detail, not something you configure, but the reason a multi-year hourly-or-finer run doesn't risk an out-of-memory crash that a shorter one wouldn't. Under that same permissive M1 gate, which specific pairs/triples fill `_MAX_PAIRS`/`_MAX_TRIPLES` also used to be structurally skewed (#230): the pre-fix enumeration order exhausted every pair involving one single pool event before ever trying a second one, so all 2000 kept pairs could share the same component — permuting that order (a fixed seed, so composed events stay reproducible run to run) fixed it, and `ANDComposer.compose()` also gained an opt-in `max_constituent_jaccard` parameter to reject a pair whose two constituents overlap too much, at no extra cost. Generating raw candidates (step 4 above) and gating them used to be two fully separate passes — every raw candidate's own activation series stayed resident for the whole run, gate-failing ones included — which on a wide KPI Table could exceed available memory before M1 even finished (#232): measured 9.5 GB for 50874 raw candidates' series alone on a 186-column table, before the gate freed any of it. Generation and gating are now interleaved per batch instead, freeing a failing candidate's series immediately (4.2x less memory retained, measured on the same table) — `DiscoveryConfig.retain_raw_events` **defaults to `False` since Phase 8** (was `True`) and frees a gate-failing candidate's activation series as soon as it's gated instead of keeping the pre-gate population resident for the whole run (~2x lower peak RSS end-to-end at realistic scale, on top of the 4.2x figure above); set it `True` explicitly on a `DiscoveryConfig` you hand to `TargetOptimizer`, which reads `EventDiscovery.raw_events` directly and pins this itself on its own fallback config — the standard `forge()` path never reads that property.
 
 **Nothing in these five steps reads a forward return.** That is the single most important fact about this module.
 
@@ -407,6 +407,7 @@ Given the candidate list from Module 1, and *for the first time in the pipeline*
 6. **Composite scoring** — the exact current formula (`AlphaConfig.score_weights`, default `(0.20, 0.25, 0.15, 0.25, 0.15)` for `(ic, lift, cohens_d, z, breadth)`):
    `composite = (w_ic·ic_norm + w_lift·lift_norm + w_d·d_norm + w_z·z_norm + w_breadth·breadth) / Σw`, where `ic_norm = clamp01(|IC|/0.10)`, `lift_norm = clamp01(lift/0.30)`, `d_norm = clamp(cohens_d/0.80, -1, 1)` (**signed** — an adverse effect drags the score down rather than clipping to zero), `z_norm = clamp01(|z*|/3.0)` (`z*` is the rotation-null-standardised excess at `h*`, i.e. the edge-to-noise ratio), and `breadth` is the regime breadth term, dropped (with the remaining weights renormalised) when no regime information is available. Two adjustments follow: a `statistically_weak` target — `h*` selected outside the BH-significant horizon set — multiplies the composite by `statistically_weak_penalty` (default `0.6`), and a passing OOS confirmation adds `oos_bonus` (default `0.05`). The result is clamped to `[0,1]` and mapped to a letter grade A (≥0.75) through D (<0.25).
 7. **Contract compilation.** All candidates with a determined direction become `AlphaContract` objects with `status="HYPOTHESIS"`; every other metric above only ever appends a string to `diagnostics` — it never blocks promotion, and `rejection_reasons` stays empty on a promoted contract. This is stated as a deliberate design principle: statistical weaknesses "feed the grade, they don't gate/reject — Rule Discovery is the sole economic judge" (`src/forgedge/docs/README.md`, translated).
+8. **Grade-guided composition** (issue #254, `forge(two_pass_composition=True)`, the default since Phase 8) — steps 1-7 above are actually run *twice* under `forge()`'s default configuration. Pass 1 grades every 1D event candidate from Module 1 A-D (the letter grade from step 6's composite score). `forgedge.composition.grade_guided_compose()` then pairs (and, with `GradePairingConfig.max_components=3`, triples) graded candidates using that letter as the pairing criterion — same grade first, then an adjacent grade via a root+partner scheme (default A↔{A,B}, B↔{B,C}, C↔{C,D}) — instead of Module 1's own purely structural tpm/dispersion/`transform_key` similarity. The empirical case for this (AMZN 1D, `docs/analysis/issue_254_two_pass_composition_plan.md`): structural pairing produced 256 candidates and 5 PARTIAL-EDGE/EDGE (1.95%); grade-guided pairing on the same data produced ~1400+ candidates and 122 (~8-9%) — the letter grade, which already encodes information about the forward return, turned out to be a far more informative pairing signal than structural correlation ever was. Composed candidates get fresh `event_id`s and are evaluated from scratch by a second, independent Alpha Discovery pass (steps 1-7 again) — nothing is inherited from a constituent's own grade or derived target. That second pass's pooled output (composed candidates plus, by default, the original singles — `GradePairingConfig.include_singles_in_pass2=True`) is what every downstream module (the hypothesis ledger, the rotation null, Module 3, Module 4) actually operates on; `ForgeResult.grading_candidates`/`.grading_contracts` keep pass 1's pre-composition artefacts available for audit, and `ForgeResult.composition_timing` reports each stage's wall-clock cost. Pass `two_pass_composition=False` to skip pass 1 entirely and fall back to Module 1's own single-pass composition (step 5 above) — the Phase 5/6 validation found the two-pass design's edge-rate improvement generalised across every 1D asset tested (8/8) while being no worse on 1H, which is why it is the default rather than an opt-in.
 
 ### Module 3 — Rule Discovery
 
@@ -604,6 +605,12 @@ from forgedge.alpha_discovery.models import TargetConfig
 
 cfg = TargetConfig(horizon=10, min_return=0.05, side="long")   # +5% within 10 bars, long
 opt = TargetOptimizer(train_df, cfg)
+# opt's own DiscoveryConfig, when not passed explicitly, defaults to
+# DiscoveryConfig(train_ratio=1.0, max_and_components=2, retain_raw_events=True)
+# -- pinned explicitly (issue #254 Phase 8), decoupled from DiscoveryConfig's
+# own class defaults (1 / False, calibrated for forge()'s two-pass path
+# instead), since TargetOptimizer composes atoms before any return is seen
+# and reads ed.raw_events directly.
 ranked = opt.run() -> pd.DataFrame       # columns: event_id, n_components, expression,
                                           # n_activations, win_rate_event, win_rate_base, lift, z_score
 opt.base_rate           # unconditional win rate of the target, set only after run()
@@ -1401,12 +1408,31 @@ Every module accepts a dataclass carrying its knobs. This section covers the one
 | `gate_params` | `GateParams()` | Consistency Gate thresholds — see below |
 | `max_categorical_classes` | `20` | above this many distinct values, a non-numeric column is dropped, not one-hot-encoded |
 | `timestamp_col` | `"open_dt"` | |
-| `max_and_components` | `2` | `1`=singles only, `2`=+pairs, `3`=+pairs+triples |
+| `max_and_components` | `1` (was `2` pre-#254 Phase 8) | `1`=singles only (Module 1 composes nothing — the default, precondition for `forge(two_pass_composition=True)`), `2`=+pairs, `3`=+pairs+triples (legacy single-pass path, or a caller with its own composition stage) |
+| `retain_raw_events` | `False` (was `True` pre-#254 Phase 8) | keep `EventDiscovery.raw_events` (pre-gate population) resident after `.run()` — needed only by `TargetOptimizer`, which sets it `True` explicitly on its own fallback config |
 | `train_ratio` | `1.0` | `<1.0` reserves a tail for Module 1's own (optional) walk-forward validation |
 | `walk_forward` | `None` | set a `EventWalkForwardConfig` to enable event-level OOS validation (§15 — opt-in) |
 | `diversity_gate_enabled` | `False` | opt-in near-duplicate suppression (§15) |
 | `diversity_threshold` | `0.85` | Jaccard bar for the diversity gate, when enabled |
 | `indicator_lag_cross_lags` | `(1, 3)` | lag set for the price-scale-indicator-vs-lagged-OHLC-base feature pairing (§8); pass `()` to disable that pairing entirely |
+
+`forge()`'s own composition knobs (not `DiscoveryConfig` fields — orchestrator-level, §9):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `two_pass_composition` | `True` (issue #254 Phase 8) | grade-guided composition after Alpha Discovery's first pass, replacing Module 1's own `max_and_components`-driven composition (§8, Module 2 walkthrough step 8). `False` reproduces the pre-#254 single-pass behaviour exactly |
+| `grade_pairing_config` | `None` → `GradePairingConfig()` | pairing scheme/budget when `two_pass_composition=True`; see `GradePairingConfig` below |
+
+`GradePairingConfig` (`forgedge.composition`, only read when `two_pass_composition=True`):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_components` | `2` | `3` also composes triples (#254 Phase 4) |
+| `adjacency` | `{"A": ("A","B"), "B": ("B","C"), "C": ("C","D")}` | which grades a root grade may pair with — symmetric |
+| `per_stratum_pair_cap` | `100` | guaranteed minimum representation per grade stratum (round-robin, not a hard ceiling) |
+| `per_stratum_triple_cap` | `50` | same, for triples |
+| `include_singles_in_pass2` | `True` | pool the original 1D candidates alongside composed ones for pass 2 |
+| `max_constituent_jaccard` | `None` | forwarded to `ANDComposer.compose()` — reject a pair whose constituents overlap too much |
 
 `GateParams` (the Consistency Gate):
 
@@ -1507,6 +1533,19 @@ forge(kpi, manual_events=[CustomEvent("close < 50")], event_discovery_config=Dis
 ```
 
 ```python
+from forgedge import forge, DiscoveryConfig
+
+forge(kpi, event_discovery_config=DiscoveryConfig(max_and_components=2))
+# two_pass_composition defaults to True (issue #254 Phase 8) and requires
+# max_and_components <= 1 on the event_discovery_config it's given —
+# composition happens in exactly one place, not both:
+# ValueError: two_pass_composition=True requires
+# event_discovery_config.max_and_components <= 1 (composition happens in
+# the two-pass stage instead); pass max_and_components<=1, or
+# two_pass_composition=False to use Module 1's own composition.
+```
+
+```python
 from forgedge import AlphaDiscovery, AlphaConfig
 
 ad = AlphaDiscovery(kpi, [], AlphaConfig())
@@ -1528,7 +1567,7 @@ This one is worth calling out specifically: `min_act`/`min_months`/`max_conc` we
 
 | Exception | Typical trigger |
 |---|---|
-| `ValueError` | invalid enum-like string (`direction`, `target_mode`, `buy_type`, `entry_mode`, `selection_mode`, `threshold_mode`, `timeframe`, `preset`, …), out-of-range numeric config field, mutually-exclusive `forge()` arguments, mismatched contract/candidate pair passed to `RuleDiscovery` |
+| `ValueError` | invalid enum-like string (`direction`, `target_mode`, `buy_type`, `entry_mode`, `selection_mode`, `threshold_mode`, `timeframe`, `preset`, …), out-of-range numeric config field, mutually-exclusive `forge()` arguments, `two_pass_composition=True` with `event_discovery_config.max_and_components>1`, mismatched contract/candidate pair passed to `RuleDiscovery` |
 | `KeyError` | a required column is missing — OHLC columns, `timestamp_col`, `source_col`, an unknown candlestick pattern name |
 | `RuntimeError` | an accessor called before `.run()` |
 | `TypeError` | wrong input type to `build_features`/`lag_features`, or an unrecognized `forge_preset(**overrides)` key |

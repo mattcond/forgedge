@@ -50,6 +50,8 @@ forge(
     market_context_config: MarketContextConfig | None = None,
     event_discovery_config: DiscoveryConfig | None = None,
     alpha_config: AlphaConfig | None = None,
+    two_pass_composition: bool = True,
+    grade_pairing_config: GradePairingConfig | None = None,
     rotation_calibration: RotationConfig | None = None,
     fast_null: bool = True,
     time_budget: TimeBudget | None = None,
@@ -85,6 +87,34 @@ running Module 0. `strict=False` downgrades every finding (`FAIL` and `WARN`
 alike) to a `UserWarning` and runs anyway. Non-critical incoherences
 (`WARN`) are always warnings regardless of `strict`.
 
+`two_pass_composition` (default `True` since issue #254 Phase 8): replaces
+M1's own structural AND-composition (`ANDComposer`, tpm/dispersion/
+`transform_key` pairing) with a grade-guided design — Event Discovery stays
+1D-only (requires `event_discovery_config.max_and_components <= 1`, else
+`ValueError`; the class default and every `forge_preset()` preset already
+satisfy this), a first `AlphaDiscovery` pass grades every 1D candidate A-D,
+`forgedge.composition.grade_guided_compose()` pairs them by that grade
+instead of structural similarity, and a second `AlphaDiscovery` pass
+evaluates the composed pool from scratch (no target/grade inherited from
+constituents). Everything downstream (ledger, rotation null, M3, M4) then
+operates on the second pass's pooled output. Defaulted on because the
+Phase 5/6 validation (`docs/analysis/issue_254_two_pass_composition_plan.md`)
+found the improvement generalised on every 1D asset tested (8/8, 1.44x-3.05x
+more EDGE/PARTIAL-EDGE contracts) while being no worse on 1H (neither path
+found more than one asset with a confirmable edge out of eight there) — so
+an intraday exploration that does turn up an edge still gets the benefit for
+free. Pass `False` to reproduce the pre-#254 single-pass behaviour exactly.
+`ForgeResult.grading_candidates`/`.grading_contracts` preserve pass 1's
+pre-composition artefacts; `ForgeResult.composition_timing` reports each
+stage's wall-clock cost (measured +44%-75% total wall time over single-pass
+at realistic 1D scale, dominated by the composition search — 40-59% of the
+two-pass-specific cost — not the extra grading pass, ~20-29%).
+
+`grade_pairing_config` — pairing scheme/budget for `two_pass_composition=
+True`; see `forgedge.composition.GradePairingConfig` below M2. Defaults to
+`GradePairingConfig()` when the flag is on and this is omitted; has no
+effect when `two_pass_composition=False`.
+
 `ForgeResult` fields: `enriched`, `candidates: list[EventCandidate]`,
 `contracts: list[AlphaContract]` (promoted *and* rejected — inspect
 `contract.rejection_reasons`/`.diagnostics`), `promoted: list[AlphaContract]`,
@@ -99,7 +129,12 @@ None`, `ledger: HypothesisLedger | None`, `time_budget: TimeBudget | None`,
 why), `coherence: ConfigReport | None` (the resolved configs plus every
 constraint violation found — produced by the *same* resolver call the
 pipeline actually ran with, so `coherence.configs` is literally what
-executed).
+executed), `grading_candidates: list[EventCandidate] | None` /
+`grading_contracts: list[AlphaContract] | None` (pass 1's pre-composition
+1D pool and its grades — only populated when `two_pass_composition=True`;
+`.candidates`/`.contracts` always mean "what M3 actually operated on", i.e.
+pass 2's pooled output), `composition_timing: dict | None` (wall-clock cost
+of each two-pass stage, only populated when `two_pass_composition=True`).
 
 `ForgeResult` methods: `.edges()` → `(contract, response)` pairs with
 `response.is_edge` (EDGE or PARTIAL-EDGE); `.validated_rules()` → responses
@@ -448,19 +483,26 @@ cost, since the `EventDiscovery` instance is already retained on `ForgeResult`.
 `gate_params: GateParams = GateParams()`, `max_categorical_classes: int = 20`,
 `scale_free_overrides: dict[str, bool] | None = None`, `timestamp_col: str =
 UNSET` (session-resolved, `"open_dt"` fallback), `max_and_components: int =
-2`, `train_ratio: float = 1.0`, `walk_forward: EventWalkForwardConfig | None
-= None`, `diversity_gate_enabled: bool = False`, `diversity_threshold: float
-= 0.85`, `indicator_lag_cross_lags: tuple[int, ...] = (1, 3)` (lag set for
-the price-scale-indicator-vs-lagged-OHLC-base feature family below; pass
-`()` to disable that family entirely), `retain_raw_events: bool = True`
-(#232 — whether `EventDiscovery.raw_events` stays populated after `.run()`;
-`False` frees a gate-failing candidate's activation series as soon as it's
-gated instead of keeping the whole pre-gate population resident for the
-run's duration, measured 4.2x less memory retained on a rich KPI Table.
-Leave at the default for any `DiscoveryConfig` also handed to
-`TargetOptimizer`, which reads `.raw_events` directly, pre-gate; safe to set
-`False` only on a config used exclusively through `forge()`, which never
-reads it).
+1` (issue #254 Phase 8 — was `2`; `1` disables M1's own structural AND
+composition, the precondition `forge(two_pass_composition=True)` — the new
+default — requires. Raise this only for the legacy single-pass path
+(`two_pass_composition=False`) or a caller with its own composition stage,
+e.g. `TargetOptimizer`, which sets it explicitly on its own fallback
+config), `train_ratio: float = 1.0`, `walk_forward: EventWalkForwardConfig
+| None = None`, `diversity_gate_enabled: bool = False`,
+`diversity_threshold: float = 0.85`, `indicator_lag_cross_lags: tuple[int,
+...] = (1, 3)` (lag set for the price-scale-indicator-vs-lagged-OHLC-base
+feature family below; pass `()` to disable that family entirely),
+`retain_raw_events: bool = False` (issue #232, default flipped `False` in
+Phase 8 — was `True`; whether `EventDiscovery.raw_events` stays populated
+after `.run()`. `False` frees a gate-failing candidate's activation series
+as soon as it's gated instead of keeping the whole pre-gate population
+resident for the run's duration, measured 4.2x less memory retained and
+~2x lower peak RSS end-to-end at realistic scale on a rich KPI Table — the
+right default because the standard `forge()` pipeline never reads
+`.raw_events`. Set `True` explicitly on any `DiscoveryConfig` also handed to
+`TargetOptimizer`, which reads `.raw_events` directly, pre-gate — its own
+fallback config already does this, decoupled from this class default).
 
 `GateParams` (Consistency Gate, Step 4) — `min_tpm: float = 0.5`,
 `max_dispersion: float = 1.5`, `dispersion_margin: float = 1.3`,
@@ -495,6 +537,17 @@ that shrinks for long histories under a fixed budget, rather than a size
 fixed at 5000 regardless of `n_rows` — relevant only if you're reading
 `and_composer.py` internals or profiling `compose()`, not part of its public
 behaviour.
+
+**Note (issue #254 Phase 8):** the composition described in this and the
+next two paragraphs — `ANDComposer`'s structural tpm/dispersion/
+`transform_key` pairing, run inside M1's own `Step 5` — is now the
+*off-by-default* legacy path (`max_and_components` defaults to `1`, which
+disables it). The default path instead composes after M2's first grading
+pass, using the grade as the pairing criterion — see `two_pass_composition`
+above and `GradePairingConfig` under M2 below. Everything in this section
+still applies verbatim to the legacy path (`two_pass_composition=False`,
+`max_and_components>=2`) and, unchanged, to the shared gate/chunking
+machinery the grade-guided composer reuses.
 
 `ANDComposer.compose()`'s pair/triple enumeration order is permuted with a
 fixed, deterministic seed (#230) — under a permissive gate (a low `min_tpm`,
@@ -624,6 +677,48 @@ also not alpha-derived), `min_direction_t: float = 0.5`,
 is undetermined direction** ("no derivable target" — no horizon produces a
 finite advantage); every other metric here feeds the A–D grade via
 `diagnostics`, not a pass/fail gate.
+
+**Grade-guided composition (issue #254, `forgedge.composition`)** — the
+default path since Phase 8 (`forge(two_pass_composition=True)`, on by
+default). Rather than M1 composing AND-pairs from purely structural
+tpm/dispersion/`transform_key` similarity, `forge()` runs `AlphaDiscovery`
+once over M1's 1D-only pool to grade every candidate A-D (`AlphaScore
+.grade`, cutoffs 0.75/0.50/0.25, hardcoded in `alpha_discovery/discovery.py`
+— unrelated to `PromotionThresholds` above), then calls
+`forgedge.composition.grade_guided_compose(candidates, contracts,
+timestamps, config, gate)` to pair/triple them using that grade instead:
+
+```
+GradePairingConfig(
+    max_components: int = 2,       # 3 also composes triples (#254 Phase 4)
+    adjacency: dict[str, tuple[str, ...]] = {"A": ("A","B"), "B": ("B","C"), "C": ("C","D")},
+    per_stratum_pair_cap: int = 100,
+    per_stratum_triple_cap: int = 50,
+    include_singles_in_pass2: bool = True,
+    max_constituent_jaccard: float | None = None,
+)
+grade_guided_compose(candidates, contracts, timestamps, config, gate) -> list[EventCandidate]
+```
+
+Pairing scheme: same grade first, then adjacent grade via a root+partner
+read off `adjacency` (default A<->{A,B}, B<->{B,C}, C<->{C,D} — D is never a
+root, only ever reached as B/C's partner; a triple's third component is
+constrained by the seed pair's own *root* grade, the alphabetically-first
+of the two). `per_stratum_pair_cap`/`_triple_cap` are a guaranteed minimum
+representation per stratum, round-robin interleaved — not a hard ceiling —
+so a small stratum's sole pair can't be crowded out by a much larger one
+before the shared `ANDComposer` cap is reached (the exact under-sampling
+bug a flat concatenate-then-truncate would reproduce). Freshly composed
+candidates get new `event_id`s and are evaluated from scratch by M2's
+second pass — nothing is inherited from pass 1's grade or target.
+`include_singles_in_pass2=True` (default) pools the original 1D candidates
+alongside the composed ones for that second pass, matching the historical
+implicit `all_passing = passing_single + passing_composed` M1's own Step 5
+used to do. Reuses `ANDComposer.compose()`'s Phase 1 pluggable hooks
+(`pool_selector`/`stratify_fn`/`max_pairs`/`max_triples`) rather than
+re-deriving any pairing or gate logic — the shared gate/chunking machinery
+documented under M1 above (episode-mode dispatch, memory-bounded chunking,
+permuted enumeration order) applies unchanged here too.
 
 `target_mode="proj"` (default, long events only) scores the binary target as
 excess return over a local trend SMA (`window = round(trend_sma_mult * h)`)
@@ -1117,9 +1212,16 @@ fraction), `side: "long"|"short"` (required), `min_activations: int = 10`,
 `min_lift_result: float = 1.0` (2nd-pass prune, on the final result set),
 `target_mode: "abs"|"proj" = "proj"`, `trend_sma_mult: float = 2.0`.
 `TargetOptimizer(train_df, target_cfg, discovery_cfg=None)` — `discovery_cfg`
-defaults to `DiscoveryConfig(train_ratio=1.0)`. `opt.validate_oos()` /
-`.discover_alpha()` raise `RuntimeError` if called before `.run()`, same
-"call run() first" pattern as every other module.
+defaults to `DiscoveryConfig(train_ratio=1.0, max_and_components=2,
+retain_raw_events=True)` (issue #254 Phase 8 — explicit, not inherited from
+`DiscoveryConfig`'s own class defaults, which changed to `1`/`False` for
+`forge()`'s two-pass default). `TargetOptimizer` composes atoms *before* any
+return is seen (the target is fixed by the caller, not grade-derived), so it
+structurally cannot use the grade-guided composer, and it reads `ed
+.raw_events` directly — hence pinning both fields itself rather than relying
+on the class default, which would silently starve its own atom pool.
+`opt.validate_oos()` / `.discover_alpha()` raise `RuntimeError` if called
+before `.run()`, same "call run() first" pattern as every other module.
 
 ## Rule monitoring / performance reports
 
@@ -1152,7 +1254,7 @@ structural configuration `FAIL` into a stopped run.
 
 | Exception | Typical trigger |
 |---|---|
-| `ValueError` | invalid enum-like string (`direction`, `target_mode`, `buy_type`, `entry_mode`, `selection_mode`, `threshold_mode`, `timeframe`, `preset`, …), out-of-range numeric config field, mutually-exclusive `forge()` arguments (`manual_events` + `event_discovery_config`), a candidate/contract pair passed to `RuleDiscovery` that don't reference each other, **`forge(strict=True)` when `config_report()` finds a `FAIL`-level configuration** (see below) |
+| `ValueError` | invalid enum-like string (`direction`, `target_mode`, `buy_type`, `entry_mode`, `selection_mode`, `threshold_mode`, `timeframe`, `preset`, …), out-of-range numeric config field, mutually-exclusive `forge()` arguments (`manual_events` + `event_discovery_config`), `forge(two_pass_composition=True, event_discovery_config=DiscoveryConfig(max_and_components>1))` (incoherent — composition must happen in one place, not both; the class default and every preset already satisfy the precondition, so this only fires on an explicit conflicting override), a candidate/contract pair passed to `RuleDiscovery` that don't reference each other, **`forge(strict=True)` when `config_report()` finds a `FAIL`-level configuration** (see below) |
 | `KeyError` | a required column is missing — OHLC columns, `timestamp_col`, `source_col`, an unknown candlestick pattern name |
 | `RuntimeError` | an accessor called before `.run()` — consistently, across `MarketContext.distribution()`, `EventDiscovery.summary()`, `AlphaDiscovery.summary()`/`.promoted_contracts()`, `RuleDiscovery.grid_summary()`, `TargetOptimizer.validate_oos()`/`.discover_alpha()` |
 | `TypeError` | wrong input type to `build_features`/`lag_features`, an unrecognized `forge_preset(**overrides)` key, a `GateParams` call using the old field names (`min_act`/`min_months`/`max_conc`, still present in several stale `examples/*.py` scripts), or arithmetic/comparison on a field still holding the `UNSET` sentinel (a hand-built config read before any `resolve_config()` pass) |

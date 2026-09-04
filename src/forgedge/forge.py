@@ -573,9 +573,10 @@ def forge(
         # M1 must stay 1D-only under two-pass composition (issue #254) —
         # composition happens in the grade-guided stage instead. Checked
         # against the config the caller actually passed (falling back to
-        # DiscoveryConfig()'s own class default, since an omitted
-        # event_discovery_config still resolves to max_and_components=2)
-        # so a silent structural mismatch fails loudly instead (invariant #9).
+        # DiscoveryConfig()'s own class default, which is max_and_components=1
+        # since Phase 8 -- coherent with this check -- so this only fires on
+        # an explicit override that raises it back above 1) so a silent
+        # structural mismatch fails loudly instead (invariant #9).
         _effective_max_and = (event_discovery_config or DiscoveryConfig()).max_and_components
         if _effective_max_and > 1:
             raise ValueError(

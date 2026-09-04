@@ -637,6 +637,18 @@ La riga di log dello stage M1 di `forge()` riporta lo stesso testo — non serve
 
 ## 8. Step 5 — AND Composition
 
+**Disattivato di default dall'issue #254 Fase 8.** `DiscoveryConfig()` ha
+ora default `max_and_components=1`, che salta del tutto questo step — il
+percorso di default di `forge()` (`two_pass_composition=True`) compone a
+valle invece, dopo la prima passata di grading di Alpha Discovery, usando
+il voto A-D come criterio di pairing anziché quello puramente strutturale
+descritto qui sotto (vedi `forgedge.composition.grade_guided_compose` e la
+spec del Modulo 2). Questo step torna attivo alzando `max_and_components`
+sopra `1` — sia su `EventDiscovery` usato standalone, sia via
+`forge(two_pass_composition=False)`, che riproduce esattamente la pipeline
+single-pass pre-#254. Tutto ciò che segue descrive la meccanica di questo
+step, invariata, per ogni volta che effettivamente gira.
+
 Dopo il gate sui singoli eventi, il modulo genera composizioni AND tra eventi che passano e riapplica il gate sul risultato. La composizione produce eventi più selettivi — meno attivazioni, ma potenzialmente più significative.
 
 ### Regole di composizione

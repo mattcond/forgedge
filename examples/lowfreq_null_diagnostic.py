@@ -116,6 +116,10 @@ def make_surrogate_ohlc(rng: np.random.Generator, mode: str = "phase") -> pd.Dat
 def count_promotions(feat_df: pd.DataFrame, label: str) -> dict:
     df_is = feat_df[feat_df["open_dt"] < "2025-01-01"].copy().reset_index(drop=True)
     enriched = MarketContext(df_is.copy()).run()
+    # max_and_components=2: this script chains EventDiscovery/AlphaDiscovery
+    # standalone (not forge()), so M1's own legacy single-pass composition
+    # applies here unconditionally -- unaffected by forge()'s two_pass_
+    # composition default (issue #254 Phase 8).
     ed = EventDiscovery(enriched.copy(), DiscoveryConfig(
         gate_params=GateParams(min_tpm=1.5, max_dispersion=3.0),
         timestamp_col="open_dt", max_and_components=2, train_ratio=1.0))
