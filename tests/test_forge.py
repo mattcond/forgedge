@@ -679,7 +679,10 @@ class TestForgeProgress:
         with caplog.at_level(logging.INFO, logger="forgedge.forge"):
             forge(kpi, manual_events=self._MANUAL, rule_discovery_config=_FAST_RD_CONFIG)
         msgs = [r.getMessage() for r in caplog.records]
-        for needle in ("M0 Market Context", "M2 Alpha Discovery", "M3 Rule Discovery", "done"):
+        # two_pass_composition=True is the default since issue #254 Phase 8,
+        # so M2 logs "M2 pass 1"/"M2 pass 2" milestones instead of a single
+        # "M2 Alpha Discovery" line.
+        for needle in ("M0 Market Context", "M2 pass 1", "M2 pass 2", "M3 Rule Discovery", "done"):
             assert any(needle in m for m in msgs), needle
 
     def test_progress_false_is_silent_on_stderr(self, kpi, capsys):
