@@ -165,13 +165,13 @@ Configurazione principale del Modulo 1. Controlla gate, composizione degli event
 | `max_categorical_classes` | int | `20` | Colonne categoriche con più valori distinti di questo limite sono classificate ma escluse dalla generazione di eventi. |
 | `scale_free_overrides` | dict[str,bool] \| None | `None` | Override manuali del flag scale-free per colonne specifiche (es. `{"rsi_14": True}`). Utile quando l'euristica automatica fallisce su serie corte. |
 | `timestamp_col` | str | `"open_dt"` *(risolto dalla sessione)* | Colonna datetime nella KPI Table (o nome dell'indice DatetimeIndex). |
-| `max_and_components` | int | `2` | Numero massimo di singoli eventi da combinare in un AND. Valori > 3 sono tecnicamente accettati ma sconsigliati (overfitting strutturale). |
+| `max_and_components` | int | `1` *(era `2` pre-issue #254 Fase 8)* | Numero massimo di singoli eventi da combinare in un AND; `1` disattiva la composizione AND propria di questo modulo, precondizione per `forge(two_pass_composition=True)` — il default (la composizione avviene a valle invece, vedi la spec del Modulo 2). Alzare per il percorso legacy single-pass (`forge(two_pass_composition=False)`) o un chiamante con una propria fase di composizione (es. `TargetOptimizer`). Valori > 3 sono tecnicamente accettati ma sconsigliati (overfitting strutturale). |
 | `train_ratio` | float | `1.0` | Frazione di barre IS (0 < train_ratio ≤ 1.0). Default 1.0 = tutto IS (nessun split). |
 | `walk_forward` | EventWalkForwardConfig \| None | `None` | Configurazione walk-forward OOS. Attivo solo se anche `train_ratio < 1.0`. |
 | `diversity_gate_enabled` | bool | `False` | Se True, applica una deduplicazione Jaccard degli eventi singoli dopo il ConsistencyGate e prima della composizione AND. Opt-in — nessun breaking change. |
 | `diversity_threshold` | float | `0.85` | Similarità Jaccard massima tollerata tra due eventi conservati. Usato solo con `diversity_gate_enabled=True`. A p99 della distribuzione Jaccard inter-evento (12 mesi di dati 1H), Jaccard=0.47 — valori sopra 0.70 sono genuine near-duplicate. |
 | `indicator_lag_cross_lags` | tuple[int,...] | `(1, 3)` | Set di lag per la famiglia di feature cross-time indicatore × base OHLC (issue #165, es. `close_sma_12[t] > low[t-3]`), ristretta agli indicatori price-scale (SMA/EMA/WMA/HMA) contro una base OHLC grezza. Passare `()` disabilita interamente questa famiglia sempre attiva. |
-| `retain_raw_events` | bool | `True` | Se `EventDiscovery.raw_events` (l'intera popolazione di candidati pre-gate, ognuno con la propria serie di attivazione a piena lunghezza) resta in memoria dopo `.run()` (issue #232). Tenere `True` per `TargetOptimizer`, che legge `.raw_events` direttamente; una config solo per `forge()` (che non lo legge mai) può impostare `False` per una riduzione misurata di 4.2x della memoria trattenuta. |
+| `retain_raw_events` | bool | `False` *(era `True` pre-issue #254 Fase 8)* | Se `EventDiscovery.raw_events` (l'intera popolazione di candidati pre-gate, ognuno con la propria serie di attivazione a piena lunghezza) resta in memoria dopo `.run()` (issue #232). Impostare `True` esplicitamente per `TargetOptimizer`, che legge `.raw_events` direttamente e fissa questo valore sulla propria config di fallback — il percorso standard di `forge()` non lo legge mai, da cui il cambio di default per una riduzione misurata di 4.2x della memoria trattenuta. |
 
 ```python
 from forgedge import EventDiscovery, DiscoveryConfig
@@ -181,16 +181,54 @@ ed = EventDiscovery(
     enriched,
     config=DiscoveryConfig(
         train_ratio=0.80,
-        max_and_components=2,
+        max_and_components=2,                   # composizione single-pass legacy (vedi sotto)
         gate_params=GateParams(min_tpm=0.5, dispersion_margin=1.3, min_episodes=10),
         walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         scale_free_overrides={"rsi_14": True},  # forza scale-free su RSI
         diversity_gate_enabled=True,            # deduplicazione Jaccard opt-in
         diversity_threshold=0.85,
-        retain_raw_events=False,                # config solo forge(): risparmia la memoria
+        retain_raw_events=True,                 # es. per TargetOptimizer, che ha bisogno di .raw_events
     ),
 )
 candidates = ed.run()
+```
+
+### Parametri di composizione di `forge()` (issue #254 Fase 8)
+
+Non sono campi di `DiscoveryConfig` — parametri a livello orchestratore su
+`forge()` stesso che decidono *dove* avviene la composizione AND:
+
+| Parametro | Tipo | Default | Descrizione |
+|---|---|---|---|
+| `two_pass_composition` | bool | `True` | Compone dopo la prima passata di grading del Modulo 2, usando il voto come criterio di pairing, invece della composizione propria del Modulo 1 guidata da `max_and_components`. Richiede `event_discovery_config.max_and_components <= 1` — altrimenti `ValueError` (la composizione deve avvenire in un solo posto). `False` riproduce esattamente il comportamento single-pass pre-#254. |
+| `grade_pairing_config` | GradePairingConfig \| None | `None` → `GradePairingConfig()` | Schema di pairing/budget per `two_pass_composition=True`; ignorato altrimenti. |
+
+### `GradePairingConfig` (`forgedge.composition`)
+
+Letto solo quando `two_pass_composition=True`.
+
+| Parametro | Tipo | Default | Descrizione |
+|---|---|---|---|
+| `max_components` | int | `2` | `3` compone anche triple (issue #254 Fase 4); il terzo componente di una tripla è vincolato dal grado radice proprio della coppia seme. |
+| `adjacency` | dict[str, tuple[str,...]] | `{"A": ("A","B"), "B": ("B","C"), "C": ("C","D")}` | Con quali gradi un grado radice può accoppiarsi. Simmetrico — una coppia `(X, Y)` è ammessa se `Y` compare sotto `X` o viceversa. |
+| `per_stratum_pair_cap` | int | `100` | Rappresentazione minima garantita per ogni strato di grado presente nel pool, interlacciata round-robin (non un tetto rigido). |
+| `per_stratum_triple_cap` | int | `50` | Idem, per le triple. |
+| `include_singles_in_pass2` | bool | `True` | Raggruppa i candidati 1D originali insieme a quelli composti per la seconda passata di Alpha Discovery. |
+| `max_constituent_jaccard` | float \| None | `None` | Inoltrato a `ANDComposer.compose()` — rifiuta una coppia i cui costituenti hanno similarità Jaccard oltre questa soglia. |
+
+```python
+from forgedge import forge, DiscoveryConfig
+from forgedge.composition import GradePairingConfig
+
+result = forge(
+    kpi,
+    timeframe="1D",
+    event_discovery_config=DiscoveryConfig(max_and_components=1),  # richiesto
+    two_pass_composition=True,          # il default — esplicito qui per chiarezza
+    grade_pairing_config=GradePairingConfig(max_components=3, per_stratum_pair_cap=150),
+)
+result.grading_candidates   # pool 1D pre-composizione della passata 1
+result.candidates            # output pooled della passata 2 — ciò su cui M3 ha realmente operato
 ```
 
 ---

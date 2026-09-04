@@ -279,6 +279,19 @@ candidates = ed.run()
 
 ### Step 5 — AND Composition (`ANDComposer`)
 
+**Off by default since issue #254 Phase 8.** `DiscoveryConfig()`'s class
+default is now `max_and_components=1`, which skips this step entirely —
+`forge()`'s own default path (`two_pass_composition=True`) composes
+downstream instead, after Module 2's first grading pass, using the letter
+grade as the pairing criterion rather than this step's purely structural
+one (see Module 2's spec, and `forgedge.composition.grade_guided_compose`).
+Raise `max_and_components` above `1` to get this step back — either
+standalone (`EventDiscovery` used directly, as in the *Basic usage* example
+above) or via `forge(two_pass_composition=False)`, which reproduces the
+pre-#254 single-pass pipeline exactly. Everything below in this section
+describes that step as it behaves whenever it does run — nothing about its
+own mechanics changed in Phase 8.
+
 The composer combines pairs (and optionally triples) of gate-passing events with
 logical AND, searching for combinations that maintain temporal consistency.
 
@@ -290,8 +303,9 @@ logical AND, searching for combinations that maintain temporal consistency.
 The composed event `A AND B` is re-submitted to the ConsistencyGate. Only
 compositions that also pass the compound gate are promoted to candidates.
 
-`max_and_components` (default 2) limits the number of components. Values > 3
-are accepted but strongly discouraged due to structural overfitting risk.
+`max_and_components` (default `1` since Phase 8, was `2`) limits the number
+of components — `1` disables this step. Values > 3 are accepted but
+strongly discouraged due to structural overfitting risk.
 
 **Example of a valid AND composition:**
 ```
@@ -744,7 +758,8 @@ for cand in candidates:
 | `max_categorical_classes` | 20 | Categorical columns with more classes are excluded from the pipeline |
 | `scale_free_overrides` | `None` | Manual override: `{"col": True/False}` |
 | `timestamp_col` | `"open_dt"` | Datetime column name (or DatetimeIndex name) |
-| `max_and_components` | 2 | Maximum components per AND composition (2 or 3; > 3 discouraged) |
+| `max_and_components` | 1 (was 2 pre-#254 Phase 8) | Maximum components per AND composition; `1` disables Step 5 (this module's own composition), the precondition for `forge(two_pass_composition=True)` — the default. Raise for the legacy single-pass path or a caller with its own composition stage |
+| `retain_raw_events` | `False` (was `True` pre-#254 Phase 8) | Whether `EventDiscovery.raw_events` stays populated after `run()`; needed only by `TargetOptimizer`, which sets `True` explicitly on its own fallback config |
 | `train_ratio` | 1.0 | IS fraction (1.0 = no OOS split, walk-forward disabled) |
 | `walk_forward` | `None` | Walk-forward config; `None` = no OOS validation |
 

@@ -287,6 +287,20 @@ candidates = ed.run()
 
 ### Step 5 — AND Composition (`ANDComposer`)
 
+**Disattivato di default dall'issue #254 Fase 8.** Il default di classe di
+`DiscoveryConfig()` è ora `max_and_components=1`, che salta del tutto questo
+step — il percorso di default di `forge()` (`two_pass_composition=True`)
+compone a valle invece, dopo la prima passata di grading del Modulo 2,
+usando il voto come criterio di pairing invece di quello puramente
+strutturale di questo step (vedi la spec del Modulo 2 e
+`forgedge.composition.grade_guided_compose`). Alza `max_and_components`
+sopra `1` per riattivare questo step — sia standalone (`EventDiscovery`
+usato direttamente, come nell'esempio *Uso base* sopra), sia via
+`forge(two_pass_composition=False)`, che riproduce esattamente la pipeline
+single-pass pre-#254. Tutto ciò che segue in questa sezione descrive questo
+step come si comporta ogni volta che gira — la sua meccanica interna non è
+cambiata nella Fase 8.
+
 Il composer combina coppie (e opzionalmente triple) di eventi che passano il gate
 con l'operatore AND, cercando combinazioni che mantengano la coerenza temporale.
 
@@ -298,8 +312,9 @@ con l'operatore AND, cercando combinazioni che mantengano la coerenza temporale.
 Il composto `A AND B` viene poi ri-sottoposto al ConsistencyGate. Solo le
 composizioni che passano anche il gate composto vengono promosse a candidati.
 
-`max_and_components` (default 2) limita il numero di componenti. Valori > 3
-sono accettati ma fortemente sconsigliati per rischio di overfitting strutturale.
+`max_and_components` (default `1` dalla Fase 8, era `2`) limita il numero di
+componenti — `1` disattiva questo step. Valori > 3 sono accettati ma
+fortemente sconsigliati per rischio di overfitting strutturale.
 
 **Esempio di AND composition valida:**
 ```
@@ -752,7 +767,8 @@ for cand in candidates:
 | `max_categorical_classes` | 20 | Colonne categoriali con più classi vengono escluse dalla pipeline |
 | `scale_free_overrides` | `None` | Override manuale: `{"col": True/False}` |
 | `timestamp_col` | `"open_dt"` | Nome della colonna datetime (o nome del DatetimeIndex) |
-| `max_and_components` | 2 | Massimo componenti per AND composition (2 o 3; > 3 sconsigliato) |
+| `max_and_components` | 1 (era 2 pre-#254 Fase 8) | Massimo componenti per AND composition; `1` disattiva lo Step 5 (la composizione propria di questo modulo), precondizione per `forge(two_pass_composition=True)` — il default. Alzare per il percorso legacy single-pass o un chiamante con una propria fase di composizione |
+| `retain_raw_events` | `False` (era `True` pre-#254 Fase 8) | Se `EventDiscovery.raw_events` resta popolato dopo `run()`; serve solo a `TargetOptimizer`, che imposta `True` esplicitamente sulla propria config di fallback |
 | `train_ratio` | 1.0 | Frazione IS (1.0 = nessun split OOS, walk-forward disabilitato) |
 | `walk_forward` | `None` | Config walk-forward; `None` = nessuna validazione OOS |
 

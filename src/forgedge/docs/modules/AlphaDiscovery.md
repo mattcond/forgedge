@@ -22,8 +22,9 @@
 9. [Step 7 — Compilare l'Alpha Contract](#9-step-7--compilare-lalpha-contract)
 10. [Step 8 — Handoff e Risposta di Rule Discovery](#10-step-8--handoff-e-risposta-di-rule-discovery)
 11. [Esempio Concreto: Valutazione di proto-RI_01](#11-esempio-concreto-valutazione-di-proto-ri_01)
-12. [Generalizzazione ad Altri Ticker](#12-generalizzazione-ad-altri-ticker)
-13. [Anti-pattern e Falsi Alpha](#13-anti-pattern-e-falsi-alpha)
+12. [Step 9 — Composizione guidata dal grado (two-pass, issue #254 Fase 8)](#12-step-9--composizione-guidata-dal-grado-two-pass-issue-254-fase-8)
+13. [Generalizzazione ad Altri Ticker](#13-generalizzazione-ad-altri-ticker)
+14. [Anti-pattern e Falsi Alpha](#14-anti-pattern-e-falsi-alpha)
     - [Multiple Testing e False Discovery Rate](#-overfitting-per-multiple-testing)
 
 ---
@@ -1093,7 +1094,108 @@ status:        VALIDATED → deploy in Strategist
 
 ---
 
-## 12. Generalizzazione ad Altri Ticker
+## 12. Step 9 — Composizione guidata dal grado (two-pass, issue #254 Fase 8)
+
+Nella pipeline single-pass descritta negli step 1-8 sopra, la lista di
+`EventCandidate` che Alpha Discovery riceve è fissa — prodotta una volta dal
+Modulo 1 (composizione AND strutturale inclusa, se `max_and_components>1`).
+**Il percorso di default di `forge()`** (`two_pass_composition=True`,
+default dalla Fase 8) inserisce invece uno stadio di composizione *tra* due
+passate indipendenti di Alpha Discovery:
+
+```
+Modulo 1 (1D-only, max_and_components<=1)
+  │
+  ▼
+Alpha Discovery — PASSATA 1 (grading)     ← esegue gli step 1-8 sopra
+  │  assegna un voto A-D a ogni candidato 1D (Step 6, composite score)
+  ▼
+forgedge.composition.grade_guided_compose()
+  │  accoppia/mette in tripla i candidati per VOTO (non per struttura)
+  │  candidati composti: event_id nuovi, nessun voto/target ereditato
+  ▼
+Alpha Discovery — PASSATA 2 (valutazione)  ← esegue di nuovo gli step 1-8,
+  │                                            da zero, sul pool pooled
+  ▼
+Modulo 3 (Rule Discovery) — opera solo sull'output della PASSATA 2
+```
+
+### Perché il grado è un criterio di pairing migliore della struttura
+
+Il criterio di pairing strutturale del Modulo 1 (tpm, dispersione,
+`transform_key`) non ha alcuna informazione sul ritorno futuro — non può
+averla, essendo Event Discovery returns-blind per invariante. Il voto A-D
+della Passata 1, al contrario, incorpora già l'evidenza statistica
+sull'edge di ciascun candidato (IC, lift, Cohen's d, significatività
+OOS — Step 6). L'esperimento originale dell'issue (AMZN 1D) ha misurato la
+differenza: pairing strutturale → 256 candidati composti, 5 PARTIAL-EDGE/
+EDGE (1,95%); pairing per voto sugli stessi dati → ~1400+ candidati, 122
+(~8-9%), con il primo attraversamento della soglia di significatività del
+null di rotazione (p=0,0497) osservato in tutta la sessione. La
+correlazione strutturale (phi) tra le serie di attivazione si è rivelata un
+pessimo proxy della qualità economica di una coppia.
+
+### Schema di pairing
+
+```python
+from forgedge.composition import GradePairingConfig, grade_guided_compose
+
+composed = grade_guided_compose(
+    candidates,   # pool EventCandidate della Passata 1 (1D)
+    contracts,     # pool AlphaContract della Passata 1 (stessi candidati, votati)
+    timestamps,
+    GradePairingConfig(
+        max_components=2,        # 3 compone anche triple (issue #254 Fase 4)
+        adjacency={"A": ("A","B"), "B": ("B","C"), "C": ("C","D")},  # default
+        per_stratum_pair_cap=100,
+        include_singles_in_pass2=True,
+    ),
+    gate,          # lo stesso ConsistencyGate che le coppie/triple devono superare
+)
+```
+
+Stesso grado per primo (`A_same`, `B_same`, ...), poi grado adiacente via
+uno schema radice+partner (default `A<->{A,B}`, `B<->{B,C}`, `C<->{C,D}` —
+`D` non è mai radice, raggiunto solo come partner di `B`/`C`). Il terzo
+componente di una tripla è vincolato dal grado *radice* della coppia seme
+(il migliore, alfabeticamente, dei due), via la stessa relazione di
+adiacenza. `per_stratum_pair_cap`/`per_stratum_triple_cap` garantiscono a
+ogni strato di grado presente nel pool una rappresentazione minima,
+interlacciata round-robin — non un tetto rigido — così la sola coppia di
+uno strato piccolo non viene scavalcata da uno strato molto più grande
+prima che il cap condiviso sia raggiunto. Riusa gli hook pluggable di
+`ANDComposer.compose()` (issue #254 Fase 1) invece di reimplementare
+pairing o gate: un'unica chiamata a `compose()` sull'intero pool
+ammissibile, con uno `stratify_fn` che chiave ogni coppia valida per il suo
+strato di grado.
+
+### Cosa arriva al Modulo 3
+
+`GradePairingConfig.include_singles_in_pass2=True` (default) raggruppa i
+candidati 1D originali insieme a quelli composti per la Passata 2 —
+replicando il comportamento storico implicito del Modulo 1
+(`all_passing = passing_single + passing_composed`). `forge()` ribinda sia
+`candidates` sia `alpha_candidates` all'output pooled della Passata 2
+*prima* che girino il ledger delle ipotesi, il null di rotazione e il
+Modulo 3 — un contratto composto che viene promosso raggiunge quindi il
+Modulo 3 esattamente come farebbe un contratto a evento singolo.
+`ForgeResult.grading_candidates`/`.grading_contracts` mantengono
+disponibili per audit gli artefatti pre-composizione della Passata 1;
+`ForgeResult.composition_timing` riporta il costo in wall-clock di ogni
+stadio (misurato: +44%-75% di tempo totale rispetto al single-pass su
+scala 1D realistica, dominato dalla ricerca di composizione stessa —
+40-59% del costo specifico del two-pass — non dalla passata di grading
+extra, ~20-29%).
+
+Passa `forge(two_pass_composition=False)` per tornare esattamente al
+percorso single-pass descritto negli step 1-8: nessuna Passata 1 separata,
+Alpha Discovery gira una sola volta sui candidati che il Modulo 1 stesso ha
+già composto (se `max_and_components>1`). `TargetOptimizer` non è toccato
+in nessun caso — compone gli atomi prima che sia visto un ritorno
+qualsiasi e non può quindi usare strutturalmente il composer guidato dal
+grado.
+
+## 13. Generalizzazione ad Altri Ticker
 
 ### Cosa cambia per ogni asset
 
@@ -1115,7 +1217,7 @@ status:        VALIDATED → deploy in Strategist
 
 ---
 
-## 13. Anti-pattern e Falsi Alpha
+## 14. Anti-pattern e Falsi Alpha
 
 ### ❌ Modificare le soglie degli Event Candidate
 
@@ -1144,6 +1246,23 @@ CORRETTO:  Alpha Discovery documenta l'osservazione negli hints del contratto:
            esplicitamente questa combinazione nel catalogo di AND Composition.
            Alpha Discovery poi valuta i candidati composti quando li riceve.
 ```
+
+> **Nota (issue #254 Fase 8).** Questo anti-pattern vieta una decisione *ad
+> hoc*: una sessione di Alpha Discovery che, ispezionando i propri stessi
+> risultati IC, decide al volo quali coppie combinare e le ricicla nella
+> stessa passata — un cortocircuito che confonderebbe target derivato e
+> criterio di selezione. Il percorso di default di `forge()` (`two_pass_
+> composition=True`) **non** fa questo: è uno stadio architetturale
+> separato e sistematico (vedi Step 8 più sotto) — accoppia *ogni* coppia
+> di candidati ammissibile per grado, secondo uno schema fisso
+> (`GradePairingConfig.adjacency`), non solo quelle che una prima
+> ispezione manuale segnalerebbe come promettenti; e ogni candidato
+> composto viene ri-valutato **da zero** da una seconda passata
+> indipendente di Alpha Discovery, con un `event_id` nuovo, senza ereditare
+> voto o target dai costituenti — esattamente il "valutare i candidati
+> composti quando li riceve" della colonna CORRETTO sopra, solo con la
+> generazione dei candidati composti spostata in uno stadio dedicato tra le
+> due passate invece che in una sessione futura di Event Discovery.
 
 ### ❌ Look-ahead bias nel target
 

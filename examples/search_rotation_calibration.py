@@ -117,6 +117,10 @@ def main():
     # ── 1. Real pipeline (once) ──────────────────────────────────────────────
     t0 = time.time()
     enriched = MarketContext(df_is.copy()).run()
+    # max_and_components=2: this script chains EventDiscovery/AlphaDiscovery
+    # standalone (not forge()), so M1's own legacy single-pass composition
+    # applies here unconditionally -- unaffected by forge()'s two_pass_
+    # composition default (issue #254 Phase 8).
     ed = EventDiscovery(enriched.copy(), DiscoveryConfig(
         gate_params=GateParams(min_tpm=MIN_TPM, max_dispersion=3.0),
         timestamp_col="open_dt", max_and_components=2, train_ratio=1.0))

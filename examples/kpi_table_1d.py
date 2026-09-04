@@ -204,6 +204,10 @@ ed_is = EventDiscovery(
     DiscoveryConfig(
         gate_params=GateParams(min_tpm=1.5, max_dispersion=3.0),
         timestamp_col="open_dt",
+        # max_and_components=2: this script chains EventDiscovery/
+        # AlphaDiscovery standalone (not forge()), so M1's own legacy
+        # single-pass composition applies here unconditionally --
+        # unaffected by forge()'s two_pass_composition default (#254 Phase 8).
         max_and_components=2,
         train_ratio=1.0,
     ),
@@ -284,6 +288,11 @@ opt = TargetOptimizer(
         timestamp_col="open_dt",
         max_and_components=2,
         train_ratio=1.0,
+        # TargetOptimizer reads ed.raw_events directly (pre-gate) -- required
+        # here since retain_raw_events now defaults to False (issue #254
+        # Phase 8); an explicit discovery_cfg like this one is NOT covered by
+        # TargetOptimizer's own decoupled fallback default.
+        retain_raw_events=True,
     ),
 )
 to_results = opt.run()

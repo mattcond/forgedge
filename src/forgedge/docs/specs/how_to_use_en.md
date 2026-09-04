@@ -250,7 +250,7 @@ config = DiscoveryConfig(
         min_tpm=0.5,             # ≥0.5 episodes/month on average (default)
         dispersion_margin=1.3,   # margin over the Poisson floor, "episode" mode (default, #205)
     ),
-    max_and_components=2,       # 1=singles only, 2=+pairs, 3=+pairs+triples (conservative default)
+    max_and_components=2,       # 1=singles only (default since #254 Phase 8), 2=+pairs, 3=+pairs+triples (legacy single-pass composition, or a caller with its own composition stage)
 )
 ed = EventDiscovery(enriched, config=config)
 candidates = ed.run()
@@ -1160,8 +1160,13 @@ in — only purging is on by default.
 
 ### Building it by hand
 
-If you need finer control, the same flow can be written explicitly — this is
-exactly what `forge` runs internally:
+If you need finer control, the same flow can be written explicitly. This
+reproduces `forge(two_pass_composition=False)`'s single-pass path exactly —
+`forge()`'s own **default** path (`two_pass_composition=True`, issue #254
+Phase 8) additionally runs Module 2 twice around a grade-guided composition
+step between the two passes; see Module 2's spec for that flow, or
+`forgedge.composition.grade_guided_compose` if you need to write the
+two-pass version by hand too:
 
 ```python
 import pandas as pd
@@ -1219,7 +1224,8 @@ def run_forge_pipeline(
         train_ratio=0.80,
         walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
         gate_params=GateParams(min_tpm=0.5, dispersion_margin=1.3),
-        max_and_components=2,
+        max_and_components=2,  # single-pass composition here; forge()'s own
+                                 # default instead composes downstream (#254 Phase 8)
     )
     ed = EventDiscovery(enriched, config=ed_config)
     candidates = ed.run()

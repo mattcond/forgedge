@@ -404,6 +404,77 @@ BH FDR is applied to IS p-values of all candidates simultaneously;
 
 ---
 
+### Step 8 — Grade-guided composition (two-pass, issue #254 Phase 8)
+
+`forge()`'s default path (`two_pass_composition=True`) runs steps 1-7 above
+**twice**. Module 1 stays 1D-only (`max_and_components<=1`); this first
+pass grades every 1D candidate A-D via step 6's composite score. Instead of
+Module 1 composing AND-pairs from purely structural tpm/dispersion/
+`transform_key` similarity, `forgedge.composition.grade_guided_compose()`
+pairs (and, with `GradePairingConfig.max_components=3`, triples) candidates
+using **that grade** as the pairing criterion:
+
+```python
+from forgedge.composition import GradePairingConfig, grade_guided_compose
+
+composed = grade_guided_compose(
+    candidates,       # pass-1 EventCandidate pool (1D)
+    contracts,         # pass-1 AlphaContract pool (same candidates, graded)
+    timestamps,
+    GradePairingConfig(max_components=2),  # 3 also composes triples
+    gate,               # the ConsistencyGate composed pairs/triples must clear
+)
+```
+
+Pairing scheme: same grade first, then adjacent grade via a root+partner
+read off `GradePairingConfig.adjacency` (default `A<->{A,B}`, `B<->{B,C}`,
+`C<->{C,D}` — `D` is never a root, only ever reached as `B`/`C`'s partner).
+A triple's third component is constrained by the seed pair's own *root*
+grade (the alphabetically-first, better of the two), via the same
+adjacency relation. `per_stratum_pair_cap`/`per_stratum_triple_cap` give
+each grade stratum a guaranteed minimum representation, round-robin
+interleaved rather than concatenated-then-truncated — the fix for the
+under-sampling bug a flat shared cap would otherwise reproduce (a small
+stratum's sole pair crowded out by a much larger stratum before the cap is
+reached). Composed candidates get fresh `event_id`s and carry **no**
+inherited grade or derived target from their constituents; a second,
+independent `AlphaDiscovery` pass runs steps 1-7 on them from scratch.
+`GradePairingConfig.include_singles_in_pass2=True` (default) pools the
+original 1D candidates alongside the composed ones for that second pass —
+matching Module 1's own historical `all_passing = passing_single +
+passing_composed` behaviour.
+
+Everything downstream of Module 2 (the hypothesis ledger, the rotation
+null, Module 3, Module 4) operates on this **second pass's pooled output**
+— `forge()` rebinds both `candidates` and `alpha_candidates` to it before
+that machinery runs, so a composed contract that promotes reaches Module 3
+exactly as a single-event one would. `ForgeResult.grading_candidates` /
+`.grading_contracts` preserve pass 1's pre-composition artefacts for audit;
+`ForgeResult.composition_timing` reports each stage's wall-clock cost.
+
+**Why this replaced Module 1's own composition as the default.** The
+issue's own AMZN 1D experiment found structural pairing (phi correlation
+between event activation series) a poor proxy for a pair's *economic*
+quality — 256 structurally-composed candidates yielded 5 PARTIAL-EDGE/EDGE
+contracts (1.95%), while the same pool paired by grade instead yielded
+~1400+ candidates and 122 (~8-9%), with the first rotation-null
+significance crossing (p=0.0497) observed all session. The Phase 5/6
+validation (`docs/analysis/issue_254_two_pass_composition_plan.md`) then
+confirmed this generalised across every 1D asset tested (8/8, 1.44x-3.05x
+more edges) while being no worse on 1H, motivating the default flip
+(`two_pass_composition: bool = True`, `DiscoveryConfig.max_and_components:
+int = 1`) in Phase 8. Pass `forge(two_pass_composition=False)` to get
+Module 1's own step-5 composition back exactly as before #254.
+
+`TargetOptimizer` (§ *Fixed-target mode* below) is **not** affected by any
+of this — it composes atoms before any return is seen (the target is fixed
+by the caller, not grade-derived), so it structurally cannot use the
+grade-guided composer, and its own fallback `DiscoveryConfig` pins
+`max_and_components=2, retain_raw_events=True` explicitly rather than
+inheriting `DiscoveryConfig`'s class defaults.
+
+---
+
 ## Data structure: `AlphaContract`
 
 ```python

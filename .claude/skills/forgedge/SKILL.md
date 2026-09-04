@@ -148,6 +148,20 @@ rule that fired, and the inputs it read), and `.coherence` (the
 next to `result.ledger.describe()` — together they say what was searched and
 with what configuration.
 
+**M2 composes by default now (issue #254 Phase 8).** `forge(two_pass_composition=True)`
+is the default: Event Discovery stays 1D-only, `AlphaDiscovery` grades every
+1D candidate A-D, `forgedge.composition.grade_guided_compose()` pairs them
+by grade (a much stronger signal than M1's own structural tpm/dispersion
+pairing — see `docs/analysis/issue_254_two_pass_composition_plan.md`), and
+a second `AlphaDiscovery` pass evaluates the composed pool from scratch.
+`ForgeResult.grading_candidates`/`.grading_contracts` expose pass 1's
+pre-composition artefacts; `.candidates`/`.contracts`/`.promoted` still mean
+"what M3 actually operated on" (pass 2's pooled output). Pass
+`two_pass_composition=False` to get the pre-#254 single-pass behaviour, in
+which case `event_discovery_config.max_and_components` (default `1`, i.e.
+composition off) is the lever to raise instead. See
+`references/api-reference.md`'s M1/M2 sections for the full parameter list.
+
 ### 2. Presets instead of hand-tuned gates
 
 ```python
@@ -555,14 +569,17 @@ median. `forge()`'s M1 stage line carries this text; `result.event_discovery
     `event_distribution_report`'s statistics are collected incrementally
     from each `GateResult` as it's produced, so nothing about the diagnostic
     changes. New `DiscoveryConfig.retain_raw_events: bool = True` — default
-    unchanged (needed by `TargetOptimizer`, which reads `EventDiscovery
-    .raw_events` directly, pre-gate); set `False` on a `forge()`-only config
-    (which never reads `.raw_events`) to get the memory saving. Do **not**
-    set it `False` on a `DiscoveryConfig` you also hand to `TargetOptimizer`
-    — it would silently lose the atom pool `TargetOptimizer` needs. If
-    you're on an older `forgedge` running M1 on a wide KPI Table with
-    permissive gate params, this is a real OOM risk that tightening
-    `min_tpm` only works around, not fixes — upgrade instead.
+    **flipped to `False` in issue #254 Phase 8** (the common case is the
+    standard `forge()` pipeline, which never reads `.raw_events`; measured
+    ~2x lower peak RSS end-to-end at realistic scale on top of the 4.2x
+    figure above). `TargetOptimizer`, which reads `EventDiscovery.raw_events`
+    directly, pre-gate, sets `True` explicitly on its own fallback config
+    rather than relying on this class default — do **not** set `retain_raw_events
+    =False` on a `DiscoveryConfig` you hand to `TargetOptimizer` yourself,
+    it would silently lose the atom pool it needs. If you're on an older
+    `forgedge` running M1 on a wide KPI Table with permissive gate params,
+    this is a real OOM risk that tightening `min_tpm` only works around, not
+    fixes — upgrade instead.
 22. **`forge(only_validated_events=True)` silently filtering nothing on a
     preset.** Fixed in #250. `only_validated_events` drops any `EventCandidate`
     whose `validation.passed` is not `True` — but that field is only ever set
@@ -585,6 +602,24 @@ median. `forge()`'s M1 stage line carries this text; `result.event_discovery
     `only_validated_events`, override the preset's `DiscoveryConfig`
     directly: `dataclasses.replace(disc_cfg, train_ratio=0.7,
     walk_forward=EventWalkForwardConfig(n_splits=...))`.
+23. **Code written against pre-#254-Phase-8 `forge()`/`DiscoveryConfig`
+    defaults getting a different composition path (or a `ValueError`)
+    without any code change.** As of Phase 8, `forge(two_pass_composition
+    =True)` and `DiscoveryConfig(max_and_components=1, retain_raw_events
+    =False)` are the defaults — previously `two_pass_composition=False`
+    (M1's own structural `ANDComposer`) and `max_and_components=2`/
+    `retain_raw_events=True`. A hand-built `DiscoveryConfig(max_and_components
+    =2, ...)` passed to `forge()` with the (now-default) `two_pass_composition
+    =True` raises `ValueError` (composition must happen in one place, not
+    both) where it silently ran M1's own AND-composer before; pass
+    `two_pass_composition=False` alongside it to keep the old behaviour
+    exactly. Code that read `EventDiscovery.raw_events` off a bare
+    `DiscoveryConfig()` now gets `None` instead of the pre-gate population —
+    pass `retain_raw_events=True` explicitly. `TargetOptimizer` is
+    unaffected either way — its own fallback `DiscoveryConfig` pins both
+    fields explicitly, decoupled from this class-default change (see
+    pitfall #21 and `references/api-reference.md`'s TargetOptimizer
+    section).
 
 ### Entry mode and what a verdict now measures
 
