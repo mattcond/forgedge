@@ -1345,7 +1345,9 @@ class TestEventDistributionReport:
     def test_median_stats_match_raw_events(self, df_2000):
         """The reported tpm/dispersion medians are computed over ALL raw
         events (including zero-activation ones), episode mode."""
-        cfg = DiscoveryConfig(gate_params=GateParams(min_tpm=1.0, min_episodes=1))
+        cfg = DiscoveryConfig(
+            gate_params=GateParams(min_tpm=1.0, min_episodes=1), retain_raw_events=True
+        )
         ed = EventDiscovery(df_2000, config=cfg)
         ed.run()
         raw = ed.raw_events
@@ -1368,7 +1370,8 @@ class TestEventDistributionReport:
         """Below 15% gate-survival, the report suggests min_tpm/dispersion_margin
         at the observed median (#215 point 5), episode mode."""
         cfg = DiscoveryConfig(
-            gate_params=GateParams(min_tpm=50.0, dispersion_margin=1.0, min_episodes=1)
+            gate_params=GateParams(min_tpm=50.0, dispersion_margin=1.0, min_episodes=1),
+            retain_raw_events=True,
         )
         ed = EventDiscovery(df_2000, config=cfg)
         candidates = ed.run()
@@ -1384,7 +1387,8 @@ class TestEventDistributionReport:
 
     def test_high_survival_has_no_hint(self, df_2000):
         cfg = DiscoveryConfig(
-            gate_params=GateParams(min_tpm=0.1, dispersion_margin=10.0, min_episodes=1)
+            gate_params=GateParams(min_tpm=0.1, dispersion_margin=10.0, min_episodes=1),
+            retain_raw_events=True,
         )
         ed = EventDiscovery(df_2000, config=cfg)
         ed.run()
@@ -1399,7 +1403,8 @@ class TestEventDistributionReport:
         cfg = DiscoveryConfig(
             gate_params=GateParams(
                 min_tpm=50.0, max_dispersion=0.1, event_counting="bar"
-            )
+            ),
+            retain_raw_events=True,
         )
         ed = EventDiscovery(df_2000, config=cfg)
         candidates = ed.run()
