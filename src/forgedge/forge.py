@@ -57,7 +57,7 @@ import logging
 import sys
 import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 import pandas as pd
@@ -345,6 +345,97 @@ class ForgeResult:
         df = df.copy()
         df["rule_verdict"] = df["alpha_id"].map(verdicts)
         return df
+
+
+def lookup_by_id(
+    result: "ForgeResult",
+    event_id: Optional[Iterable[str]] = None,
+    alpha_id: Optional[Iterable[str]] = None,
+) -> List["ForgeResult"]:
+    """Return ``[result]`` filtered to the given ``event_id``\\ (s) or ``alpha_id``\\ (s).
+
+    ``event_id`` and ``alpha_id`` are mutually exclusive — exactly one must be
+    given (``ValueError`` otherwise). ``event_id`` matches
+    ``EventCandidate.event_id`` / ``AlphaContract.event_candidate_id``;
+    ``alpha_id`` matches ``AlphaContract.alpha_id`` (== the paired
+    ``RuleDiscoveryResponse.alpha_id``).
+
+    ``candidates``, ``contracts``, ``promoted`` and ``rule_responses`` are
+    filtered consistently with each other — filtering by ``alpha_id`` also
+    keeps only the candidates referenced by a kept contract's
+    ``event_candidate_id``, and vice versa for ``event_id``. Every other
+    field (``enriched``, ``ticker``, ``event_frame``, ``registry``, the live
+    module instances, ``calibration``, ``ledger``, ``time_budget``,
+    ``context``, ``resolution``, ``coherence``, the two-pass fields) is
+    carried over unchanged via :func:`dataclasses.replace`.
+
+    Returning a **list** of one ``ForgeResult`` — not a bare ``ForgeResult``
+    — makes the result a drop-in ``Iterable[ForgeResult]``, so it composes
+    with every function that already expects one: every
+    :mod:`forgedge.playground` function, and
+    :func:`forgedge.deployment.promotion_gate` /
+    :func:`forgedge.deployment.export_rules`::
+
+        export_rules(lookup_by_id(result, alpha_id=[...]), output_dir="./out")
+
+    An ``event_id``/``alpha_id`` that matches nothing yields empty lists on
+    the returned ``ForgeResult`` — never an error.
+
+    Parameters
+    ----------
+    result : ForgeResult
+        A single :func:`forge` output.
+    event_id : Iterable[str], optional
+        Keep only items reachable from an :class:`EventCandidate` with one of
+        these ``event_id`` values.
+    alpha_id : Iterable[str], optional
+        Keep only items reachable from an :class:`AlphaContract` with one of
+        these ``alpha_id`` values.
+
+    Returns
+    -------
+    list[ForgeResult]
+        Single-element list carrying the filtered result.
+    """
+    if (event_id is None) == (alpha_id is None):
+        raise ValueError(
+            "lookup_by_id() requires exactly one of event_id or alpha_id, "
+            "not both and not neither."
+        )
+
+    if alpha_id is not None:
+        wanted = set(alpha_id)
+        contracts = [c for c in result.contracts if c.alpha_id in wanted]
+        promoted = [c for c in result.promoted if c.alpha_id in wanted]
+        rule_responses = [
+            (c, r) for c, r in result.rule_responses if c.alpha_id in wanted
+        ]
+        keep_event_ids = {c.event_candidate_id for c in contracts}
+        candidates = [c for c in result.candidates if c.event_id in keep_event_ids]
+    else:
+        wanted = set(event_id)
+        candidates = [c for c in result.candidates if c.event_id in wanted]
+        keep_event_ids = {c.event_id for c in candidates}
+        contracts = [
+            c for c in result.contracts if c.event_candidate_id in keep_event_ids
+        ]
+        promoted = [
+            c for c in result.promoted if c.event_candidate_id in keep_event_ids
+        ]
+        rule_responses = [
+            (c, r)
+            for c, r in result.rule_responses
+            if c.event_candidate_id in keep_event_ids
+        ]
+
+    filtered = replace(
+        result,
+        candidates=candidates,
+        contracts=contracts,
+        promoted=promoted,
+        rule_responses=rule_responses,
+    )
+    return [filtered]
 
 
 def forge(

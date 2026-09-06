@@ -12,6 +12,7 @@ from forgedge import (
     RuleRegistry,
     forge,
     forge_multi,
+    lookup_by_id,
 )
 from forgedge.event_discovery.models import GateParams
 from forgedge.market_context.models import REGIME_COL
@@ -196,6 +197,91 @@ class TestForge:
             assert response.is_edge
         for response in full_result.validated_rules():
             assert response.validated_rule is not None
+
+
+class TestLookupById:
+    """#264 — filtering a ForgeResult down to specific alpha_id/event_id values."""
+
+    pytestmark = pytest.mark.slow
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def full_result(cls):
+        """Own instance of the fixture from TestForge — class fixtures don't
+        cross class boundaries in pytest, so this mirrors it rather than
+        sharing it."""
+        return forge(
+            _ohlc_kpi_table(),
+            asset="TEST",
+            timeframe="4H",
+            event_discovery_config=_FAST_ED_CONFIG,
+            rule_discovery_config=_FAST_RD_CONFIG,
+        )
+
+    def test_filter_by_alpha_id(self, full_result):
+        contract = full_result.contracts[0]
+        out = lookup_by_id(full_result, alpha_id=[contract.alpha_id])
+        assert isinstance(out, list) and len(out) == 1
+        filtered = out[0]
+        assert isinstance(filtered, ForgeResult)
+        assert [c.alpha_id for c in filtered.contracts] == [contract.alpha_id]
+        assert [c.alpha_id for c in filtered.promoted] == [
+            c.alpha_id for c in full_result.promoted if c.alpha_id == contract.alpha_id
+        ]
+        assert all(
+            c.alpha_id == contract.alpha_id for c, _ in filtered.rule_responses
+        )
+        # candidates stay consistent with the surviving contract's own link.
+        assert {c.event_id for c in filtered.candidates} == {
+            contract.event_candidate_id
+        }
+
+    def test_filter_by_event_id(self, full_result):
+        candidate = full_result.candidates[0]
+        out = lookup_by_id(full_result, event_id=[candidate.event_id])
+        filtered = out[0]
+        assert [c.event_id for c in filtered.candidates] == [candidate.event_id]
+        assert all(
+            c.event_candidate_id == candidate.event_id for c in filtered.contracts
+        )
+        assert all(
+            c.event_candidate_id == candidate.event_id
+            for c, _ in filtered.rule_responses
+        )
+
+    def test_raises_when_both_ids_given(self, full_result):
+        with pytest.raises(ValueError):
+            lookup_by_id(
+                full_result,
+                event_id=[full_result.candidates[0].event_id],
+                alpha_id=[full_result.contracts[0].alpha_id],
+            )
+
+    def test_raises_when_neither_id_given(self, full_result):
+        with pytest.raises(ValueError):
+            lookup_by_id(full_result)
+
+    def test_unmatched_id_yields_empty_lists_not_an_error(self, full_result):
+        filtered = lookup_by_id(full_result, alpha_id=["NO-SUCH-ALPHA-ID"])[0]
+        assert filtered.contracts == []
+        assert filtered.promoted == []
+        assert filtered.rule_responses == []
+        assert filtered.candidates == []
+
+    def test_other_fields_are_carried_over_unchanged(self, full_result):
+        filtered = lookup_by_id(full_result, alpha_id=[full_result.contracts[0].alpha_id])[0]
+        assert filtered.enriched is full_result.enriched
+        assert filtered.market_context is full_result.market_context
+        assert filtered.registry is full_result.registry
+
+    def test_composes_directly_with_export_rules(self, full_result, tmp_path):
+        """Issue #264's exact use case: no glue code between the two calls."""
+        from forgedge.deployment import export_rules
+
+        contract = full_result.contracts[0]
+        filtered = lookup_by_id(full_result, alpha_id=[contract.alpha_id])
+        # Must not raise: `filtered` is a drop-in Iterable[ForgeResult].
+        export_rules(filtered, output_dir=tmp_path, promotable_only=False)
 
 
 class TestForgeTimeframeScaledHorizons:

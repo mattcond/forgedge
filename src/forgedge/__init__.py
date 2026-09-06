@@ -23,7 +23,7 @@ from .event_discovery import (
     EventDiscovery,
     EventWalkForwardConfig,
 )
-from .forge import ForgeResult, forge, forge_multi
+from .forge import ForgeResult, forge, forge_multi, lookup_by_id
 from .ledger import HypothesisLedger
 from .resolver import (
     Constraint,
@@ -76,6 +76,7 @@ __all__ = [
     "forge",
     "forge_multi",
     "ForgeResult",
+    "lookup_by_id",
     "RotationCalibrator",
     "RotationConfig",
     "CalibrationReport",
