@@ -1,5 +1,13 @@
 # Top 10 regole 1D — Validazione Hold-Out (ultimi 6 mesi censurati)
 
+> **ERRATA (2026-09-08):** i PF di hold-out riportati sotto sono calcolati sui trade
+> nominali sovrapposti e sono fuorvianti — il caso studiato in dettaglio (regola #1,
+> 25 trade nominali da appena 5 episodi indipendenti) è nella diagnosi completa in
+> **[`report_v2.md`](./report_v2.md)**, che sostituisce questa top 10 con due nuovi set
+> di regole (una diversificata per ticker, una filtrata su PF walk-forward moderato
+> 1.5-2.5) ri-verificati con una metodologia a livello di episodio. Vedi `report_v2.md`
+> prima di usare i numeri di questo file.
+
 **Data esecuzione:** 2026-09-08
 **Pipeline:** FORGE (`forge()`, preset `"balanced"`, `timeframe="1D"`)
 **Ticker analizzati:** 8 dataset `*_1DAY.csv` in `examples/data/`
