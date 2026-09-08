@@ -543,6 +543,36 @@ rejection_reasons, diagnostics, rule_verdict
 
 `rule_verdict` è l'unica colonna che `summary()` aggiunge oltre a ciò che i campi propri di `AlphaContract` già portano — `"EDGE"`/`"PARTIAL-EDGE"`/`"NON-EDGE"`/`"INSUFFICIENT-DATA"` quando M3 è girato per quel candidato, `NaN` per un candidato mai promosso oltre M2 (M3 vede solo `promoted`, quindi la maggior parte delle 5356 righe qui è `NaN` — filtra prima con `summary()[summary()["promoted"]]` se vuoi solo quelle che Rule Discovery ha davvero toccato).
 
+### `lookup_by_id()` — restringere un `ForgeResult` a una sola regola
+
+```python
+lookup_by_id(result: ForgeResult, event_id: Iterable[str] = None, alpha_id: Iterable[str] = None) -> list[ForgeResult]
+```
+
+Una funzione a livello di modulo (`from forgedge import lookup_by_id`), non un metodo di `ForgeResult` — restituisce un **nuovo** `ForgeResult` (avvolto in una lista di un elemento) con `candidates`/`contracts`/`promoted`/`rule_responses` filtrati in modo coerente ai soli `event_id`/`alpha_id` dati, mentre ogni altro campo (`enriched`, `ticker`, `registry`, `context`, …) viene riportato invariato via `dataclasses.replace`. `event_id` e `alpha_id` sono mutuamente esclusivi — passarli entrambi, o nessuno dei due, solleva `ValueError`.
+
+Il motivo per cui restituisce una **lista** invece di un `ForgeResult` nudo è la componibilità: il risultato è un `Iterable[ForgeResult]` drop-in, quindi alimenta direttamente ogni funzione di `forgedge.playground` e `forgedge.deployment.promotion_gate()`/`export_rules()` senza codice di collegamento — il modo naturale per far girare una di quelle su una sola regola invece che su un'intera sessione:
+
+```python
+from forgedge import lookup_by_id
+from forgedge.deployment import export_rules
+
+alpha_id = result.edges()[0][0].alpha_id     # un qualunque AlphaContract.alpha_id che hai già
+one_rule = lookup_by_id(result, alpha_id=[alpha_id])
+export_rules(one_rule, "exported_rules/", promotable_only=False)
+```
+
+**Verificato**, sulla stessa run ADA sopra, isolando la sua prima voce di `edges()` (`alpha_id` incorpora la data della run, quindi la stringa esatta cambia da un giorno all'altro — `"ALPHA-ADAUSDC-1D-260908-337"` il giorno in cui è stato eseguito):
+
+```
+filtered = lookup_by_id(result, alpha_id=[alpha_id])
+len(filtered) == 1
+len(filtered[0].candidates) == len(filtered[0].contracts) == len(filtered[0].promoted) == len(filtered[0].rule_responses) == 1
+filtered[0].enriched.shape == result.enriched.shape   # i campi non correlati restano intatti
+```
+
+Un `event_id`/`alpha_id` che non trova corrispondenza produce liste vuote su ogni campo filtrato — mai un errore — quindi `lookup_by_id(result, event_id=["typo"])` è un modo sicuro per controllare "questo id esiste davvero" senza un `try`/`except`.
+
 ### Preset
 
 ```python
@@ -2286,6 +2316,13 @@ Ogni voce: sintomo → causa probabile → come verificarla → correzione → c
 - **Causa:** `rule_discovery.validation.validate(trades, base_rate, n_trials, bars_per_year=24*365, ...)` ha `bars_per_year` di default a **8760 — un'assunzione oraria** — e non lo inferisce dai tuoi dati. `walk_forward()` (e quindi ogni `RuleDiscoveryResponse` ottenuta tramite il percorso normale `forge()`/`RuleDiscovery(...).run()`) lo sovrascrive sempre con la spaziatura mediana reale tra le barre misurata sulle tue candele, quindi questo colpisce solo chi chiama `validate()` in standalone.
 - **Conferma:** uno `sharpe_ratio`/`deflated_sharpe` annualizzato su dati giornalieri che sembra implausibilmente grande o piccolo rispetto ai numeri per trade.
 - **Correzione:** passa `bars_per_year=` esplicitamente (`365.25` per il giornaliero, `35040` per il 15 minuti, …) ogni volta che chiami `validate()` fuori da `walk_forward()`.
+
+### "Due run identiche di `forge()` su dati identici promuovono un numero leggermente diverso di contratti, o scelgono una regola diversa come migliore"
+
+- **Causa:** confermato, verificato empiricamente (850/851/855 promossi su run ripetute sullo stesso dataset a storia completa). `feature_generator.py` itera intersezioni `set()` di nomi di colonna (es. `set(roll_min) & set(roll_max)`) il cui ordine di iterazione dipende dalla randomizzazione dell'hash delle stringhe per processo di Python (`PYTHONHASHSEED` non impostato di default) — quell'ordine si propaga a valle fino a quale candidato sopravvive a un cap che tronca il pool (es. `_MAX_PAIRS`/`_MAX_TRIPLES` dell'AND-composer, o l'ordine di pairing del composer guidato dal grado sotto il default two-pass, §9/§12). `forge()` di per sé non è deterministico bit-per-bit tra riavvii del processo; **è** deterministico all'interno di un singolo processo già in esecuzione (l'hash seed resta fisso per tutta la vita del processo).
+- **Conferma:** rilancia lo stesso identico script due volte, come due invocazioni di processo separate (non due chiamate dentro un solo script) — un `len(result.promoted)` diverso o una regola "migliore" diversa tra le due run conferma questo, piuttosto che un cambiamento reale negli input/nella configurazione.
+- **Correzione:** fissa `PYTHONHASHSEED=0` (o un altro valore fisso) nell'ambiente prima di avviare il processo — `examples/wf_period_reduction_test.py` lo fa automaticamente ri-eseguendo se stesso (`os.environ["PYTHONHASHSEED"] = "0"; os.execv(sys.executable, ...)`) se la variabile non è già impostata, dato che Python legge `PYTHONHASHSEED` solo all'avvio dell'interprete — impostarla via `os.environ` a metà processo non ha alcun effetto sul processo corrente. Applica lo stesso pattern di ri-esecuzione (o imposta la variabile d'ambiente prima di lanciare Python) in qualunque script o servizio dove riprodurre esattamente un risultato di `forge()` tra le run è importante, es. un test di regressione in CI o un audit trail.
+- **Portata:** questo riguarda la *riproducibilità esatta* di una run specifica, non la correttezza — ogni singolo verdetto è comunque calcolato onestamente; è la popolazione di ciò che ha la possibilità di essere misurato (quale candidato sopravvive a un cap) che può spostarsi di una manciata di contratti tra run non fissate.
 
 ---
 

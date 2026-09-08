@@ -156,6 +156,26 @@ every tradeable rule into one cross-ticker `RuleRegistry`. Do not pass
 `ticker`/`asset`/`run_registry` in `forge_kwargs` — they're set/overridden
 automatically.
 
+```
+lookup_by_id(
+    result: ForgeResult,
+    event_id: Iterable[str] | None = None,
+    alpha_id: Iterable[str] | None = None,
+) -> list[ForgeResult]
+```
+
+Module-level function (not a `ForgeResult` method) that filters
+`candidates`/`contracts`/`promoted`/`rule_responses` down to the given
+`event_id`(s) or `alpha_id`(s) — mutually exclusive, `ValueError` if both or
+neither are given — and carries every other field over unchanged via
+`dataclasses.replace`. Returns a **list** of one `ForgeResult` (not a bare
+one) specifically so the result is a drop-in `Iterable[ForgeResult]` for
+every `forgedge.playground` function and for
+`forgedge.deployment.promotion_gate()`/`export_rules()` — the way to run any
+of those on a single rule instead of a whole session, e.g.
+`export_rules(lookup_by_id(result, alpha_id=[alpha_id]), "out/")`. A
+non-matching id yields empty filtered lists, never an error.
+
 ## Presets
 
 ```

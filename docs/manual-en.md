@@ -541,6 +541,36 @@ rejection_reasons, diagnostics, rule_verdict
 
 `rule_verdict` is the one column `summary()` adds beyond what `AlphaContract`'s own fields already carry — `"EDGE"`/`"PARTIAL-EDGE"`/`"NON-EDGE"`/`"INSUFFICIENT-DATA"` when M3 ran for that candidate, `NaN` for a candidate never promoted past M2 (M3 only sees `promoted`, so most of the 5356 rows are `NaN` here — filter `summary()[summary()["promoted"]]` first if you only want the ones Rule Discovery actually touched).
 
+### `lookup_by_id()` — narrowing a `ForgeResult` down to one rule
+
+```python
+lookup_by_id(result: ForgeResult, event_id: Iterable[str] = None, alpha_id: Iterable[str] = None) -> list[ForgeResult]
+```
+
+A module-level function (`from forgedge import lookup_by_id`), not a `ForgeResult` method — it returns a **new** `ForgeResult` (wrapped in a single-element list) with `candidates`/`contracts`/`promoted`/`rule_responses` filtered consistently down to the given `event_id`(s) or `alpha_id`(s), while every other field (`enriched`, `ticker`, `registry`, `context`, …) is carried over unchanged via `dataclasses.replace`. `event_id` and `alpha_id` are mutually exclusive — passing both, or neither, raises `ValueError`.
+
+The point of returning a **list** rather than a bare `ForgeResult` is composability: the result is a drop-in `Iterable[ForgeResult]`, so it feeds directly into every `forgedge.playground` function and into `forgedge.deployment.promotion_gate()`/`export_rules()` with no glue code — the natural way to run any of those on exactly one rule instead of a whole session:
+
+```python
+from forgedge import lookup_by_id
+from forgedge.deployment import export_rules
+
+alpha_id = result.edges()[0][0].alpha_id     # any AlphaContract.alpha_id you already have
+one_rule = lookup_by_id(result, alpha_id=[alpha_id])
+export_rules(one_rule, "exported_rules/", promotable_only=False)
+```
+
+**Verified**, on the same ADA run as above, isolating its first `edges()` entry (`alpha_id` embeds the run date, so the exact string differs run to run — `"ALPHA-ADAUSDC-1D-260908-337"` the day this was run):
+
+```
+filtered = lookup_by_id(result, alpha_id=[alpha_id])
+len(filtered) == 1
+len(filtered[0].candidates) == len(filtered[0].contracts) == len(filtered[0].promoted) == len(filtered[0].rule_responses) == 1
+filtered[0].enriched.shape == result.enriched.shape   # unrelated fields untouched
+```
+
+An `event_id`/`alpha_id` that matches nothing yields empty lists on every filtered field — never an error — so `lookup_by_id(result, event_id=["typo"])` is a safe way to check "does this id exist at all" without a `try`/`except`.
+
 ### Presets
 
 ```python
@@ -2268,6 +2298,13 @@ Each entry: symptom → likely cause → how to confirm → fix → how to preve
 - **Cause:** `rule_discovery.validation.validate(trades, base_rate, n_trials, bars_per_year=24*365, ...)` defaults `bars_per_year` to **8760 — an hourly-bar assumption** — and does not infer it from your data. `walk_forward()` (and therefore every `RuleDiscoveryResponse` you get through the normal `forge()`/`RuleDiscovery(...).run()` path) always overrides it with the actual median bar spacing measured from your candles, so this only bites a caller who calls `validate()` standalone.
 - **Confirm:** an annualised `sharpe_ratio`/`deflated_sharpe` on daily data that looks implausibly large or small relative to the per-trade numbers.
 - **Fix:** pass `bars_per_year=` explicitly (`365.25` for daily, `35040` for 15-minute, …) whenever you call `validate()` outside of `walk_forward()`.
+
+### "Two identical `forge()` runs on identical data promote a slightly different number of contracts, or pick a different rule as best"
+
+- **Cause:** confirmed, verified empirically (850/851/855 promoted across repeated runs on the same full-history dataset). `feature_generator.py` iterates `set()` intersections of column names (e.g. `set(roll_min) & set(roll_max)`) whose iteration order depends on Python's per-process string hash randomization (`PYTHONHASHSEED` unset by default) — that order propagates downstream to which candidate survives a pool-truncating cap (e.g. the AND-composer's `_MAX_PAIRS`/`_MAX_TRIPLES`, or the grade-guided composer's pairing order under the two-pass default, §9/§12). `forge()` itself is not bit-for-bit deterministic across process restarts; it *is* deterministic within a single already-running process (the hash seed is fixed for the process's lifetime).
+- **Confirm:** re-run the exact same script twice, as two separate process invocations (not two calls inside one script) — a differing `len(result.promoted)` or a different "best" rule between the two runs confirms this, rather than a real change in inputs/config.
+- **Fix:** pin `PYTHONHASHSEED=0` (or any fixed value) in the environment before starting the process — `examples/wf_period_reduction_test.py` does this automatically by re-executing itself (`os.environ["PYTHONHASHSEED"] = "0"; os.execv(sys.executable, ...)`) if the variable isn't already set, since Python only reads it at interpreter startup — setting it via `os.environ` mid-process has no effect on the current process. Apply the same re-exec pattern (or set the environment variable before launching Python) in any script or service where reproducing an exact `forge()` result across runs matters, e.g. a CI regression test or an audit trail.
+- **Scope:** this affects *exact reproducibility* of a specific run, not correctness — every individual verdict is still computed honestly; it's the population of what gets a chance to be measured (which candidate survives a cap) that can shift by a handful of contracts between unpinned runs.
 
 ---
 

@@ -109,12 +109,12 @@ KPI Table (input)
 │           Frequenza minima (tpm) | N episodi minimo                 │
 │           Dispersione episodi entro il floor statistico di Poisson  │
 │                                                                     │
-│  Step 5 — AND Composition                                           │
+│  Step 5 — AND Composition (disattivato di default dall'issue #254)   │
 │           Combina eventi di trasformazioni diverse sulla            │
 │           stessa feature o su feature semanticamente distinte       │
 │           Riapplica il Consistency Gate sul composto                │
 └──────────────────────────┬──────────────────────────────────────────┘
-                           │ Event Candidates
+                           │ Event Candidates (solo eventi singoli, di default)
                            │
                            │  VALUTAZIONE — primo contatto con il target
                            ▼
@@ -139,6 +139,12 @@ KPI Table (input)
 │                                                                     │
 │  Step 6 — Alpha Scoring (voto, non gate)                            │
 │           Composite score, grade A / B / C / D                      │
+│                                                                     │
+│  Step 7 — Composizione guidata dal grado (two-pass, default)        │
+│           Dopo la prima passata di grading, compone AND tra         │
+│           eventi singoli usando il voto A-D come criterio di        │
+│           pairing anziché la struttura pura dello Step 5 di M1      │
+│           I compositi rientrano in M2 per una seconda valutazione   │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │ Alpha Contract
                            │
@@ -268,7 +274,7 @@ corta). La risoluzione effettiva è tracciata in `window_resolution`.
 si sostituisce `ema_proxy` con `hmm`, `kmeans` o un classificatore custom
 cambiando solo il campo `classifier` nella configurazione.
 
-→ Documento di dettaglio: **[Market Context Module](Market_Context_Module.md)**
+→ Documento di dettaglio: **[Market Context Module](modules/MarketContext.md)**
 
 ---
 
@@ -314,7 +320,7 @@ episodi (issue #134/#205). Una modalità legacy `event_counting="bar"`
 resta disponibile, con i due soli criteri `min_tpm` (barre/mese) e
 `max_dispersion` (default 1.5).
 
-→ Documento di dettaglio: **[Event Discovery Module](Event_Discovery_Module.md)**
+→ Documento di dettaglio: **[Event Discovery Module](modules/EventDiscovery.md)**
 
 ---
 
@@ -366,7 +372,7 @@ in Rule Discovery (`SelectionCriteria.max_rotation_p`): un contratto
 con `rotation_p` troppo alto non può ricevere un verdetto `EDGE` pieno,
 indipendentemente da quanto siano buone le metriche di backtest.
 
-→ Documento di dettaglio: **[Alpha Discovery Pipeline](Alpha_Discovery_Pipeline.md)**
+→ Documento di dettaglio: **[Alpha Discovery Pipeline](modules/AlphaDiscovery.md)**
 
 ---
 
@@ -423,7 +429,7 @@ mean_concurrent_positions`) sostituisce il conteggio nominale dei trade
 nei test di significatività: un mucchio di posizioni aperte sulla stessa
 finestra temporale non vale come altrettante osservazioni indipendenti.
 
-→ Documento di dettaglio: **[Rule Discovery Pipeline](Rule_Discovery_Pipeline.md)**
+→ Documento di dettaglio: **[Rule Discovery Pipeline](modules/RuleDiscovery.md)**
 
 ---
 
@@ -461,7 +467,7 @@ target — la struttura logica della regola rimane invariata.
 sulla maggioranza dei ticker, `PARTIAL`, `SPECIFIC` o `ISOLATED`
 altrimenti.
 
-→ Documento di dettaglio: **[Rule Registry Module](Rule_Registry_Module.md)**
+→ Documento di dettaglio: **[Rule Registry Module](modules/RuleRegistry.md)**
 
 ---
 
@@ -720,6 +726,15 @@ verdict:    "EDGE"
 ---
 
 ## 7. Ciclo di Vita di una Regola
+
+> Questo esempio illustra la composizione AND strutturale pura di M1 (§2,
+> Step 5) — non il percorso di default di `forge()` dall'issue #254 in poi
+> (`two_pass_composition=True`), che compone invece nello Step 7 di M2,
+> guidato dal grado A-D anziché dalla sola struttura temporale. La logica
+> qui sotto resta identica per ogni composizione che gira, cambia solo
+> **quando** gira: prima del grading (qui) o dopo (default attuale). Vedi
+> `src/forgedge/docs/modules/AlphaDiscovery.md` §12 per il percorso
+> two-pass.
 
 ```
 FASE 1 — GENERAZIONE                               MODULO
@@ -990,20 +1005,18 @@ Evoluzione della deduplicazione da binaria a strutturata:
 
 | Documento | Contenuto |
 |---|---|
-| **[Market Context Module](Market_Context_Module.md)** | Interfaccia RegimeClassifier, EMAProxyClassifier v1.0, configurazione, lookup colonne EMA, output `regime`+`regime_stable`, estensibilità v2.0 (HMM, KMeans, custom) |
-| **[Event Discovery Module](Event_Discovery_Module.md)** | Architettura 5 step, Variable Catalog, Feature Generation (arietà 1/2/3), Transform Layer (Identità/Pctrank/Zscore/Delta), Event Generation, Consistency Gate, AND Composition, esempio end-to-end su `close_rsi_25` |
-| **[Alpha Discovery Pipeline](Alpha_Discovery_Pipeline.md)** | Alpha Contract format, definizione del target, analisi Hurst/ACF, IC Measurement, Win Rate Analysis, Regime Sensitivity, Alpha Scoring, False Discovery Rate (BH), handoff a Rule Discovery |
-| **[Rule Discovery Pipeline](Rule_Discovery_Pipeline.md)** | Parse Alpha Contract, backtest con meccanica limit order, selezione parametri, validazione statistica (t-test, DSR), analisi regime, checklist |
-| **[Rule Registry Module](Rule_Registry_Module.md)** | Registro in-memory, input multi-ticker, matrici Jaccard e Spearman, deduplicazione, cross-ticker backtest con ricalcolo soglie, classificazione genericità (GENERIC/PARTIAL/SPECIFIC/ISOLATED), tabella piatta, report HTML |
+| **[Market Context Module](modules/MarketContext.md)** | Interfaccia RegimeClassifier, EMAProxyClassifier v1.0, configurazione, lookup colonne EMA, output `regime`+`regime_stable`, estensibilità v2.0 (HMM, KMeans, custom) |
+| **[Event Discovery Module](modules/EventDiscovery.md)** | Architettura 5 step, Variable Catalog, Feature Generation (arietà 1/2/3), Transform Layer (Identità/Pctrank/Zscore/Delta), Event Generation, Consistency Gate, AND Composition, esempio end-to-end su `close_rsi_25` |
+| **[Alpha Discovery Pipeline](modules/AlphaDiscovery.md)** | Alpha Contract format, definizione del target, analisi Hurst/ACF, IC Measurement, Win Rate Analysis, Regime Sensitivity, Alpha Scoring, False Discovery Rate (BH), handoff a Rule Discovery |
+| **[Rule Discovery Pipeline](modules/RuleDiscovery.md)** | Parse Alpha Contract, backtest con meccanica limit order, selezione parametri, validazione statistica (t-test, DSR), analisi regime, checklist |
+| **[Rule Registry Module](modules/RuleRegistry.md)** | Registro in-memory, input multi-ticker, matrici Jaccard e Spearman, deduplicazione, cross-ticker backtest con ricalcolo soglie, classificazione genericità (GENERIC/PARTIAL/SPECIFIC/ISOLATED), tabella piatta, report HTML |
 | **[Playground Module](modules/Playground.md)** | Non un modulo della pipeline: helper di analisi di sola lettura su `list[ForgeResult]` — nervosismo dei confini di regime, eventi "morti" M1→M2, ragioni di scarto M3 per grado alpha, famiglie di feature che M2 non orienta mai, diagnostics M2 vs verdetto M3, generalizzazione cross-ticker per grade, cluster di deduplicazione, funnel di conversione end-to-end. Checklist completa (issue #237, 11/11 casi d'uso) |
 | **[Deployment Module](modules/Deployment.md)** | Modulo gemello del Playground, con effetti reali: gate di promozione configurabile, export su disco (pkl+yaml) delle regole promosse, manifest per il monitoraggio periodico. Separato dal Playground da PR #247 (issue #245) |
 
-### Esempio applicato
-
-Il documento **[ADA_USDC_1H_Backtest_Report.md](ADA_USDC_1H_Backtest_Report.md)**
-mostra un'applicazione completa di FORGE su ADAUSDC 1H (2025):
-10 regole estratte, analisi di distribuzione mensile, analisi del regime,
-confronto tra regole assolute e regime-independent.
+Per un'applicazione completa e verificata end-to-end su dati reali, vedi il
+manuale generale (`docs/manual-en.md`/`manuale-it.md`), §7 "A Full Pipeline
+Run" (§13 descrive il fixture che usa, `tests/fixtures/ADA_1D_TRAIN.parquet`,
+incluso nel repository) — ogni numero è riprodotto da una run reale.
 
 ---
 

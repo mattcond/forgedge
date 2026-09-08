@@ -293,6 +293,13 @@ if resp.is_edge:
 | [`modulo_2_en.md`](src/forgedge/docs/specs/modulo_2_en.md) | Alpha Discovery: derived target, IC, OOS, AlphaContract |
 | [`modulo_3_en.md`](src/forgedge/docs/specs/modulo_3_en.md) | Rule Discovery: backtest, EDGE verdict, walk-forward, reports |
 | [`modulo_4_en.md`](src/forgedge/docs/specs/modulo_4_en.md) | Rule Registry: deduplication, cross-ticker, genericity, export |
+| [`configuration_en.md`](src/forgedge/docs/specs/configuration_en.md) | Complete configuration reference: every dataclass field, type, default, and description |
+| [`playground_en.md`](src/forgedge/docs/specs/playground_en.md) | `forgedge.playground`: read-only analysis helpers over pooled `ForgeResult` output |
+| [`deployment_en.md`](src/forgedge/docs/specs/deployment_en.md) | `forgedge.deployment`: promotion gate, rule export, monitoring manifest for putting discovered rules into production |
+
+Working on this codebase with an AI coding agent? The `forgedge` skill in
+[`.claude/skills/forgedge/`](.claude/skills/forgedge/) covers the library's
+API, verdicts, and pipeline invariants in a form an agent can use directly.
 
 ---
 
