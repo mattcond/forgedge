@@ -302,6 +302,14 @@ if resp.is_edge:
 | [`modulo_2_it.md`](src/forgedge/docs/specs/modulo_2_it.md) | Alpha Discovery: target derivato, IC, OOS, AlphaContract |
 | [`modulo_3_it.md`](src/forgedge/docs/specs/modulo_3_it.md) | Rule Discovery: backtest, verdetto EDGE, walk-forward, report |
 | [`modulo_4_it.md`](src/forgedge/docs/specs/modulo_4_it.md) | Rule Registry: deduplicazione, cross-ticker, genericity, export |
+| [`configuration_it.md`](src/forgedge/docs/specs/configuration_it.md) | Riferimento completo alla configurazione: ogni campo dataclass, tipo, default e descrizione |
+| [`playground_it.md`](src/forgedge/docs/specs/playground_it.md) | `forgedge.playground`: helper di analisi di sola lettura sopra i `ForgeResult` messi in pool |
+| [`deployment_it.md`](src/forgedge/docs/specs/deployment_it.md) | `forgedge.deployment`: gate di promozione, export delle regole, manifest di monitoraggio per portare le regole scoperte in produzione |
+
+Lavori su questo codebase con un agente AI? La skill `forgedge` in
+[`.claude/skills/forgedge/`](.claude/skills/forgedge/) copre l'API della
+libreria, i verdetti e gli invarianti della pipeline in una forma che un
+agente può usare direttamente.
 
 ---
 

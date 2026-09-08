@@ -620,6 +620,23 @@ median. `forge()`'s M1 stage line carries this text; `result.event_discovery
     fields explicitly, decoupled from this class-default change (see
     pitfall #21 and `references/api-reference.md`'s TargetOptimizer
     section).
+24. **`forge()` is not bit-for-bit deterministic across process restarts.**
+    `feature_generator.py` iterates `set()` intersections of column names,
+    whose order depends on Python's per-process string hash randomization
+    (`PYTHONHASHSEED` unset by default); that order propagates to which
+    candidate survives a pool-truncating cap (AND-composer/grade-guided
+    composer), so two separate invocations of an identical script on
+    identical data can promote a slightly different number of contracts or
+    pick a different "best" rule — verified empirically (850/851/855
+    promoted across repeated runs). It **is** deterministic within one
+    already-running process. Fix: pin `PYTHONHASHSEED` in the environment
+    *before* the interpreter starts — setting it via `os.environ` mid-script
+    has no effect, since Python only reads it at startup; re-exec the
+    script if you need it self-contained (`os.environ["PYTHONHASHSEED"] =
+    "0"; os.execv(sys.executable, [sys.executable] + sys.argv)` as the very
+    first lines, as `examples/wf_period_reduction_test.py` does). Matters
+    for CI regression tests or any audit trail that expects an exact
+    `forge()` result to reproduce run to run.
 
 ### Entry mode and what a verdict now measures
 
