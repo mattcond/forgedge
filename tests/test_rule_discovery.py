@@ -24,6 +24,7 @@ from forgedge.rule_discovery import (
     ValidatedRule,
     WalkForwardConfig,
     build_grid,
+    cluster_entry_offset_scan,
     deflated_sharpe,
     html_report,
     rule_summary_report,
@@ -133,6 +134,106 @@ def _persistent_signal_table(n=600, run_len=5, every=40, seed=4):
         "open": close, "high": close * 1.02, "low": close * 0.98,
         "close": close, "__sig__": sig,
     })
+
+
+def _clustered_dip_then_rally_table(n=1500, every=60, seed=7):
+    """Two-bar signal clusters where the run's *second* bar, not the first,
+    is deliberately the profitable one-shot entry (issue #269).
+
+    Each cluster (bars ``i``, ``i+1``) sits right before a ``-4%`` dip that
+    lands exactly on bar ``i+1``, followed by a steady rally both entrants
+    ride on the very same subsequent price path: a market order opened off
+    bar ``i`` fills at ``open[i+1] == close[i]`` (the pre-dip level) and pays
+    for the dip out of the eventual exit; a market order opened off bar
+    ``i+1`` fills at ``open[i+2] == close[i+1]`` (the post-dip local low) and
+    starts the same rally from the bottom. With the rally sized smaller than
+    the dip, the first-bar entry nets negative and the second-bar entry nets
+    positive — the scenario ``cluster_entry_offset_scan`` exists to find.
+    """
+    close = np.full(n, 100.0)
+    sig = np.zeros(n, dtype=int)
+    i = 20
+    while i + 25 < n:
+        sig[i] = 1
+        sig[i + 1] = 1
+        base = close[i - 1]
+        close[i] = base
+        close[i + 1] = base * 0.96  # -4% dip lands on the cluster's 2nd bar
+        for k in range(2, 21):  # steady rally over the following 19 bars
+            close[i + k] = close[i + 1] * (1.003 ** (k - 1))
+        if i + 21 < n:
+            close[i + 21:] = close[i + 20]  # flat carry until the next cluster
+        i += every
+    open_ = np.empty(n)
+    open_[0] = close[0]
+    open_[1:] = close[:-1]  # standard convention: this bar opens at the last close
+    return pd.DataFrame({
+        "open_dt": pd.date_range("2023-01-01", periods=n, freq="1D"),
+        "open": open_, "high": close * 1.001, "low": close * 0.999,
+        "close": close, "__sig__": sig,
+    })
+
+
+class TestClusterEntryOffsetScan:
+    """Issue #269 (draft) — which bar of a multi-bar cluster to enter on."""
+
+    def test_finds_the_known_profitable_offset(self):
+        df = _clustered_dip_then_rally_table()
+        params = BacktestParams(
+            buy_type="market", target_h=10, fee=0.0,
+            early_stopping=False, sell_pct=0.5,
+        )
+        result = cluster_entry_offset_scan(df, "__sig__", params)
+
+        assert result.n_clusters > 5
+        assert result.mean_cluster_length == pytest.approx(2.0)
+        assert result.max_cluster_length == 2
+        assert len(result.offsets) == 2
+
+        offset0, offset1 = result.offsets
+        assert offset0.offset == 0 and offset1.offset == 1
+        # Every cluster opens exactly one trade at each offset here — no
+        # cluster is close enough to its neighbour for one-shot to skip one.
+        assert offset0.n_trades_opened == result.n_clusters
+        assert offset1.n_trades_opened == result.n_clusters
+        assert offset0.net_gain < 0
+        assert offset1.net_gain > 0
+        assert result.best_offset == 1
+
+    def test_no_signal_returns_an_empty_result(self):
+        df = _clustered_dip_then_rally_table()
+        df["__sig__"] = 0
+        params = BacktestParams(buy_type="market", target_h=10)
+        result = cluster_entry_offset_scan(df, "__sig__", params)
+        assert result.n_clusters == 0
+        assert result.offsets == []
+        assert result.best_offset is None
+        assert math.isnan(result.mean_cluster_length)
+
+    def test_a_single_bar_signal_has_exactly_one_offset(self):
+        df = _candle_with_signal(n=2000, signal_every=40, drift_after_signal=0.06)
+        params = BacktestParams(
+            buy_type="limit", buy_drop_pct=0.005, buy_delay_bar=6,
+            sell_pct=0.03, target_h=24,
+        )
+        result = cluster_entry_offset_scan(df, "__sig__", params)
+        assert result.max_cluster_length == 1
+        assert len(result.offsets) == 1
+        assert result.offsets[0].offset == 0
+        assert result.best_offset == 0
+
+    def test_max_offset_caps_the_scan(self):
+        df = _clustered_dip_then_rally_table()
+        params = BacktestParams(
+            buy_type="market", target_h=10, fee=0.0,
+            early_stopping=False, sell_pct=0.5,
+        )
+        result = cluster_entry_offset_scan(df, "__sig__", params, max_offset=1)
+        assert len(result.offsets) == 1
+        assert result.offsets[0].offset == 0
+        # The known-better offset 1 is never reached, so best_offset falls
+        # back to the only row that was actually scanned.
+        assert result.best_offset == 0
 
 
 class TestOverlapVisibility:
