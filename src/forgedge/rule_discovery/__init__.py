@@ -6,13 +6,15 @@ out-of-sample with a walk-forward scheme, and emits a verdict
 (``EDGE`` / ``PARTIAL-EDGE`` / ``NON-EDGE``).
 """
 from .analysis import excursion_stats, execution_envelope
-from .backtest import optimistic_hit_col, run_backtest
+from .backtest import cluster_entry_offset_scan, optimistic_hit_col, run_backtest
 from .discovery import RuleDiscovery
 from .grid import build_grid, grid_dataframe, run_grid, select_best
 from .models import (
     BacktestParams,
     BacktestSummary,
     EntryOptimization,
+    EntryTimingOffset,
+    EntryTimingOptimization,
     ExcursionStats,
     ExecutionEnvelope,
     GridResult,
@@ -51,9 +53,12 @@ __all__ = [
     "RegimeBreakdown",
     "ExecutionEnvelope",
     "EntryOptimization",
+    "EntryTimingOffset",
+    "EntryTimingOptimization",
     "ExcursionStats",
     "ValidatedRule",
     "run_backtest",
+    "cluster_entry_offset_scan",
     "optimistic_hit_col",
     "run_grid",
     "build_grid",
