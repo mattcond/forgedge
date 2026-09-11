@@ -36,3 +36,27 @@ All three portfolios clear IS and OOS (PF 3.8–6.2) and lose money on the hold-
 815 gated rules were profitable there, against 34.8% of all 1,510 tradeable rules
 — passing the IS+OOS gates made a rule *less* likely to survive. No rule ever
 cleared the rotation null (`rotation_p = 1.00` on all but one leg).
+
+## Parte 2 — il gate a tre finestre
+
+`09_multiwindow.py` ri-segna tutte le 1.510 regole su **IS / OOS / HO1 / HO2**
+in un solo replay per regola: il filtro di `run_backtest` agisce solo sulla barra
+di apertura (`dt[signal_rn+1]`), quindi un replay full-range bucketizzato su
+quella barra riproduce esattamente le finestre separate — verificato contro
+`pool.csv` (conteggi identici, differenza massima di PF 0.0).
+
+| Step | Script | Produce |
+|---|---|---|
+| 7 | `09_multiwindow.py` | `out/multiwindow.csv`, `out/ledgers.pkl` |
+| 8 | `10_triple_gate.py` | Set A (gate IS+OOS+HO) e Set B (gate IS+OOS+HO1, HO2 sigillata) |
+| 9 | `11_payload2.py` + `12_report_part2.py` | sezione 2 del report HTML |
+
+**Esito.** HO1 = `2026-01-01 → 2026-05-01` entra nel gate, HO2 = `2026-05-01 →
+2026-09-02` resta sigillata. Sopravvivenza su HO2: nessun gate 29,6% · IS+OOS
+30,5% · IS+OOS+HO1 **24,5%**. Con cap orizzonte ≤20 barre (così ogni regola può
+chiudere dentro HO2): 29,6% · 28,5% · **21,8%**. Aggiungere una finestra al gate
+peggiora la finestra successiva.
+
+L'unico segnale che regge è la **classe di asset**: le regole su indici
+sopravvivono al 67,8% (gate IS+OOS) e 67,4% (gate IS+OOS+HO1), praticamente
+invariate; commodity 16,9% → 10,1%, crypto 22,6% → 15,0%.
