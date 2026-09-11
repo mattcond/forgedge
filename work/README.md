@@ -60,3 +60,29 @@ peggiora la finestra successiva.
 L'unico segnale che regge è la **classe di asset**: le regole su indici
 sopravvivono al 67,8% (gate IS+OOS) e 67,4% (gate IS+OOS+HO1), praticamente
 invariate; commodity 16,9% → 10,1%, crypto 22,6% → 15,0%.
+
+## Parte 3 — criterio di consistenza (IS *e* OOS *e* HO)
+
+L'hold-out resta fuori dalla **discovery** (`forge()` non vede mai barre oltre il
+2025-12-31) ed entra solo in **selezione**, come terza conferma: si tiene una
+regola solo se profittevole in IS, in OOS e nell'hold-out.
+
+| Step | Script | Produce |
+|---|---|---|
+| 10 | `13_consistency.py` | `out/setK.pkl` — 3 book da 5 regole, gate IS+OOS+HO, orizzonte ≤20 |
+| 11 | `14_payload3.py` + `15_report_part3.py` | sezione 3 del report HTML |
+
+Il ranking va oltre le tre finestre: fra le 217 regole ammissibili si preferiscono
+quelle che chiudono in positivo più **trimestri di calendario indipendenti**
+(mediana 16/23 nel pool), poi il PF della finestra più debole, poi la consistenza
+walk-forward di M3.
+
+**Esito.** PF fra 1,8 e 2,7 su tutte e tre le finestre, 19–20 trimestri positivi
+su 23, peggior trimestre da −56 a −72 € contro una mediana di +36/+51 €, drawdown
+massimo sotto il 5% del capitale di picco in ogni finestra. La composizione si
+riequilibra da sola verso S&P 500 / DAX / Copper più uno short su Brent o Bitcoin.
+
+**Limite.** IS, OOS e HO sono ormai tutte lette: questi book descrivono ciò che ha
+funzionato dal 2021 a oggi, non stimano ciò che funzionerà. Ciò che il filtro non
+impone — e che quindi porta informazione residua — è la *forma* della
+distribuzione trimestrale, non il livello delle tre finestre.
