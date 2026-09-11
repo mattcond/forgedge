@@ -1,0 +1,6 @@
+# Derived data — regenerate with 01_build_kpi.py / 02_discover.py / 03_pool.py
+kpi/
+runs/
+out/*.pkl
+out/payload.json
+out/pool_log.txt
