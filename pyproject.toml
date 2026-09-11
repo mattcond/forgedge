@@ -36,3 +36,13 @@ addopts = "-n auto"
 markers = [
     "slow: full-grid Rule Discovery / large-dataset (>=4000 bars) pipeline tests. Dominate suite runtime; deselect with -m 'not slow' for the fast dev loop, run the full suite (this default) before pushing.",
 ]
+
+[tool.hatch.build.targets.wheel]
+exclude = [
+    "examples/data/**/*.csv",
+]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "examples/data/**/*.csv",
+]
