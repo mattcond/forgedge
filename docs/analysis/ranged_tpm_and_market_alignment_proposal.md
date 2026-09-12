@@ -518,8 +518,96 @@ trend/carry rispetto al crypto) è il più bilanciato — entrambe le direzioni 
 economicamente, non solo statisticamente stabili. Nessun terzo bug trovato in questo
 giro: la doppia correzione di §3.3-§3.4 regge su dati indipendenti.
 
-### 3.6 Rischi / vincoli noti
+### 3.6 Casi studio — perché i due metodi divergono, orizzonte per orizzonte
 
+Analisi di dettaglio su ADA (`"balanced"`): profilo completo per-orizzonte di sei
+regole rappresentative per ciascuno dei due gruppi che dividono i metodi (§3.4),
+per capire il meccanismo, non solo il conteggio aggregato.
+
+**Gruppo "solo attuale" (BH-FDR promuove, AUC no) — tre meccanismi distinti:**
+
+1. *Decadimento veloce diluito dai pesi trapezoidali* (il più frequente):
+
+   ```
+   ALPHA-ADA-1D-260912-007  (close_ret_03 > 0.089)
+   h    1       2       3       5       7       10
+   rate 0.0136  0.0088  0.0068  0.0027  0.0014  0.0025
+   z    2.20*   1.62*   1.38    0.64    0.38    0.79
+   ```
+   `h_sig=(1,2)` — due orizzonti individualmente significativi, non un colpo di
+   fortuna isolato — ma `p_AUC=0.169`, non passa. Il tasso decade rapidamente dopo
+   h=2 (snap-back tipico), mentre i pesi trapezoidali su `(1,2,3,5,7,10)` **crescono**
+   verso il centro/coda (`w(7)=2.5`, il massimo, contro `w(1)=0.5`): il test pesa di
+   più gli orizzonti lunghi dove il segnale si è già spento, diluendo un effetto reale
+   ma concentrato all'inizio.
+
+2. *Vero picco isolato* (il caso che lo stadio (a) dell'idea B doveva intercettare):
+
+   ```
+   ALPHA-ADA-1D-260912-037  (delta_close_ret_03_1 > 0.053)
+   h    1      2      3      5      7      10
+   z    1.08   1.47   2.17*  1.18   0.16   0.01
+   ```
+   Solo h=3 è significativo, isolato tra rumore prima e dopo. `p_AUC=0.165`. Qui il
+   test funziona esattamente come previsto.
+
+3. *Orizzonte diradato dall'enrichment che domina la somma pesata* (non previsto in
+   fase di design):
+
+   ```
+   ALPHA-ADA-1D-260912-996  (ratio_high_low_lag12 < 0.920)
+   h_sig = (1, 2, 3, 5, 6)  — CINQUE orizzonti su 9 individualmente significativi
+   p_AUC = 0.216 — non passa comunque
+   ```
+   Nonostante un profilo di significatività ampio, non concentrato in un punto,
+   l'evento ha orizzonti aggiunti dall'enrichment (6, 12, 24 oltre alla griglia base)
+   — a `h=24` il peso trapezoidale è enorme (`w(24)=(24-12)/2=6`, contro `w(1)=0.5`),
+   e lì il tasso è quasi nullo (0.0018) ma con quel peso pesa quanto l'intero gruppo
+   di orizzonti brevi significativi messi insieme.
+
+**Gruppo "solo AUC" (AUC promuove, BH-FDR no) — un pattern unico e pulito:**
+
+Tutte e sei le regole esaminate hanno `h_sig=()` — **nessun** orizzonte
+individualmente BH-significativo — ma mostrano segno **stabile su tutta la griglia
+scansionata, mai un'inversione**:
+
+```
+ALPHA-ADA-1D-260912-256  (pr_ratio_close_ret03_ret96_96 < 0.083)  direzione implicita: short
+h    1        2        3        5        7        10
+rate -0.0049  -0.0066  -0.0090  -0.0087*  -0.0051  -0.0039
+z    -0.73    -1.22    -1.85    -2.18     -1.49    -1.39
+```
+Negativo su ogni singolo orizzonte, mai un cambio di segno, eppure nessun punto
+supera BH-FDR individualmente — `p_AUC=0.065`. Lo stesso schema si ripete identico
+nelle altre cinque regole esaminate (028, 088, 057, 136, 048): z tipicamente tra 1.0
+e 2.0, mai abbastanza forte in un punto isolato, sempre presente ovunque si guardi —
+l'opposto esatto del gruppo "solo attuale" (forte-ma-solo-qui vs. debole-ma-ovunque).
+Nessuna delle sei mostra il pattern "picco poi inversione" del gruppo precedente.
+
+**Sintesi.** I due gruppi non sono simmetrici per caso: il metodo attuale è
+strutturalmente sensibile a un picco concentrato (anche isolato, meccanismo 2 sopra);
+il metodo AUC è strutturalmente sensibile alla coerenza di segno distribuita
+(gruppo "solo AUC"), ma — meccanismi 1 e 3 sopra — può **mancare** un effetto reale se
+è concentrato all'inizio della griglia e diluito dai pesi lunghi, o se un singolo
+orizzonte diradato dall'enrichment domina la somma anche a fronte di un profilo già
+ampiamente significativo. Nessuno dei due metodi è strettamente superiore in ogni
+caso: misurano cose diverse, con vulnerabilità diverse.
+
+### 3.7 Rischi / vincoli noti
+
+- **Nuovo, dai casi studio §3.6: i pesi trapezoidali penalizzano sistematicamente gli
+  edge veloci e concentrati.** Non è un errore nel calcolo — l'integrale pesato è
+  esattamente quello specificato — ma è un limite di *design* dello schema di pesi:
+  su una griglia con salti crescenti (`1,2,3,5,7,10`), i punti centrali/finali pesano
+  più di quelli iniziali, quindi un effetto reale ma a decadimento rapido (proprio il
+  pattern mean-reversion che §3.4-§3.5 trovano dominante tra ciò che *supera* lo
+  stadio (a)) rischia di essere diluito quando è anche più forte all'inizio della
+  griglia rispetto alla coda. Un singolo orizzonte aggiunto dall'enrichment e molto
+  distante dai vicini (es. h=24 dopo h=12) può ricevere un peso sproporzionato e
+  dominare la somma anche a fronte di un profilo altrimenti ampio e coerente
+  (caso 996). Da rivalutare in una revisione successiva (es. pesi legati alla
+  varianza attesa a ciascun orizzonte invece che alla sola spaziatura) — non
+  affrontato in questa specifica.
 - La soglia di `p_AUC` (qui 0.10, illustrativa) e la soglia di `ρ` (qui 0.5,
   illustrativa) vanno agganciate alla calibrazione statistica esistente di M2
   (`PromotionThresholds`), non lasciate come numeri liberi.
@@ -533,7 +621,7 @@ giro: la doppia correzione di §3.3-§3.4 regge su dati indipendenti.
 - Resta da ripetere la validazione anche sul preset `"sniper"` (qui testato solo per
   l'idea A, §2.9) prima di considerare le soglie definitive.
 
-### 3.7 Domande aperte
+### 3.8 Domande aperte
 
 - Calcolare gli stadi (a)/(b) anche sui candidati con `direction` oggi `"undetermined"`
   (necessario per catturare i casi "solo AUC" osservati in §3.4) o solo su quelli già
@@ -704,10 +792,10 @@ decidere con l'utente:
   difetto della formula. Resta da congelare solo il dettaglio tecnico residuo di §2.7
   (`"bar"` mode, se esporre `z`).
 - **Idea B: formule congelate (corrette due volte) e validate su tre asset**
-  (§3.3-§3.5) — due stadi (gate AUC via rotation-null riusato, poi pendenza di `Δ_h/h`
+  (§3.3-§3.6) — due stadi (gate AUC via rotation-null riusato, poi pendenza di `Δ_h/h`
   sulla griglia), entrambi corretti dallo stesso artefatto aritmetico (`Δ_h` grezzo) e
   poi confermati su ADA, BTC ed EURUSD con lo stesso pattern qualitativo. Resta da
-  ripetere su `"sniper"` (§3.6) e fissare le soglie definitive (§3.7).
+  ripetere su `"sniper"` (§3.7) e fissare le soglie definitive (§3.8).
 - **Idea C: formule congelate** (§4.3) — meccanismo a tre/quattro stati derivato
   interamente da `DerivedTarget.score_by_h`, già esposto sul contratto, nessun nuovo
   dato. Resta da fare la validazione empirica (§4.5, stesso metodo usato per A e B)
