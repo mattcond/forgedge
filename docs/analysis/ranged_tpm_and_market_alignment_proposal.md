@@ -268,6 +268,43 @@ delle centinaia il numero di coppie possibili supera ampiamente quel tetto, quin
 conteggio dei compositi non è informativo per confrontare la pressione computazionale
 reale tra le configurazioni — solo la dimensione della pool atomica pre-composizione lo è.
 
+### 2.9 Validazione multi-asset — BTC ed EURUSD
+
+Estensione di §2.8 a due asset ulteriori, costruiti da OHLCV grezzo
+(`examples/data/BTCEUR_1DAY.csv`, `examples/data/EURUSD_1DAY.csv`) via
+`build_features`/`candle_features` — nessuna sorgente forgedge modificata, stesso
+metodo di §2.8. **Limite del confronto**: `ADA_1D_TRAIN.parquet` è un fixture
+pre-costruito con una configurazione di feature diversa da quella di default usata qui
+per BTC/EURUSD (4495 candidati grezzi contro ~47000) — il confronto BTC↔EURUSD è pulito
+(stessa config), quello con ADA no.
+
+| asset | mesi | `σ_tpm` (balanced) | rapporto ranged/floor, grezzo | dopo dedup |
+|---|---|---|---|---|
+| ADA | 29 | 0.257 | 1.55× | 1.58× |
+| BTC | 43 | 0.205 | 1.26× | 1.31× |
+| EURUSD | 69 | 0.156 | **0.97×** | 0.99× |
+
+| asset | mesi | `σ_tpm` (sniper) | rapporto ranged/floor, grezzo | dopo dedup |
+|---|---|---|---|---|
+| ADA | 29 | 0.127 | 0.18× | 0.19× |
+| BTC | 43 | 0.101 | 0.39× | 0.37× |
+| EURUSD | 69 | 0.077 | 0.47× | 0.40× |
+
+**Osservazione di troubleshooting.** Per `"balanced"` il rapporto scende
+monotonicamente all'aumentare dei mesi di storia — coerente con `σ_tpm ∝ 1/√n_mesi`
+(più dati → banda più stretta → meno ammissione dal basso): il meccanismo si comporta
+come progettato. Ma per `"sniper"` il rapporto **sale** con più mesi — direzione
+opposta. Non è quindi una relazione generale e pulita con `n_mesi`: la forma della
+distribuzione dei tassi grezzi propria di ciascun asset pesa almeno quanto l'ampiezza
+della banda, e l'interazione tra le due non si riduce a una regola unica. Nessun bug
+individuato — la formula resta corretta e stabile, il suo effetto netto è
+genuinamente specifico di asset e preset insieme, non solo di preset come la sola
+verifica su ADA avrebbe potuto suggerire.
+
+Il conteggio dei compositi satura a 2000 in **tutte e 12** le combinazioni
+asset×preset×modalità testate — conferma ulteriore, non più solo su ADA, che è
+`_MAX_PAIRS` a saturare, non un segnale sostanziale.
+
 ---
 
 ## 3. Idea B — Etichettatura momentum / mean-reversion / idiosincratica (M2)
@@ -447,7 +484,41 @@ Distribuzione plausibile per pattern basati su indicatori tecnici (incroci, sogl
 percentile) su questo asset/timeframe: prevalentemente reazioni che si affievolisce con
 l'orizzonte, non trend che si autoalimentano.
 
-### 3.5 Rischi / vincoli noti
+### 3.5 Validazione multi-asset — BTC ed EURUSD
+
+Stesso metodo di §3.4, preset `"balanced"`, sugli asset di §2.9 (BTC ed EURUSD, KPI
+table costruite da OHLCV grezzo — stesso limite di confronto con ADA già segnalato lì).
+
+**Selezione — metodo attuale vs metodo AUC corretto:**
+
+| asset | entrambi (h\* med) | solo attuale (h\* med) | solo AUC (h\* med, % bordo) |
+|---|---|---|---|
+| ADA | 111 (3) | 69 (2) | 45 (5, 6.7%) |
+| BTC | 491 (2) | 209 (1) | 237 (5, 13.1%) |
+| EURUSD | 356 (5) | 391 (1) | 184 (7, 13.6%) |
+
+Pattern identico sui tre asset: "solo attuale" ha sempre l'h\* mediano più basso (1-2) —
+il rischio di falsi positivi a orizzonte breve del metodo attuale non è specifico di
+ADA. "Solo AUC" ha sempre l'h\* mediano più alto (5-7) senza concentrarsi al bordo
+(6.7-13.6%, mai vicino al 43% della formula sbagliata di §3.4) — la correzione tiene su
+asset molto diversi da quello su cui è stata trovata.
+
+**Etichetta stadio (b):**
+
+| asset | n | mean-reversion-aligned | idiosyncratic | momentum-aligned |
+|---|---|---|---|---|
+| ADA | 156 | 68.6% | 28.2% | 3.2% |
+| BTC | 728 | **83.4%** | 15.2% | 1.4% |
+| EURUSD | 540 | 60.7% | 31.7% | **7.6%** |
+
+Il mean-reversion domina ovunque (61-83%), il momentum resta sempre marginale (1-8%) —
+coerente con pattern basati su indicatori tecnici. BTC (l'asset più volatile dei tre)
+mostra lo skew più forte verso mean-reversion; EURUSD (FX, storicamente più incline a
+trend/carry rispetto al crypto) è il più bilanciato — entrambe le direzioni plausibili
+economicamente, non solo statisticamente stabili. Nessun terzo bug trovato in questo
+giro: la doppia correzione di §3.3-§3.4 regge su dati indipendenti.
+
+### 3.6 Rischi / vincoli noti
 
 - La soglia di `p_AUC` (qui 0.10, illustrativa) e la soglia di `ρ` (qui 0.5,
   illustrativa) vanno agganciate alla calibrazione statistica esistente di M2
@@ -459,20 +530,18 @@ l'orizzonte, non trend che si autoalimentano.
   seconda correzione: la concentrazione al bordo osservata nella prima passata era un
   artefatto della formula (`Δ_h` grezzo in entrambi gli stadi), non un fenomeno che
   l'idea C intercetterebbe. Nessuna dipendenza stretta tra B e C.
-- Prima di congelare le soglie definitive va ripetuta la stessa doppia verifica (bontà
-  della correzione + confronto di selezione) su un secondo preset/asset, sullo stesso
-  modello di §2.8 per l'idea A — un'unica validazione ha già portato a due correzioni
-  successive, motivo in più per non fermarsi a un solo caso.
+- Resta da ripetere la validazione anche sul preset `"sniper"` (qui testato solo per
+  l'idea A, §2.9) prima di considerare le soglie definitive.
 
-### 3.6 Domande aperte
+### 3.7 Domande aperte
 
 - Calcolare gli stadi (a)/(b) anche sui candidati con `direction` oggi `"undetermined"`
   (necessario per catturare i casi "solo AUC" osservati in §3.4) o solo su quelli già
   diretti — la validazione mostra che la prima opzione è quella che cattura il valore
   aggiunto reale del metodo.
 - Esporre anche i valori quantitativi (`p_AUC`, `ρ`) oltre alle etichette categoriche.
-- Ripetere la validazione su un secondo preset/asset prima di congelare le soglie
-  definitive, sullo stesso modello di §2.8 per l'idea A.
+- Ripetere la validazione anche sul preset `"sniper"` prima di congelare le soglie
+  definitive.
 
 ---
 
@@ -628,18 +697,19 @@ pinning al bordo che C rileva).
 Questo documento resta a livello di specifica funzionale. I passi successivi, da
 decidere con l'utente:
 
-- **Idea A: validazione empirica chiusa** (§2.8) — formula confermata corretta e
-  stabile su due preset (`"balanced"`, `"sniper"`) sul fixture di riferimento; l'effetto
-  netto sul volume di candidati varia per preset/asset per una ragione capita e
-  spiegata, non per un difetto della formula. Resta da congelare solo il dettaglio
-  tecnico residuo di §2.7 (`"bar"` mode, se esporre `z`).
+- **Idea A: validazione empirica chiusa, multi-preset e multi-asset** (§2.8-§2.9) —
+  formula confermata corretta e stabile su due preset (`"balanced"`, `"sniper"`) e tre
+  asset (ADA, BTC, EURUSD); l'effetto netto sul volume di candidati varia per
+  preset×asset insieme per una ragione capita e in parte spiegata (§2.9), non per un
+  difetto della formula. Resta da congelare solo il dettaglio tecnico residuo di §2.7
+  (`"bar"` mode, se esporre `z`).
+- **Idea B: formule congelate (corrette due volte) e validate su tre asset**
+  (§3.3-§3.5) — due stadi (gate AUC via rotation-null riusato, poi pendenza di `Δ_h/h`
+  sulla griglia), entrambi corretti dallo stesso artefatto aritmetico (`Δ_h` grezzo) e
+  poi confermati su ADA, BTC ed EURUSD con lo stesso pattern qualitativo. Resta da
+  ripetere su `"sniper"` (§3.6) e fissare le soglie definitive (§3.7).
 - **Idea C: formule congelate** (§4.3) — meccanismo a tre/quattro stati derivato
   interamente da `DerivedTarget.score_by_h`, già esposto sul contratto, nessun nuovo
-  dato. Resta da fare la validazione empirica (§4.5, stesso metodo di §2.8) prima di
-  considerarla chiusa come A.
-- **Idea B: formule congelate e validazione empirica su un preset** (§3.3-§3.4) — due
-  stadi (gate AUC via rotation-null riusato, poi pendenza di `Δ_h/h` sulla griglia). La
-  validazione ha già corretto una formula sbagliata (`Δ_h` grezzo) e mostrato una
-  differenza di selezione concreta rispetto al metodo attuale. Restano aperte le soglie
-  (§3.6) e la ripetizione su un secondo preset/asset, come già fatto per A.
+  dato. Resta da fare la validazione empirica (§4.5, stesso metodo usato per A e B)
+  prima di considerarla chiusa come le altre due.
 - Solo dopo: apertura di branch/issue separati per A, B, C.
