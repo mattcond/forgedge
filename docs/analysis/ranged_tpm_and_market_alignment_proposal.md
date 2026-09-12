@@ -333,8 +333,8 @@ orizzonte costa una proiezione lineare, nessun ricalcolo pesante:
 
 ```
 w = pesi trapezoidali sulla griglia reale (rispetta spaziature non uniformi, es. H={1,2,5,10})
-AUC_Δ = Σ_i w_i · Δ_{h_i} = delta @ w                    # statistica osservata
-AUC_Δ^(shift) = null[shift, :] @ w                        # nulla, una per shift
+AUC_Δ = Σ_i w_i · (Δ_{h_i} / h_i)                          # tasso per-barra, NON Δ_h grezzo — vedi §3.4
+AUC_Δ^(shift) = Σ_i w_i · (null[shift, h_i] / h_i)          # nulla costruita sulla stessa quantità
 p_AUC = (1 + #{|AUC_Δ^(shift)| >= |AUC_Δ|}) / (1 + n_shift_validi)   # stessa formula già usata per-orizzonte
 
 edge_distinguibile = p_AUC < soglia
@@ -346,6 +346,11 @@ finestre sovrapposte), quindi Fisher li tratterebbe come indipendenti quando non
 sono, sovrastimando la significatività. Costruire la nulla sulla statistica già
 aggregata (come sopra) evita il problema perché la correlazione tra orizzonti è
 automaticamente preservata in ogni shift.
+
+**Nota di consistenza:** sia lo stadio (a) sia lo stadio (b) operano ora sulla stessa
+quantità corretta, `Δ_h / h` — non solo (b). La prima stesura usava `Δ_h` grezzo in (a);
+la validazione empirica (§3.4) ha mostrato che era anch'essa distorta, per lo stesso
+motivo aritmetico scoperto correggendo (b).
 
 **Stadio (b) — solo se (a) è positivo: direzione del profilo sulla griglia.**
 
@@ -383,46 +388,64 @@ modificata. Da quegli argomenti lo script ricalcola `mu_base`/`delta` e la matri
 senza toccare il pacchetto. Dataset: `tests/fixtures/ADA_1D_TRAIN.parquet`, griglia
 giornaliera `(1,2,3,5,7,10)`.
 
-**Conferma della correzione `Δ_h/h`.** Sugli 89 contratti (su 180 con direzione
-derivata) che superano `p_AUC < 0.10`:
+**Prima passata — perché anche lo stadio (a) andava corretto.** La prima versione dello
+stadio (a) integrava `Δ_h` grezzo, non il tasso. Decomponendo la somma pesata
+termine-per-termine su tutti i 1662 candidati:
 
-| | `Δ_h` grezzo (scartato) | `Δ_h / h` (congelato) |
+| | quota media di \|AUC\| dal termine dominante | il termine dominante è l'ultimo orizzonte |
 |---|---|---|
-| momentum-aligned | 78 (88%) | 8 (9%) |
-| mean-reversion-aligned | 0 | 50 (56%) |
-| idiosyncratic | 11 (12%) | 31 (35%) |
+| `Δ_h` grezzo | 40% | **40.4%** dei casi |
+| `Δ_h / h` (corretto) | 31% | **10.7%** dei casi |
 
-La versione grezza etichettava quasi tutto come momentum — implausibile, e infatti
-artefatto aritmetico (§3.3). Incrociando con il flag di bordo dell'idea C
-(`h* == max(orizzonti scansionati)`) si esclude che fosse un effetto di griglia
-sotto-scansionata: `ρ` resta alto sia al bordo sia all'interno della griglia — la causa
-era la formula, non l'idea C.
+Con `Δ_h` grezzo, in 4 casi su 10 la "significatività integrata sulla griglia" era in
+realtà quasi interamente il contributo di un solo punto — quasi sempre il più lungo
+scansionato: lo stesso problema aritmetico che (b) aveva già rivelato (`Δ_h` è cumulato,
+cresce con `h` per qualunque edge persistente anche solo costante per barra),
+ripresentato in una forma diversa. Confrontando la selezione "solo AUC" (candidati che
+l'AUC promuove e il metodo attuale no) tra le due versioni: con `Δ_h` grezzo, `h*`
+mediano = 10 e 43% dei casi al bordo della griglia; con `Δ_h/h`, `h*` mediano = 5 e
+solo 6.7% al bordo. La correzione elimina quasi del tutto la concentrazione al bordo —
+non era un segnale reale, era l'artefatto aritmetico.
 
-**Selezione: metodo attuale (direzione derivabile) vs metodo AUC, sugli stessi 1662
-candidati atomici.** `h*`, `direction` e `sell_pct` vengono dalla *stessa* derivazione in
-entrambi i casi — quello che cambia è **quali** candidati ciascun metodo lascia passare:
+**Numeri finali, entrambi gli stadi corretti su `Δ_h/h`.** Selezione — metodo attuale
+(direzione derivabile) vs metodo AUC, sugli stessi 1662 candidati atomici. `h*`,
+`direction` e `sell_pct` vengono dalla *stessa* derivazione in entrambi i casi — cambia
+solo **quali** candidati ciascun metodo lascia passare:
 
 | | AUC non significativo | AUC significativo (`p_AUC<0.10`) |
 |---|---|---|
-| **attuale: undetermined** | 1426 | 56 — *"solo AUC"* |
-| **attuale: direzione derivata** | 91 — *"solo attuale"* | 89 — *entrambi* |
+| **attuale: undetermined** | 1437 | 45 — *"solo AUC"* |
+| **attuale: direzione derivata** | 69 — *"solo attuale"* | 111 — *entrambi* |
 
-- **Entrambi (89):** `h*` mediano = 5 — posizione centrale della griglia.
-- **Solo attuale (91):** `h*` mediano = **1** — il test a singolo orizzonte (BH-FDR)
-  trova un picco di significatività a un orizzonte molto corto che **non regge**
-  quando si guarda il profilo integrato sull'intera griglia. Rischio del metodo attuale:
-  falsi positivi concentrati su orizzonti brevi/rumorosi.
-- **Solo AUC (56):** `h*` mediano = **10** (al bordo della griglia base) — nessun singolo
-  orizzonte supera il BH-FDR (`direction` oggi resta `"undetermined"`, `sell_pct` mai
-  calcolato), ma l'effetto **integrato su più orizzonti è significativo**: un contributo
-  moderato e persistente, mai abbastanza concentrato in un punto solo. Esattamente il
-  tipo di caso per cui il test AUC esiste — e nota collegata: questi casi si concentrano
-  vicino al bordo della griglia, lo stesso segnale che l'idea C guarda da un'altra
-  angolazione (h\* pinnato al bordo perché la griglia non arriva abbastanza lontano).
+- **Entrambi (111):** `h*` mediano = 3, 18.9% al bordo.
+- **Solo attuale (69):** `h*` mediano = **2**, 10.1% al bordo — il test a singolo
+  orizzonte (BH-FDR) trova un picco di significatività a orizzonte breve che non regge
+  sul profilo integrato. Rischio del metodo attuale: falsi positivi su orizzonti
+  brevi/rumorosi.
+- **Solo AUC (45):** `h*` mediano = 5, **solo 6.7% al bordo** — nessun singolo orizzonte
+  supera il BH-FDR (`direction` oggi `"undetermined"`, `sell_pct` mai calcolato), ma
+  l'effetto integrato su più orizzonti è significativo: un contributo moderato e
+  distribuito, non concentrato in un punto. A differenza della prima passata, questi
+  casi **non** si concentrano più al bordo della griglia — la nota di collegamento con
+  l'idea C ipotizzata nella prima stesura era anch'essa un riflesso dell'artefatto
+  aritmetico, non un fenomeno reale.
 
-Non è un rapporto di sottoinsieme: il metodo AUC non "seleziona di più" o "di meno" del
-metodo attuale, seleziona **un insieme diverso**, con un profilo di falsi
-positivi/negativi diverso.
+Non è un rapporto di sottoinsieme: il metodo AUC seleziona un insieme **diverso**, con un
+profilo di falsi positivi/negativi diverso, non semplicemente "più" o "meno" del metodo
+attuale.
+
+**Etichetta dello stadio (b) sui 156 candidati (111+45) che superano lo stadio (a)
+corretto:**
+
+| | n | % |
+|---|---|---|
+| mean-reversion-aligned | 107 | 68.6% |
+| idiosyncratic | 44 | 28.2% |
+| momentum-aligned | 5 | 3.2% |
+
+Distribuzione plausibile per pattern basati su indicatori tecnici (incroci, soglie di
+percentile) su questo asset/timeframe: prevalentemente reazioni che si affievolisce con
+l'orizzonte, non trend che si autoalimentano.
 
 ### 3.5 Rischi / vincoli noti
 
@@ -432,9 +455,14 @@ positivi/negativi diverso.
 - Il test (a) va calcolato sul periodo di stima coerente con la validazione IS/OOS già
   esistente, per non introdurre una forma di overfitting non controllata dalla
   walk-forward/rotazione già presente.
-- Il legame con l'idea C non è quello ipotizzato in origine (il pinning al bordo non
-  spiega l'artefatto di §3.4) ma resta utile come nota diagnostica accessoria sui casi
-  "solo AUC" (si veda sopra) — non più una dipendenza stretta per la correttezza di B.
+- Il legame con l'idea C ipotizzato nella prima stesura non regge nemmeno dopo la
+  seconda correzione: la concentrazione al bordo osservata nella prima passata era un
+  artefatto della formula (`Δ_h` grezzo in entrambi gli stadi), non un fenomeno che
+  l'idea C intercetterebbe. Nessuna dipendenza stretta tra B e C.
+- Prima di congelare le soglie definitive va ripetuta la stessa doppia verifica (bontà
+  della correzione + confronto di selezione) su un secondo preset/asset, sullo stesso
+  modello di §2.8 per l'idea A — un'unica validazione ha già portato a due correzioni
+  successive, motivo in più per non fermarsi a un solo caso.
 
 ### 3.6 Domande aperte
 
