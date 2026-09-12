@@ -63,61 +63,143 @@ banali/degenerate, es. un indicatore quasi sempre sopra soglia).
   `oos_span_too_short`, `m3_stricter_than_m1`. Tutta questa catena assume la semantica di
   floor con margine di Poisson al 95% ("almeno N trade attesi al tasso minimo").
 
-### 2.3 Proposta funzionale
+### 2.3 Proposta funzionale (formule congelate)
 
 Aggiungere una modalità di selezione alternativa al gate, **attiva solo su richiesta
-esplicita** e **confinata a M1**:
+esplicita** e **confinata a M1**. Due nuovi campi su `GateParams`:
 
-- Nuovo campo (nome indicativo) `GateParams.tpm_mode: Literal["floor", "ranged"] = "floor"`.
-  Default invariato → nessuna regressione sul comportamento esistente.
-- In modalità `"ranged"`, `min_tpm` è interpretato come **centro** di una banda anziché
-  come soglia minima. La larghezza della banda si deriva dalla dispersione *già
-  misurata* dal gate per quell'evento — non un nuovo parametro statistico, ma la stessa
-  quantità (`episode_id` / `eff_max_dispersion`) letta in chiave bidirezionale invece che
-  come solo tetto.
-- Criterio di accettazione (bozza): l'evento passa se il suo tasso osservato
-  (`episode_tpm` o `mean_tpm`, a seconda di `event_counting`) cade entro
-  `min_tpm ± k · σ_tpm`, dove `σ_tpm` è la deviazione standard implicita nella
-  dispersione osservata a quel numero di mesi, e `k` gioca lo stesso ruolo di
-  `dispersion_margin` oggi (quanta tolleranza oltre il minimo statisticamente
-  difendibile).
+```python
+tpm_mode: Literal["floor", "ranged"] = "floor"   # default invariato, nessuna regressione
+tpm_tolerance: float = UNSET                      # stessa unità di min_tpm
+```
 
-### 2.4 Decisione già presa
+In modalità `"ranged"`, `min_tpm` è il **centro** della banda. `tpm_tolerance` è la
+mezza-larghezza, in unità assolute (episodi/mese o barre/mese, come `min_tpm`), con due
+comportamenti a seconda che sia lasciato `UNSET` o fissato dall'utente — lo stesso
+idioma `UNSET`→derivato usato ovunque nel resolver, ma risolto **localmente dentro il
+gate**, non nella tabella `CONSTRAINTS` di `resolver.py` (si veda il perché in §2.4):
 
-**La banda ranged resta un filtro di selezione locale a M1.** Gli eventi che superano il
-gate — in modalità `"floor"` o `"ranged"` — arrivano a M2 nella stessa forma
-(`EventCandidate` con la sua serie di attivazione), indistinguibili dal punto di vista di
-M2 in poi. Questo significa **esplicitamente**:
+- **`UNSET` (default) → derivato dalla dispersione tollerata di sessione:**
 
-- Nessuna modifica alla catena di derivazione del resolver (`min_train_months`,
-  `pf_min_tpm`, i controlli di coerenza `oos_span_too_short` / `m3_stricter_than_m1`
-  restano ancorati alla semantica floor di `min_tpm`, invariata).
-- La modalità ranged non introduce un nuovo "significato" di `min_tpm` visibile a valle:
-  è un criterio di ammissione in più al gate, non una ridefinizione del parametro.
-- Se in futuro servisse che anche M3/resolver ragionassero in termini di banda, sarà una
-  proposta separata e esplicita, non un effetto collaterale di questa modalità.
+  ```
+  σ_tpm = sqrt(eff_max_dispersion · min_tpm / n_total_months)
+  tpm_tolerance_effettivo = z · σ_tpm            (z = 1.959964, normale a due code, 95%)
+  ```
 
-### 2.5 Rischi / vincoli noti
+  `eff_max_dispersion` è il tetto **di sessione** già calcolato dal gate (§2.2), non
+  l'`episode_id` del singolo evento. È una scelta deliberata, non la più ovvia — si veda
+  §2.4 per il perché.
 
-- Va scelta con cura la stima di `σ_tpm` per non reintrodurre un nuovo parametro
-  "magico" scollegato da `dispersion_margin` — l'intento è riusare la stessa
-  informazione statistica già presente nel gate (si veda §2.2), non aggiungerne una
-  indipendente.
-- `min_episodes` (potere statistico minimo) resta comunque un vincolo assoluto separato,
-  come oggi — la modalità ranged non lo sostituisce.
-- Va deciso se la modalità ranged è compatibile con `event_counting="bar"` oltre che con
-  `"episode"` (quest'ultimo è il default e il caso più naturale, dato che l'indice di
-  dispersione episodico è già la quantità pensata per non essere gonfiata da stati
-  persistenti multi-barra).
+- **Fissato esplicitamente dall'utente → banda letterale**, nessuna statistica coinvolta:
+  `banda = [min_tpm − tpm_tolerance, min_tpm + tpm_tolerance]`. Risolve direttamente il
+  caso d'uso "voglio eventi con mediamente 4 episodi al mese, tolleranza 2": si scrive
+  `tpm_tolerance=2.0` (con `min_tpm=4.0`, anch'esso in override) e si ottiene esattamente
+  quella banda, senza che nessuna formula derivata la modifichi.
 
-### 2.6 Domande aperte per il design tecnico
+In entrambi i casi: `banda = [max(0, centro − mezza_larghezza), centro + mezza_larghezza]`
+(un tasso non può essere negativo).
 
-- Formula esatta di `σ_tpm` a partire da `episode_id`/`eff_max_dispersion` e
-  `n_total_months`.
-- Se `k` è un nuovo campo (`tpm_margin`) o se si riusa `dispersion_margin` anche per la
-  banda.
-- Comportamento quando `n_total_months` è troppo piccolo per stimare la dispersione
-  (stesso caso limite già gestito in modalità floor, `consistency_gate.py:118-126`).
+**Precondizione strutturale, non parte della banda:** un evento con `n_episodes == 0`
+(non si attiva mai) è scartato a monte, prima di valutare la banda — non è "un evento con
+tasso 0 che eventualmente rientra nella banda per effetto del troncamento a zero", è
+semplicemente non un evento. Non richiede una nuova verifica: `min_episodes` (default 10)
+lo esclude già in pratica, ma la precondizione va resa esplicita nel codice invece di
+dipendere da quel default.
+
+Il criterio di burstiness (`episode_id <= eff_max_dispersion`, invariato) resta
+**indipendente** dal criterio di banda — la modalità ranged aggiunge un vincolo sul
+livello del tasso, non ne rimpiazza o modifica uno esistente su forma/regolarità.
+
+### 2.4 Perché il default usa `eff_max_dispersion` (di sessione) e non `episode_id` (dell'evento)
+
+Prima scelta scartata: usare `episode_id` proprio dell'evento al posto di
+`eff_max_dispersion` renderebbe la banda adattiva per evento (più stretta per un evento
+regolare, più larga per uno vicino al tetto di burstiness ammesso). Sembra più
+"principiato" statisticamente, ma ha un difetto concreto: **accoppia nella direzione
+sbagliata** i due criteri del gate. Un evento già borderline sulla burstiness (`ID`
+vicino al tetto) riceverebbe automaticamente *più* tolleranza sul tasso — l'opposto di
+quanto si vorrebbe da un filtro di qualità (più scrutinio, non meno, dove la struttura
+temporale è già al limite). In più, `episode_id` è una varianza campionaria stimata su
+pochi conteggi mensili: con `n_total_months` piccolo (il regime più comune per i preset
+più selettivi, es. `"sniper"`) la stima è essa stessa rumorosa, e quel rumore si
+propagherebbe due volte nella larghezza della banda.
+
+Usare `eff_max_dispersion` (il tetto di sessione, identico per ogni evento) risolve
+entrambi i problemi: è una funzione chiusa di `n_total_months` e `dispersion_margin`,
+nessuna stima campionaria per-evento coinvolta, e — punto chiave — equivale a valutare la
+formula "adattiva" nel caso peggiore ammissibile (`episode_id ≤ eff_max_dispersion` per
+ogni evento che supera comunque il gate), quindi è **sempre almeno larga quanto** lo
+sarebbe stata la versione adattiva per quello specifico evento, mai più stretta. Il
+costo è la perdita di adattività per-evento (un evento molto regolare non viene premiato
+con una banda più stretta) — un costo di precisione, non di sicurezza, e comunque
+aggirabile fissando `tpm_tolerance` esplicitamente quando serve.
+
+### 2.5 Decisioni già prese
+
+- **La banda ranged resta un filtro di selezione locale a M1.** Gli eventi che superano
+  il gate — in modalità `"floor"` o `"ranged"` — arrivano a M2 nella stessa forma
+  (`EventCandidate` con la sua serie di attivazione), indistinguibili dal punto di vista
+  di M2 in poi. Nessuna modifica alla catena di derivazione del resolver
+  (`min_train_months`, `pf_min_tpm`, i controlli `oos_span_too_short` /
+  `m3_stricter_than_m1` restano ancorati alla semantica floor di `min_tpm`, invariata).
+- **La derivazione di `tpm_tolerance` non può vivere nel resolver di sessione.**
+  `eff_max_dispersion` dipende da `n_total_months`, una quantità **nota solo dal
+  dataset reale**. Il resolver (`resolver.py`) è per costruzione cieco ai dati — deriva
+  tutto da configurazione + `PipelineContext`, mai da `n_bars`/`span_months` — e
+  `config_report()`/`forge_preset()` costruiscono le configurazioni senza mai vedere la
+  tabella KPI. `eff_max_dispersion` infatti **già oggi** si calcola dentro
+  `ConsistencyGate.evaluate()` (`consistency_gate.py:143`), non nel resolver — la
+  derivazione di `tpm_tolerance` va nello stesso posto, per lo stesso motivo.
+  Conseguenza pratica: a differenza di `min_train_months`/`pf_min_tpm`,
+  `tpm_tolerance` derivato **non comparirà** in `ResolutionTrace`
+  (`result.resolution.describe()`) — è locale al gate, non alla sessione.
+- **Integrazione con `forge_preset()`.** I quattro preset (`sniper`/`balanced`/`sweep`/
+  `burst`) non impostano oggi `tpm_mode`/`tpm_tolerance` — comportamento invariato per
+  chi non li usa esplicitamente. Per attivarli tramite preset serve aggiungerli alla
+  whitelist di override di `forge_preset()` (`presets.py:352-362`, che oggi rifiuta con
+  `TypeError` ogni chiave non elencata) esattamente come `min_tpm`/`dispersion_margin`:
+  `tpm_mode = overrides.pop("tpm_mode", "floor")`,
+  `tpm_tolerance = overrides.pop("tpm_tolerance", UNSET)`, passati a `GateParams(...)`.
+  Nessuna voce di calibrazione per-preset serve per `tpm_tolerance` (a differenza di
+  `min_tpm`, che ha un valore `daily_min_tpm_episode` da scalare per timeframe) perché
+  resta `UNSET` di default su tutti e quattro. Il default derivato eredita comunque la
+  filosofia del preset "gratis", perché `eff_max_dispersion` dipende da
+  `dispersion_margin`, che ogni preset già fissa in modo diverso (`sniper` quasi zero
+  slack → banda stretta; `burst` clustering deliberatamente Poisson-implausibile →
+  banda larga).
+- **Incompatibilità di preset segnalata:** `"burst"` è disegnato esplicitamente per
+  ammettere concentrazione temporale estrema (`dispersion_margin=3.00`, commento in
+  `presets.py:300`: *"clustering Poisson-implausibile, di proposito"*) — l'opposto
+  filosofico di "seleziona una cadenza tipica". Combinare `tpm_mode="ranged"` con
+  `"burst"` è sconsigliato, sullo stesso piano della nota già esistente "non abbinare
+  `sniper` al `RotationCalibrator`" (pitfall #6 della skill `forgedge`).
+
+### 2.6 Rischi / vincoli noti
+
+- `min_episodes` (potere statistico minimo) resta un vincolo assoluto separato, come
+  oggi — la modalità ranged non lo sostituisce, si somma ad esso.
+- Va deciso se la modalità ranged è utilizzabile anche con `event_counting="bar"` oltre
+  che con `"episode"` (default) — in `"bar"` mode non esiste un `eff_max_dispersion` con
+  floor (`max_dispersion` è lì una soglia assoluta senza floor, si veda §2.2): la scelta
+  più coerente sarebbe usare `max_dispersion` stesso come input di `σ_tpm` in quel caso,
+  non un'osservazione per-evento.
+- Ambiguità di unità già presente su `min_tpm` (episodi/mese vs. barre/mese a seconda di
+  `event_counting`) si propaga a `tpm_tolerance`: un valore letterale impostato pensando
+  a un modo conta-eventi e poi riletto sotto l'altro cambia scala silenziosamente. Non è
+  un problema nuovo introdotto da questa feature, ma va documentato esplicitamente perché
+  qui riguarda sia il centro sia il raggio della banda.
+- Vincolo implementativo per l'eventuale composizione AND: `ANDComposer.compose()` valuta
+  il gate in forma vettorizzata via `_gate_pass` (`consistency_gate.py:307-357`), condivisa
+  col path a singolo evento per costruzione (fix #226) — il criterio ranged deve entrare
+  nello stesso punto condiviso, non essere reimplementato separatamente nel path batch,
+  per non riaprire la stessa classe di bug.
+
+### 2.7 Domande aperte residue
+
+- Se estendere la modalità ranged a `event_counting="bar"` ora o rimandarlo (vedi §2.6).
+- Se `z=1.959964` (95% a due code) deve restare fisso nel default derivato o esporre un
+  modo per cambiarlo senza dover per forza passare a `tpm_tolerance` letterale.
+- Validazione empirica dei numeri (prossimo passo, §6).
 
 ---
 
