@@ -584,6 +584,62 @@ e 2.0, mai abbastanza forte in un punto isolato, sempre presente ovunque si guar
 l'opposto esatto del gruppo "solo attuale" (forte-ma-solo-qui vs. debole-ma-ovunque).
 Nessuna delle sei mostra il pattern "picco poi inversione" del gruppo precedente.
 
+**Verifica del vantaggio reale (gruppo "solo AUC"): confronto con la baseline di
+mercato, globale e locale.** Prima di fidarsi delle sei regole sopra, verifica diretta
+se misurano un vantaggio proprio dell'evento o solo drift di mercato che trapela.
+
+*Confronto globale* — `μ_base_h` (rendimento medio non condizionato, l'intera storia
+IS) è identico per le sei regole a ogni h (~0.0005-0.0008/barra — coerente con un
+drift rialzista pressoché costante di ADA nel periodo campionato) mentre il tasso
+condizionato all'evento è **6-11× più grande**:
+
+| regola | \|tasso evento\| medio | \|tasso mercato\| medio | rapporto |
+|---|---|---|---|
+| 028 | 0.00704 | 0.00062 | 11.4× |
+| 088 | 0.00591 | 0.00061 | 9.7× |
+| 057 | 0.00362 | 0.00059 | 6.2× |
+| 256 | 0.00637 | 0.00058 | 10.9× |
+| 136 | 0.00430 | 0.00062 | 6.9× |
+| 048 | 0.00666 | 0.00059 | 11.3× |
+
+Il caso più convincente è la regola 256 (`pr_ratio_close_ret03_ret96_96 < 0.083`,
+direzione implicita short): `mu_cond_rate` è **negativo su ogni orizzonte** mentre
+`mu_base_rate` è **sempre positivo** (il mercato saliva in media) — l'evento spinge il
+percorso condizionato nella direzione opposta a dove il mercato tende naturalmente,
+non un pezzo di drift travestito.
+
+*Confronto locale* — stesso confronto, ma con la baseline ristretta all'unione
+deduplicata delle finestre di ±15 barre intorno a ogni attivazione (attivazione
+inclusa), invece che l'intera storia: controlla "era genericamente un buon/cattivo
+momento vicino a queste attivazioni", non solo "rispetto a tutta la storia
+pluriennale".
+
+| regola | attivazioni | copertura finestra locale | rapporto vs globale | rapporto vs locale |
+|---|---|---|---|---|
+| 028 | 50 | 78.6% | 11.4× | **1.9×** |
+| 088 | 66 | 79.9% | 9.7× | 5.8× |
+| 057 | 101 | **99.8%** | 6.2× | 5.6× |
+| 256 | 49 | 70.0% | 10.9× | **23.8×** |
+| 136 | 53 | 96.3% | 6.9× | 5.0× |
+| 048 | 58 | 92.5% | 11.3× | 9.0× |
+
+**Avvertimento sulla copertura**: su una storia IS di ~617 barre, con eventi che si
+attivano 49-101 volte, l'unione delle finestre ±15 copre già dal 70% al 99.8%
+dell'intera serie (per la regola 057, la finestra "locale" *è* quasi tutta la serie)
+— il confronto locale aggiunge poco di indipendente rispetto al globale quando
+l'evento non è raro rispetto alla lunghezza della storia disponibile. Nonostante
+questo, il rapporto resta **sempre sopra 1×** (1.9×-23.8×): il tasso dell'evento
+supera comunque il tasso del solo vicinato locale, non solo quello dell'intera
+storia. Il caso 256 diventa persino più convincente in locale (23.8× — vicino alle
+sue attivazioni il mercato non aveva quasi drift, eppure l'evento produce un
+rendimento condizionato negativo netto). Il caso più debole sotto questa lente più
+severa è il 028 (rapporto crolla da 11.4× a 1.9×) — resta sopra 1× ma è il meno
+robusto del gruppo.
+
+**Conclusione della verifica**: le regole "solo AUC" misurano un vantaggio reale
+specifico dell'evento, non un artefatto di deriva di mercato — confermato sia contro
+la baseline globale sia (con il caveat sulla copertura) contro quella locale.
+
 **Sintesi.** I due gruppi non sono simmetrici per caso: il metodo attuale è
 strutturalmente sensibile a un picco concentrato (anche isolato, meccanismo 2 sopra);
 il metodo AUC è strutturalmente sensibile alla coerenza di segno distribuita
