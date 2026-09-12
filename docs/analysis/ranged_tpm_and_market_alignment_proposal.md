@@ -11,14 +11,17 @@ punto di partenza per un eventuale design tecnico successivo.
 - **A.** Event Discovery (M1): modalità "ranged" per `GateParams.min_tpm` — da floor a
   target con banda di tolleranza.
 - **B.** Alpha Discovery (M2): etichettatura momentum / mean-reversion / idiosincratica
-  per contratto, basata sulla correlazione tra l'esito della regola e il rendimento di
-  mercato allo stesso orizzonte `h`.
+  per contratto, in due stadi — (a) un test di significatività integrato sull'intera
+  griglia degli orizzonti (riusa il rotation-null esistente), (b) la pendenza del tasso
+  per-barra dell'eccesso lungo la griglia, solo se (a) è positivo.
 - **C.** Alpha Discovery (M2): diagnostica di sufficienza della griglia degli orizzonti
   (`horizon_grid`) — emersa come prerequisito dell'idea B, ma tracciata come idea
   indipendente perché utile a prescindere da essa.
 
-Le tre idee sono indipendenti nell'implementazione (toccano moduli/file diversi) ma B
-dipende concettualmente da C per essere affidabile (si veda §4).
+Le tre idee sono indipendenti nell'implementazione (toccano moduli/file diversi). Una
+dipendenza concettuale B→C era stata ipotizzata in una prima stesura ma la validazione
+empirica di B (§3.4) l'ha esclusa come causa dei problemi trovati — resta solo una nota
+diagnostica accessoria (si veda §3.5).
 
 ---
 
@@ -279,105 +282,169 @@ informazione può servire sia come etichetta descrittiva (mean-reversion / momen
 come indicazione di quanto l'edge sia "vantaggioso rispetto al mercato" in un senso più
 ricco della sola media.
 
-### 3.2 Stato attuale (verificato)
+### 3.2 Stato attuale (verificato) e due false partenze
 
 - `AlphaContract` deriva già `direction` e `mean_advantage` come eccesso rispetto alla
   baseline **incondizionata**: `Δ_h = μ_cond_h − μ_base_h`, dove `μ_base_h` è il
   rendimento medio a `h` barre su **tutte** le barre (`alpha_discovery/discovery.py:450-454`,
   `models.py:47-48`). Questo È già, nella sostanza, "il vantaggio rispetto al rendimento
-  medio di mercato allo stesso orizzonte" — non va reinventato.
-  - Conseguenza pratica: la parte "capire se la regola è più vantaggiosa del mercato"
-    (una delle due letture proposte per questa idea) è in buona parte già coperta da
-    `mean_advantage`/`direction`. Un confronto ulteriore — la regola batte il buy&hold
-    cumulato sull'intero periodo OOS — è un confronto di **livello aggregato** diverso
-    (media per-barra vs. rendimento composto sull'intera finestra) e più naturale come
-    arricchimento del report M3/M4 (accanto a `BacktestSummary.net_gain`), non come
-    nuovo criterio di selezione in M2. Non è oggetto di questo documento ma va tenuto
-    presente come idea collegata, più leggera, per evitare di sovrapporla per errore a B.
-  - Quello che **manca** è una misura di **co-movimento** (correlazione), non di livello:
-    `mean_advantage` non dice se l'edge si muove *con* il mercato o *contro* di esso,
-    solo *quanto* lo batte in media.
-- Esiste già un'infrastruttura di correlazione riusabile, ma con un target diverso:
-  `rule_registry/correlation.py` — `_spearman()` e `gain_correlation_by_date()`
-  calcolano correlazione di Spearman tra i *gain* di **coppie di regole** (M4,
-  de-duplicazione/diversificazione di portafoglio), non tra una regola e il rendimento
-  del mercato sottostante.
-- `AlphaContract.market_structure` (`alpha_discovery/models.py:788`, popolato da
-  `alpha_discovery/market_structure.py`) calcola Hurst/ACF **sul prezzo/mercato**, come
-  contesto interpretativo generale (il mercato nel suo complesso è mean-reverting o
-  trending) — non è una proprietà della singola regola, e non risponde alla domanda "la
-  *mia* regola si allinea al movimento di mercato quando si attiva?".
+  medio di mercato allo stesso orizzonte" — non va reinventato. Un confronto di livello
+  aggregato più grezzo — la regola batte il buy&hold cumulato sull'intero periodo OOS —
+  resta un'idea collegata più leggera, più naturale come arricchimento del report M3/M4
+  (accanto a `BacktestSummary.net_gain`) che come criterio di selezione in M2; non è
+  oggetto di questo documento.
+- **Prima falsa partenza (corretta in questa revisione): correlare col rendimento di
+  mercato sulle stesse barre è degenere.** A livello di M2 non esiste un rendimento
+  della regola distinto dal rendimento di mercato: sulla barra attiva, "il rendimento
+  della regola" è letteralmente `L0[t, h]` (il forward log-return del mercato), al più
+  con segno invertito da `direction`. Correlare le due serie sulle stesse barre allo
+  stesso `h` dà quindi **esattamente 1** per un evento long ed **esattamente -1** per uno
+  short — codifica solo `direction`, non un'informazione nuova. La formula
+  originariamente proposta in questa sezione (Spearman tra rendimento per-attivazione e
+  rendimento di mercato "sullo stesso orizzonte h\*, sulle stesse barre") va scartata per
+  questo motivo, non per preferenza di design.
+- **Seconda considerazione, non uno scarto ma una precisazione trovata per strada:**
+  `AlphaContract.regime_analysis` (`models.py:714-722`, `discovery.py:990-1049`) misura
+  già, per ogni regime di mercato di M0 (mean-reverting/trending/random-walk),
+  l'Information Coefficient dell'evento **dentro quel regime**, classificando
+  `dependency_type` come agnostic/conditional/specific/broken. Risponde a "questa regola
+  generalizza tra regimi di mercato diversi", non alla domanda di B ("quando questa
+  regola si attiva, il suo vantaggio è coerente con la direzione che il mercato aveva
+  preso, o no") — non è ridondante, ma è stata la base di due alternative (correlazione
+  con lo stato di mercato pregresso; riuso di `RegimeAnalysis` con bucket direzionali)
+  **entrambe superate** dalla proposta definitiva in §3.3, più semplice ed economica.
+- `AlphaContract.market_structure` (Hurst/ACF) resta una caratterizzazione del mercato
+  nel suo complesso, non della singola regola — nessuna sovrapposizione con B.
 
-### 3.3 Proposta funzionale
+### 3.3 Proposta funzionale (formule congelate, in due stadi)
 
-Per ogni contratto (o candidato, a seconda di dove si decide di calcolarla), calcolare
-la correlazione (Spearman, riusando `_spearman` — da estrarre in un modulo condiviso
-invece di duplicarla) tra:
+Nessuna correlazione con una serie di mercato esterna: tutto deriva dalla **forma del
+profilo `Δ_h` dell'evento stesso lungo la griglia degli orizzonti** — un profilo già
+corretto per il drift di mercato per costruzione (`Δ_h = μ_cond_h − μ_base_h`).
 
-- il rendimento per-attivazione già calcolato da M2 per derivare `direction`/`lift`
-  (nessun nuovo dato da produrre: la serie esiste già nella scansione della griglia
-  degli orizzonti), e
-- il rendimento di mercato realizzato sullo stesso orizzonte `h*`, sulle stesse barre di
-  attivazione.
+**Stadio (a) — l'edge è distinguibile dal mercato, sull'intera griglia?** Non un
+confronto di magnitudine ("l'area sotto la curva condizionata è più grande di quella di
+mercato quindi sono diverse") ma un test di significatività che riusa l'infrastruttura
+del rotation-null già esistente (`_rotation_null`, `discovery.py:618-674`), che calcola
+**già** — per ogni shift circolare e ogni orizzonte insieme — la matrice
+`null[shift, h]` di `Δ_h` sotto la nulla "il timing dell'evento è scorrelato dai
+rendimenti". Integrare quella matrice invece di ridurla subito a `(z_h, p_h)` per
+orizzonte costa una proiezione lineare, nessun ricalcolo pesante:
 
-Dal segno e dall'intensità della correlazione, derivare un'etichetta a tre valori sul
-contratto (nome di campo indicativo: `market_alignment`):
+```
+w = pesi trapezoidali sulla griglia reale (rispetta spaziature non uniformi, es. H={1,2,5,10})
+AUC_Δ = Σ_i w_i · Δ_{h_i} = delta @ w                    # statistica osservata
+AUC_Δ^(shift) = null[shift, :] @ w                        # nulla, una per shift
+p_AUC = (1 + #{|AUC_Δ^(shift)| >= |AUC_Δ|}) / (1 + n_shift_validi)   # stessa formula già usata per-orizzonte
 
-- **correlazione positiva forte → "momentum-aligned"**: la regola vince quando il
-  mercato si muove nella stessa direzione — il suo edge si sovrappone (parzialmente) al
-  movimento del mercato nello stesso periodo.
-- **correlazione negativa forte → "mean-reversion-aligned"**: vince quando il mercato si
-  muove nella direzione opposta.
-- **vicino a zero → "idiosyncratic"**: l'edge non dipende dalla direzione che il mercato
-  ha effettivamente preso nello stesso periodo.
+edge_distinguibile = p_AUC < soglia
+```
 
-Questa etichetta è un **diagnostico aggiuntivo**, non un nuovo gate di promozione: non
-cambia `direction`, `lift`, né i criteri di `promoted_contracts()` esistenti — coerente
-con l'impostazione "additiva, non invasiva" già scelta per l'idea A.
+Scartata la combinazione alla Fisher dei `p_value_by_h` esistenti come alternativa più
+economica: i p-value per-orizzonte sono correlati tra loro (orizzonti vicini condividono
+finestre sovrapposte), quindi Fisher li tratterebbe come indipendenti quando non lo
+sono, sovrastimando la significatività. Costruire la nulla sulla statistica già
+aggregata (come sopra) evita il problema perché la correlazione tra orizzonti è
+automaticamente preservata in ogni shift.
 
-### 3.4 Dipendenza dall'idea C
+**Stadio (b) — solo se (a) è positivo: direzione del profilo sulla griglia.**
 
-**Questo è il punto critico emerso in discussione.** L'etichetta si calcola a
-`h = holding_period_h` (h\*, derivato come `argmax|z_h|` sulla griglia
-`AlphaConfig.horizon_grid`). Per un edge trend-following genuino, `|z_h|` può crescere
-**monotonicamente** con `h` invece di avere un picco interno — h\* finisce allora pinnato
-al bordo superiore della griglia non perché lì ci sia l'orizzonte ottimale, ma perché la
-griglia non è stata scansionata abbastanza lontano. In quel caso:
+```
+ρ = spearman(h, (segno_direction · Δ_h) / h)    # tasso per-barra, NON Δ_h grezzo
 
-- l'etichetta "momentum-aligned" verrebbe calcolata a un orizzonte arbitrario (il
-  bordo della griglia configurata), non a un orizzonte realmente identificato dai dati;
-- due regole trend-following vere, con griglie di ampiezza diversa, prenderebbero
-  correlazioni/etichette diverse per un dettaglio di configurazione, non per una
-  differenza reale di mercato.
+ρ > soglia   → "momentum-aligned"        (il tasso per-barra cresce con l'orizzonte)
+ρ < -soglia  → "mean-reversion-aligned"  (il tasso per-barra si affievolisce/inverte)
+altrimenti   → "idiosyncratic"           (nessuna pendenza chiara)
+```
 
-**Conseguenza per il design:** l'etichetta "momentum-aligned" va assegnata con piena
-fiducia solo quando h\* è un punto **interno** della griglia (picco genuino di
-`|z_h|`); quando h\* è pinnato al bordo con `|z_h|` ancora crescente, l'etichetta va
-declassata (es. `"momentum-aligned (horizon possibly under-scanned)"`) invece di essere
-affermata come se fosse ben identificata. Il meccanismo di rilevamento è l'oggetto
-dell'idea C (§4) — B dipende da C per essere affidabile sui casi più interessanti (i
-trend-follower veri), anche se le due idee restano separate nell'implementazione.
+**Perché `Δ_h / h` e non `Δ_h`: una seconda falsa partenza, questa volta trovata solo
+validando sui dati (§3.4).** `Δ_h` è una quantità *cumulata* su una finestra di `h`
+barre: qualunque edge persistente ma **costante per barra** mostra `Δ_h` crescente con
+`h` per pura aritmetica del log-return cumulato, non perché il fenomeno sia
+trend-following. La versione con `Δ_h` grezzo etichettava quasi ogni edge genuino come
+momentum. Dividere per `h` (esatto in log-space, dove i rendimenti si sommano
+linearmente — non un'approssimazione) dà il tasso medio per barra: costante per un edge
+piatto (`ρ≈0`, idiosyncratic, corretto), crescente per un edge che si autoalimenta
+(`ρ>0`, momentum), decrescente per una reazione che si affievolisce (`ρ<0`,
+mean-reversion).
+
+Entrambi gli stadi producono un **diagnostico aggiuntivo**, non un nuovo gate di
+promozione — non toccano `direction`, `lift`, né `promoted_contracts()`.
+
+### 3.4 Validazione empirica — fixture reale, preset `"balanced"`
+
+Metodo: nessuna sorgente modificata. `AlphaDiscovery._derive_target` è avvolto
+(monkeypatch solo nel processo dello script, stessa tecnica usata per l'idea A) al solo
+scopo di catturare i suoi stessi argomenti in ingresso (`active_is, valid_is, L0, cnt_t,
+sum_t, horizons`) — la funzione originale viene comunque chiamata e il suo risultato
+restituito invariato, quindi i contratti prodotti sono identici a una run non
+modificata. Da quegli argomenti lo script ricalcola `mu_base`/`delta` e la matrice
+`null` con la stessa identica formula FFT già in `_rotation_null` (righe 653-663),
+senza toccare il pacchetto. Dataset: `tests/fixtures/ADA_1D_TRAIN.parquet`, griglia
+giornaliera `(1,2,3,5,7,10)`.
+
+**Conferma della correzione `Δ_h/h`.** Sugli 89 contratti (su 180 con direzione
+derivata) che superano `p_AUC < 0.10`:
+
+| | `Δ_h` grezzo (scartato) | `Δ_h / h` (congelato) |
+|---|---|---|
+| momentum-aligned | 78 (88%) | 8 (9%) |
+| mean-reversion-aligned | 0 | 50 (56%) |
+| idiosyncratic | 11 (12%) | 31 (35%) |
+
+La versione grezza etichettava quasi tutto come momentum — implausibile, e infatti
+artefatto aritmetico (§3.3). Incrociando con il flag di bordo dell'idea C
+(`h* == max(orizzonti scansionati)`) si esclude che fosse un effetto di griglia
+sotto-scansionata: `ρ` resta alto sia al bordo sia all'interno della griglia — la causa
+era la formula, non l'idea C.
+
+**Selezione: metodo attuale (direzione derivabile) vs metodo AUC, sugli stessi 1662
+candidati atomici.** `h*`, `direction` e `sell_pct` vengono dalla *stessa* derivazione in
+entrambi i casi — quello che cambia è **quali** candidati ciascun metodo lascia passare:
+
+| | AUC non significativo | AUC significativo (`p_AUC<0.10`) |
+|---|---|---|
+| **attuale: undetermined** | 1426 | 56 — *"solo AUC"* |
+| **attuale: direzione derivata** | 91 — *"solo attuale"* | 89 — *entrambi* |
+
+- **Entrambi (89):** `h*` mediano = 5 — posizione centrale della griglia.
+- **Solo attuale (91):** `h*` mediano = **1** — il test a singolo orizzonte (BH-FDR)
+  trova un picco di significatività a un orizzonte molto corto che **non regge**
+  quando si guarda il profilo integrato sull'intera griglia. Rischio del metodo attuale:
+  falsi positivi concentrati su orizzonti brevi/rumorosi.
+- **Solo AUC (56):** `h*` mediano = **10** (al bordo della griglia base) — nessun singolo
+  orizzonte supera il BH-FDR (`direction` oggi resta `"undetermined"`, `sell_pct` mai
+  calcolato), ma l'effetto **integrato su più orizzonti è significativo**: un contributo
+  moderato e persistente, mai abbastanza concentrato in un punto solo. Esattamente il
+  tipo di caso per cui il test AUC esiste — e nota collegata: questi casi si concentrano
+  vicino al bordo della griglia, lo stesso segnale che l'idea C guarda da un'altra
+  angolazione (h\* pinnato al bordo perché la griglia non arriva abbastanza lontano).
+
+Non è un rapporto di sottoinsieme: il metodo AUC non "seleziona di più" o "di meno" del
+metodo attuale, seleziona **un insieme diverso**, con un profilo di falsi
+positivi/negativi diverso.
 
 ### 3.5 Rischi / vincoli noti
 
-- Serve chiarire se "rendimento di mercato a h" è il rendimento realizzato puntuale
-  `log(close[t+h]/close[t])` (stessa unità già usata per `Δ_h`) o qualcos'altro — per
-  coerenza con il resto di M2 si userebbe la prima definizione, in log-space (stessa
-  scelta motivata in `target.py:114-119` per la robustezza alle code pesanti crypto).
-- Va deciso un criterio quantitativo di soglia per "correlazione forte" vs "vicino a
-  zero" (analogo alle soglie già esistenti per `min_direction_t`, `fdr_q`, ecc. — non un
-  numero arbitrario scollegato dal resto della calibrazione statistica di M2).
-- La correlazione andrebbe calcolata sul periodo di stima coerente con la validazione
-  già esistente (IS vs. OOS confermato) per non introdurre una nuova forma di
-  overfitting non controllata dalla walk-forward OOS di M1/rotazione già presente.
+- La soglia di `p_AUC` (qui 0.10, illustrativa) e la soglia di `ρ` (qui 0.5,
+  illustrativa) vanno agganciate alla calibrazione statistica esistente di M2
+  (`PromotionThresholds`), non lasciate come numeri liberi.
+- Il test (a) va calcolato sul periodo di stima coerente con la validazione IS/OOS già
+  esistente, per non introdurre una forma di overfitting non controllata dalla
+  walk-forward/rotazione già presente.
+- Il legame con l'idea C non è quello ipotizzato in origine (il pinning al bordo non
+  spiega l'artefatto di §3.4) ma resta utile come nota diagnostica accessoria sui casi
+  "solo AUC" (si veda sopra) — non più una dipendenza stretta per la correttezza di B.
 
 ### 3.6 Domande aperte
 
-- L'etichetta va calcolata anche sui candidati non promossi (diagnostica generale) o
-  solo sui contratti promossi/EDGE (più economico, ma meno utile per capire perché un
-  candidato non è stato promosso)?
-- Va esposta anche una versione quantitativa (il coefficiente di correlazione grezzo)
-  oltre all'etichetta categorica, per chi vuole soglie proprie?
+- Calcolare gli stadi (a)/(b) anche sui candidati con `direction` oggi `"undetermined"`
+  (necessario per catturare i casi "solo AUC" osservati in §3.4) o solo su quelli già
+  diretti — la validazione mostra che la prima opzione è quella che cattura il valore
+  aggiunto reale del metodo.
+- Esporre anche i valori quantitativi (`p_AUC`, `ρ`) oltre alle etichette categoriche.
+- Ripetere la validazione su un secondo preset/asset prima di congelare le soglie
+  definitive, sullo stesso modello di §2.8 per l'idea A.
 
 ---
 
@@ -463,8 +530,10 @@ rialzo che potrebbe essere rumore del rotation-null.
 - `"horizon_at_grid_boundary_climbing"` — stato `bordo_in_salita` (alta confidenza).
 - `"horizon_at_grid_boundary_ambiguous"` — stato `bordo_ambiguo` o `bordo_grid_troppo_corta`.
 
-Due livelli invece di uno danno all'idea B due gradi di declassamento della propria
-etichetta invece di un taglio netto sì/no (§3.4).
+Due livelli invece di uno darebbero all'idea B due gradi di declassamento della propria
+etichetta invece di un taglio netto sì/no — nota storica: la validazione empirica di B
+(§3.4) ha poi escluso il pinning al bordo come causa dei problemi trovati in quella sede,
+quindi questo collegamento resta un affinamento accessorio, non una dipendenza stretta.
 
 **Esclusione per `fixed_target=True`.** Quando il target è fissato dall'utente
 (`TargetOptimizer`/`AlphaConfig.fixed_target`), `holding_period_h` non viene da
@@ -514,15 +583,17 @@ declassa la propria etichetta (§3.4).
 
 ```
 A (M1, ranged tpm)         — indipendente, nessuna dipendenza dalle altre due
-C (M2, grid sufficiency)   — indipendente nell'implementazione, prerequisito
-                              concettuale per usare B con fiducia sui trend-follower
-B (M2, market alignment)   — usa l'esito di C per calibrare la confidenza dell'etichetta
+B (M2, market alignment)   — indipendente da C (dipendenza ipotizzata, poi esclusa
+                              empiricamente in §3.4); usa solo il proprio profilo Δ_h
+C (M2, grid sufficiency)   — indipendente nell'implementazione; resta una nota
+                              diagnostica accessoria per i casi "solo AUC" di B (§3.4)
 ```
 
-Non c'è un obbligo di ordine di implementazione tra A e {B, C} (moduli diversi, nessuna
-interazione). Tra B e C, C dovrebbe precedere o accompagnare B: implementare B da sola
-produrrebbe etichette "momentum-aligned" sistematicamente meno affidabili proprio sui
-casi più interessanti (i trend-follower veri con h\* al bordo).
+Le tre idee non hanno più un ordine di implementazione obbligato: A è indipendente per
+costruzione; B, dopo la validazione empirica, si è rivelata indipendente da C nella
+pratica (una dipendenza concettuale era stata ipotizzata in una prima stesura, ma i dati
+mostrano che la causa dei problemi trovati in B era nella formula di B stessa, non nel
+pinning al bordo che C rileva).
 
 ## 6. Prossimi passi
 
@@ -538,6 +609,9 @@ decidere con l'utente:
   interamente da `DerivedTarget.score_by_h`, già esposto sul contratto, nessun nuovo
   dato. Resta da fare la validazione empirica (§4.5, stesso metodo di §2.8) prima di
   considerarla chiusa come A.
-- Congelare le formule esatte per B (§3.6) in una specifica tecnica, con lo stesso tipo
-  di audit empirico.
+- **Idea B: formule congelate e validazione empirica su un preset** (§3.3-§3.4) — due
+  stadi (gate AUC via rotation-null riusato, poi pendenza di `Δ_h/h` sulla griglia). La
+  validazione ha già corretto una formula sbagliata (`Δ_h` grezzo) e mostrato una
+  differenza di selezione concreta rispetto al metodo attuale. Restano aperte le soglie
+  (§3.6) e la ripetizione su un secondo preset/asset, come già fatto per A.
 - Solo dopo: apertura di branch/issue separati per A, B, C.
