@@ -412,45 +412,101 @@ prescindere dall'etichettatura momentum/mean-reversion, ogni volta che si legge
   forma di `|z_h|` osservata; non garantisce che un trend-follower genuino trovi un
   picco interno.
 
-### 4.3 Proposta funzionale
+### 4.3 Proposta funzionale (formule congelate)
 
-Due livelli, dal più economico al più completo:
+Tutto il necessario è **già calcolato e già esposto** su `AlphaContract.derived_target`
+(`DerivedTarget.score_by_h: Dict[int, float]`, `models.py:85-87,119` — il punteggio
+`|z_h|` per orizzonte, la stessa quantità con cui `h*` viene scelto via
+`argmax|z_h|`, `discovery.py:496`) — nessun nuovo dato, nessuna nuova statistica.
 
-1. **Rilevamento (diagnostico, a costo pressoché zero).** Flag su `AlphaContract
-   .diagnostics` (lo stesso campo non bloccante usato oggi per altre annotazioni — vedi
-   pitfall #12 della skill `forgedge`, non `rejection_reasons`) quando
-   `h* == max(horizon_grid)`. Si legge direttamente da `advantage_by_h`/i valori di
-   `z_h` già calcolati per l'intera griglia — nessun ricalcolo.
-2. **Distinzione fine (monotonicità).** Non basta sapere che h\* è al bordo: bisogna
-   distinguere il caso patologico (`|z_h|` ancora in crescita all'ultimo punto — griglia
-   sotto-scansionata) dal caso innocuo (il bordo coincide per caso con un vero massimo
-   interno, `|z_h|` già in discesa prima del bordo o piatto). Controllo derivato dagli
-   stessi dati (coerente con l'invariante #3 — nessuna assunzione a priori tipo "le
-   regole trend-following usano h=X"), non un valore hardcoded.
+**Rilevamento del bordo.** Il confronto va fatto contro il massimo degli orizzonti con
+punteggio **finito**, non contro `max(AlphaConfig.horizon_grid)`: un orizzonte scartato
+per `cnt_a < 2` (troppo pochi bar attivi validi) ha `score_by_h[h] = NaN` ed esce
+dall'`argmax` comunque — confrontare col grid configurato tratterebbe come "bordo" anche
+un caso in cui l'ultimo punto realmente valutato era prima.
 
-Il risultato (diagnostico + esito del controllo di monotonicità) è la base su cui
-l'idea B declassa la propria etichetta (§3.4).
+```python
+horizons_validi = sorted(h for h, s in derived_target.score_by_h.items() if isfinite(s))
+h_star = derived_target.holding_period_h
+al_bordo = h_star == horizons_validi[-1]
+```
+
+**Distinzione fine — tre stati, non due.** Un confronto a un solo passo è rumoroso
+(§4.4 originale). Servono almeno due incrementi consecutivi di `|z_h|` per dichiarare il
+caso ad alta confidenza:
+
+```python
+scores = [derived_target.score_by_h[h] for h in horizons_validi]  # ordine crescente di h
+
+if not al_bordo:
+    stato = "interno"                     # picco genuino, nessun problema
+elif len(scores) < 3:
+    stato = "bordo_grid_troppo_corta"      # non abbastanza punti per giudicare il trend
+elif scores[-1] > scores[-2] > scores[-3]:
+    stato = "bordo_in_salita"              # due incrementi consecutivi — alta confidenza
+elif scores[-1] > scores[-2]:
+    stato = "bordo_ambiguo"                # un solo incremento — potrebbe essere rumore
+else:
+    stato = "bordo_plateau"                # ultimo punto non superiore al precedente
+```
+
+Uguaglianza esatta (`scores[-1] == scores[-2]`) è trattata come **non** salita — un
+plateau all'ultimo punto suggerisce di aver catturato l'asintoto, non di essere a metà
+di una crescita. Richiedere due incrementi consecutivi (non uno) usa metà di una griglia
+tipica (griglie standard a 5-6 punti: `DAILY=(1,2,3,5,7,10)`, `INTRADAY=(1,2,4,8,12,24)`)
+— una soglia deliberatamente severa, per non segnalare "sotto-scansionato" su un singolo
+rialzo che potrebbe essere rumore del rotation-null.
+
+**Rappresentazione.** Due nuovi valori non-bloccanti in `AlphaContract.diagnostics`
+(stesso campo usato oggi per altre annotazioni — pitfall #12 della skill `forgedge`, non
+`rejection_reasons`), non un flag booleano:
+- `"horizon_at_grid_boundary_climbing"` — stato `bordo_in_salita` (alta confidenza).
+- `"horizon_at_grid_boundary_ambiguous"` — stato `bordo_ambiguo` o `bordo_grid_troppo_corta`.
+
+Due livelli invece di uno danno all'idea B due gradi di declassamento della propria
+etichetta invece di un taglio netto sì/no (§3.4).
+
+**Esclusione per `fixed_target=True`.** Quando il target è fissato dall'utente
+(`TargetOptimizer`/`AlphaConfig.fixed_target`), `holding_period_h` non viene da
+`argmax|z_h|` — viene dall'utente. Applicare la diagnostica a `holding_period_h` in quel
+caso segnalerebbe "la tua scelta esplicita è al bordo", che non è lo stesso tipo di
+problema (non un artefatto di ricerca, una decisione dell'utente). La diagnostica va
+applicata invece a `data_derived_horizon_h` (il valore diagnostico "cosa avrebbe scelto
+la derivazione dai dati", già documentato per verificare la convergenza) solo quando
+quel campo non è `None`.
+
+**Nota, non azionabile:** lo stesso problema esiste simmetricamente al bordo
+**inferiore** della griglia (punteggio ancora in crescita mentre `h` scende verso il
+minimo scansionato) — ma lì generalmente non è correggibile: le griglie iniziano già a 1
+barra, la finezza più fine possibile per quel timeframe.
+
+Il risultato (`stato`, e quindi il valore in `diagnostics`) è la base su cui l'idea B
+declassa la propria etichetta (§3.4).
 
 ### 4.4 Rischi / vincoli noti
 
 - Allargare meccanicamente `horizon_grid` ogni volta che si rileva il pinning **non è
   gratis**: `purge_bars` cresce con `max(horizon_grid)`, riducendo la finestra di
   training utile; il sizing del resolver (`min_train_months` e la catena collegata)
-  andrebbe rivalutato. La proposta qui è **solo diagnostica** (segnalare, non
+  andrebbe rivalutato. La proposta qui resta **solo diagnostica** (segnalare, non
   correggere automaticamente allargando la griglia) — un'eventuale politica di
   allargamento automatico è una proposta successiva e separata, con i suoi trade-off da
   valutare a parte.
-- Il controllo di monotonicità va reso robusto al rumore sugli ultimi punti della
-  griglia (differenze finite su pochi orizzonti vicini possono essere instabili) —
-  probabilmente serve una tolleranza, non un confronto esatto punto-a-punto.
+- Il criterio "due incrementi consecutivi" presuppone almeno 3 orizzonti validi vicino al
+  bordo — su una griglia molto corta o molto diradata dall'enrichment (§4.2,
+  `dominant_window` + moltiplicatori) lo stato `bordo_grid_troppo_corta` sarà frequente:
+  è un esito onesto ("non posso giudicare"), non un difetto della soglia.
 
-### 4.5 Domande aperte
+### 4.5 Domande aperte residue
 
-- Il diagnostico si applica solo a `direction != "undetermined"` (ha senso solo dove
-  esiste già un h\* significativo) o anche ai candidati scartati, per capire *perché*
-  erano scartati?
-- La soglia di tolleranza per "ancora in crescita" al bordo — assoluta o relativa alla
-  scala di `|z_h|` osservata?
+- Se calcolare la diagnostica solo su `direction != "undetermined"` (dove esiste un h\*
+  con un senso economico) o anche sui candidati scartati, per capire *perché* — decisione
+  a basso rischio, rimandabile alla specifica tecnica: il calcolo è comunque a costo
+  quasi zero in entrambi i casi.
+- Validazione empirica sul fixture di riferimento (stesso metodo usato per l'idea A,
+  §2.8): quanti contratti reali cadono in ciascuno dei quattro stati, e se
+  `bordo_in_salita` si concentra sugli eventi già etichettabili come trend-following da
+  altri segnali (Hurst/`market_structure` alto).
 
 ---
 
@@ -478,6 +534,10 @@ decidere con l'utente:
   netto sul volume di candidati varia per preset/asset per una ragione capita e
   spiegata, non per un difetto della formula. Resta da congelare solo il dettaglio
   tecnico residuo di §2.7 (`"bar"` mode, se esporre `z`).
-- Congelare le formule esatte per B (§3.6) e C (§4.5) in una specifica tecnica per
-  modulo, con lo stesso tipo di audit empirico appena fatto per A.
+- **Idea C: formule congelate** (§4.3) — meccanismo a tre/quattro stati derivato
+  interamente da `DerivedTarget.score_by_h`, già esposto sul contratto, nessun nuovo
+  dato. Resta da fare la validazione empirica (§4.5, stesso metodo di §2.8) prima di
+  considerarla chiusa come A.
+- Congelare le formule esatte per B (§3.6) in una specifica tecnica, con lo stesso tipo
+  di audit empirico.
 - Solo dopo: apertura di branch/issue separati per A, B, C.
