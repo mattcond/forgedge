@@ -199,7 +199,71 @@ aggirabile fissando `tpm_tolerance` esplicitamente quando serve.
 - Se estendere la modalità ranged a `event_counting="bar"` ora o rimandarlo (vedi §2.6).
 - Se `z=1.959964` (95% a due code) deve restare fisso nel default derivato o esporre un
   modo per cambiarlo senza dover per forza passare a `tpm_tolerance` letterale.
-- Validazione empirica dei numeri (prossimo passo, §6).
+
+### 2.8 Validazione empirica — `"balanced"` e `"sniper"`, fixture reale
+
+Metodo: `tpm_mode="ranged"` non esiste ancora nel codice (nessuna sorgente è stata
+modificata). Per testare il criterio proposto sui path reali di Event Discovery —
+inclusi Diversity Gate e `ANDComposer`, non solo il gate a singolo evento — lo script di
+verifica sostituisce a runtime (monkeypatch, solo nel processo dello script, mai nel
+pacchetto) l'unico chokepoint condiviso già identificato in §2.6:
+`consistency_gate._gate_pass`, importato con lo stesso nome anche da `and_composer.py`
+(fix #226 lo rende l'unica fonte di verità sia per il path a singolo evento sia per
+quello batch dei compositi). Sostituire quella funzione per la durata di una run è
+comportamentalmente equivalente ad avere implementato la modalità per davvero, ai fini
+del test. Dataset: `tests/fixtures/ADA_1D_TRAIN.parquet` (882 barre, 29 mesi).
+
+**`"balanced"` (`min_tpm=1.0`, `dispersion_margin=1.30`) — banda derivata `[0.496, 1.504]`:**
+
+| | grezzi (pre-gate) | dopo Diversity Gate + `max_and=2` |
+|---|---|---|
+| floor (oggi) | 1662 atomici | 1288 atomici + 2000 composti = 3288 |
+| ranged (proposto) | 2571 atomici | 2033 atomici + 2000 composti = 4033 |
+
+Risultato inatteso: su questo asset, a default, **ranged è netto più permissivo del
+floor attuale** (2571 vs 1662 grezzi; 2033 vs 1288 dopo dedup), non più selettivo.
+Il lato "ammetti chi è appena sotto il target" (1694 candidati grezzi tra 0.496 e 1.0
+tpm/mese) è molto più popolato del lato "escludi chi è molto sopra" (785 candidati
+sopra 1.504, tipicamente 3.5-3.9 tpm/mese — questi sì genuinamente "troppo frequenti",
+il caso che l'idea A intende intercettare). Ipotesi iniziale scartata dai dati: il
+surplus non è quasi-duplicazione — il tasso di deduplica (~21%) è quasi identico a
+quello del floor (~22.5%), quindi la maggioranza dei 1694 sono pattern distinti, non
+soglie percentili ridondanti sulla stessa feature.
+
+**`"sniper"` (`min_tpm=0.3`, `dispersion_margin=1.05`) — banda derivata `[0.052, 0.548]`:**
+
+| | grezzi (pre-gate) | dopo Diversity Gate + `max_and=2` |
+|---|---|---|
+| floor (oggi) | 3809 atomici | 2992 atomici + 2000 composti = 4992 |
+| ranged (proposto) | 681 atomici | 561 atomici + 2000 composti = 2561 |
+
+Qui l'effetto si **inverte completamente**: ranged è drasticamente più restrittivo del
+floor (681 vs 3809 grezzi, −82%). Con `min_tpm=0.3` il floor di oggi è quasi un
+non-filtro (la stragrande maggioranza delle feature si attiva più spesso di una volta
+ogni ~3 mesi), mentre il bordo superiore della banda derivata (0.548, appena 1.8× il
+target) fa quasi tutto il lavoro di selezione. Nessun candidato rientra nel caso
+"ammesso solo da ranged" (`ranged-only = 0`): a `n_total_months=29`, il pavimento di
+potenza statistica `min_episodes >= 10` implica già da solo un tasso minimo di
+`10/29 ≈ 0.345`, sopra il bordo inferiore della banda (0.052) — quel meccanismo di
+"estensione verso il basso" non ha mai la possibilità di attivarsi su questo preset.
+
+**Conclusione della validazione:** la formula (§2.3, tenuta semplice e interpretabile
+come deciso) è confermata **corretta e stabile** — nessun bug, nessun comportamento
+degenere. Ma il suo **effetto netto sul volume di candidati non è una proprietà fissa
+della modalità ranged**: dipende da dove il `min_tpm` del preset cade rispetto alla
+distribuzione reale dei tassi delle feature su quell'asset. Un preset con `min_tpm`
+basso (`sniper`) vede dominare il bordo superiore (più restrittivo); un preset con
+`min_tpm` moderato (`balanced`) vede dominare il bordo inferiore (più permissivo). Va
+letto come comportamento atteso e specifico di preset/asset, non come difetto della
+formula — coerente con la scelta already presa di non complicarla per inseguire un
+effetto netto uniforme.
+
+**Limite noto del metodo:** il conteggio dei compositi satura a 2000 in tutti e quattro
+i casi testati — quasi certamente `_MAX_PAIRS`, il tetto duro di `and_composer.py`, non
+un segnale di "nessuna differenza a valle". Con pool atomiche anche solo nell'ordine
+delle centinaia il numero di coppie possibili supera ampiamente quel tetto, quindi il
+conteggio dei compositi non è informativo per confrontare la pressione computazionale
+reale tra le configurazioni — solo la dimensione della pool atomica pre-composizione lo è.
 
 ---
 
@@ -409,9 +473,11 @@ casi più interessanti (i trend-follower veri con h\* al bordo).
 Questo documento resta a livello di specifica funzionale. I passi successivi, da
 decidere con l'utente:
 
-- Congelare le formule esatte (§2.6, §3.6, §4.5) in una specifica tecnica per modulo.
-- Decidere le soglie quantitative (bande di correlazione, tolleranza di monotonicità,
-  `k`/`tpm_margin` per la banda ranged) con un audit empirico sui fixture esistenti
-  (`tests/fixtures/ADA_1D_TRAIN.parquet`), sul modello di
-  `docs/analysis/pipeline_parameter_coherence.md`.
+- **Idea A: validazione empirica chiusa** (§2.8) — formula confermata corretta e
+  stabile su due preset (`"balanced"`, `"sniper"`) sul fixture di riferimento; l'effetto
+  netto sul volume di candidati varia per preset/asset per una ragione capita e
+  spiegata, non per un difetto della formula. Resta da congelare solo il dettaglio
+  tecnico residuo di §2.7 (`"bar"` mode, se esporre `z`).
+- Congelare le formule esatte per B (§3.6) e C (§4.5) in una specifica tecnica per
+  modulo, con lo stesso tipo di audit empirico appena fatto per A.
 - Solo dopo: apertura di branch/issue separati per A, B, C.
