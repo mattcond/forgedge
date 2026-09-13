@@ -26,7 +26,12 @@ import numpy as np
 import pandas as pd
 
 from ..episodes import episode_starts as _episode_starts
+from ..unset import is_set
 from .models import GateParams, GateResult, RawEvent
+
+# Two-sided 95% normal quantile (z_0.975), used by the "ranged" tpm_mode's
+# derived tolerance — see docs/analysis/ranged_tpm_and_market_alignment_proposal.md §2.3.
+_Z_95_TWO_SIDED = 1.959964
 
 
 class ConsistencyGate:
@@ -80,6 +85,13 @@ class ConsistencyGate:
            ``max_dispersion`` plays no role here — it is a ``"bar"``-mode-only
            field.  A persistent multi-bar state no longer inflates the
            monthly variance.
+
+        ``GateParams.tpm_mode="ranged"`` (episode counting only) replaces
+        criterion 1 above with a two-sided band —
+        ``min_tpm - tolerance <= episode_tpm <= min_tpm + tolerance`` — so an
+        event that fires too *often*, not just too rarely, is also rejected;
+        see ``GateParams.tpm_tolerance`` and
+        docs/analysis/ranged_tpm_and_market_alignment_proposal.md §2.
 
         Episode metrics (``n_episodes``, ``episode_index_of_dispersion``,
         ``n_eff``) are reported as diagnostics in both modes whenever
@@ -150,7 +162,7 @@ class ConsistencyGate:
             p,
             mean_tpm=mean_tpm, id_score=id_score,
             episode_tpm=episode_tpm, n_episodes=n_episodes, episode_id=episode_id,
-            eff_max_dispersion=eff_max_dispersion,
+            eff_max_dispersion=eff_max_dispersion, n_total_months=n_total_months,
         ))
 
         fail_reason: Optional[str] = None
@@ -160,6 +172,21 @@ class ConsistencyGate:
                     fail_reason = f"rate: {mean_tpm:.2f} tpm < {p.min_tpm}"
                 else:
                     fail_reason = f"dispersion: ID={id_score:.2f} > {p.max_dispersion}"
+            elif p.tpm_mode == "ranged":
+                tpm_lo, tpm_hi = _tpm_band(p, eff_max_dispersion, n_total_months)
+                if n_episodes == 0:
+                    fail_reason = "rate: 0 episodes (ranged mode always rejects n_episodes=0)"
+                elif not (tpm_lo <= episode_tpm <= tpm_hi):
+                    fail_reason = (
+                        f"rate: {episode_tpm:.2f} epi/month outside band "
+                        f"[{tpm_lo:.2f}, {tpm_hi:.2f}]"
+                    )
+                elif n_episodes < p.min_episodes:
+                    fail_reason = f"episodes: {n_episodes} < {p.min_episodes}"
+                else:
+                    fail_reason = (
+                        f"episode dispersion: ID={episode_id:.2f} > {eff_max_dispersion:.2f}"
+                    )
             else:
                 if episode_tpm < p.min_tpm:
                     fail_reason = f"rate: {episode_tpm:.2f} epi/month < {p.min_tpm}"
@@ -304,6 +331,32 @@ def _eff_max_dispersion(n_total_months, dispersion_margin):
     return poisson_floor * dispersion_margin
 
 
+def _tpm_band(
+    params: GateParams, eff_max_dispersion: float, n_total_months: int,
+) -> tuple[float, float]:
+    """The ``[lo, hi]`` rate band for ``tpm_mode="ranged"`` — ``min_tpm`` is
+    the centre, ``tpm_tolerance`` the half-width (see ``GateParams`` and
+    docs/analysis/ranged_tpm_and_market_alignment_proposal.md §2.3).
+
+    Left at ``UNSET`` (default), the half-width is derived from the same
+    session-level ``eff_max_dispersion`` the burstiness criterion already
+    uses, not the event's own ``episode_id`` (§2.4 of the doc: coupling the
+    two criteria that way rewards events already borderline on burstiness
+    with *more* rate tolerance, the wrong direction for a quality filter).
+    Set explicitly, ``tpm_tolerance`` is used verbatim, no statistics
+    involved.  The lower bound is clipped at 0 — a rate cannot be negative.
+    """
+    center = params.min_tpm
+    if is_set(params.tpm_tolerance):
+        half_width = params.tpm_tolerance
+    elif n_total_months > 0:
+        sigma = float(np.sqrt(eff_max_dispersion * center / n_total_months))
+        half_width = _Z_95_TWO_SIDED * sigma
+    else:
+        half_width = 0.0
+    return max(0.0, center - half_width), center + half_width
+
+
 def _gate_pass(
     params: GateParams,
     *,
@@ -313,6 +366,7 @@ def _gate_pass(
     n_episodes,
     episode_id,
     eff_max_dispersion,
+    n_total_months,
 ):
     """The single source of truth for "does this pass the Consistency Gate".
 
@@ -343,11 +397,39 @@ def _gate_pass(
     eff_max_dispersion : float
         From :func:`_eff_max_dispersion` — one value shared by the whole
         batch, not per-candidate.
+    n_total_months : int
+        One value shared by the whole batch, not per-candidate.  Only read
+        when ``params.tpm_mode == "ranged"`` and ``params.tpm_tolerance`` is
+        ``UNSET`` (see :func:`_tpm_band`).
 
     Returns
     -------
     bool or np.ndarray of bool
+
+    Raises
+    ------
+    ValueError
+        If ``params.tpm_mode == "ranged"`` with ``params.event_counting ==
+        "bar"`` — the ranged band is defined only for episode counting for
+        now (docs/analysis/ranged_tpm_and_market_alignment_proposal.md §2.7).
     """
+    if params.tpm_mode == "ranged":
+        if params.event_counting == "bar":
+            raise ValueError(
+                "GateParams.tpm_mode='ranged' is not defined for "
+                "event_counting='bar' (see "
+                "docs/analysis/ranged_tpm_and_market_alignment_proposal.md §2.7)"
+            )
+        tpm_lo, tpm_hi = _tpm_band(params, eff_max_dispersion, n_total_months)
+        # Structural precondition, not part of the band: a feature that never
+        # activates is rejected outright, never "a rate of 0 that happens to
+        # round up to the band's clipped-at-zero floor" (§2.3 of the doc).
+        rate_ok = (n_episodes > 0) & (episode_tpm >= tpm_lo) & (episode_tpm <= tpm_hi)
+        return (
+            rate_ok
+            & (n_episodes >= params.min_episodes)
+            & ~(episode_id > eff_max_dispersion)
+        )
     if params.event_counting == "bar":
         return (mean_tpm >= params.min_tpm) & (id_score <= params.max_dispersion)
     return (

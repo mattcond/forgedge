@@ -553,6 +553,7 @@ class ANDComposer:
                     mean_tpm=mean_tpm_sub, id_score=id_sub,
                     episode_tpm=episode_tpm_sub, n_episodes=n_episodes_sub,
                     episode_id=episode_id_sub, eff_max_dispersion=eff_max_dispersion,
+                    n_total_months=n_total_months,
                 )
                 passing = np.where(gate_pass)[0]
             else:
@@ -644,6 +645,7 @@ class ANDComposer:
                             mean_tpm=mean_tpm_s, id_score=id_t,
                             episode_tpm=episode_tpm_t, n_episodes=n_episodes_t,
                             episode_id=episode_id_t, eff_max_dispersion=eff_max_dispersion,
+                            n_total_months=n_total_months,
                         )
                         passing_t = np.where(gate_t)[0]
                     else:
