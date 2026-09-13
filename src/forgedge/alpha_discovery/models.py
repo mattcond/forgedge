@@ -108,6 +108,53 @@ class DerivedTarget:
     data_derived_sell_pct : float or None
         Fixed-target diagnostic: the ``sell_pct`` the data derivation would have
         produced at its own ``h*`` (``None``/``nan`` when unavailable).
+    nature : str
+        Idea B, stage (b) (docs/analysis/ranged_tpm_and_market_alignment_proposal.md
+        §3.3): ``"momentum-aligned"``, ``"mean-reversion-aligned"`` or
+        ``"idiosyncratic"`` — the sign of the per-bar excess rate's slope
+        along the horizon grid. ``"non_significativo"`` (default) when stage
+        (a) below did not find a distinguishable edge integrated over the
+        whole grid — computed independently of whether a direction was
+        assigned at all, so it can be informative even on a
+        ``"undetermined"`` or otherwise-rejected candidate.
+    horizon_at_boundary : bool
+        Idea C, unified with idea B across both promotion routes (§4.5): is
+        ``h*`` pinned to the edge of the tested horizon grid for a reason
+        that survives scrutiny, rather than at a genuine interior peak? On
+        the ``"z_score"``/``"both"`` routes, ``True`` for the
+        ``"bordo_in_salita"``/``"bordo_ambiguo"``/``"bordo_grid_troppo_corta"``
+        states of :meth:`AlphaDiscovery._grid_boundary_state`. On the
+        ``"auc"`` route it **is** that route's own
+        :meth:`AlphaDiscovery._h_star_elbow` boundary flag, not a separate
+        computation. Empirically correlates with genuinely
+        ``"momentum-aligned"`` candidates *more*, not less, than with the
+        other labels (§4.6) — treat it as a qualifier on ``nature``, never as
+        a reason to discount it.
+    promotion_route : str or None
+        Which significance test(s) actually found a distinguishable edge:
+        ``"z_score"`` (BH-FDR only), ``"auc"`` (stage (a) only — the
+        candidate BH-FDR alone would leave ``"undetermined"``), or
+        ``"both"``. ``None`` when neither test cleared — either because
+        ``direction`` is ``"undetermined"``, or (with
+        ``PromotionThresholds.require_significant_direction=False``) because
+        a direction was still assigned under the legacy non-blocking
+        behaviour despite neither test finding significance. Independent of
+        ``require_significant_direction``, which only controls whether the
+        *lack* of a route gates ``direction`` — it never changes what the
+        route actually was. Determines how ``horizon_at_boundary`` above was
+        computed for this candidate (the ``"auc"`` route uses the elbow
+        rule's own boundary flag; every other value uses
+        :meth:`AlphaDiscovery._grid_boundary_state`).
+    p_auc : float
+        Idea B stage (a)'s p-value — the significance of the
+        trapezoidal-weighted AUC of the per-bar excess rate against the
+        rotation null, integrated over the whole grid. ``nan`` when fewer
+        than two horizons have a finite ``Δ_h``.
+    rho : float
+        Idea B stage (b)'s Spearman correlation between horizon and the
+        (direction-oriented) per-bar rate — the quantity ``nature`` is
+        thresholded from. ``nan`` when stage (a) was not significant or
+        fewer than three horizons are usable.
     """
 
     holding_period_h: int
@@ -123,6 +170,11 @@ class DerivedTarget:
     fixed_target: bool = False
     data_derived_horizon_h: Optional[int] = None
     data_derived_sell_pct: Optional[float] = None
+    nature: str = "non_significativo"
+    horizon_at_boundary: bool = False
+    promotion_route: Optional[str] = None
+    p_auc: float = float("nan")
+    rho: float = float("nan")
 
 
 @dataclass
@@ -236,13 +288,32 @@ class PromotionThresholds:
         When ``True`` (default), a direction is assigned only if the selected
         horizon clears the Benjamini-Hochberg control — i.e. ``h*`` is in
         ``DerivedTarget.h_sig`` (equivalently ``statistically_weak`` is
-        ``False``).  When **no** horizon is BH-significant the excess is not
-        statistically distinguishable from the rotation null at any horizon, so
-        ``argmax|z_h|`` would assign a direction off a coin-flip (often the
-        drift-driven long edge of the grid); this gate returns
+        ``False``) — **or** the idea B stage (a) AUC test below is
+        significant (docs/analysis/ranged_tpm_and_market_alignment_proposal.md
+        §3.9: an OR-strengthening of the original BH-only gate, not a
+        replacement for it).  When **neither** test finds a distinguishable
+        edge, ``argmax|z_h|`` would assign a direction off a coin-flip (often
+        the drift-driven long edge of the grid); this gate returns
         ``"undetermined"`` instead.  Set to ``False`` for the legacy
         non-blocking behaviour (always assign a direction subject only to
-        ``min_direction_t``, flagging thin evidence via ``statistically_weak``).
+        ``min_direction_t``, flagging thin evidence via ``statistically_weak``,
+        and never running the AUC test's OR-strengthening).
+    auc_max_p : float
+        Maximum p-value for idea B's stage (a) — the excess-log-return
+        profile's per-bar-rate AUC, tested against the same rotation null
+        used for ``h_sig``, but integrated over the *whole* horizon grid
+        instead of one horizon at a time (§3.3 of the doc above). Illustrative
+        default ``0.10``, same order as ``fdr_q``. Only reached for candidates
+        with ``require_significant_direction=True``; unread otherwise.
+    rho_momentum_threshold : float
+        Stage (b): the Spearman-rank slope of the per-bar rate profile along
+        the horizon grid, in the direction stage (a) implies, needed to label
+        a candidate ``"momentum-aligned"`` (``rho > threshold``) or
+        ``"mean-reversion-aligned"`` (``rho < -threshold``); otherwise
+        ``"idiosyncratic"``. Illustrative default ``0.5``. Only computed when
+        stage (a) is significant (``DerivedTarget.nature`` stays
+        ``"non_significativo"`` otherwise) — independent of whether a
+        direction ends up assigned at all.
     """
 
     ic_min_abs: float = 0.02
@@ -255,6 +326,8 @@ class PromotionThresholds:
     oos_max_p: float = 0.10
     min_direction_t: float = 0.5
     require_significant_direction: bool = True
+    auc_max_p: float = 0.10
+    rho_momentum_threshold: float = 0.5
 
 
 @dataclass
@@ -813,6 +886,14 @@ class AlphaContract:
     handoff_status: str = "PENDING_RULE_DISCOVERY"
     rule_discovery_response: Optional[dict] = None
 
+    # Idea B/C (docs/analysis/ranged_tpm_and_market_alignment_proposal.md
+    # §3-§4) — mirrored here from `derived_target` for direct top-level
+    # access, since they describe *how* the contract was promoted rather
+    # than its economic target. See `DerivedTarget` for the full docstring.
+    nature: str = "non_significativo"
+    horizon_at_boundary: bool = False
+    promotion_route: Optional[str] = None
+
     # ------------------------------------------------------------------
     def to_dict(self) -> dict:
         """Flat dictionary suitable for a summary DataFrame row.
@@ -861,6 +942,9 @@ class AlphaContract:
             "grade": sc.grade,
             "rejection_reasons": "; ".join(self.rejection_reasons),
             "diagnostics": "; ".join(self.diagnostics),
+            "nature": self.nature,
+            "horizon_at_boundary": self.horizon_at_boundary,
+            "promotion_route": self.promotion_route,
         }
 
     def to_contract_dict(self) -> dict:
@@ -919,6 +1003,9 @@ class AlphaContract:
             "rejection_reasons": self.rejection_reasons,
             "diagnostics": self.diagnostics,
             "fdr_promoted": self.fdr_promoted,
+            "nature": self.nature,
+            "horizon_at_boundary": self.horizon_at_boundary,
+            "promotion_route": self.promotion_route,
             "handoff_status": self.handoff_status,
             "rule_discovery_response": self.rule_discovery_response,
         }
