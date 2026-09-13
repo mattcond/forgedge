@@ -8,6 +8,8 @@ from typing import Literal, Optional
 import numpy as np
 import pandas as pd
 
+from ..unset import UNSET
+
 
 class ColumnType(str, Enum):
     """Enumeration of the three column types recognised by the TypeClassifier.
@@ -173,6 +175,38 @@ class GateParams:
         the default 1, a single missing bar inside a run does not start a new
         episode (on daily data, a one-day interruption is not a new event).
         ``0`` gives strict consecutive runs.
+    tpm_mode : {"floor", "ranged"}
+        Selects how the rate criterion reads ``min_tpm``.  Default
+        ``"floor"`` — behaviour unchanged: a one-sided ``rate >= min_tpm``.
+        ``"ranged"`` instead treats ``min_tpm`` as the **centre** of a band
+        (``[min_tpm - tolerance, min_tpm + tolerance]``, clipped at 0), so an
+        event that fires *too often* — not just too rarely — is rejected.
+        Only defined for ``event_counting="episode"`` (see ``tpm_tolerance``
+        and docs/analysis/ranged_tpm_and_market_alignment_proposal.md §2);
+        combining ``"ranged"`` with ``event_counting="bar"`` raises
+        ``ValueError`` at evaluation time.  An event with ``n_episodes == 0``
+        is always rejected outright in ``"ranged"`` mode, independently of
+        the band and of ``min_episodes`` — a non-activating feature is not
+        "a rate of 0 that happens to round up to the band's floor".
+    tpm_tolerance : float
+        Half-width of the ``"ranged"`` band, in the same unit as ``min_tpm``
+        (episodes/month).  Unread when ``tpm_mode="floor"``.  Left at the
+        default ``UNSET``, the half-width is *derived* from the session's own
+        dispersion tolerance rather than chosen by the caller:
+        ``sigma = sqrt(eff_max_dispersion * min_tpm / n_total_months)``,
+        ``tolerance = 1.959964 * sigma`` (two-sided 95% normal quantile) —
+        the same worst-case per-event variance ``eff_max_dispersion`` already
+        bounds, so the derived band is never narrower than what an
+        individual event's own burstiness tolerance would allow.  Set
+        explicitly, it is used verbatim — a literal band, no statistics
+        involved: ``tpm_tolerance=2.0`` with ``min_tpm=4.0`` always gives
+        ``[2.0, 6.0]``, regardless of the dataset.  Deliberately **not**
+        derived from the event's own ``episode_id`` (which would couple the
+        two gate criteria the wrong way — see §2.4 of the doc above) nor
+        exposed through ``ResolutionTrace``: it depends on
+        ``n_total_months``, a dataset fact the resolver never sees, so it is
+        derived locally inside the gate, the same place
+        ``eff_max_dispersion`` already is.
     """
     min_tpm: float = 0.5
     max_dispersion: float = 1.5
@@ -180,6 +214,8 @@ class GateParams:
     event_counting: Literal["episode", "bar"] = "episode"
     min_episodes: int = 10
     episode_gap: int = 1
+    tpm_mode: Literal["floor", "ranged"] = "floor"
+    tpm_tolerance: float = UNSET
 
 
 @dataclass

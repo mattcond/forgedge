@@ -353,7 +353,7 @@ def forge_preset(
 
         M1: ``min_tpm``, ``max_dispersion``, ``dispersion_margin``,
         ``min_episodes``, ``max_and_components``, ``timestamp_col``,
-        ``event_counting``.
+        ``event_counting``, ``tpm_mode``, ``tpm_tolerance``.
 
         M2: ``min_lift``, ``min_cohens_d``, ``fdr_q``, ``oos_max_p``,
         ``horizon_grid``, ``bars_per_day``.
@@ -412,6 +412,13 @@ def forge_preset(
     # RotationCalibrator downstream.
     min_episodes = overrides.pop("min_episodes", spec["min_episodes"])
     max_and = overrides.pop("max_and_components", spec["max_and_components"])
+    # No preset sets these — `tpm_mode="ranged"` is opt-in, not a per-profile
+    # calibration (docs/analysis/ranged_tpm_and_market_alignment_proposal.md
+    # §2.5): the derived-tolerance default already inherits each preset's own
+    # `dispersion_margin` for free, so no per-preset `tpm_tolerance` table is
+    # needed either.
+    tpm_mode = overrides.pop("tpm_mode", "floor")
+    tpm_tolerance = overrides.pop("tpm_tolerance", UNSET)
     # Left UNSET unless the caller asks for one: the schema is a session
     # fact, not a profile choice, and the resolver propagates it to every
     # module instead of the preset setting M1's copy alone (F10).
@@ -424,6 +431,8 @@ def forge_preset(
             dispersion_margin=dispersion_margin,
             min_episodes=min_episodes,
             event_counting=event_counting,
+            tpm_mode=tpm_mode,
+            tpm_tolerance=tpm_tolerance,
         ),
         timestamp_col=timestamp_col,
         max_and_components=max_and,
