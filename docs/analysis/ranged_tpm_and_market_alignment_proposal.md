@@ -734,6 +734,30 @@ or (require_significant and statistically_weak and not auc_significant)
 `direction` e `sell_pct` non richiedono una nuova derivazione — escono dallo stesso
 codice già eseguito oggi, semplicemente non più scartati.
 
+**Nuovo campo esposto: `promotion_route`.** Il rafforzamento OR crea, per costruzione,
+tre popolazioni (§3.4: "solo attuale", "solo AUC", "entrambi") — oggi solo un'etichetta
+di comodo usata nelle tabelle di validazione, mai esposta sul contratto. Va promossa a
+campo vero e proprio, perché a valle serve sapere *quale* verifica ha promosso la
+regola — non solo se è stata promossa — per scegliere correttamente la derivazione di
+`h*` (§3.9, argmax\|z_h\| vs elbow) e la diagnostica di bordo (§4.5, §4.6):
+
+```python
+promotion_route: Literal["z_score", "auc", "both"]
+# "z_score" — solo BH-FDR (h_sig non vuoto), h* da argmax|z_h|
+# "auc"     — solo il nuovo test AUC (p_AUC < soglia), h* dalla regola elbow
+# "both"    — entrambi i test superati; h* resta argmax|z_h| (nessun conflitto:
+#             §3.9 mostra che sulle regole "entrambi" i due metodi concordano
+#             quasi sempre sull'ordine di grandezza di h*, §3.4)
+```
+
+Costo zero: `z_score_significant` (`h_sig` non vuoto) e `auc_significant` (`p_AUC` <
+soglia) sono già entrambi calcolati per ogni candidato dentro `_derive_target` — il
+campo è la sola combinazione booleana dei due, non una nuova statistica. Va esposto su
+`AlphaContract` (accanto a `derived_target`), non dentro `DerivedTarget`: non è
+un'informazione sul target economico in sé, ma su *come* il contratto è stato promosso —
+la stessa distinzione già usata per tenere `diagnostics` separato da `rejection_reasons`
+(pitfall #12 della skill `forgedge`).
+
 **`direction` è robusta per questo gruppo, per costruzione.** `adv = delta[j_star]` è il
 delta a un solo orizzonte, ma i casi studio di §3.6 mostrano che per "solo AUC" il segno
 è stabile su tutta la griglia, mai un'inversione — è la stessa proprietà che rende
@@ -968,29 +992,31 @@ campi con l'idea B — si veda §4.6.
 non vuoto): confronta `score_by_h` (cioè `|z_h|`) contro il bordo della griglia. Il
 rafforzamento OR di §3.9 introduce un secondo percorso — promozione via test **AUC**
 (`h_sig=()` ma `p_AUC` significativo) — dove `h*` non viene più da `argmax|z_h|` ma
-dalla regola elbow di §3.9. Per questo percorso **non serve una diagnostica separata**:
-lo stato `boundary_monotone` che l'elbow produce mentre sceglie `h*` **è già** la
-risposta alla stessa domanda ("la griglia è abbastanza lunga?"), calcolata sul cumulato
-`Δ_h` invece che su `score_by_h`.
+dalla regola elbow di §3.9. Il campo `promotion_route` di §3.9 (già esposto su
+`AlphaContract`, nessun dato nuovo) dice quale dei due applicare — non serve dedurlo
+da `h_sig`/`p_AUC` a valle:
 
 ```python
-if via_promozione == "bh_fdr":
+if contract.promotion_route in ("z_score", "both"):
     stato = diagnostica_su_score_by_h(derived_target)        # §4.3, invariata
-elif via_promozione == "auc":
+else:  # "auc"
     stato = "bordo_in_salita" if h_elbow_status == "boundary_monotone" else "interno"
     # nessun ricalcolo: h_elbow_status è già un sottoprodotto della scelta di h* (§3.9)
 ```
 
+`"both"` usa la diagnostica BH-FDR perché su quel percorso `h*` resta `argmax|z_h|`
+(§3.9) — la domanda "la griglia è abbastanza lunga?" va posta sulla stessa quantità con
+cui `h*` è stato scelto, non su `Δ_h` che lì non ha determinato nulla.
+
 Non ci sono i quattro stati intermedi (`bordo_ambiguo`, `bordo_plateau`,
-`bordo_grid_troppo_corta`) sul percorso AUC — la regola elbow a un solo marginale non li
-distingue, e i due raffinamenti tentati per introdurli (conteggio a due marginali,
+`bordo_grid_troppo_corta`) sul percorso `"auc"` — la regola elbow a un solo marginale non
+li distingue, e i due raffinamenti tentati per introdurli (conteggio a due marginali,
 soglia di materialità sul rumore null — entrambi in §3.9) sono stati validati e
 scartati: nessuno dei due migliora la regola grezza. Se un raffinamento futuro li
 introdurrà, si potranno mappare 1:1 sugli stessi due valori di `AlphaContract
 .diagnostics` già definiti in §4.3 (`"horizon_at_grid_boundary_climbing"` /
-`"horizon_at_grid_boundary_ambiguous"`), aggiungendo solo un terzo campo
-(`horizon_selection_method: "argmax_z" | "elbow_auc"`) per distinguere da quale via
-proviene la diagnostica — nessuna nuova struttura dati, un solo campo di provenienza.
+`"horizon_at_grid_boundary_ambiguous"`) — `promotion_route` (§3.9) già distingue da
+quale via proviene la diagnostica, nessun campo ulteriore da aggiungere.
 
 Sul fixture ADA (`"balanced"`, gruppo "solo AUC", n=45, §3.9): 37/45 (82.2%) risultano
 `boundary_monotone` con la regola a due marginali consecutivi, 13/45 (28.9%) con quella a
@@ -1032,23 +1058,27 @@ genuinamente trend-following — declassarle proprio lì cancellerebbe l'informa
 utile: "momentum-aligned al bordo" è probabilmente la firma più pulita di un
 trend-follower ancora in corsa, non un caso da mettere in dubbio.
 
-**Disegno adottato: due campi ortogonali**, non una quarta categoria che sovrascrive le
+**Disegno adottato: tre campi ortogonali**, non una quarta categoria che sovrascrive le
 prime tre:
 
 ```python
 nature: Literal["momentum-aligned", "mean-reversion-aligned", "idiosyncratic",
                 "non_significativo"]           # idea B, §3.3, invariata
 horizon_at_boundary: bool                       # idea C, §4.3/§4.5, invariata
+promotion_route: Literal["z_score", "auc", "both"]   # §3.9, invariata
 ```
 
-Una regola può quindi essere `nature="momentum-aligned", horizon_at_boundary=True` (il
-caso da manuale) oppure `nature="mean-reversion-aligned", horizon_at_boundary=False` (il
-caso più comune) — mai una perde l'altra. `horizon_at_boundary` copre entrambi i
-percorsi di promozione con la stessa logica di §4.5 (stato `bordo_*` per BH-FDR,
-`boundary_monotone` per AUC) — cambia solo il fatto che ora è un secondo campo, non un
-override del primo. Le due voci fini di `diagnostics` (`"horizon_at_grid_boundary
-_climbing"` / `"_ambiguous"`, §4.3) restano come dettaglio interno per chi vuole la
-granularità originale a quattro stati sul percorso BH-FDR; `horizon_at_boundary` è la
+Una regola può quindi essere `nature="momentum-aligned", horizon_at_boundary=True,
+promotion_route="auc"` (il caso da manuale — un trend-follower ancora in corsa, trovato
+proprio dal test che non richiede un picco isolato) oppure `nature="mean-reversion
+-aligned", horizon_at_boundary=False, promotion_route="both"` (il caso più comune) — mai
+un campo sovrascrive l'altro. `promotion_route` non è solo tracciabilità: dice anche
+*come* leggere `horizon_at_boundary` per quella regola, perché la diagnostica di bordo è
+calcolata diversamente a seconda del percorso (§4.5) — `z_score`/`both` da
+`score_by_h`, `auc` dal marginale di `Δ_h` via elbow. Le due voci fini di `diagnostics`
+(`"horizon_at_grid_boundary_climbing"` / `"_ambiguous"`, §4.3) restano come dettaglio
+interno per chi vuole la granularità originale a quattro stati sul percorso `z_score`;
+`horizon_at_boundary` è la
 lettura booleana semplificata pensata per l'uso combinato con `nature`.
 
 ### 4.7 Domande aperte residue
