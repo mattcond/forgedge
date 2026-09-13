@@ -18,10 +18,14 @@ punto di partenza per un eventuale design tecnico successivo.
   (`horizon_grid`) — emersa come prerequisito dell'idea B, ma tracciata come idea
   indipendente perché utile a prescindere da essa.
 
-Le tre idee sono indipendenti nell'implementazione (toccano moduli/file diversi). Una
-dipendenza concettuale B→C era stata ipotizzata in una prima stesura ma la validazione
-empirica di B (§3.4) l'ha esclusa come causa dei problemi trovati — resta solo una nota
-diagnostica accessoria (si veda §3.5).
+A è indipendente nell'implementazione dalle altre due (modulo diverso, M1 vs M2). Una
+dipendenza concettuale B→C era stata ipotizzata in una prima stesura per il criterio
+BH-FDR esistente, ma la validazione empirica di B (§3.4) l'ha esclusa come causa dei
+problemi trovati lì (si veda §3.5). Il rafforzamento OR della selezione di B (§3.9),
+però, ha fatto emergere un'unificazione reale e diversa: per i candidati promossi via il
+nuovo test AUC, la scelta di `h*` (§3.9) e la diagnostica di sufficienza della griglia
+di C (§4.5) sono **la stessa domanda posta sulla stessa quantità** (il profilo
+cumulato `Δ_h`), non due meccanismi paralleli.
 
 ---
 
@@ -670,10 +674,12 @@ caso: misurano cose diverse, con vulnerabilità diverse.
 - Il test (a) va calcolato sul periodo di stima coerente con la validazione IS/OOS già
   esistente, per non introdurre una forma di overfitting non controllata dalla
   walk-forward/rotazione già presente.
-- Il legame con l'idea C ipotizzato nella prima stesura non regge nemmeno dopo la
-  seconda correzione: la concentrazione al bordo osservata nella prima passata era un
-  artefatto della formula (`Δ_h` grezzo in entrambi gli stadi), non un fenomeno che
-  l'idea C intercetterebbe. Nessuna dipendenza stretta tra B e C.
+- Il legame con l'idea C ipotizzato nella prima stesura non regge, per la selezione
+  BH-FDR esistente, nemmeno dopo la seconda correzione: la concentrazione al bordo
+  osservata nella prima passata era un artefatto della formula (`Δ_h` grezzo in entrambi
+  gli stadi), non un fenomeno che l'idea C intercetterebbe lì. Per il nuovo percorso di
+  promozione via AUC (§3.9), invece, B e C sono **la stessa diagnostica** — si veda §3.9
+  e §4.5.
 - Resta da ripetere la validazione anche sul preset `"sniper"` (qui testato solo per
   l'idea A, §2.9) prima di considerare le soglie definitive.
 
@@ -686,6 +692,111 @@ caso: misurano cose diverse, con vulnerabilità diverse.
 - Esporre anche i valori quantitativi (`p_AUC`, `ρ`) oltre alle etichette categoriche.
 - Ripetere la validazione anche sul preset `"sniper"` prima di congelare le soglie
   definitive.
+
+### 3.9 Rafforzamento OR della selezione e scelta di `h*`/`direction` per i candidati "solo AUC" (formula congelata) — unificazione con l'idea C
+
+Risponde alla prima domanda aperta di §3.8: come promuovere i candidati "solo AUC"
+(§3.4) mantenendo, non sostituendo, il criterio BH-FDR esistente.
+
+**La modifica è minima.** `_derive_target` (`discovery.py:479-566`) calcola già
+`h*`, `direction` e `sell_pct` per **ogni** candidato — la clausola che oggi li scarta è
+una sola:
+
+```python
+undetermined = (
+    not isfinite(adv) or adv == 0.0
+    or not isfinite(z_star) or abs(z_star) < min_direction_t
+    or (require_significant and statistically_weak)   # <- h_sig=() sempre per "solo AUC"
+)
+```
+
+Per il gruppo "solo AUC", `h_sig=()` per definizione, quindi `statistically_weak=True`
+sempre e questa clausola scatta a prescindere dalla forza del segnale. Il rafforzamento
+OR è un cambio di una riga:
+
+```python
+or (require_significant and statistically_weak and not auc_significant)
+```
+
+`direction` e `sell_pct` non richiedono una nuova derivazione — escono dallo stesso
+codice già eseguito oggi, semplicemente non più scartati.
+
+**`direction` è robusta per questo gruppo, per costruzione.** `adv = delta[j_star]` è il
+delta a un solo orizzonte, ma i casi studio di §3.6 mostrano che per "solo AUC" il segno
+è stabile su tutta la griglia, mai un'inversione — è la stessa proprietà che rende
+`AUC_Δ` significativo. Qualunque orizzonte scelga `j_star`, il segno di `adv` sarebbe lo
+stesso: nessun rischio "coin-flip" per questo gruppo, a differenza del caso che la
+clausola originale vuole prevenire (profilo a picco isolato, gruppo "solo attuale").
+
+**`h*` non lo è.** Con `h_sig=()`, `h*` oggi viene scelto da `argmax|z_h|` su tutta la
+griglia — ma il profilo "solo AUC" è per costruzione piatto e diffuso (z moderati
+ovunque, mai un picco), quindi l'argmax vince per un margine spesso minimo e può cadere
+su un punto poco rappresentativo. `sell_pct` (quantile MFE calcolato *a* `h*`) eredita
+quell'instabilità anche quando `direction` non ne soffre.
+
+**Tre alternative validate sul fixture ADA (`"balanced"`, 225 candidati nei tre gruppi
+rilevanti: 111 "entrambi", 69 "solo attuale", 45 "solo AUC"):**
+
+```python
+w = pesi trapezoidali sulla griglia reale        # gli stessi di §3.3
+rate_i = Δ_hi / hi
+
+# 1) invariato — argmax|z_h| (oggi)
+# 2) centroide pesato: h*_centroid = round_to_grid( Σ w_i·h_i·|rate_i| / Σ w_i·|rate_i| )
+# 3) elbow — marginale che si annulla:
+marginal_1 = Δ_h1 / h1
+marginal_i = (Δ_hi − Δ_h(i-1)) / (hi − h(i-1))      # eccesso nelle sole barre aggiuntive
+h*_elbow = h(i-1) al primo i con segno(AUC_Δ)·marginal_i <= 0
+         = ultimo orizzonte della griglia se non si annulla mai (boundary_monotone)
+```
+
+| gruppo | n | `h*` mediano (argmax / centroide / elbow) | % al bordo (argmax / centroide / elbow) |
+|---|---|---|---|
+| entrambi | 111 | 3 / 5 / 3 | 18.9% / 0.0% / 12.6% |
+| solo attuale | 69 | 2 / 6 / 2 | 10.1% / 0.0% / 0.0% |
+| solo AUC | 45 | 5 / 10 / **6** | 6.7% / 0.0% / **28.9%** |
+
+Concordanza tra i tre metodi sul gruppo "solo AUC": solo 20-33% — non è rumore, scelgono
+sistematicamente orizzonti diversi. Esempi concreti (stesse regole di §3.6):
+
+- **028**: il tasso decade (0.0150→0.0021) ma il cumulato `Δ_h` cresce ininterrottamente
+  fino a h=24. `argmax` sceglie **h=1**, il punto più corto — economicamente il meno
+  sensato, visto che tenere di più continua a pagare. Centroide ed elbow concordano su
+  **h=10**.
+- **088**: `Δ_h` cresce **monotonicamente su tutta la griglia testata**, fino a h=20
+  (arricchito). `argmax` sceglie h=2, ignorando che il vantaggio continua a crescere per
+  altri 18 giorni oltre quel punto; l'elbow lo segnala onestamente come
+  `boundary_monotone` invece di inventare un punto di stop che non c'è.
+- **136**: il centroide sceglie h=10 nonostante il profilo culmini e ridiscenda già a
+  h=6 — perché **eredita lo stesso bias dei pesi trapezoidali** già documentato come
+  rischio dello stadio (a) in §3.7 (i punti tardi/arricchiti pesano sproporzionatamente).
+  `argmax` ed elbow concordano correttamente su h=6.
+
+**Il centroide è scartato**: eredita il bias dei pesi trapezoidali verso gli orizzonti
+tardi/arricchiti (caso 136) — non è un metodo pulito finché quei pesi non vengono
+rivisti (rischio già aperto in §3.7).
+
+**L'elbow (formula sopra) è il candidato scelto**, con un limite noto: su un profilo non
+monotono con un singolo calo isolato poi recuperato (es. regola 256 — negativo ovunque,
+un solo punto di parziale reversione a h=7, poi si riappiattisce), la regola grezza si
+ferma al primo marginale che cambia segno, anche se non è un vero punto di stop.
+**Corretto testando "due marginali consecutivi non positivi"** (mutuato da §4.3, idea
+C): il risultato è peggiore, non migliore — su griglie di sole 6-9 orizzonti la soglia a
+due passi lascia raramente spazio a due conferme e il metodo collassa quasi sempre al
+bordo (82.2% per "solo AUC" contro il 28.9% della regola a un solo marginale; 55.0%
+anche su "entrambi", dove il profilo è tipicamente a picco netto). La soglia di idea C
+era calibrata per un'altra domanda (una salita sospetta vicino al bordo su griglie più
+dense) e non si trapianta pari pari al criterio di arresto sul marginale. **Resta quindi
+in vigore la regola a un solo marginale**, col rischio dei falsi stop residuo — un
+raffinamento a soglia di materialità (non di conteggio), calibrato sulla variabilità
+`rate_null` già calcolata in stadio (a), è in esplorazione separata.
+
+**Unificazione con l'idea C.** L'esito `boundary_monotone` dell'elbow **è** la stessa
+domanda che l'idea C pone per il percorso BH-FDR ("la griglia è abbastanza lunga da
+vedere dove finisce l'edge?"), solo misurata sul cumulato `Δ_h` invece che su
+`score_by_h`/z. Non sono due meccanismi paralleli: sono la stessa diagnostica di
+sufficienza della griglia, con due implementazioni a seconda di quale via ha promosso il
+candidato — si veda §4.5 per il dettaglio.
 
 ---
 
@@ -807,7 +918,42 @@ declassa la propria etichetta (§3.4).
   `dominant_window` + moltiplicatori) lo stato `bordo_grid_troppo_corta` sarà frequente:
   è un esito onesto ("non posso giudicare"), non un difetto della soglia.
 
-### 4.5 Domande aperte residue
+### 4.5 Unificazione con l'idea B: due percorsi di promozione, un'unica diagnostica
+
+§4.3 descrive la diagnostica per il percorso di promozione **BH-FDR** (`h_sig`
+non vuoto): confronta `score_by_h` (cioè `|z_h|`) contro il bordo della griglia. Il
+rafforzamento OR di §3.9 introduce un secondo percorso — promozione via test **AUC**
+(`h_sig=()` ma `p_AUC` significativo) — dove `h*` non viene più da `argmax|z_h|` ma
+dalla regola elbow di §3.9. Per questo percorso **non serve una diagnostica separata**:
+lo stato `boundary_monotone` che l'elbow produce mentre sceglie `h*` **è già** la
+risposta alla stessa domanda ("la griglia è abbastanza lunga?"), calcolata sul cumulato
+`Δ_h` invece che su `score_by_h`.
+
+```python
+if via_promozione == "bh_fdr":
+    stato = diagnostica_su_score_by_h(derived_target)        # §4.3, invariata
+elif via_promozione == "auc":
+    stato = "bordo_in_salita" if h_elbow_status == "boundary_monotone" else "interno"
+    # nessun ricalcolo: h_elbow_status è già un sottoprodotto della scelta di h* (§3.9)
+```
+
+Non ci sono i quattro stati intermedi (`bordo_ambiguo`, `bordo_plateau`,
+`bordo_grid_troppo_corta`) sul percorso AUC — la regola elbow a un solo marginale non li
+distingue oggi. Se il raffinamento a soglia di materialità (§3.9, in esplorazione) li
+introdurrà, si potranno mappare 1:1 sugli stessi due valori di `AlphaContract
+.diagnostics` già definiti in §4.3 (`"horizon_at_grid_boundary_climbing"` /
+`"horizon_at_grid_boundary_ambiguous"`), aggiungendo solo un terzo campo
+(`horizon_selection_method: "argmax_z" | "elbow_auc"`) per distinguere da quale via
+proviene la diagnostica — nessuna nuova struttura dati, un solo campo di provenienza.
+
+Sul fixture ADA (`"balanced"`, gruppo "solo AUC", n=45, §3.9): 37/45 (82.2%) risultano
+`boundary_monotone` con la regola a due marginali consecutivi, 13/45 (28.9%) con quella a
+un solo marginale (in vigore) — numeri alti in entrambi i casi rispetto al 6.7% del
+bordo su `argmax|z_h`, ma è atteso: un profilo piatto e diffuso come quello del gruppo
+"solo AUC" (§3.6) è per costruzione più incline a "non aver ancora visto la fine
+dell'edge entro la griglia testata" di un profilo a picco netto.
+
+### 4.6 Domande aperte residue
 
 - Se calcolare la diagnostica solo su `direction != "undetermined"` (dove esiste un h\*
   con un senso economico) o anche sui candidati scartati, per capire *perché* — decisione
@@ -816,7 +962,10 @@ declassa la propria etichetta (§3.4).
 - Validazione empirica sul fixture di riferimento (stesso metodo usato per l'idea A,
   §2.8): quanti contratti reali cadono in ciascuno dei quattro stati, e se
   `bordo_in_salita` si concentra sugli eventi già etichettabili come trend-following da
-  altri segnali (Hurst/`market_structure` alto).
+  altri segnali (Hurst/`market_structure` alto). Per il percorso AUC questa validazione
+  è già fatta in §3.9/§4.5; resta da fare solo per il percorso BH-FDR.
+- Se e come estendere la regola elbow del percorso AUC ai quattro stati del percorso
+  BH-FDR, una volta chiuso il raffinamento a soglia di materialità (§3.9).
 
 ---
 
@@ -824,17 +973,25 @@ declassa la propria etichetta (§3.4).
 
 ```
 A (M1, ranged tpm)         — indipendente, nessuna dipendenza dalle altre due
-B (M2, market alignment)   — indipendente da C (dipendenza ipotizzata, poi esclusa
-                              empiricamente in §3.4); usa solo il proprio profilo Δ_h
-C (M2, grid sufficiency)   — indipendente nell'implementazione; resta una nota
-                              diagnostica accessoria per i casi "solo AUC" di B (§3.4)
+
+percorso BH-FDR (esistente):
+B (M2, h* = argmax|z_h|)   — indipendente da C per questo percorso (dipendenza
+                              ipotizzata, poi esclusa empiricamente in §3.4)
+C (M2, grid sufficiency)   — diagnostica su score_by_h/z, §4.3, invariata
+
+percorso AUC (nuovo, §3.9 — rafforzamento OR della selezione):
+B (M2, h* = elbow su Δ_h)  ─┐
+C (M2, grid sufficiency)   ─┴─ stessa diagnostica, stesso calcolo (§4.5): lo stato
+                                boundary_monotone dell'elbow È l'esito di C, non un
+                                secondo passo
 ```
 
-Le tre idee non hanno più un ordine di implementazione obbligato: A è indipendente per
-costruzione; B, dopo la validazione empirica, si è rivelata indipendente da C nella
-pratica (una dipendenza concettuale era stata ipotizzata in una prima stesura, ma i dati
-mostrano che la causa dei problemi trovati in B era nella formula di B stessa, non nel
-pinning al bordo che C rileva).
+A resta indipendente per costruzione. Per il percorso di promozione BH-FDR esistente, B
+e C restano indipendenti come la validazione empirica ha mostrato (§3.4-§3.5): la causa
+dei problemi trovati in B era nella formula di B stessa, non nel pinning al bordo che C
+rileva. Per il nuovo percorso AUC (§3.9), invece, B e C **si fondono**: la scelta di
+`h*` e la diagnostica di sufficienza della griglia sono lo stesso calcolo sullo stesso
+profilo `Δ_h` (§4.5) — non due idee da sequenziare, ma un unico meccanismo con due letture.
 
 ## 6. Prossimi passi
 
@@ -850,10 +1007,14 @@ decidere con l'utente:
 - **Idea B: formule congelate (corrette due volte) e validate su tre asset**
   (§3.3-§3.6) — due stadi (gate AUC via rotation-null riusato, poi pendenza di `Δ_h/h`
   sulla griglia), entrambi corretti dallo stesso artefatto aritmetico (`Δ_h` grezzo) e
-  poi confermati su ADA, BTC ed EURUSD con lo stesso pattern qualitativo. Resta da
-  ripetere su `"sniper"` (§3.7) e fissare le soglie definitive (§3.8).
+  poi confermati su ADA, BTC ed EURUSD con lo stesso pattern qualitativo. Rafforzamento
+  OR della selezione e derivazione di `h*` per i "solo AUC" validati su ADA (§3.9) —
+  regola elbow a un solo marginale scelta, centroide scartato, raffinamento a soglia di
+  materialità in esplorazione. Resta da ripetere su `"sniper"` (§3.7) e fissare le
+  soglie definitive (§3.8).
 - **Idea C: formule congelate** (§4.3) — meccanismo a tre/quattro stati derivato
   interamente da `DerivedTarget.score_by_h`, già esposto sul contratto, nessun nuovo
-  dato. Resta da fare la validazione empirica (§4.5, stesso metodo usato per A e B)
-  prima di considerarla chiusa come le altre due.
+  dato. Estesa al percorso di promozione via AUC come diagnostica unificata con B (§4.5,
+  §3.9) — già validata lì. Resta da fare la validazione empirica sul percorso BH-FDR
+  (§4.6, stesso metodo usato per A e B) prima di considerarla chiusa come le altre due.
 - Solo dopo: apertura di branch/issue separati per A, B, C.
