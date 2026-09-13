@@ -1,10 +1,13 @@
 # Proposta funzionale — modalità ranged per `min_tpm` (M1) e diagnostica di allineamento al mercato (M2)
 
-**Stato del documento:** bozza di specifiche funzionali, non di design tecnico né di
-implementazione. Raccoglie tre idee emerse da una sessione di esplorazione sul
-pipeline FORGE, con lo stato attuale del codice verificato riga per riga e le
-decisioni di indirizzo già prese. Nessun codice è stato scritto: questo documento è il
-punto di partenza per un eventuale design tecnico successivo.
+**Stato del documento:** specifica funzionale con **metodologia congelata su tutte e tre
+le idee** (A, B, C) — non design tecnico né implementazione. Ogni formula è stata
+validata empiricamente sul fixture di riferimento (ADA) e su almeno due asset aggiuntivi
+dove rilevante (BTC, EURUSD); i tentativi di raffinamento che non hanno retto alla
+validazione sono documentati come tali, non nascosti. Restano solo dettagli di
+calibrazione (soglie numeriche, un secondo preset da ripetere) rimandati alla specifica
+tecnica — nessuna domanda aperta sul *metodo* in sé. Nessun codice è stato scritto:
+questo documento è il punto di partenza per il design tecnico successivo.
 
 **Idee tracciate:**
 
@@ -786,10 +789,25 @@ due passi lascia raramente spazio a due conferme e il metodo collassa quasi semp
 bordo (82.2% per "solo AUC" contro il 28.9% della regola a un solo marginale; 55.0%
 anche su "entrambi", dove il profilo è tipicamente a picco netto). La soglia di idea C
 era calibrata per un'altra domanda (una salita sospetta vicino al bordo su griglie più
-dense) e non si trapianta pari pari al criterio di arresto sul marginale. **Resta quindi
-in vigore la regola a un solo marginale**, col rischio dei falsi stop residuo — un
-raffinamento a soglia di materialità (non di conteggio), calibrato sulla variabilità
-`rate_null` già calcolata in stadio (a), è in esplorazione separata.
+dense) e non si trapianta pari pari al criterio di arresto sul marginale.
+
+**Anche un secondo raffinamento, a soglia di materialità invece che di conteggio, è
+stato provato e scartato.** Idea: scalare il marginale osservato per la deviazione
+standard del marginale nullo (stesse rotazioni già usate per `p_AUC`), fermandosi solo
+quando il calo eccede un multiplo di quel rumore (`z_marginale <= -soglia`, con
+`soglia=0` che riproduce esattamente la regola grezza come controllo). Risultato: già a
+`soglia=0.5` il bordo esplode ovunque, incluso il gruppo "entrambi" (picco netto, dove
+non dovrebbe succedere) — dal 12.6% al 38.7%, poi 74.8% a `soglia=1.0`. Il motivo è
+statistico, non un bug: la differenza tra due cumulate consecutive (`Δ_hi − Δ_h(i-1)`) è
+molto più rumorosa della cumulata stessa — differenziare amplifica la varianza — quindi
+il null per-segmento ha poca potenza e quasi nessun marginale supera anche un solo sigma
+di rumore. Sul caso 057 (quello che il raffinamento doveva correggere) non risolve
+nemmeno il problema originale: a `soglia=0.5` si ferma ancora a h=5 (il calo è appena
+sopra soglia).
+
+**Resta quindi in vigore la regola grezza a un solo marginale**, col rischio dei falsi
+stop residuo (caso 057) accettato come limite noto e documentato, non risolto da nessuno
+dei due raffinamenti tentati.
 
 **Unificazione con l'idea C.** L'esito `boundary_monotone` dell'elbow **è** la stessa
 domanda che l'idea C pone per il percorso BH-FDR ("la griglia è abbastanza lunga da
@@ -939,7 +957,9 @@ elif via_promozione == "auc":
 
 Non ci sono i quattro stati intermedi (`bordo_ambiguo`, `bordo_plateau`,
 `bordo_grid_troppo_corta`) sul percorso AUC — la regola elbow a un solo marginale non li
-distingue oggi. Se il raffinamento a soglia di materialità (§3.9, in esplorazione) li
+distingue, e i due raffinamenti tentati per introdurli (conteggio a due marginali,
+soglia di materialità sul rumore null — entrambi in §3.9) sono stati validati e
+scartati: nessuno dei due migliora la regola grezza. Se un raffinamento futuro li
 introdurrà, si potranno mappare 1:1 sugli stessi due valori di `AlphaContract
 .diagnostics` già definiti in §4.3 (`"horizon_at_grid_boundary_climbing"` /
 `"horizon_at_grid_boundary_ambiguous"`), aggiungendo solo un terzo campo
@@ -965,7 +985,8 @@ dell'edge entro la griglia testata" di un profilo a picco netto.
   altri segnali (Hurst/`market_structure` alto). Per il percorso AUC questa validazione
   è già fatta in §3.9/§4.5; resta da fare solo per il percorso BH-FDR.
 - Se e come estendere la regola elbow del percorso AUC ai quattro stati del percorso
-  BH-FDR, una volta chiuso il raffinamento a soglia di materialità (§3.9).
+  BH-FDR — i due raffinamenti tentati in §3.9 sono stati scartati; serve un'idea diversa
+  da quelle esplorate finora (conteggio, soglia di materialità sul rumore null).
 
 ---
 
@@ -995,26 +1016,32 @@ profilo `Δ_h` (§4.5) — non due idee da sequenziare, ma un unico meccanismo c
 
 ## 6. Prossimi passi
 
-Questo documento resta a livello di specifica funzionale. I passi successivi, da
-decidere con l'utente:
+**Metodologia congelata su A, B e C** — questo documento resta a livello di specifica
+funzionale, ma l'esplorazione è chiusa: ogni formula è stata scritta, validata sui dati
+reali, corretta dove i dati mostravano un problema, e le strade alternative scartate
+sono documentate insieme alla ragione dello scarto invece di essere solo omesse.
 
-- **Idea A: validazione empirica chiusa, multi-preset e multi-asset** (§2.8-§2.9) —
-  formula confermata corretta e stabile su due preset (`"balanced"`, `"sniper"`) e tre
-  asset (ADA, BTC, EURUSD); l'effetto netto sul volume di candidati varia per
-  preset×asset insieme per una ragione capita e in parte spiegata (§2.9), non per un
-  difetto della formula. Resta da congelare solo il dettaglio tecnico residuo di §2.7
-  (`"bar"` mode, se esporre `z`).
-- **Idea B: formule congelate (corrette due volte) e validate su tre asset**
-  (§3.3-§3.6) — due stadi (gate AUC via rotation-null riusato, poi pendenza di `Δ_h/h`
-  sulla griglia), entrambi corretti dallo stesso artefatto aritmetico (`Δ_h` grezzo) e
-  poi confermati su ADA, BTC ed EURUSD con lo stesso pattern qualitativo. Rafforzamento
-  OR della selezione e derivazione di `h*` per i "solo AUC" validati su ADA (§3.9) —
-  regola elbow a un solo marginale scelta, centroide scartato, raffinamento a soglia di
-  materialità in esplorazione. Resta da ripetere su `"sniper"` (§3.7) e fissare le
-  soglie definitive (§3.8).
-- **Idea C: formule congelate** (§4.3) — meccanismo a tre/quattro stati derivato
-  interamente da `DerivedTarget.score_by_h`, già esposto sul contratto, nessun nuovo
-  dato. Estesa al percorso di promozione via AUC come diagnostica unificata con B (§4.5,
-  §3.9) — già validata lì. Resta da fare la validazione empirica sul percorso BH-FDR
-  (§4.6, stesso metodo usato per A e B) prima di considerarla chiusa come le altre due.
+- **Idea A — congelata.** Formula confermata corretta e stabile su due preset
+  (`"balanced"`, `"sniper"`) e tre asset (ADA, BTC, EURUSD) (§2.8-§2.9); l'effetto netto
+  sul volume di candidati varia per preset×asset insieme per una ragione capita, non per
+  un difetto della formula. Dettaglio tecnico residuo (non metodologico): compatibilità
+  `"bar"` mode, se esporre `z` (§2.7) — rimandato alla specifica tecnica.
+- **Idea B — congelata.** Due stadi (gate AUC via rotation-null riusato, poi pendenza di
+  `Δ_h/h` sulla griglia), entrambi corretti dallo stesso artefatto aritmetico (`Δ_h`
+  grezzo) e confermati su ADA, BTC ed EURUSD (§3.3-§3.6). Rafforzamento OR della
+  selezione e derivazione di `h*`/`direction` per i "solo AUC" validati su ADA (§3.9):
+  regola elbow a un solo marginale scelta; centroide scartato (eredita il bias dei pesi
+  trapezoidali); **due raffinamenti dell'elbow tentati e scartati** (conteggio a due
+  marginali — troppo severo su griglie corte; soglia di materialità sul rumore
+  null — statisticamente sotto-potenziata, differenziare due cumulate amplifica la
+  varianza) — il rischio residuo (falsi stop su profili non monotoni, caso 057) resta
+  documentato, non risolto. Dettaglio tecnico residuo: ripetere su `"sniper"` e fissare i
+  valori numerici delle soglie `p_AUC`/`ρ` (oggi illustrative) (§3.7-§3.8) — rimandato
+  alla specifica tecnica.
+- **Idea C — congelata.** Meccanismo a tre/quattro stati derivato interamente da
+  `DerivedTarget.score_by_h`, nessun nuovo dato (§4.3). Estesa al percorso di promozione
+  via AUC come diagnostica unificata con B (§4.5, §3.9) — già validata lì, stessi due
+  raffinamenti tentati e scartati. Dettaglio tecnico residuo: validazione empirica sul
+  percorso BH-FDR (oggi solo quello AUC è coperto) (§4.6) — rimandato alla specifica
+  tecnica, non blocca il congelamento della formula.
 - Solo dopo: apertura di branch/issue separati per A, B, C.
