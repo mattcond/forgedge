@@ -328,6 +328,8 @@ class AlphaDiscovery:
                     require_significant=cfg.thresholds.require_significant_direction,
                     target_mode=cfg.target_mode,
                     trend_sma_mult=cfg.trend_sma_mult,
+                    auc_max_p=cfg.thresholds.auc_max_p,
+                    rho_momentum_threshold=cfg.thresholds.rho_momentum_threshold,
                 )
             h_star = derived.holding_period_h
             j_star = all_h.index(h_star)
@@ -418,6 +420,7 @@ class AlphaDiscovery:
             "oos_passed", "oos_p_value", "oos_lift",
             "regime_dependency", "regime_breadth", "composite_score", "grade",
             "rejection_reasons", "diagnostics",
+            "nature", "horizon_at_boundary", "promotion_route",
         ]
         if not self._contracts:
             return pd.DataFrame(columns=_cols)
@@ -444,6 +447,8 @@ class AlphaDiscovery:
         require_significant: bool = True,
         target_mode: str = "abs",
         trend_sma_mult: float = 2.0,
+        auc_max_p: float = 0.10,
+        rho_momentum_threshold: float = 0.5,
     ) -> DerivedTarget:
         """Scan the horizon grid and derive ``(h*, sell_pct*, direction*)``.
 
@@ -465,17 +470,43 @@ class AlphaDiscovery:
 
         The rotation null yields ``p_value_by_h``; Benjamini-Hochberg at
         ``fdr_q`` yields ``h_sig`` and the ``statistically_weak`` flag (``h*``
-        outside ``h_sig``).  ``h*`` is always chosen on ``|z_h|`` over the whole
-        grid, but the **direction** is gated: when ``require_significant`` is
-        set (default) and no horizon clears BH, the excess is indistinguishable
-        from the null everywhere, so ``direction`` is ``"undetermined"`` rather
-        than a coin-flip read off ``argmax|z_h|``.
+        outside ``h_sig``).  ``h*`` is chosen on ``|z_h|`` over the whole grid
+        for the ``"z_score"``/``"both"`` promotion routes below.
+
+        Idea B/C (docs/analysis/ranged_tpm_and_market_alignment_proposal.md
+        §3-§4) run alongside this unchanged derivation, not instead of it:
+
+        * **Stage (a)** (:meth:`_auc_significance`) tests whether the excess
+          profile is distinguishable from the rotation null *integrated over
+          the whole grid* — a candidate can clear this test even when no
+          single horizon clears Benjamini-Hochberg (``h_sig=()``).
+        * **``promotion_route`` OR-strengthening**: a direction is assigned
+          when *either* a horizon clears BH (as before) *or* stage (a) does —
+          this is the only change to ``undetermined`` below. On the
+          ``"auc"``-only route, ``h*`` comes from :meth:`_h_star_elbow`
+          instead of ``argmax|z_h|``, which is unstable on the flat, diffuse
+          profile that route's candidates have by construction.
+        * **Stage (b)** (``nature``), only when stage (a) is significant:
+          the sign of the *slope* of the per-bar rate profile along the grid
+          — momentum-aligned/mean-reversion-aligned/idiosyncratic.
+        * **``horizon_at_boundary``** (idea C): is ``h*`` pinned to the edge
+          of the tested grid for a reason that survives scrutiny (still
+          climbing) rather than pure noise?  Computed via
+          :meth:`_grid_boundary_state` on the ``"z_score"``/``"both"`` routes,
+          or read directly off :meth:`_h_star_elbow`'s own boundary flag on
+          the ``"auc"`` route — the same question, answered two ways
+          depending on which test promoted the candidate (§4.5).
+
+        None of this touches ``advantage_by_h``/``t_stat_by_h``/``score_by_h``/
+        ``p_value_by_h``/``h_sig``/``statistically_weak`` — those still
+        describe the ``argmax|z_h|`` profile exactly as before, regardless of
+        which route ultimately assigned the direction.
 
         ``sell_pct`` is the ``mfe_quantile``-quantile of the Maximum Favorable
         Excursion at ``h*`` across active IS bars.  ``direction`` is
         ``"undetermined"`` when no horizon yields a finite ``Δ_h``, when
-        ``|z_h*| < min_direction_t``, or (with ``require_significant``) when the
-        target is ``statistically_weak``.
+        ``|z_h*| < min_direction_t``, or when neither promotion route clears
+        its significance test.
         """
         m_f = active_is.astype(float)
         cnt_a = m_f @ valid_is                 # active bars valid at each horizon
@@ -487,7 +518,7 @@ class AlphaDiscovery:
             delta = mu_cond - mu_base          # Δ_h — excess log-return (signed)
 
         # Circular-rotation null: z_h = Δ_h / σ_null,h and the two-sided p-value.
-        z, p_rot = AlphaDiscovery._rotation_null(
+        z, p_rot, null = AlphaDiscovery._rotation_null(
             active_is, valid_is, L0, mu_base, delta,
         )
         usable = (cnt_a >= 2) & np.isfinite(delta) & np.isfinite(z)
@@ -520,13 +551,46 @@ class AlphaDiscovery:
 
         adv = delta[j_star]
         z_star = z[j_star]
+
+        # ── Idea B stage (a): AUC significance test over the whole grid ────
+        h_arr_all = np.asarray(horizons, dtype=float)
+        finite_mask = np.isfinite(delta)
+        auc_delta = float("nan")
+        p_auc = float("nan")
+        h_f = delta_f = None
+        if int(finite_mask.sum()) >= 2:
+            h_f = h_arr_all[finite_mask]
+            delta_f = delta[finite_mask]
+            null_f = null[:, finite_mask]
+            auc_delta, p_auc = AlphaDiscovery._auc_significance(h_f, delta_f, null_f)
+        auc_significant = bool(np.isfinite(p_auc) and p_auc < auc_max_p)
+
+        # ── Idea B stage (b): momentum/mean-reversion/idiosyncratic label ──
+        # Only meaningful once stage (a) has found a distinguishable edge;
+        # independent of which route (if any) ends up assigning a direction.
+        nature = "non_significativo"
+        rho = float("nan")
+        if auc_significant:
+            sign_auc = 1.0 if auc_delta >= 0 else -1.0
+            rho, _ = stats.spearmanr(h_f, sign_auc * (delta_f / h_f))
+            if np.isfinite(rho) and rho > rho_momentum_threshold:
+                nature = "momentum-aligned"
+            elif np.isfinite(rho) and rho < -rho_momentum_threshold:
+                nature = "mean-reversion-aligned"
+            else:
+                nature = "idiosyncratic"
+
         undetermined = (
             not np.isfinite(adv) or adv == 0.0
             or not np.isfinite(z_star) or abs(z_star) < min_direction_t
-            # No BH-significant horizon: the excess is indistinguishable from the
-            # rotation null everywhere, so argmax|z| would assign a direction off
-            # a coin-flip (often the drift-driven long edge of the grid).
-            or (require_significant and statistically_weak)
+            # No BH-significant horizon *and* no AUC-significant edge either:
+            # the excess is indistinguishable from the rotation null by both
+            # tests, so argmax|z| would assign a direction off a coin-flip
+            # (often the drift-driven long edge of the grid). OR-strengthened
+            # (docs/analysis/...md §3.9): a candidate the BH gate alone would
+            # leave undetermined is still promoted when stage (a) is
+            # significant on its own.
+            or (require_significant and statistically_weak and not auc_significant)
         )
         if undetermined:
             return DerivedTarget(
@@ -540,29 +604,77 @@ class AlphaDiscovery:
                 p_value_by_h=p_value_by_h,
                 h_sig=h_sig,
                 statistically_weak=statistically_weak,
+                nature=nature,
+                p_auc=float(p_auc),
+                rho=float(rho),
             )
 
-        direction = "long" if adv > 0 else "short"
+        # ── promotion_route + route-specific h*/direction/boundary ─────────
+        # Purely a function of which significance test(s) actually found an
+        # edge -- independent of `require_significant`, which only controls
+        # whether the *lack* of one gates `direction`. With
+        # `require_significant=False` a candidate can still be promoted with
+        # neither test clearing (the legacy non-blocking behaviour): that
+        # case is real and gets `promotion_route=None`, not a route that
+        # didn't actually apply.
+        if not statistically_weak:
+            promotion_route = "both" if auc_significant else "z_score"
+        elif auc_significant:
+            promotion_route = "auc"
+        else:
+            promotion_route = None
+
+        if promotion_route == "auc":
+            # h* would be unstable from argmax|z_h| on this route's flat,
+            # diffuse profile (§3.9), so it comes from the elbow rule instead.
+            sign_auc = 1.0 if auc_delta >= 0 else -1.0
+            h_final, horizon_at_boundary = AlphaDiscovery._h_star_elbow(
+                h_f, delta_f, sign_auc,
+            )
+            adv_final = delta[horizons.index(h_final)]
+            if not np.isfinite(adv_final) or adv_final == 0.0:
+                # Defensive fallback (not observed in validation, docs
+                # §3.9): the elbow-chosen horizon has no usable excess of its
+                # own even though the integrated profile does -- fall back to
+                # the same h* the "z_score" route would have used.
+                h_final, adv_final = h_star, adv
+                horizon_at_boundary = (
+                    AlphaDiscovery._grid_boundary_state(score_by_h, h_final) != "interno"
+                )
+        else:
+            # "z_score", "both", or None (legacy `require_significant=False`
+            # permissive mode): h* stays argmax|z_h*|, unchanged from today.
+            h_final, adv_final = h_star, adv
+            horizon_at_boundary = (
+                AlphaDiscovery._grid_boundary_state(score_by_h, h_final) != "interno"
+            )
+
+        direction = "long" if adv_final > 0 else "short"
         sell_pct = (
             AlphaDiscovery._compute_mfe_quantile(
-                close_is, active_is, h_star, direction, mfe_quantile, mfe_floor,
+                close_is, active_is, h_final, direction, mfe_quantile, mfe_floor,
                 target_mode, trend_sma_mult,
             )
             if close_is is not None
-            else max(float(abs(adv)), mfe_floor)
+            else max(float(abs(adv_final)), mfe_floor)
         )
 
         return DerivedTarget(
-            holding_period_h=h_star,
+            holding_period_h=h_final,
             sell_pct=sell_pct,
             direction=direction,
-            mean_advantage=float(adv),
+            mean_advantage=float(adv_final),
             advantage_by_h=advantage_by_h,
             t_stat_by_h=t_stat_by_h,
             score_by_h=score_by_h,
             p_value_by_h=p_value_by_h,
             h_sig=h_sig,
             statistically_weak=statistically_weak,
+            nature=nature,
+            horizon_at_boundary=horizon_at_boundary,
+            promotion_route=promotion_route,
+            p_auc=float(p_auc),
+            rho=float(rho),
         )
 
     @staticmethod
@@ -606,6 +718,8 @@ class AlphaDiscovery:
             require_significant=cfg.thresholds.require_significant_direction,
             target_mode=cfg.target_mode,
             trend_sma_mult=cfg.trend_sma_mult,
+            auc_max_p=cfg.thresholds.auc_max_p,
+            rho_momentum_threshold=cfg.thresholds.rho_momentum_threshold,
         )
         return replace(
             diag,
@@ -622,7 +736,7 @@ class AlphaDiscovery:
         L0: np.ndarray,
         mu_base: np.ndarray,
         delta: np.ndarray,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Circular-rotation null for the excess log-return, per horizon.
 
         Every non-trivial circular shift ``k`` of the event mask is a draw under
@@ -641,14 +755,21 @@ class AlphaDiscovery:
 
         All ``n−1`` shifts are evaluated at once via the circular cross-
         correlation (FFT), so the exact test costs ``O(n log n · k)`` — no Monte
-        Carlo, no seed.  Returns ``(z, p)`` with ``nan`` where a horizon has no
-        usable null.
+        Carlo, no seed.  Returns ``(z, p, null)`` with ``nan`` where a horizon
+        has no usable null.  ``null`` is the full ``(n-1, k)`` matrix of
+        per-shift excess values (row 0 of the rotation dropped — the identity
+        shift, i.e. the observed data) — idea B's stage (a) AUC significance
+        test (docs/analysis/ranged_tpm_and_market_alignment_proposal.md §3.3)
+        integrates it over the grid instead of reducing it to ``(z, p)`` first,
+        so it is returned rather than discarded.
         """
         n, k = L0.shape
         z = np.full(k, np.nan)
         p = np.full(k, np.nan)
+        null = np.empty((max(n - 1, 0), k))
+        null.fill(np.nan)
         if n < 4:
-            return z, p
+            return z, p, null
 
         af = active_is.astype(float)
         vf = valid_is.astype(float)
@@ -671,7 +792,143 @@ class AlphaDiscovery:
             z = np.where((sd > 0) & np.isfinite(delta), delta / sd, np.nan)
             ge = np.nansum(np.abs(null) >= np.abs(delta)[None, :], axis=0)
             p = np.where(n_valid > 0, (1.0 + ge) / (1.0 + n_valid), np.nan)
-        return z, p
+        return z, p, null
+
+    @staticmethod
+    def _trapz_weights(h: np.ndarray) -> np.ndarray:
+        """Trapezoidal integration weights over a (possibly non-uniform)
+        horizon grid — used by idea B's stage (a) AUC significance test
+        (docs/analysis/ranged_tpm_and_market_alignment_proposal.md §3.3).
+
+        Known limitation, documented rather than fixed (§3.7 of the doc): on
+        a grid with growing spacing (e.g. ``1, 2, 3, 5, 7, 10``), the middle
+        and late points carry more weight than the early ones, so a fast,
+        concentrated edge can be diluted relative to a slower, more evenly
+        spread one. A single horizon added by per-event enrichment far from
+        its neighbours (e.g. ``h=24`` after ``h=12``) can dominate the sum.
+        """
+        h = np.asarray(h, dtype=float)
+        w = np.zeros_like(h)
+        if len(h) == 1:
+            return np.array([1.0])
+        w[0], w[-1] = (h[1] - h[0]) / 2, (h[-1] - h[-2]) / 2
+        if len(h) > 2:
+            w[1:-1] = (h[2:] - h[:-2]) / 2
+        return w
+
+    @staticmethod
+    def _auc_significance(
+        h_arr: np.ndarray, delta_f: np.ndarray, null_f: np.ndarray,
+    ) -> Tuple[float, float]:
+        """Idea B stage (a): is the excess-log-return profile distinguishable
+        from the rotation null over the *whole* horizon grid, not just at a
+        single horizon (docs/analysis/...md §3.3)?
+
+        Integrates the per-bar rate ``Δ_h / h`` — not the raw (cumulated)
+        ``Δ_h`` — with trapezoidal weights, and tests it against the same
+        quantity computed on every rotation-null shift (reusing
+        :meth:`_rotation_null`'s matrix, not a fresh permutation).  Using the
+        raw ``Δ_h`` here was tried and found, on real data, to bias both this
+        test and the AUC value toward the longest horizon on the grid for any
+        edge that is merely persistent, not truly momentum — see §3.4 of the
+        doc for the empirical correction.
+
+        Parameters
+        ----------
+        h_arr : np.ndarray
+            Horizons with a finite ``delta``, ascending.
+        delta_f : np.ndarray
+            ``Δ_h`` at those horizons.
+        null_f : np.ndarray
+            ``(n_shifts, len(h_arr))`` rotation-null excess matrix, restricted
+            to the same horizons.
+
+        Returns
+        -------
+        (auc, p_auc) : tuple of float
+            ``auc`` is the observed weighted sum (a signed rate, per bar).
+            ``p_auc`` is ``nan`` when no rotation shift yields a usable value.
+        """
+        w = AlphaDiscovery._trapz_weights(h_arr)
+        rate = delta_f / h_arr
+        auc = float((w * rate).sum())
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rate_null = null_f / h_arr[None, :]
+        auc_null = rate_null @ w
+        n_valid = int(np.isfinite(auc_null).sum())
+        if n_valid == 0:
+            return auc, float("nan")
+        ge = int(np.nansum(np.abs(auc_null) >= abs(auc)))
+        return auc, (1.0 + ge) / (1.0 + n_valid)
+
+    @staticmethod
+    def _h_star_elbow(
+        h_arr: np.ndarray, delta_f: np.ndarray, sign: float,
+    ) -> Tuple[int, bool]:
+        """Idea B, ``"auc"`` promotion route (docs/analysis/...md §3.9): choose
+        ``h*`` for a candidate with no BH-significant horizon (``h_sig=()``),
+        where ``argmax|z_h|`` would pick an all-but-arbitrary point on a
+        profile that is, by construction, flat and diffuse.
+
+        Walks the grid from the shortest horizon and stops at the first point
+        where the *marginal* per-bar excess in the additional bars — not the
+        cumulative rate — stops growing in the AUC's own direction. Two
+        refinements (requiring two consecutive non-positive marginals; a
+        materiality threshold scaled by the rotation-null's own spread) were
+        tried and empirically rejected — both made the rule collapse to the
+        grid boundary far more often, for different reasons (see §3.9): the
+        raw single-marginal rule below is the one that survived validation.
+
+        Returns
+        -------
+        (h_star, at_grid_boundary) : tuple of int, bool
+            ``at_grid_boundary`` is ``True`` when the marginal never turns
+            non-positive within the tested grid (``"boundary_monotone"`` in
+            the doc) — this **is** idea C's grid-sufficiency diagnostic for
+            this route, not a separate computation (§4.5).
+        """
+        if len(h_arr) == 1:
+            return int(h_arr[0]), True
+        marginal = np.empty(len(h_arr))
+        marginal[0] = delta_f[0] / h_arr[0]
+        marginal[1:] = (delta_f[1:] - delta_f[:-1]) / (h_arr[1:] - h_arr[:-1])
+        signed = sign * marginal
+        for i in range(len(h_arr)):
+            if signed[i] <= 0:
+                return (int(h_arr[i - 1]) if i > 0 else int(h_arr[0])), False
+        return int(h_arr[-1]), True
+
+    @staticmethod
+    def _grid_boundary_state(score_by_h: Dict[int, float], h_star: int) -> str:
+        """Idea C (docs/analysis/...md §4.3): is ``h*`` pinned to the edge of
+        the tested horizon grid because the underlying ``|z_h|`` is still
+        climbing, or because it is a genuine interior peak?  Used for the
+        ``"z_score"``/``"both"`` promotion routes, where ``h*`` comes from
+        ``argmax|z_h|`` — see :meth:`_h_star_elbow` for the ``"auc"`` route,
+        which answers the same question as a side effect of choosing ``h*``.
+
+        The comparison is against the highest horizon with a **finite**
+        score, not ``max(horizon_grid)``: a horizon dropped for too few valid
+        active bars already has ``score_by_h[h] = nan`` and falls out of the
+        ``argmax`` on its own, so comparing against the configured grid would
+        misreport a genuine interior peak as "at the boundary".
+
+        Requires two consecutive increases (not one) to call the climbing
+        state high-confidence — a single uptick this close to the noise
+        floor of the rotation null is not enough evidence on its own.
+        """
+        horizons_validi = sorted(h for h, s in score_by_h.items() if np.isfinite(s))
+        if not horizons_validi or h_star != horizons_validi[-1]:
+            return "interno"
+        scores = [score_by_h[h] for h in horizons_validi]
+        if len(scores) < 3:
+            return "bordo_grid_troppo_corta"
+        if scores[-1] > scores[-2] > scores[-3]:
+            return "bordo_in_salita"
+        elif scores[-1] > scores[-2]:
+            return "bordo_ambiguo"
+        else:
+            return "bordo_plateau"
 
     @staticmethod
     def _compute_mfe_quantile(
@@ -1310,6 +1567,9 @@ class AlphaDiscovery:
             diagnostics=diagnostics,
             fdr_promoted=bool(fdr_ok),
             dominant_window=cand.dominant_window(),
+            nature=derived.nature,
+            horizon_at_boundary=derived.horizon_at_boundary,
+            promotion_route=derived.promotion_route,
         )
 
     # ------------------------------------------------------------------
