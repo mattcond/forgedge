@@ -491,10 +491,16 @@ Distribuzione plausibile per pattern basati su indicatori tecnici (incroci, sogl
 percentile) su questo asset/timeframe: prevalentemente reazioni che si affievolisce con
 l'orizzonte, non trend che si autoalimentano.
 
-### 3.5 Validazione multi-asset — BTC ed EURUSD
+### 3.5 Validazione multi-asset — BTC, EURUSD e DAX
 
 Stesso metodo di §3.4, preset `"balanced"`, sugli asset di §2.9 (BTC ed EURUSD, KPI
-table costruite da OHLCV grezzo — stesso limite di confronto con ADA già segnalato lì).
+table costruite da OHLCV grezzo — stesso limite di confronto con ADA già segnalato lì),
+più un quarto asset aggiunto appositamente: **DAX 1D**
+(`examples/data/E_DAAX_1DAY.csv`, 1759 barre, 2021-01-03 → 2026-09-02) — l'unico dei
+quattro con un **trend forte e pressoché costante** per tutto il campione (rendimento
+log cumulato +63%, drift medio ~0.00036/barra, nessun ritracciamento prolungato). Serve
+da banco di prova mirato per il momentum: sugli altri tre asset i casi momentum-aligned
+erano troppo pochi (1-10) per dire granché.
 
 **Selezione — metodo attuale vs metodo AUC corretto:**
 
@@ -503,12 +509,13 @@ table costruite da OHLCV grezzo — stesso limite di confronto con ADA già segn
 | ADA | 111 (3) | 69 (2) | 45 (5, 6.7%) |
 | BTC | 491 (2) | 209 (1) | 237 (5, 13.1%) |
 | EURUSD | 356 (5) | 391 (1) | 184 (7, 13.6%) |
+| DAX | 557 (3) | 450 (1) | 182 (7, 13.7%) |
 
-Pattern identico sui tre asset: "solo attuale" ha sempre l'h\* mediano più basso (1-2) —
-il rischio di falsi positivi a orizzonte breve del metodo attuale non è specifico di
-ADA. "Solo AUC" ha sempre l'h\* mediano più alto (5-7) senza concentrarsi al bordo
-(6.7-13.6%, mai vicino al 43% della formula sbagliata di §3.4) — la correzione tiene su
-asset molto diversi da quello su cui è stata trovata.
+Pattern identico sui quattro asset: "solo attuale" ha sempre l'h\* mediano più basso
+(1-2) — il rischio di falsi positivi a orizzonte breve del metodo attuale non è
+specifico di ADA. "Solo AUC" resta lontano dal bordo su tutti e quattro (6.7-13.7%, mai
+vicino al 43% della formula sbagliata di §3.4) — la correzione tiene anche sull'asset
+più trending testato finora.
 
 **Etichetta stadio (b):**
 
@@ -517,13 +524,16 @@ asset molto diversi da quello su cui è stata trovata.
 | ADA | 156 | 68.6% | 28.2% | 3.2% |
 | BTC | 728 | **83.4%** | 15.2% | 1.4% |
 | EURUSD | 540 | 60.7% | 31.7% | **7.6%** |
+| DAX | 739 | 72.8% | 23.0% | **4.2% (n=31)** |
 
-Il mean-reversion domina ovunque (61-83%), il momentum resta sempre marginale (1-8%) —
-coerente con pattern basati su indicatori tecnici. BTC (l'asset più volatile dei tre)
-mostra lo skew più forte verso mean-reversion; EURUSD (FX, storicamente più incline a
-trend/carry rispetto al crypto) è il più bilanciato — entrambe le direzioni plausibili
-economicamente, non solo statisticamente stabili. Nessun terzo bug trovato in questo
-giro: la doppia correzione di §3.3-§3.4 regge su dati indipendenti.
+Il mean-reversion domina **anche su DAX** (72.8%) — non è un artefatto di asset "poco
+trendy": nemmeno un drift fortissimo e costante rende il pattern medio scoperto da M2
+prevalentemente trend-following. Ma il campione momentum sale a 31 casi (contro 1-10
+sugli altri tre) — il primo abbastanza grande da vedere cosa succede a `ρ` in coda: il
+valore massimo osservato è **0.976**, un profilo quasi puramente trend-following mai
+visto negli altri asset. Nessun terzo bug trovato in questo giro: la doppia correzione
+di §3.3-§3.4 regge su dati indipendenti, incluso l'asset scelto apposta per essere il
+caso più sfavorevole per il mean-reversion.
 
 ### 3.6 Casi studio — perché i due metodi divergono, orizzonte per orizzonte
 
@@ -809,6 +819,21 @@ sopra soglia).
 stop residuo (caso 057) accettato come limite noto e documentato, non risolto da nessuno
 dei due raffinamenti tentati.
 
+**Validazione su un secondo asset — DAX (§3.5).** Stesso confronto a tre metodi,
+sull'asset scelto apposta per essere il più trending dei quattro:
+
+| gruppo | n | `h*` mediano (centroide / elbow) | % al bordo (centroide / elbow) |
+|---|---|---|---|
+| entrambi | 557 | 5 / 5 | 0.0% / 11.8% |
+| solo attuale | 450 | 7 / 2 | 0.4% / 0.7% |
+| solo AUC | 182 | 10 / 3 | 0.0% / **13.7%** |
+
+Il tasso di bordo dell'elbow su "solo AUC" scende dal 28.9% di ADA al 13.7% di DAX —
+coerente, non sorprendente: il mean-reversion (che tende a un picco interno genuino,
+§3.5) resta la maggioranza anche su un asset fortemente trending, quindi l'elbow trova
+un punto di arresto interno più spesso. Nessuna instabilità strutturale emersa
+sull'asset più sfavorevole al mean-reversion testato finora.
+
 **Unificazione con l'idea C.** L'esito `boundary_monotone` dell'elbow **è** la stessa
 domanda che l'idea C pone per il percorso BH-FDR ("la griglia è abbastanza lunga da
 vedere dove finisce l'edge?"), solo misurata sul cumulato `Δ_h` invece che su
@@ -900,10 +925,11 @@ rialzo che potrebbe essere rumore del rotation-null.
 - `"horizon_at_grid_boundary_climbing"` — stato `bordo_in_salita` (alta confidenza).
 - `"horizon_at_grid_boundary_ambiguous"` — stato `bordo_ambiguo` o `bordo_grid_troppo_corta`.
 
-Due livelli invece di uno darebbero all'idea B due gradi di declassamento della propria
-etichetta invece di un taglio netto sì/no — nota storica: la validazione empirica di B
-(§3.4) ha poi escluso il pinning al bordo come causa dei problemi trovati in quella sede,
-quindi questo collegamento resta un affinamento accessorio, non una dipendenza stretta.
+Nota storica: la prima stesura di questa proposta immaginava questi due valori come un
+**declassamento** della fiducia nell'etichetta di idea B. §4.6 mostra, con dati alla
+mano, che è l'opposto: il bordo correla **di più**, non di meno, con le regole
+genuinamente trend-following. Il collegamento con B resta reale, ma cambia natura — si
+veda §4.6 per il disegno finale a due campi.
 
 **Esclusione per `fixed_target=True`.** Quando il target è fissato dall'utente
 (`TargetOptimizer`/`AlphaConfig.fixed_target`), `holding_period_h` non viene da
@@ -919,8 +945,8 @@ quel campo non è `None`.
 minimo scansionato) — ma lì generalmente non è correggibile: le griglie iniziano già a 1
 barra, la finezza più fine possibile per quel timeframe.
 
-Il risultato (`stato`, e quindi il valore in `diagnostics`) è la base su cui l'idea B
-declassa la propria etichetta (§3.4).
+Il risultato (`stato`, e quindi il valore in `diagnostics`) è l'input del disegno a due
+campi con l'idea B — si veda §4.6.
 
 ### 4.4 Rischi / vincoli noti
 
@@ -973,20 +999,75 @@ bordo su `argmax|z_h`, ma è atteso: un profilo piatto e diffuso come quello del
 "solo AUC" (§3.6) è per costruzione più incline a "non aver ancora visto la fine
 dell'edge entro la griglia testata" di un profilo a picco netto.
 
-### 4.6 Domande aperte residue
+### 4.6 Disegno finale: due campi indipendenti, non una gerarchia
+
+Prima formulazione di questa proposta: il bordo come segnale di **sfiducia** — le due
+voci di `diagnostics` di §4.3 "declassano" l'etichetta di idea B. Validandolo sui dati
+(ADA e, soprattutto, **DAX** — l'asset con un trend forte e pressoché costante scelto
+apposta per avere un campione momentum non trascurabile, §3.5) il risultato è
+**l'opposto**.
+
+La domanda giusta non è "tra le regole al bordo, quante sono momentum?" (dominata dalle
+frequenze di base — il mean-reversion è comune, il momentum è raro, quindi in valore
+assoluto il bordo è quasi sempre pieno di regole non-momentum). La domanda giusta è
+**tra le regole di ciascuna etichetta, quante finiscono al bordo?**
+
+| etichetta (idea B) | ADA — n | ADA — % al bordo | DAX — n | DAX — % al bordo |
+|---|---|---|---|---|
+| momentum-aligned | 5 | **60.0%** | 31 | **35.5%** |
+| idiosyncratic | 44 | 43.2% | 170 | 22.9% |
+| non_significativo | 69 | 10.1% | 450 | 15.1% |
+| mean-reversion-aligned | 107 | 11.2% | 538 | 8.7% |
+
+Su entrambi gli asset il momentum ha il tasso di bordo più alto — coerente con
+l'intuizione originale: un vero trend-follower è, per natura, un profilo che non ha
+ancora smesso di crescere quando la griglia finisce. Il mean-reversion ha il tasso più
+basso: un effetto che si esaurisce/inverte tende a mostrare un picco interno genuino,
+prima che la griglia termini. (Campione ADA piccolo, n=5 — il risultato DAX, n=31, è
+quello statisticamente più solido, ma punta nella stessa direzione.)
+
+**Questo esclude un declassamento.** Se il bordo correlasse col rumore, "declassare"
+l'etichetta al bordo avrebbe senso. Ma il bordo correla **di più** con le regole
+genuinamente trend-following — declassarle proprio lì cancellerebbe l'informazione più
+utile: "momentum-aligned al bordo" è probabilmente la firma più pulita di un
+trend-follower ancora in corsa, non un caso da mettere in dubbio.
+
+**Disegno adottato: due campi ortogonali**, non una quarta categoria che sovrascrive le
+prime tre:
+
+```python
+nature: Literal["momentum-aligned", "mean-reversion-aligned", "idiosyncratic",
+                "non_significativo"]           # idea B, §3.3, invariata
+horizon_at_boundary: bool                       # idea C, §4.3/§4.5, invariata
+```
+
+Una regola può quindi essere `nature="momentum-aligned", horizon_at_boundary=True` (il
+caso da manuale) oppure `nature="mean-reversion-aligned", horizon_at_boundary=False` (il
+caso più comune) — mai una perde l'altra. `horizon_at_boundary` copre entrambi i
+percorsi di promozione con la stessa logica di §4.5 (stato `bordo_*` per BH-FDR,
+`boundary_monotone` per AUC) — cambia solo il fatto che ora è un secondo campo, non un
+override del primo. Le due voci fini di `diagnostics` (`"horizon_at_grid_boundary
+_climbing"` / `"_ambiguous"`, §4.3) restano come dettaglio interno per chi vuole la
+granularità originale a quattro stati sul percorso BH-FDR; `horizon_at_boundary` è la
+lettura booleana semplificata pensata per l'uso combinato con `nature`.
+
+### 4.7 Domande aperte residue
 
 - Se calcolare la diagnostica solo su `direction != "undetermined"` (dove esiste un h\*
   con un senso economico) o anche sui candidati scartati, per capire *perché* — decisione
   a basso rischio, rimandabile alla specifica tecnica: il calcolo è comunque a costo
   quasi zero in entrambi i casi.
-- Validazione empirica sul fixture di riferimento (stesso metodo usato per l'idea A,
-  §2.8): quanti contratti reali cadono in ciascuno dei quattro stati, e se
-  `bordo_in_salita` si concentra sugli eventi già etichettabili come trend-following da
-  altri segnali (Hurst/`market_structure` alto). Per il percorso AUC questa validazione
-  è già fatta in §3.9/§4.5; resta da fare solo per il percorso BH-FDR.
-- Se e come estendere la regola elbow del percorso AUC ai quattro stati del percorso
-  BH-FDR — i due raffinamenti tentati in §3.9 sono stati scartati; serve un'idea diversa
-  da quelle esplorate finora (conteggio, soglia di materialità sul rumore null).
+- **Risolta in §4.6**: `horizon_at_boundary` correla con `nature`, ma nel senso opposto a
+  quello ipotizzato in origine (si concentra sul momentum, non lo esclude) — confermato
+  su ADA e DAX. Resta da ripetere la stessa verifica su BTC/EURUSD e con un segnale
+  indipendente da idea B (Hurst/`market_structure`) per un controllo incrociato più
+  forte, ma non è più una domanda aperta sul verso dell'effetto.
+- Se e come estendere la regola elbow del percorso AUC ai quattro stati fini del
+  percorso BH-FDR — i due raffinamenti tentati in §3.9 sono stati scartati; serve
+  un'idea diversa da quelle esplorate finora (conteggio, soglia di materialità sul
+  rumore null). A bassa priorità ora che `horizon_at_boundary` (booleano, §4.6) copre
+  l'uso pratico su entrambi i percorsi senza bisogno dei quattro stati fini sul percorso
+  AUC.
 
 ---
 
@@ -1039,9 +1120,12 @@ sono documentate insieme alla ragione dello scarto invece di essere solo omesse.
   valori numerici delle soglie `p_AUC`/`ρ` (oggi illustrative) (§3.7-§3.8) — rimandato
   alla specifica tecnica.
 - **Idea C — congelata.** Meccanismo a tre/quattro stati derivato interamente da
-  `DerivedTarget.score_by_h`, nessun nuovo dato (§4.3). Estesa al percorso di promozione
-  via AUC come diagnostica unificata con B (§4.5, §3.9) — già validata lì, stessi due
-  raffinamenti tentati e scartati. Dettaglio tecnico residuo: validazione empirica sul
-  percorso BH-FDR (oggi solo quello AUC è coperto) (§4.6) — rimandato alla specifica
-  tecnica, non blocca il congelamento della formula.
+  `DerivedTarget.score_by_h`, nessun nuovo dato (§4.3), validato su 180 contratti
+  BH-FDR-promossi su ADA. Unificata con B su entrambi i percorsi di promozione (§4.5) e
+  ridisegnata come **due campi indipendenti** — `nature` (idea B, invariata) e
+  `horizon_at_boundary` (booleano) — invece di un declassamento, dopo che la
+  validazione su ADA e DAX ha mostrato che il bordo correla *di più*, non di meno, con
+  le regole genuinamente momentum (§4.6). Dettaglio tecnico residuo: ripetere la stessa
+  verifica su BTC/EURUSD e con un segnale indipendente (Hurst/`market_structure`) (§4.7)
+  — rimandato alla specifica tecnica, non blocca il congelamento della formula.
 - Solo dopo: apertura di branch/issue separati per A, B, C.
