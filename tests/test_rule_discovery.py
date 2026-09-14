@@ -36,6 +36,7 @@ from forgedge.rule_discovery import (
 )
 from forgedge.rule_discovery import excursion_stats, execution_envelope
 from forgedge.rule_discovery.discovery import _MIN_TRADES_ABS
+from forgedge.rule_discovery.walkforward import selection_windows
 from forgedge.rule_discovery.validation import (
     _effective_sample,
     _ttest_1samp_greater,
@@ -927,6 +928,66 @@ class TestWalkForward:
         total = sum(s.test_summary.total_trades for s in wf.splits)
         assert wf.oos_trades is not None
         assert len(wf.oos_trades) == total
+
+
+class TestPurgeWidthEntryMode:
+    """#278: buy_delay_bar is provably inert under buy_type="market"
+    (backtest.py's _scan_fill market branch fills unconditionally at
+    signal_rn + 1 and returns before ever reading buy_delay_bar), so the
+    walk-forward purge width must not reserve margin for it in that mode."""
+
+    def test_market_entry_purge_ignores_buy_delay_bar(self):
+        df = _candle_with_signal(n=12000, signal_every=30)
+        cfg = WalkForwardConfig(n_splits=3, min_train_months=4)
+        spec_large_delay = GridSpec(
+            buy_drop_pct=[0.005], sell_pct=[0.03], target_h=[24], buy_delay_bar=[500],
+        )
+        spec_zero_delay = GridSpec(
+            buy_drop_pct=[0.005], sell_pct=[0.03], target_h=[24], buy_delay_bar=[0],
+        )
+
+        w_large = selection_windows(df, spec_large_delay, BacktestParams(buy_type="market"), cfg)
+        w_zero = selection_windows(df, spec_zero_delay, BacktestParams(buy_type="market"), cfg)
+
+        assert w_large and w_zero
+        # buy_delay_bar must have zero effect on the market purge width --
+        # the windows (train_from, train_to, test_from, test_to) must be
+        # bit-identical regardless of how large buy_delay_bar is.
+        assert w_large == w_zero
+
+    def test_limit_entry_purge_still_includes_buy_delay_bar(self):
+        """Regression guard: the fix must not also zero out the delay term
+        for buy_type="limit", where buy_delay_bar genuinely governs the fill
+        (_scan_fill's limit branch reads it directly)."""
+        df = _candle_with_signal(n=12000, signal_every=30)
+        cfg = WalkForwardConfig(n_splits=3, min_train_months=4)
+        spec_delay = GridSpec(
+            buy_drop_pct=[0.005], sell_pct=[0.03], target_h=[24], buy_delay_bar=[50],
+        )
+        spec_zero = GridSpec(
+            buy_drop_pct=[0.005], sell_pct=[0.03], target_h=[24], buy_delay_bar=[0],
+        )
+
+        w_delay = selection_windows(df, spec_delay, BacktestParams(buy_type="limit"), cfg)
+        w_zero = selection_windows(df, spec_zero, BacktestParams(buy_type="limit"), cfg)
+
+        assert w_delay and w_zero
+        # A larger buy_delay_bar must still purge more of the train tail.
+        assert w_delay[0][1] < w_zero[0][1]
+        # The exact gap matches the extra 50 bars (1h candles here).
+        assert w_zero[0][1] - w_delay[0][1] == pd.Timedelta(hours=50)
+
+    def test_explicit_purge_bars_override_is_unaffected_by_buy_type(self):
+        """cfg.purge_bars, when set, bypasses the target_h/buy_delay_bar
+        formula entirely for both entry modes -- the #278 fix only changes
+        the *derived* branch."""
+        df = _candle_with_signal(n=12000, signal_every=30)
+        spec = GridSpec(buy_drop_pct=[0.005], sell_pct=[0.03], target_h=[24], buy_delay_bar=[500])
+        cfg = WalkForwardConfig(n_splits=3, min_train_months=4, purge_bars=10)
+
+        w_market = selection_windows(df, spec, BacktestParams(buy_type="market"), cfg)
+        w_limit = selection_windows(df, spec, BacktestParams(buy_type="limit"), cfg)
+        assert w_market == w_limit
 
 
 # ---------------------------------------------------------------------------
