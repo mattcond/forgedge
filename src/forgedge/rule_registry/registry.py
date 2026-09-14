@@ -134,7 +134,9 @@ class RuleRegistry:
     def compute_correlations(self) -> CorrelationMatrices:
         """Step 2 — Jaccard / Spearman matrices and per-rule maxima."""
         self.matrices = correlation.correlation_matrices(
-            self.documents, min_active=self.config.cross_min_active
+            self.documents,
+            min_active=self.config.cross_min_active,
+            max_pool=self.config.max_correlation_pool,
         )
         correlation.annotate_correlation_maxima(self.documents, self.matrices)
         return self.matrices

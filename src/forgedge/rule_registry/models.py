@@ -93,6 +93,24 @@ class RegistryConfig:
         Minimum aligned active bars required before a Spearman gain correlation
         is computed; below it the correlation is reported as ``0.0`` (spec
         Section 6, Matrix B).
+    max_correlation_pool : int
+        Above this many tradeable (``EDGE``/``PARTIAL-EDGE``) rules,
+        ``compute_correlations()`` (Step 2) skips its ``O(n^2)`` Jaccard/
+        Spearman computation entirely and returns identity/zero-off-diagonal
+        matrices instead (issue #281) — a run that happens to promote an
+        unusually large number of tradeable rules (a legitimate, data-dependent
+        outcome, not a misconfiguration: e.g. an atypical grade distribution
+        driving a much higher-than-usual promotion rate) would otherwise hang
+        for a long, unbounded, and unsignalled amount of time on this single
+        step, with M0-M3 together typically taking a small fraction of that.
+        Skipping is conservative, not silently wrong: an all-zero Jaccard
+        matrix flags no false-positive duplicates, and ``gain_corr_max`` reads
+        ``0.0`` for every rule — the same values a rule with no correlated
+        peers would already report. ``CorrelationMatrices.skipped`` records
+        whether this happened. Default ``500`` (comfortably above what a
+        single-ticker session normally promotes — see the module's own
+        worked example — while keeping the worst case bounded to at most a
+        couple of minutes).
     export_format : str
         Flat-table format: ``"excel"`` or ``"csv"``.
     export_duplicates : bool
@@ -115,6 +133,7 @@ class RegistryConfig:
     min_cross_pf_retention: float = UNSET
     generic_ratio_threshold: float = 2.0 / 3.0
     cross_min_active: int = 10
+    max_correlation_pool: int = 500
     export_format: str = "excel"
     export_duplicates: bool = True
     export_non_generic: bool = True
@@ -311,8 +330,14 @@ class CorrelationMatrices:
     spearman : pd.DataFrame
         Symmetric Spearman matrix on the date-aligned gains (return
         correlation).  Bars with no trade contribute a gain of ``0``.
+    skipped : bool
+        ``True`` when the pool exceeded ``RegistryConfig.max_correlation_pool``
+        and the real ``O(n^2)`` computation was skipped (issue #281) — both
+        matrices are then identity/zero-off-diagonal placeholders, not a
+        measurement. Default ``False``.
     """
 
     rule_ids: List[str]
     jaccard: pd.DataFrame
     spearman: pd.DataFrame
+    skipped: bool = False

@@ -18,7 +18,8 @@ package runtime ``numpy``/``pandas``-only, matching the rest of FORGE.
 """
 from __future__ import annotations
 
-from typing import List, Sequence
+import warnings
+from typing import List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -107,17 +108,52 @@ def _gain_series(doc: RuleDocument) -> pd.Series:
 def correlation_matrices(
     docs: List[RuleDocument],
     min_active: int = 10,
+    max_pool: Optional[int] = None,
 ) -> CorrelationMatrices:
     """Compute the Jaccard and Spearman matrices over the whole registry.
 
     Both matrices are symmetric with a unit diagonal (Jaccard) or self
     correlation of ``1.0`` (Spearman).  Returns empty frames for an empty
     registry.
+
+    Parameters
+    ----------
+    max_pool : int, optional
+        Above this many documents, the ``O(n^2)`` pairwise computation below
+        is skipped entirely and identity/zero-off-diagonal matrices are
+        returned instead, with ``CorrelationMatrices.skipped=True`` (issue
+        #281) — ``None`` (default) never skips, preserving every existing
+        caller's behaviour. A run that promotes an unusually large number of
+        tradeable rules is a legitimate, data-dependent outcome (e.g. an
+        atypical grade distribution driving a much higher promotion rate),
+        not a misconfiguration to reject — but the double loop below has no
+        cap of its own and no vectorization, so left unchecked it turns into
+        an unbounded, unsignalled hang while every other pipeline stage
+        finishes in a small fraction of that time. Skipping is conservative:
+        an all-zero Jaccard matrix flags no false-positive duplicates, and a
+        zero ``gain_corr_max`` is the same reading a rule with no correlated
+        peers already gets.
     """
     ids = [d.rule_id for d in docs]
     n = len(docs)
     jac = np.eye(n)
     spr = np.eye(n)
+
+    if max_pool is not None and n > max_pool:
+        warnings.warn(
+            f"correlation_matrices: {n} tradeable rules exceeds "
+            f"max_correlation_pool={max_pool}; skipping the O(n^2) Jaccard/"
+            f"Spearman computation ({n * (n - 1) // 2} pairs) to avoid an "
+            f"unbounded hang. Duplicate flags and gain_corr_max are not "
+            f"meaningful for this run's rules (see RegistryConfig"
+            f".max_correlation_pool, issue #281).",
+            stacklevel=2,
+        )
+        jaccard = pd.DataFrame(jac, index=ids, columns=ids)
+        spearman = pd.DataFrame(spr, index=ids, columns=ids)
+        return CorrelationMatrices(
+            rule_ids=ids, jaccard=jaccard, spearman=spearman, skipped=True,
+        )
 
     for i in range(n):
         for j in range(i + 1, n):
