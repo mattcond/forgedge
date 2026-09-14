@@ -10,19 +10,64 @@ data).
 Pairing scheme: same grade first (``A_same``, ``B_same``, ...), then
 adjacent grade via a root+partner scheme read off
 ``GradePairingConfig.adjacency`` (default A<->{A,B}, B<->{B,C}, C<->{C,D} —
-D is never a root, only ever reached as B/C's partner). Reuses
-``ANDComposer.compose()``'s Phase 1 hooks (``forgedge.event_discovery
-.and_composer``, #254 Phase 1) rather than re-deriving any pairing or gate
-logic: one ``compose()`` call over the whole eligible pool, with a
-``stratify_fn`` that keys each valid pair by its grade stratum so the
-round-robin interleaving fixes the exact under-sampling bug the issue
-reports for a single shared cap (a small stratum's sole pair getting
-crowded out entirely by a much larger stratum before the cap is reached).
+D is never a root, only ever reached as B/C's partner).
+
+Each grade stratum is composed via its **own, independent**
+``ANDComposer.compose()`` call (one call per ``(stratum_key, grade_set)``
+from :func:`_enumerate_strata`), rather than one shared call across the
+whole pool with a stratify hook approximating fairness through round-robin
+interleaving. Two problems measured on a real pipeline run (DAAX 1H,
+``docs/analysis/exhaustive_and_composition_coverage_proposal.md``) motivate
+this:
+
+* **Cross-process non-determinism.** ``ANDComposer``'s own pair/triple
+  traversal shuffle uses a fixed seed (issue #230), which only guarantees
+  reproducibility *given* a fixed pool order — and the pool's incoming
+  order depends on ``FeatureGenerator``'s internal ``set()`` iteration,
+  which is hash-seed-randomized per Python process (issue #24). Two
+  identical runs of the same config on the same data produced two
+  different "best" composed rules purely because the process restarted.
+  Sorting the pool by a canonical key (``RawEvent.component.expression``,
+  a deterministic string) before any further processing removes this
+  dependency entirely — same input, same output, independent of process.
+* **Selection diversity collapses without an explicit constraint.** A
+  shared cap across a stratify-keyed round-robin lets whichever
+  feature-pair combinations happen to be visited first (or score best,
+  if ranked) dominate — measured: a plain merit ranking (tpm-closeness +
+  low dispersion + episode count) kept only 49/303 distinct
+  source-feature-pair combinations (16%) versus 149/303 (49%) from random
+  sampling of the same size, the same "single dominant component" failure
+  mode issue #230 already had to fix once for the raw pair-index shuffle.
+  Stratifying **within** each grade stratum's own ``compose()`` call by
+  ``(source_feature_a, source_feature_b)`` — reusing
+  ``ANDComposer.compose()``'s existing ``stratify_fn`` hook, unmodified —
+  fixes this the same way #230 fixed root-index domination: round-robin
+  across feature-pair groups before the per-stratum cap is reached, so a
+  single feature combination's threshold variants can no longer crowd out
+  every other combination. Measured with the deduplication in place: 231
+  /276 distinct feature-pair combinations (84%) at comparable or better
+  quality (dispersion 0.673 vs 0.987 for the random baseline).
+
+One more refinement falls out of the same measurements for free: grades
+``A``/``B`` are rare by construction (the letter grade is a strict ranking,
+and A/B are the top of it), so any stratum rooted only in
+``GradePairingConfig.exhaustive_grades`` (default ``{A, B}``) has, in
+practice, far fewer admissible pairs than the cap — "exhaustive" for those
+strata costs nothing extra; it's what ``min(cap, available)`` already gives
+once each stratum gets its own independent budget instead of sharing one
+global cap. The strata that actually need sampling (anything touching C or
+D — ``D_same`` alone was 97.6% of the admissible pair space measured on
+DAAX) get ``per_stratum_pair_cap``/``per_stratum_triple_cap`` as before, now
+combined with the feature-pair stratification above.
+
+See ``docs/analysis/exhaustive_and_composition_coverage_proposal.md`` for
+the full empirical writeup this design is based on.
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import pandas as pd
 
@@ -56,11 +101,11 @@ class GradePairingConfig:
         listed under ``Y`` (so ``"B": ("B","C")`` alone is enough to also
         allow an A-graded event to pair with B, via A's own entry).
     per_stratum_pair_cap : int
-        Guaranteed minimum representation (and the unit :func:`grade_guided_compose`
-        scales the total pair budget by) for each grade stratum that
-        actually appears in a given pool. Not a hard per-stratum ceiling —
-        see :func:`grade_guided_compose`'s docstring for the precise
-        fairness property this delivers and why. Default ``100``.
+        Maximum pairs composed from a single grade stratum (e.g. ``B_C``),
+        applied independently per stratum — a stratum's budget is never
+        shared with, or reduced by, any other stratum's population. Ignored
+        for a stratum whose grades are all in ``exhaustive_grades`` (see
+        below). Default ``100``.
     per_stratum_triple_cap : int
         Same, for triples (only relevant when ``max_components >= 3``).
         Default ``50``.
@@ -76,6 +121,21 @@ class GradePairingConfig:
     max_constituent_jaccard : float or None
         Forwarded to ``ANDComposer.compose()`` — see its own docstring.
         Default ``None`` (disabled).
+    exhaustive_grades : frozenset[str]
+        A stratum whose grade set is a subset of this (default ``{"A",
+        "B"}``) is composed without a pair/triple cap (bounded only by
+        ``exhaustive_safety_cap``, never by ``per_stratum_pair_cap``) — see
+        the module docstring for why this is safe in practice: these grades
+        are rare by construction, so the natural pair count already sits
+        far below any reasonable cap.
+    exhaustive_safety_cap : int
+        Defensive upper bound applied to a stratum in ``exhaustive_grades``
+        instead of ``per_stratum_pair_cap``/``per_stratum_triple_cap`` — not
+        expected to bind given how grades are distributed in practice, but
+        guards against a pathological input (e.g. a mis-tuned promotion
+        threshold that makes ``A``/``B`` common) silently reproducing the
+        same uncapped-materialization cost this design otherwise avoids.
+        Default ``5000``.
     """
 
     max_components: int = 2
@@ -86,62 +146,62 @@ class GradePairingConfig:
     per_stratum_triple_cap: int = 50
     include_singles_in_pass2: bool = True
     max_constituent_jaccard: Optional[float] = None
+    exhaustive_grades: FrozenSet[str] = field(default_factory=lambda: frozenset({"A", "B"}))
+    exhaustive_safety_cap: int = 5000
 
 
-def _stratum_key(config: GradePairingConfig, grade_of: Dict[int, str], a: RawEvent, b: RawEvent) -> Optional[str]:
-    """Grade-based stratum key for one valid pair, or ``None`` to exclude it.
+def _enumerate_strata(
+    config: GradePairingConfig, grades_present: set,
+) -> List[Tuple[str, FrozenSet[str]]]:
+    """List every ``(stratum_key, grade_set)`` reachable from the grades
+    actually present in this pool: same-grade for each grade, plus
+    adjacent-grade pairs per ``config.adjacency``.
 
-    ``None`` for a pair whose grades aren't in ``config.adjacency``'s allowed
-    set drops it from composition entirely — e.g. an A-D pair under the
-    default scheme, which is neither same-grade nor listed as adjacent by
-    either grade's own entry.
+    One entry here becomes one independent ``ANDComposer.compose()`` call
+    in :func:`grade_guided_compose` — see the module docstring for why
+    "independent" (rather than one shared call with a grade-keyed
+    stratify hook) is the fix, not just a refactor.
     """
-    ga, gb = grade_of.get(id(a)), grade_of.get(id(b))
-    if ga is None or gb is None:
-        return None
-    if ga == gb:
-        return f"{ga}_same"
-    lo, hi = sorted((ga, gb))
-    if hi in config.adjacency.get(lo, ()) or lo in config.adjacency.get(hi, ()):
-        return f"{lo}_{hi}"
-    return None
-
-
-def _triple_third_grade_ok(
-    config: GradePairingConfig, grade_of: Dict[int, str], root_grade: str, third: RawEvent
-) -> bool:
-    """Is ``third``'s grade admissible as a triple's third component, given
-    the seed pair's own root grade (issue #254 Phase 4)?
-
-    Reuses the exact same same-grade/adjacency relation ``_stratum_key``
-    applies to pairs — a triple's third component must relate to the
-    *root* grade the same way a valid pairing partner would, not just be
-    structurally distinct (``_validity_mask``) or reachable from either seed
-    member individually via two separate pairwise checks.
-    """
-    g3 = grade_of.get(id(third))
-    if g3 is None:
-        return False
-    if g3 == root_grade:
-        return True
-    lo, hi = sorted((root_grade, g3))
-    return hi in config.adjacency.get(lo, ()) or lo in config.adjacency.get(hi, ())
-
-
-def _count_strata(config: GradePairingConfig, grades_present: set) -> int:
-    """Number of distinct grade strata the pool in front of us can produce.
-
-    Used to scale the total pair/triple budget handed to ``compose()`` —
-    see :func:`grade_guided_compose`'s docstring for what this buys.
-    """
-    same = len(grades_present)
-    adjacent = 0
+    strata: List[Tuple[str, FrozenSet[str]]] = []
     presents = sorted(grades_present)
+    for g in presents:
+        strata.append((f"{g}_same", frozenset({g})))
     for i, g1 in enumerate(presents):
         for g2 in presents[i + 1:]:
             if g2 in config.adjacency.get(g1, ()) or g1 in config.adjacency.get(g2, ()):
-                adjacent += 1
-    return same + adjacent
+                strata.append((f"{g1}_{g2}", frozenset({g1, g2})))
+    return strata
+
+
+def _pair_matches_stratum(ga: str, gb: str, grades: FrozenSet[str]) -> bool:
+    """Does a pair graded ``(ga, gb)`` belong to this ``grades`` stratum?
+
+    A same-grade stratum (``len(grades) == 1``) needs both sides equal to
+    that grade; an adjacent-grade stratum (``len(grades) == 2``) needs one
+    side each — excluding a same-grade pair, which belongs to its own
+    ``X_same`` stratum instead.
+    """
+    if len(grades) == 1:
+        g = next(iter(grades))
+        return ga == g and gb == g
+    return {ga, gb} == set(grades)
+
+
+def _stratum_root(grades: FrozenSet[str]) -> str:
+    """The stratum's root grade: the single grade itself for a same-grade
+    stratum, otherwise the alphabetically-first (better) of the two."""
+    return next(iter(grades)) if len(grades) == 1 else min(grades)
+
+
+def _reachable_from_root(config: "GradePairingConfig", root: str) -> FrozenSet[str]:
+    """Grades a triple's third component may have, given the seed pair's
+    root grade: the root itself, plus whatever ``config.adjacency`` lists
+    under it. Forward-only (does not also admit a grade whose *own* entry
+    happens to list ``root`` as a partner) — the same relation
+    ``_enumerate_strata`` already uses to decide which adjacent-grade
+    strata exist, applied to a single grade instead of a pair.
+    """
+    return frozenset({root, *config.adjacency.get(root, ())})
 
 
 def grade_guided_compose(
@@ -158,37 +218,23 @@ def grade_guided_compose(
     ``contracts`` is expected to be Alpha Discovery's *first-pass* output,
     i.e. every candidate it graded, not only ``.promoted_contracts()``: an
     "undetermined direction" event still carries a usable
-    ``alpha_score.grade``), builds a single composable pool of every
-    single-component, graded candidate, and calls
-    ``ANDComposer.compose()`` once with a grade-derived ``stratify_fn``
-    (Phase 1, #254) so round-robin interleaving — not concatenation — decides
-    traversal order across strata. At ``max_components >= 3`` a
-    ``triple_third_filter`` (Phase 1's other composition hook) additionally
-    constrains each triple's third component by the seed pair's own root
-    grade (Phase 4, #254) — see ``_triple_third_grade_ok``.
+    ``alpha_score.grade``), sorts the resulting pool by a canonical key
+    (deterministic across processes — see the module docstring), and runs
+    one independent ``ANDComposer.compose()`` call per grade stratum
+    (:func:`_enumerate_strata`). Within each stratum's own call, pairs are
+    additionally stratified by their two source features
+    (``ANDComposer.compose()``'s ``stratify_fn`` hook, unmodified) so the
+    per-stratum cap is spent across distinct feature combinations before a
+    single combination's threshold variants can dominate it — the same
+    round-robin-over-concatenation fix issue #230 made for the raw pair
+    index shuffle, applied one level up. At ``max_components >= 3`` each
+    stratum's own call also gets a ``triple_third_filter`` constraining the
+    third component by the stratum's root grade (Phase 4, #254).
 
-    Fairness property of the pair/triple budget
-    ---------------------------------------------
-    The total budget handed to ``compose()`` is
-    ``n_strata * config.per_stratum_pair_cap`` (similarly for triples), where
-    ``n_strata`` is the number of grade strata actually present in this
-    pool. Round-robin interleaving (``ANDComposer._stratified_pair_order``)
-    guarantees every stratum contributes at least one candidate near the
-    front of the traversal, before the budget can be exhausted by a single
-    dominant stratum — this is the concrete fix for the failure mode the
-    issue reports (a shared flat cap silently starving a small stratum to
-    zero). It is **not** a hard per-stratum ceiling: once a small stratum's
-    own valid pairs are exhausted, later rounds hand its "slot" to whichever
-    strata remain, so a large stratum can end up contributing more than its
-    nominal ``per_stratum_pair_cap`` share. A hard ceiling would need either
-    N independent ``compose()`` calls (which reintroduces pool contamination
-    across adjacent strata — see the design plan) or truncating each
-    stratum's *pre-gate* candidate list before the gate has actually run,
-    which trades one fairness problem for another (a stratum whose early
-    candidates happen to fail the gate would be under-represented even
-    though it has other valid candidates deeper in its own list). Guarding
-    against complete starvation, which is what the issue's own v1-vs-v2
-    numbers describe, is the property this design targets.
+    A stratum whose grades are all in ``config.exhaustive_grades`` (default
+    ``{"A", "B"}``) is composed without ``per_stratum_pair_cap`` /
+    ``per_stratum_triple_cap`` (bounded only by ``exhaustive_safety_cap``)
+    — see the module docstring for why this is cheap in practice.
 
     Returned candidates are fresh: new ``event_id``s from
     ``raw_event_to_candidate`` (Phase 1, #254), never inheriting the grade,
@@ -242,39 +288,82 @@ def grade_guided_compose(
     if len(raw_events) < 2:
         return []
 
-    grades_present = set(grade_of.values())
-    n_strata = max(1, _count_strata(config, grades_present))
-    effective_max_pairs = n_strata * config.per_stratum_pair_cap
-    effective_max_triples = (
-        n_strata * config.per_stratum_triple_cap if config.max_components >= 3 else 0
-    )
+    # Canonical, deterministic order (see module docstring): removes the
+    # dependency on FeatureGenerator's hash-seed-randomized set() iteration
+    # order (issue #24) from which pairs get composed and returned.
+    raw_events.sort(key=lambda r: r.component.expression)
 
-    def stratify(a: RawEvent, b: RawEvent) -> Optional[str]:
-        return _stratum_key(config, grade_of, a, b)
+    by_grade: Dict[str, List[RawEvent]] = defaultdict(list)
+    for r in raw_events:
+        by_grade[grade_of[id(r)]].append(r)
 
-    def triple_third_filter(a: RawEvent, b: RawEvent, c: RawEvent) -> bool:
-        # The seed pair (a, b) already passed `stratify` (same-grade or
-        # adjacent), so both grades are known; the pair's "root" is the
-        # better (alphabetically-first, A<B<C<D) of the two — the same
-        # grade `_stratum_key`'s own sorted(lo, hi) treats as the
-        # adjacency-dict key that validated the pair in the first place.
-        ga, gb = grade_of.get(id(a)), grade_of.get(id(b))
-        if ga is None or gb is None:
-            return False
-        root_grade = min(ga, gb)
-        return _triple_third_grade_ok(config, grade_of, root_grade, c)
+    composed: List[RawEvent] = []
+    for stratum_key, grades in _enumerate_strata(config, set(by_grade)):
+        root = _stratum_root(grades)
+        # The pool a triple's third component is drawn from must extend
+        # beyond this stratum's own two grades whenever the root's adjacency
+        # reaches further (e.g. "A_same" has grades={"A"} but a third
+        # component graded "B" is still admissible, since ANDComposer's
+        # triple search only ever looks within the *same* pool array passed
+        # to this compose() call -- see and_composer.py's valid_k lookup).
+        # Pair formation itself stays restricted to `grades` via
+        # feature_pair_stratify below, so this extension never lets a
+        # mismatched pair (e.g. A-B) slip into the "A_same" stratum's own
+        # pair output.
+        pool_grades = grades | _reachable_from_root(config, root) if config.max_components >= 3 else grades
+        pool = [r for g in pool_grades for r in by_grade[g]]
+        if len(pool) < 2:
+            continue
 
-    composer = ANDComposer(gate)
-    composed_raw = composer.compose(
-        raw_events, timestamps, max_components=config.max_components,
-        gate=gate,
-        pool_selector=lambda pool: pool,
-        stratify_fn=stratify,
-        max_pairs=effective_max_pairs,
-        max_triples=effective_max_triples,
-        triple_third_filter=triple_third_filter if config.max_components >= 3 else None,
-        max_constituent_jaccard=config.max_constituent_jaccard,
-    )
+        exhaustive = grades.issubset(config.exhaustive_grades)
+        pair_cap = config.exhaustive_safety_cap if exhaustive else config.per_stratum_pair_cap
+        triple_cap = 0
+        if config.max_components >= 3:
+            triple_cap = config.exhaustive_safety_cap if exhaustive else config.per_stratum_triple_cap
+
+        def feature_pair_stratify(
+            a: RawEvent, b: RawEvent, _grades: FrozenSet[str] = grades,
+        ) -> Optional[str]:
+            ga, gb = grade_of.get(id(a)), grade_of.get(id(b))
+            if ga is None or gb is None or not _pair_matches_stratum(ga, gb, _grades):
+                return None
+            return "|".join(sorted((a.component.source_feature, b.component.source_feature)))
+
+        def triple_third_filter(
+            a: RawEvent, b: RawEvent, c: RawEvent, _root: str = root,
+        ) -> bool:
+            # The seed pair (a, b) already matched this stratum's grades via
+            # feature_pair_stratify, so the root computed above applies.
+            g3 = grade_of.get(id(c))
+            return g3 is not None and g3 in _reachable_from_root(config, _root)
+
+        composer = ANDComposer(gate)
+        composed.extend(composer.compose(
+            pool, timestamps, max_components=config.max_components,
+            gate=gate,
+            pool_selector=lambda p: p,
+            stratify_fn=feature_pair_stratify,
+            max_pairs=pair_cap,
+            max_triples=triple_cap,
+            triple_third_filter=triple_third_filter if config.max_components >= 3 else None,
+            max_constituent_jaccard=config.max_constituent_jaccard,
+        ))
+
+    # Extending a same-grade stratum's pool to reach third components (above)
+    # means the same logical triple can, in principle, be independently
+    # discovered from two different stratum calls (e.g. an "A,A,B" triple
+    # from both "A_same" seeded on the A-A pair, and "A_B" seeded on an A-B
+    # pair with the second A as third) -- dedupe by constituent set, not by
+    # expression string, since join order (and therefore the string) depends
+    # on which call found it first.
+    seen: set = set()
+    deduped: List[RawEvent] = []
+    for ev in composed:
+        key = frozenset(c.expression for c in ev.component.components)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ev)
 
     timestamp_col = (
         candidates[0].event_series.index.name
@@ -286,5 +375,5 @@ def grade_guided_compose(
             ev, idx, timestamps,
             timestamp_col=timestamp_col, gate_params=gate.params,
         )
-        for idx, ev in enumerate(composed_raw)
+        for idx, ev in enumerate(deduped)
     ]
