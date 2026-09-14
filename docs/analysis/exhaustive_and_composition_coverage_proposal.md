@@ -228,10 +228,87 @@ quanto già esiste nel codice:
    quanta diversità la selezione finale conserva rispetto al pool
    completo (non solo il conteggio ammesso oggi).
 
-Prossimo passo naturale, se si procede all'implementazione: prototipare
-la combinazione merito+diversità sullo stesso pool DAAX già misurato, e
-verificare se le due regole `PARTIAL-EDGE` trovate nelle due esecuzioni
-del §1 comparirebbero entrambe (o quale delle due, e perché) sotto la
-nuova selezione deterministica.
+## 8. Politica a due fasce: esaustivo per A/B, campionato per C/D
+
+Una raffinazione che nasce direttamente dai numeri del §3: dato che i
+gradi A e B sono per costruzione rari (in questo pool: B=3, A=0, contro
+D=2947), qualunque stratum "radicato" solo in A/B genera per costruzione
+pochissime coppie — il cap da 100 non li tocca nemmeno. La combinatoria
+esplosiva è concentrata esclusivamente dove compaiono C o D.
+
+Regola generale: **esaustivo quando entrambi i gradi della coppia sono
+in {A, B}; campionato quando almeno uno dei due è C o D.**
+
+| Stratum | Entrambi in {A,B}? | Trattamento |
+|---|---|---|
+| `A_same`, `A_B`, `B_same` | sì | **esaustivo** (nessun campionamento — il volume naturale è già sotto controllo) |
+| `B_C` | no | campionato (merito + diversità, §6) |
+| `C_same`, `C_D` | no | campionato (merito + diversità, §6) |
+| `D_same` | no | campionato — **da trattare col budget più stretto**, essendo lo stratum più popoloso in assoluto (4.335.094 coppie ammissibili, 107.223 gate-passanti, il 97.6% dell'intero spazio ammissibile e il 95.6% dei gate-passer totali misurati) |
+
+Non è una regola arbitraria sovrapposta al design: è la stessa
+scansione esaustiva del §5 che, applicata a valle, rivela quali strati
+sono già sotto al cap (quindi "esaustivo" è semplicemente ciò che
+`min(cap, len(gruppo))` produce da solo, senza logica dedicata) e quali
+lo superano di ordini di grandezza (dove serve davvero merito+diversità).
+Il costo di scansione resta lo stesso indipendentemente da questa
+distinzione — cambia solo, a valle, quanti oggetti `EventCandidate`
+vengono infine costruiti per stratum.
+
+## 9. Prototipo su DAAX — risultati
+
+Implementato e testato sullo stesso pool DAAX 1H (3133 candidati, cache
+riusata per evitare di ripetere la discovery/grading da 5 minuti):
+scansione esaustiva completata in 434s, 112.122 coppie gate-passanti —
+coerente con le misure precedenti. Per ogni stratum "campionato" (tutti
+tranne `B_same`, che qui non ha gate-passer), prima di applicare il
+punteggio di merito si raggruppano le coppie per `source_pair` (le due
+feature sorgente coinvolte) e si tiene **un solo rappresentante — il
+migliore per punteggio — per ciascuna combinazione distinta**; solo dopo
+si prendono le top-100 tra questi rappresentanti.
+
+| Stratum | Gate-passer | Source-pair distinte | Tenute | Source-pair tenute |
+|---|---|---|---|---|
+| `B_C` | 3 | 2 | 2 | 2 (100%) |
+| `C_D` | 4.424 | 476 | 100 | 100 (100%) |
+| `C_same` | 472 | 74 | 74 (tutte — sotto cap) | 74 (100%) |
+| `D_same` | 107.223 | 2.234 | 100 | 100 (100%) |
+
+**Totale**: 276 composizioni materializzate, **231 combinazioni di
+feature sorgente distinte (83.7%)** — contro le 49/303 (16.2%) del
+punteggio di merito "nudo" testato al §6. Il passo di deduplicazione
+per `source_pair` prima del ranking risolve quasi del tutto il problema
+di concentrazione osservato in precedenza, mantenendo la qualità:
+
+- tpm mediano 25.43 (target 24.00 — vicino quanto la versione senza
+  deduplicazione, 26.89)
+- dispersione mediana 0.673 (in linea con 0.642 di prima, ben sotto la
+  soglia effettiva 1.706)
+- n_episodi mediano 1602
+
+**La famiglia di feature della regola originale (§1) sopravvive alla
+nuova selezione**: la combinazione `ratio_close_ret03_ret06` (soglia
+diretta) × `ratio_close_ret03_ret06` (stessa feature, trasformata in
+percentile-rank a finestra 96 — la stessa coppia dietro `h*=192`
+dell'analisi precedente) compare **sia in `C_D` che in `C_same`**, con
+punteggi di merito tra i più alti dei rispettivi strati (0.663 e 0.622).
+Non è garantito che sopravviva sempre — dipende dai suoi numeri relativi
+agli altri candidati del pool in quella specifica run — ma qui lo fa,
+ed è esattamente il comportamento cercato: una regola con buone
+statistiche non viene più persa per sfortuna d'ordine.
+
+**Effetto collaterale positivo non pianificato**: per `C_same` (474
+gate-passer, 74 combinazioni distinte) la deduplicazione fa sì che
+*tutte* le combinazioni vengano tenute automaticamente, perché sono meno
+del cap — lo stesso "esaustivo emergente" già visto per gli strati
+A/B al §8, qui ottenuto senza bisogno di codificare esplicitamente
+`C_same` come caso speciale.
+
+**Conclusione**: la politica a due fasce + deduplicazione per feature
+sorgente è pronta per un'implementazione reale in `grade_pairing.py`.
+Il costo aggiuntivo osservato (~7.2 minuti sulla scansione esaustiva,
+invariato rispetto alle misure precedenti) è indipendente dalla
+politica di selezione a valle, che nella pratica costa frazioni di
+secondo (operazioni pandas su ~112mila righe già in memoria).
 
 
