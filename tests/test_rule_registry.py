@@ -25,6 +25,7 @@ from forgedge.rule_registry import (
     recalibrate_candidate,
 )
 from forgedge.rule_registry.correlation import (
+    annotate_correlation_maxima,
     correlation_matrices,
     gain_correlation_by_date,
 )
@@ -180,6 +181,71 @@ class TestCorrelation:
         assert np.allclose(m.jaccard.values, m.jaccard.values.T)
         assert np.allclose(m.spearman.values, m.spearman.values.T)
         assert np.allclose(np.diag(m.jaccard.values), 1.0)
+        assert m.skipped is False
+
+
+class TestCorrelationPoolCap:
+    """issue #281: correlation_matrices() is O(n^2) with no cap, and a run
+    that promotes an unusually large number of tradeable rules -- a
+    legitimate, data-dependent outcome, not a misconfiguration -- turned
+    that single step into an unbounded, unsignalled hang."""
+
+    def _fully_overlapping_docs(self, n, pf_start=10.0):
+        dates = [f"2024-01-{d:02d}T00:00:00" for d in range(1, 21)]
+        gains = list(np.linspace(-0.1, 0.1, 20))
+        # Identical activation dates/gains -> would score jaccard=1.0 and
+        # spearman=1.0 for every pair if the real computation ran, so a
+        # skip is unambiguous from the output alone.
+        return [_doc(f"R{i}", dates, gains, pf=pf_start - i) for i in range(n)]
+
+    def test_pool_above_cap_is_skipped_and_flagged(self):
+        docs = self._fully_overlapping_docs(6)
+        with pytest.warns(UserWarning, match="max_correlation_pool"):
+            m = correlation_matrices(docs, min_active=5, max_pool=5)
+        assert m.skipped is True
+        # Identity/zero-off-diagonal placeholders, not the real (all-1.0)
+        # correlations these fully-overlapping docs would otherwise produce.
+        off_diag = m.jaccard.values[~np.eye(6, dtype=bool)]
+        assert np.allclose(off_diag, 0.0)
+        off_diag_s = m.spearman.values[~np.eye(6, dtype=bool)]
+        assert np.allclose(off_diag_s, 0.0)
+        assert np.allclose(np.diag(m.jaccard.values), 1.0)
+
+    def test_pool_at_or_below_cap_is_not_skipped(self):
+        docs = self._fully_overlapping_docs(5)
+        m = correlation_matrices(docs, min_active=5, max_pool=5)
+        assert m.skipped is False
+        # Real computation: fully-overlapping docs score 1.0 off-diagonal too.
+        off_diag = m.jaccard.values[~np.eye(5, dtype=bool)]
+        assert np.allclose(off_diag, 1.0)
+
+    def test_max_pool_none_never_skips_regardless_of_size(self):
+        docs = self._fully_overlapping_docs(6)
+        m = correlation_matrices(docs, min_active=5, max_pool=None)
+        assert m.skipped is False
+        off_diag = m.jaccard.values[~np.eye(6, dtype=bool)]
+        assert np.allclose(off_diag, 1.0)
+
+    def test_annotate_maxima_reads_zero_on_a_skipped_pool(self):
+        docs = self._fully_overlapping_docs(6)
+        with pytest.warns(UserWarning):
+            m = correlation_matrices(docs, min_active=5, max_pool=5)
+        annotate_correlation_maxima(docs, m)
+        assert all(d.overlap_max == 0.0 for d in docs)
+        assert all(d.gain_corr_max == 0.0 for d in docs)
+
+    def test_registry_config_default_cap(self):
+        assert RegistryConfig().max_correlation_pool == 500
+
+    def test_registry_wires_config_cap_through(self):
+        docs = self._fully_overlapping_docs(6)
+        registry = RuleRegistry.__new__(RuleRegistry)
+        registry.documents = docs
+        registry.config = RegistryConfig(max_correlation_pool=5)
+        with pytest.warns(UserWarning, match="max_correlation_pool"):
+            matrices = registry.compute_correlations()
+        assert matrices.skipped is True
+        assert registry.matrices is matrices
 
 
 # ---------------------------------------------------------------------------
