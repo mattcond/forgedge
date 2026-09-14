@@ -451,6 +451,38 @@ class TestGradeGuidedComposeTriples:
         )
 
     def test_per_stratum_triple_cap_bounds_the_total_triple_budget(self):
+        """Uses grade "D" (not "A"/"B") so the stratum falls in the sampled
+        tier, where per_stratum_triple_cap actually bounds the budget -- a
+        stratum rooted only in {A, B} is exhaustive by default (see
+        test_exhaustive_tier_is_not_bounded_by_the_per_stratum_cap below) and
+        is deliberately NOT bounded by this setting."""
+        gate, ts, month_idx, n_months = _gate_and_ts()
+        rng = np.random.default_rng(254)
+        n = len(ts)
+        group = _overlapping_group(rng, n, 8)
+
+        candidates, contracts = [], []
+        for i, s in enumerate(group):
+            eid = f"EVT-d{i}"
+            candidates.append(_candidate(eid, f"feat_d{i}", s, gate, month_idx, n_months))
+            contracts.append(_contract(eid, "D"))
+
+        # Only one stratum present ("D_same") -> effective_max_triples ==
+        # 1 * per_stratum_triple_cap exactly.
+        config = GradePairingConfig(
+            max_components=3, per_stratum_pair_cap=50, per_stratum_triple_cap=3,
+        )
+        composed = grade_guided_compose(candidates, contracts, ts, config, gate)
+        triples = [ev for ev in composed if len(ev.components) == 3]
+        assert len(triples) <= 3
+
+    def test_exhaustive_tier_is_not_bounded_by_the_per_stratum_cap(self):
+        """A stratum rooted only in {A, B} (rare-by-construction grades, per
+        the DAAX empirical measurements in
+        docs/analysis/exhaustive_and_composition_coverage_proposal.md) is
+        exhaustive: it must not be silently truncated to per_stratum_triple_cap
+        the way a C/D-touching stratum is -- that undercoverage is exactly
+        what issue #254's grade_pairing.py fix addresses."""
         gate, ts, month_idx, n_months = _gate_and_ts()
         rng = np.random.default_rng(254)
         n = len(ts)
@@ -462,14 +494,16 @@ class TestGradeGuidedComposeTriples:
             candidates.append(_candidate(eid, f"feat_a{i}", s, gate, month_idx, n_months))
             contracts.append(_contract(eid, "A"))
 
-        # Only one stratum present ("A_same") -> effective_max_triples ==
-        # 1 * per_stratum_triple_cap exactly.
+        # Only one stratum present ("A_same"), which is exhaustive by default
+        # -> the tiny per_stratum_triple_cap must NOT bound the output.
         config = GradePairingConfig(
-            max_components=3, per_stratum_pair_cap=50, per_stratum_triple_cap=3,
+            max_components=3, per_stratum_pair_cap=50, per_stratum_triple_cap=1,
         )
         composed = grade_guided_compose(candidates, contracts, ts, config, gate)
         triples = [ev for ev in composed if len(ev.components) == 3]
-        assert len(triples) <= 3
+        assert len(triples) > 1, (
+            "an exhaustive A_same stratum must not be truncated to per_stratum_triple_cap"
+        )
 
     def test_fresh_triple_event_ids_never_reused(self):
         gate, ts, month_idx, n_months = _gate_and_ts()
@@ -489,6 +523,87 @@ class TestGradeGuidedComposeTriples:
         composed_ids = {c.event_id for c in composed}
         assert composed_ids.isdisjoint(input_ids)
         assert len(composed_ids) == len(composed)
+
+
+class TestGradeGuidedComposeDeterminismAndDiversity:
+    """The two behaviors this design change specifically targets (see the
+    module docstring): cross-process non-determinism from incoming pool
+    order, and diversity collapse under a shared cap. Both measured
+    empirically on DAAX 1H in
+    docs/analysis/exhaustive_and_composition_coverage_proposal.md."""
+
+    def test_deterministic_output_independent_of_input_candidate_order(self):
+        """The concrete, in-process provable version of issue #254's
+        cross-process bug: two identical runs produced two different
+        composed pools purely because FeatureGenerator's set() iteration
+        order is hash-seed-randomized per process (issue #24), and
+        ANDComposer's own traversal shuffle only reproduces given a fixed
+        pool order. grade_guided_compose's canonical sort (by
+        RawEvent.component.expression) removes the dependency: feeding the
+        same candidates in two different orders must produce identical
+        output."""
+        gate, ts, month_idx, n_months = _gate_and_ts()
+        rng = np.random.default_rng(254)
+        n = len(ts)
+        group = _overlapping_group(rng, n, 10)
+
+        candidates, contracts = [], []
+        for i, s in enumerate(group):
+            eid = f"EVT-a{i}"
+            candidates.append(_candidate(eid, f"feat_a{i}", s, gate, month_idx, n_months))
+            contracts.append(_contract(eid, "A"))
+
+        config = GradePairingConfig(per_stratum_pair_cap=5)
+
+        forward = grade_guided_compose(candidates, contracts, ts, config, gate)
+        backward = grade_guided_compose(list(reversed(candidates)), contracts, ts, config, gate)
+
+        def constituent_sets(composed):
+            return {frozenset(c.expression for c in ev.components) for ev in composed}
+
+        assert constituent_sets(forward), "fixture must actually produce composed output"
+        assert constituent_sets(forward) == constituent_sets(backward), (
+            "composed output must not depend on the order candidates were passed in"
+        )
+
+    def test_feature_pair_stratify_spreads_selection_across_distinct_pairs(self):
+        """Reusing ANDComposer.compose()'s stratify_fn keyed on
+        (source_feature_a, source_feature_b) rather than grade alone --
+        the fix for the diversity-collapse failure mode measured on DAAX
+        (16% -> 84% distinct feature-pair coverage under a tight cap, see
+        the module docstring). Grade "D" (non-exhaustive) so
+        per_stratum_pair_cap actually binds: with 4 distinct source-feature
+        pairs each backed by 3 gate-passing variants (12 candidate pairs
+        total) and a cap equal to the number of distinct pairs, round-robin
+        interleaving must spend the cap one-per-group rather than letting a
+        single pair's variants fill it."""
+        gate, ts, month_idx, n_months = _gate_and_ts()
+        rng = np.random.default_rng(254)
+        n = len(ts)
+
+        n_pairs = 4
+        variants_per_pair = 3
+        candidates, contracts = [], []
+        for p in range(n_pairs):
+            for v in range(variants_per_pair):
+                s1, s2 = _overlapping_pair(rng, n)
+                e1, e2 = f"EVT-p{p}v{v}a", f"EVT-p{p}v{v}b"
+                candidates.append(_candidate(e1, f"feat_p{p}_x", s1, gate, month_idx, n_months))
+                candidates.append(_candidate(e2, f"feat_p{p}_y", s2, gate, month_idx, n_months))
+                contracts.append(_contract(e1, "D"))
+                contracts.append(_contract(e2, "D"))
+
+        config = GradePairingConfig(per_stratum_pair_cap=n_pairs)
+        composed = grade_guided_compose(candidates, contracts, ts, config, gate)
+
+        assert len(composed) <= n_pairs, "per_stratum_pair_cap must bound a non-exhaustive stratum"
+        source_pairs = {
+            tuple(sorted(c.source_feature for c in ev.components)) for ev in composed
+        }
+        assert len(source_pairs) == n_pairs, (
+            f"expected all {n_pairs} distinct feature pairs represented under the cap, "
+            f"got {source_pairs}"
+        )
 
 
 class TestGradeGuidedComposeRealPipeline:
