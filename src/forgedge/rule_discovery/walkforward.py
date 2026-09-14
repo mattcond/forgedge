@@ -289,8 +289,16 @@ def selection_windows(
     if cfg.purge_bars is not None:
         purge_bars = max(int(cfg.purge_bars), 0)
     else:
+        # buy_delay_bar is provably inert under buy_type="market" (#278):
+        # _scan_fill's market branch fills unconditionally at signal_rn + 1
+        # and returns before ever reading buy_delay_bar. GridSpec never fans
+        # buy_type out as a grid axis (grid.py's `axes` covers only
+        # buy_drop_pct/sell_pct/target_h/buy_delay_bar), so it is constant
+        # for this whole walk-forward call — reading it once off `base` is
+        # enough to know whether the delay term can ever matter here.
+        delay_component = 0 if base.buy_type == "market" else max(resolved.buy_delay_bar)
         purge_bars = (
-            max(resolved.target_h) + max(resolved.buy_delay_bar) + 1
+            max(resolved.target_h) + delay_component + 1
         )  # +1: the entry acts on the bar after the signal
     # Session-resolved from `AlphaConfig.embargo_bars` (#180); 0 is this
     # module's documented decision for a caller who never went through
