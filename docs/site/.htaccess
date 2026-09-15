@@ -1,0 +1,11 @@
+# Force UTF-8 regardless of the shared-hosting server's own default
+# charset (OVH's Apache commonly defaults text/html to ISO-8859-1 via
+# AddDefaultCharset, which overrides the page's own <meta charset="UTF-8">
+# per HTTP-header precedence and garbles accented letters, em dashes,
+# arrows, and the ≥/≠ symbols used throughout these pages).
+AddDefaultCharset UTF-8
+
+<IfModule mod_mime.c>
+  AddType 'text/html; charset=UTF-8' .html
+  AddType 'text/css; charset=UTF-8' .css
+</IfModule>
