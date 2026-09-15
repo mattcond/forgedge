@@ -172,6 +172,8 @@
     justify-content: space-between;
     padding-block: 14px;
     gap: 16px;
+    flex-wrap: wrap;
+    row-gap: 10px;
   }
   .brand {
     display: flex;
@@ -592,6 +594,7 @@
   }
   @media (max-width: 480px) {
     .verdicts { grid-template-columns: 1fr; }
+    .brand small { display: none; }
   }
 </style>
 </head>
@@ -612,7 +615,10 @@
       <button type="button" class="lang-btn" data-lang="it" aria-pressed="true">IT</button>
       <button type="button" class="lang-btn" data-lang="en" aria-pressed="false">EN</button>
     </div>
-    <a class="btn solid" href="https://github.com/mattcond/forgedge" target="_blank" rel="noopener">GitHub ↗</a>
+    <div style="display:flex; gap:8px;">
+      <a class="btn solid" href="https://github.com/mattcond/forgedge" target="_blank" rel="noopener">GitHub ↗</a>
+      <a class="btn" href="https://pypi.org/project/forgedge/" target="_blank" rel="noopener">PyPI ↗</a>
+    </div>
   </div>
 </div>
 
@@ -885,7 +891,6 @@ open(<span class="c3">"report.html"</span>, <span class="c3">"w"</span>).write(h
         <h4 data-i18n="footer.h4.project">Progetto</h4>
         <ul>
           <li><a href="https://github.com/mattcond/forgedge" target="_blank" rel="noopener">Repository GitHub</a></li>
-          <li><a href="https://pypi.org/project/forgedge/" target="_blank" rel="noopener" data-i18n="footer.project.pypi">Pacchetto PyPI</a></li>
           <li><a href="docs/readme-it.html">README (italiano)</a></li>
           <li><a href="docs/readme-en.html">README (English)</a></li>
           <li><a href="docs/license.html" data-i18n="footer.project.license">Licenza MIT</a></li>
@@ -1025,8 +1030,7 @@ open(<span class="c3">"report.html"</span>, <span class="c3">"w"</span>).write(h
     "footer.docs.link3": { it: "Riferimento configurazione", en: "Configuration reference" },
     "footer.docs.link4": { it: "Deployment", en: "Deployment" },
     "footer.h4.project": { it: "Progetto", en: "Project" },
-    "footer.project.license": { it: "Licenza MIT", en: "MIT License" },
-    "footer.project.pypi": { it: "Pacchetto PyPI", en: "PyPI package" }
+    "footer.project.license": { it: "Licenza MIT", en: "MIT License" }
   };
 
   var HREF = {
