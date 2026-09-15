@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>README (italiano) — FORGE</title>
+<meta name="description" content="Il README italiano del progetto FORGE: cosa fa, perché, pipeline e quick start." />
+<meta name="robots" content="index, follow" />
+<link rel="canonical" href="https://forgedge.it/docs/readme-it.html" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/docs.css">
+</head>
+<body>
+<a class="back" href="../index.html">&larr; FORGE</a>
+<main>
+<article id="content">
+<h1 id="forge-feature-oriented-rule-generation-engine">FORGE — Feature-Oriented Rule Generation Engine</h1>
+<p>FORGE è un sistema di ricerca quantitativa per la <strong>scoperta sistematica di regole di trading algoritmico</strong> da dati storici di mercato. A partire da una KPI Table (OHLCV + indicatori tecnici), FORGE identifica eventi booleani con struttura temporale stabile, ne misura il potere predittivo rispetto a un target economico derivato dai dati, e produce contratti formali pronti per la validazione operativa.</p>
+<p><a href="readme-en.html">🇬🇧 English version</a></p>
+<hr />
+<h2 id="cosa-fa-forge-in-parole-semplici">Cosa fa FORGE, in parole semplici</h2>
+<p>Se fai trading — o lavori con chi lo fa — probabilmente hai già sentito frasi tipo <em>"ogni volta che succede X, il prezzo tende a salire."</em> Individuare un pattern del genere è la parte facile. Quella difficile è capire se sia <strong>reale</strong>, o se sembri buono solo perché sono state provate abbastanza idee che una, per puro caso, doveva per forza sembrare buona. È esattamente la trappola che FORGE è costruito per evitare, in quattro passaggi:</p>
+<ol>
+<li><strong>Cerca un pattern ripetibile</strong> nella storia di prezzi e indicatori — senza mai guardare cosa succede <em>dopo</em>, così il pattern non ha modo di "barare" conoscendo di nascosto il futuro.</li>
+<li><strong>Verifica se quel pattern predice davvero qualcosa</strong> — il prezzo si muove in modo affidabile in una direzione, abbastanza spesso e abbastanza da contare?</li>
+<li><strong>Simula il trading per davvero</strong> — commissioni reali, esecuzione realistica degli ordini, e test solo su dati che il pattern non ha mai visto mentre veniva scoperto.</li>
+<li><strong>Verifica se regge anche altrove</strong> — su altri asset, non solo su quello su cui è stato scoperto.</li>
+</ol>
+<p>Ogni pattern esce da questo processo con un verdetto onesto — <em>funziona</em>, <em>è al limite</em>, oppure <em>non regge</em> — più le ragioni specifiche dietro a quel verdetto, mai un punteggio a scatola chiusa. Nessun pattern viene mai aggiustato a posteriori per farlo sembrare migliore; una regola che non supera la soglia viene riportata così com'è, non rimaneggiata di nascosto finché non la supera.</p>
+<p>Una cosa che FORGE deliberatamente <strong>non</strong> fa: piazzare ordini, o parlare con un exchange. È uno strumento di ricerca che ti dice quali idee vale la pena approfondire e passa il testimone con i dettagli operativi (quando entrare, quando uscire, quanto è forte l'evidenza) — trasformare questo in trading dal vivo è un passo separato e deliberato, affidato a qualunque sistema tu usi davvero per eseguire gli ordini.</p>
+<p>Il resto di questo documento entra nel funzionamento tecnico, per chi vuole eseguire FORGE in prima persona.</p>
+<hr />
+<h2 id="perche-forge">Perché FORGE</h2>
+<p>La ricerca sistematica di edge di trading soffre di tre problemi ricorrenti:</p>
+<ul>
+<li><strong>Look-ahead bias</strong> — le soglie degli eventi calibrate osservando i rendimenti "conoscono" già il futuro prima della scoperta</li>
+<li><strong>Ottimizzazione in-sample</strong> — soglie e orizzonti calibrati sulla stessa finestra usata per la valutazione producono backtest circolari</li>
+<li><strong>Mancanza di separazione operativa</strong> — l'evidenza statistica del potere predittivo non equivale alla profittabilità sotto commissioni reali e meccaniche di esecuzione degli ordini</li>
+</ul>
+<p>FORGE affronta tutti e tre con un'<strong>architettura a pipeline rigidamente separata</strong>: ogni modulo risponde a una sola domanda e passa al successivo solo un artefatto formale. Nessun modulo può accedere ai dati del modulo successivo; nessuna soglia può essere ricalibrata dopo la scoperta.</p>
+<hr />
+<h2 id="pipeline">Pipeline</h2>
+<pre><code>KPI Table (OHLCV + indicatori tecnici)
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Modulo 0 — Market Context                                       │
+│  Classifica ogni barra per regime di mercato (5 livelli).        │
+│  Output: KPI Table + colonne 'regime' e 'regime_stable'          │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Modulo 1 — Event Discovery                                      │
+│  Scopre eventi booleani dalla struttura temporale degli          │
+│  indicatori. Non vede mai il forward return.                     │
+│  Output: list[EventCandidate]                                    │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Modulo 2 — Alpha Discovery                                      │
+│  Deriva il target per evento, misura il potere predittivo IS,    │
+│  conferma sull'OOS tail. Prima esposizione al forward return.    │
+│  Output: list[AlphaContract]                                     │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Modulo 3 — Rule Discovery                                       │
+│  Backtest realistico con order mechanics, fee, walk-forward OOS. │
+│  Output: EDGE / PARTIAL-EDGE / NON-EDGE + parametri operativi   │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Modulo 4 — Rule Registry                                        │
+│  Deduplicazione, backtest cross-ticker, classificazione genericity│
+│  Output: tabella piatta + report HTML autocontenuto              │
+└──────────────────────────────────────────────────────────────────┘
+</code></pre>
+<hr />
+<h2 id="invarianti-fondamentali">Invarianti fondamentali</h2>
+<table>
+<thead>
+<tr>
+<th>Invariante</th>
+<th>Cosa previene</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Modulo 1 non vede mai il forward return</td>
+<td>Look-ahead bias nella selezione degli eventi</td>
+</tr>
+<tr>
+<td>Le soglie sono immutabili dopo la scoperta</td>
+<td>Ottimizzazione delle soglie sul campione di valutazione</td>
+</tr>
+<tr>
+<td>Orizzonte, direzione e take-profit sono derivati dai dati per ogni evento</td>
+<td>Assunzioni economiche che pre-cuociono il risultato</td>
+</tr>
+<tr>
+<td>Il verdetto operativo è vincolato al walk-forward OOS (Modulo 3); la conferma OOS di Alpha è registrata su ogni contratto</td>
+<td>Conferma a posteriori di una conclusione già decisa</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="installazione">Installazione</h2>
+<p>FORGE dipende unicamente da <code>numpy</code> e <code>pandas</code>. Nessuna dipendenza da <code>scipy</code>, <code>statsmodels</code> o librerie ML: tutte le primitive statistiche (Spearman, t-test, regressione OU, FDR Benjamini-Hochberg, funzione beta incompleta) sono implementate in puro numpy.</p>
+<pre><code class="language-bash">pip install forgedge
+</code></pre>
+<hr />
+<h2 id="quick-start">Quick start</h2>
+<pre><code class="language-python">import pandas as pd
+from forgedge import forge
+
+# KPI Table con OHLCV + indicatori tecnici (colonna 'close' richiesta)
+kpi = pd.read_parquet(&quot;kpi_table.parquet&quot;)
+
+# Pipeline completa: da KPI Table a regole validate in una singola chiamata
+result = forge(kpi, ticker=&quot;BTCUSDC&quot;, timeframe=&quot;1H&quot;)
+
+print(result.summary())                         # una riga per candidato + rule_verdict
+for contract, response in result.edges():       # solo EDGE / PARTIAL-EDGE
+    print(contract.alpha_id, response.verdict)
+print(result.registry.summary())                # Modulo 4 — regole catalogate
+</code></pre>
+<p>Prima che tutto questo giri, <code>forge()</code> risolve ogni campo di configurazione non impostato rispetto al timeframe/schema della sessione e verifica l'intero bundle per contraddizioni interne — di default (<code>strict=True</code>) solleva subito <code>ValueError</code> se ne trova una che farebbe fallire ogni candidato per ragioni che non c'entrano nulla col segnale, invece di lasciare che la run finisca e produca un muro di rigetti inspiegati. <code>strict=False</code> declassa questo a un warning e gira comunque; <code>forgedge.config_report(...)</code> esegue lo stesso controllo in standalone, prima di impegnarsi in una run completa.</p>
+<p>Su un <code>timeframe</code> daily o più lento la griglia di holding period di default
+viene sostituita automaticamente da una calibrata sul daily (la griglia
+standard è calibrata su barre ~orarie); passando un proprio <code>AlphaConfig</code> si
+mantiene il pieno controllo.  Per una configurazione per-modulo coerente in
+frequenza usare <code>forgedge.presets.forge_preset("balanced", timeframe="1D",
+asset=...)</code>.
+La griglia di ogni evento viene inoltre <strong>arricchita</strong> con orizzonti a
+0.5×/1×/2× la finestra dominante del suo indicatore
+(<code>AlphaConfig.horizon_enrichment</code> — un'unione, mai una restrizione, con cap
+statistico perché le finestre di condizionamento lente non possano chiedere
+holding period non misurabili; le ipotesi aggiunte sono contate dal ledger e
+prezzate dal rotation null).</p>
+<p>Di default <code>forge()</code> esegue anche il <strong>fast rotation null a livello di
+ricerca</strong> — la distribuzione nulla esatta del miglior eccesso standardizzato
+su ogni offset circolare, calcolata via FFT in ~secondi — e un verdetto <code>EDGE</code>
+pieno richiede in aggiunta di batterla (<code>rotation_p &lt;= 0.05</code>): una regola che
+ha solo vinto la lotteria del multiple testing della propria sessione di
+discovery viene declassata a <code>PARTIAL-EDGE</code>.  La superficie di ipotesi della
+sessione è registrata su <code>ForgeResult.ledger</code>; disattivabile con
+<code>fast_null=False</code>.</p>
+<p>Gli split temporali sono <strong>purged</strong>: le barre in-sample la cui finestra
+forward attraversa il confine IS/OOS sono escluse da ogni misura di Alpha
+Discovery, e le finestre train del walk-forward terminano un worst-case trade
+span prima della finestra test (vedi <code>forgedge.timebudget.TimeBudget</code> —
+passandone uno a <code>forge()</code> tutti i moduli condividono un unico asse, con
+embargo opzionale).</p>
+<p>Rule Discovery seleziona il punto operativo <strong>solo dentro le finestre train
+del walk-forward</strong> (<code>RuleDiscoveryConfig.selection_mode="walk_forward"</code>, il
+default): i parametri pubblicati vengono dall'ultima finestra train (o dal
+consenso tra le finestre), e ogni metrica che alimenta il verdetto è
+calcolata sullo span di selezione — l'ultima finestra test non è mai letta
+da alcuna selezione.  <code>selection_mode="full_sample"</code> ripristina il
+comportamento legacy full-table.</p>
+<p>I verdetti sono <strong>power-aware</strong>: un potenziale <code>EDGE</code>/<code>PARTIAL-EDGE</code> la cui
+evidenza out-of-sample aggregata non può sostenerlo (troppi pochi trade test
+aggregati, o una minimum detectable expectancy sopra l'effetto dichiarato)
+viene emesso come <code>INSUFFICIENT-DATA</code> — non tradeable, ma conserva la sua
+<code>ValidatedRule</code> per la ri-valutazione su più dati.  La valutazione legge solo
+il ledger concatenato delle finestre test, mai le singole finestre del
+walk-forward (corte by design).  Disattivabile con
+<code>SelectionCriteria(power_gate=False)</code>.</p>
+<p>Sessioni multi-ticker con <code>forge_multi</code>:</p>
+<pre><code class="language-python">from forgedge import forge_multi
+
+frames = {&quot;BTCUSDC&quot;: btc_kpi, &quot;ETHUSDC&quot;: eth_kpi, &quot;ADAUSDC&quot;: ada_kpi}
+results, registry = forge_multi(frames, timeframe=&quot;1H&quot;)
+
+# GENERIC: la regola si generalizza su ≥ 2/3 dei ticker testati
+df = registry.flat_table()
+print(df[[&quot;rule_id&quot;, &quot;classification&quot;, &quot;pf&quot;, &quot;cross_ticker_score&quot;]])
+
+# Report HTML autocontenuto (SVG inline, nessuna CDN)
+html = registry.html_report(timeframe=&quot;1H&quot;)
+with open(&quot;report.html&quot;, &quot;w&quot;) as f:
+    f.write(html)
+</code></pre>
+<p>Monitoraggio delle regole pubblicate su candele fresche:</p>
+<pre><code class="language-python">from forgedge import RuleSpec, rule_performance_report
+
+# Una spec per ogni regola tradeable di un run forge() — is_end / verdict /
+# expectancy OOS vengono compilati automaticamente dagli artefatti di sessione.
+specs = RuleSpec.from_forge_result(result)
+
+# Oppure passa direttamente il ForgeResult — stesso effetto.
+html = rule_performance_report(result, candele_fresche)
+with open(&quot;rules_report.html&quot;, &quot;w&quot;) as f:
+    f.write(html)
+</code></pre>
+<p>Ogni regola viene rieseguita in modo <strong>deterministico</strong> sulle candele fornite
+(lo stesso percorso <code>EventCandidate.apply()</code> usato da Rule Discovery) — le
+candele non devono essere la tabella di discovery, quindi è il modo naturale
+per monitorare le regole pubblicate su dati raccolti dopo la discovery. Il
+report mostra, per regola: equity vs buy &amp; hold su doppio asse (scale
+indipendenti — confronta le forme, non le grandezze), un trend di
+attivazione mensile diviso in in-sample/out-of-sample, la distribuzione
+gain/loss, le KDE delle distribuzioni dei rendimenti — low/close/high, ognuno
+il rendimento forward sull'orizzonte di holding (target_h barre dopo la
+barra del segnale, ancorato al close di quella barra, orientato per
+direzione: la stessa grandezza da cui Alpha Discovery deriva il target e su
+cui Rule Discovery fa trading), base vs evento — uno scatter MAE→net
+(rischio intra-trade per queste regole senza stop), l'expectancy rolling
+(rilevatore di decadimento dell'edge), la performance per regime, gli ultimi
+trade e un badge "segnale
+attivo ora".</p>
+<hr />
+<h2 id="i-tre-concetti">I tre concetti</h2>
+<p>FORGE struttura il processo di scoperta attorno a tre concetti formali che rispondono ciascuno a una domanda distinta e producono un artefatto distinto.</p>
+<h3 id="evento-osservare-il-mercato-senza-bias">Evento — osservare il mercato senza bias</h3>
+<p>Un <strong>evento</strong> è una condizione booleana sulle barre storiche, scoperta dalla struttura temporale degli indicatori senza mai calcolare un forward return. Le soglie sono distribuzionali (percentili specifici per asset) e immutabili una volta fissate.</p>
+<pre><code class="language-python">c = candidates[0]
+print(c.expression)            # &quot;rsi_14 &lt; 31.2 AND spread_ema_9_25 &lt; -0.0118&quot;
+signal = c.apply(new_kpi)      # pd.Series bool — deterministico, senza look-ahead
+</code></pre>
+<p>Il ConsistencyGate filtra gli eventi con struttura temporale instabile (attivazioni insufficienti, clustering stagionale, bassa frequenza mensile) prima che venga calcolato qualsiasi rendimento.</p>
+<h3 id="alpha-misurare-il-potere-predittivo">Alpha — misurare il potere predittivo</h3>
+<p>Un <strong>alpha</strong> è la risposta empirica alla domanda: <em>dato che l'evento si è attivato, cosa succede statisticamente nelle prossime h barre?</em> Orizzonte, direzione e take-profit (<code>sell_pct</code>) sono tutti <strong>derivati dai dati</strong> — mai assunti — scansionando <code>|mean_advantage|/√h</code> su una grid di orizzonti e prendendo il quantile MFE delle barre attive.</p>
+<pre><code class="language-python">c = promoted[0]
+dt = c.derived_target
+print(f&quot;{dt.direction} a h={dt.holding_period_h}h  sell_pct={dt.sell_pct:.4f}&quot;)
+print(f&quot;Grade {c.alpha_score.grade}  |  OOS lift: {c.oos_validation.lift:.4f}&quot;)
+</code></pre>
+<p>L'unico gate di rigetto rigido è la direzione indeterminata (nessun vantaggio finito su nessun orizzonte). Tutte le altre metriche statistiche (IC, Cohen's d, lift, FDR) contribuiscono al grade A–D senza bloccare la promozione.</p>
+<h3 id="regola-tradare-in-modo-realistico">Regola — tradare in modo realistico</h3>
+<p>Una <strong>regola</strong> è il verdetto operativo su un contratto alpha. Rule Discovery esegue un backtest realistico — uscita a take-profit, stop a orizzonte, commissioni per lato — valutato prima con un ingresso a mercato (quel verdetto è autoritativo), poi opzionalmente con un ingresso a limite adottato solo se supera condizioni out-of-sample rigorose — e valida la migliore configurazione di parametri su un walk-forward OOS rolling.</p>
+<pre><code class="language-python">resp = RuleDiscovery(ed.df, contract, cand).run()
+print(resp.verdict)                               # &quot;EDGE&quot;, &quot;PARTIAL-EDGE&quot;, &quot;NON-EDGE&quot;
+if resp.is_edge:
+    p = resp.validated_rule.params
+    print(f&quot;Entry: limit -{p.buy_drop_pct:.2%}  TP: +{p.sell_pct:.2%}  h={p.target_h}&quot;)
+    print(f&quot;IS PF: {resp.in_sample_summary.profit_factor:.2f}&quot;
+          f&quot;  WF consistency: {resp.walk_forward.consistency:.0%}&quot;)
+</code></pre>
+<hr />
+<h2 id="panoramica-dei-moduli">Panoramica dei moduli</h2>
+<table>
+<thead>
+<tr>
+<th>Modulo</th>
+<th>Domanda cui risponde</th>
+<th>Output principale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0 — Market Context</td>
+<td>In che regime si trova questa barra?</td>
+<td>Colonna <code>regime</code> (5 livelli), <code>regime_stable</code></td>
+</tr>
+<tr>
+<td>1 — Event Discovery</td>
+<td>Questa configurazione dell'indicatore è stabile e ripetibile?</td>
+<td><code>EventCandidate</code> — soglie immutabili, <code>apply()</code></td>
+</tr>
+<tr>
+<td>2 — Alpha Discovery</td>
+<td>L'evento predice un rendimento orientato?</td>
+<td><code>AlphaContract</code> — target derivato, grade A–D</td>
+</tr>
+<tr>
+<td>3 — Rule Discovery</td>
+<td>Questo alpha è profittevole con order mechanics reali?</td>
+<td><code>RuleDiscoveryResponse</code> — verdetto EDGE, <code>ValidatedRule</code></td>
+</tr>
+<tr>
+<td>4 — Rule Registry</td>
+<td>Questa regola si generalizza su altri ticker?</td>
+<td>Tabella piatta, report HTML — GENERIC / PARTIAL / SPECIFIC</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="stato-implementazione">Stato implementazione</h2>
+<table>
+<thead>
+<tr>
+<th>Modulo</th>
+<th>Stato</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0 — Market Context</td>
+<td>✅ Implementato</td>
+</tr>
+<tr>
+<td>1 — Event Discovery</td>
+<td>✅ Implementato</td>
+</tr>
+<tr>
+<td>2 — Alpha Discovery</td>
+<td>✅ Implementato</td>
+</tr>
+<tr>
+<td>3 — Rule Discovery</td>
+<td>✅ Implementato</td>
+</tr>
+<tr>
+<td>4 — Rule Registry</td>
+<td>🚧 WIP</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="documentazione">Documentazione</h2>
+<p><strong>Inizia dal manuale</strong> — <a href="manuale-it.html"><code>docs/manuale-it.md</code></a> è un'unica guida completa, verificata con esempi, che copre l'installazione fino all'architettura di produzione, il troubleshooting, best practice/anti-pattern, una FAQ e un glossario. Ogni cosa al suo interno è stata verificata contro il sorgente attuale e, dove è citato un numero, contro una run reale. Tutto quello sotto è materiale di riferimento più stretto e complementare.</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Contenuto</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="manuale-it.html"><code>docs/manuale-it.md</code></a></td>
+<td>Il manuale completo, verificato con esempi — dall'installazione alla produzione, l'API di ogni modulo, troubleshooting, FAQ</td>
+</tr>
+<tr>
+<td><a href="concepts-it.html"><code>concepts_it.md</code></a></td>
+<td>Guida concettuale: evento, alpha e regola — dal mercato al segnale</td>
+</tr>
+<tr>
+<td><a href="https://github.com/mattcond/forgedge/blob/main/src/forgedge/docs/specs/how_to_use_it.md"><code>how_to_use_it.md</code></a></td>
+<td>Guida pratica alla pipeline end-to-end per produzione</td>
+</tr>
+<tr>
+<td><a href="https://github.com/mattcond/forgedge/blob/main/src/forgedge/docs/specs/modulo_0_it.md"><code>modulo_0_it.md</code></a></td>
+<td>Market Context: classificazione regime, EMAProxy, configurazione</td>
+</tr>
+<tr>
+<td><a href="https://github.com/mattcond/forgedge/blob/main/src/forgedge/docs/specs/modulo_1_it.md"><code>modulo_1_it.md</code></a></td>
+<td>Event Discovery: pipeline 5-step, ConsistencyGate, EventCandidate</td>
+</tr>
+<tr>
+<td><a href="https://github.com/mattcond/forgedge/blob/main/src/forgedge/docs/specs/modulo_2_it.md"><code>modulo_2_it.md</code></a></td>
+<td>Alpha Discovery: target derivato, IC, OOS, AlphaContract</td>
+</tr>
+<tr>
+<td><a href="https://github.com/mattcond/forgedge/blob/main/src/forgedge/docs/specs/modulo_3_it.md"><code>modulo_3_it.md</code></a></td>
+<td>Rule Discovery: backtest, verdetto EDGE, walk-forward, report</td>
+</tr>
+<tr>
+<td><a href="https://github.com/mattcond/forgedge/blob/main/src/forgedge/docs/specs/modulo_4_it.md"><code>modulo_4_it.md</code></a></td>
+<td>Rule Registry: deduplicazione, cross-ticker, genericity, export</td>
+</tr>
+<tr>
+<td><a href="configuration-it.html"><code>configuration_it.md</code></a></td>
+<td>Riferimento completo alla configurazione: ogni campo dataclass, tipo, default e descrizione</td>
+</tr>
+<tr>
+<td><a href="https://github.com/mattcond/forgedge/blob/main/src/forgedge/docs/specs/playground_it.md"><code>playground_it.md</code></a></td>
+<td><code>forgedge.playground</code>: helper di analisi di sola lettura sopra i <code>ForgeResult</code> messi in pool</td>
+</tr>
+<tr>
+<td><a href="deployment-it.html"><code>deployment_it.md</code></a></td>
+<td><code>forgedge.deployment</code>: gate di promozione, export delle regole, manifest di monitoraggio per portare le regole scoperte in produzione</td>
+</tr>
+</tbody>
+</table>
+<p>Lavori su questo codebase con un agente AI? La skill <code>forgedge</code> in
+<a href="https://github.com/mattcond/forgedge/tree/main/.claude/skills/forgedge/"><code>.claude/skills/forgedge/</code></a> copre l'API della
+libreria, i verdetti e gli invarianti della pipeline in una forma che un
+agente può usare direttamente.</p>
+<hr />
+<h2 id="licenza">Licenza</h2>
+<p>MIT</p>
+</article>
+</main>
+</body>
+</html>

@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Evento, Alpha, Regola — FORGE</title>
+<meta name="description" content="Guida concettuale di FORGE: come nasce un segnale di trading da evento, alpha e regola." />
+<meta name="robots" content="index, follow" />
+<link rel="canonical" href="https://forgedge.it/docs/concepts-it.html" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/docs.css">
+</head>
+<body>
+<a class="back" href="../index.html">&larr; FORGE</a>
+<main>
+<article id="content">
+<h1 id="forge-dal-mercato-al-segnale-evento-alpha-e-regola">FORGE — Dal Mercato al Segnale: Evento, Alpha e Regola</h1>
+<p>Questo documento spiega come FORGE produce segnali di trading a partire da dati
+storici, costruendo progressivamente i tre concetti fondamentali del sistema:
+l'<strong>evento</strong>, l'<strong>alpha</strong> e la <strong>regola</strong>. Ogni concetto risponde a una domanda
+precisa e produce un artefatto formale che il successivo riceve in input — senza
+mai retrocedere dati, riaprire ottimizzazioni chiuse, o mescolare i domini.</p>
+<hr />
+<h2 id="il-problema-che-forge-affronta">Il problema che FORGE affronta</h2>
+<p>La ricerca di trading edge sistematica è infestata da un paradosso: è sempre
+possibile trovare pattern che "avrebbero funzionato" nel passato. Basta
+ottimizzare le soglie abbastanza a lungo, scegliere i periodi giusti, guardare
+il rendimento mentre si costruisce il segnale. Il risultato è un backtest
+attraente e una strategia che in produzione non funziona.</p>
+<p>I tre vettori principali di questa distorsione sono:</p>
+<ol>
+<li>
+<p><strong>Look-ahead bias nella selezione del segnale.</strong> Se la soglia dell'evento
+   viene scelta perché produce rendimenti positivi, la soglia già "sa" il futuro.
+   Qualsiasi backtest successivo è circolare.</p>
+</li>
+<li>
+<p><strong>Ottimizzazione sullo stesso campione della valutazione.</strong> Se si cerca il
+   miglior orizzonte, il miglior take-profit, il miglior filtro di regime sugli
+   stessi dati su cui si misura il Profit Factor, il PF riflette il rumore del
+   campione, non l'edge strutturale.</p>
+</li>
+<li>
+<p><strong>Assenza di separazione tra fase statistica e fase operativa.</strong> Sapere che
+   un evento predice statisticamente un rendimento positivo non equivale a sapere
+   che è profittevole con fee, slippage e meccaniche d'ordine realistici.</p>
+</li>
+</ol>
+<p>FORGE risponde a questi tre problemi con una pipeline a tre moduli separati da
+confini formali: nessun modulo può accedere ai dati del successivo, nessuna
+soglia può essere ricalibrata dopo la scoperta.</p>
+<hr />
+<h2 id="1-levento-osservare-il-mercato-senza-pregiudizi">1. L'Evento: Osservare il Mercato senza Pregiudizi</h2>
+<h3 id="definizione">Definizione</h3>
+<p>Un <strong>evento</strong> è una condizione booleana su barre storiche: per ogni barra della
+KPI Table, l'evento è <code>True</code> (attivo) o <code>False</code> (inattivo). Non è un segnale
+di trading — è un'osservazione strutturata del mercato.</p>
+<pre><code>Evento: RSI_14 &lt; 31.2
+         │
+         ├─ Barra 4712 (RSI=29.8): True  ← evento attivo
+         ├─ Barra 4713 (RSI=33.1): False
+         ├─ Barra 4714 (RSI=30.0): True  ← evento attivo
+         └─ ...
+</code></pre>
+<p>Un evento può essere composto da più condizioni in AND:</p>
+<pre><code>Evento: RSI_14 &lt; 31.2  AND  spread_ema_9_25 &lt; -0.0118
+</code></pre>
+<p>Il nome formale nella codebase è <code>EventCandidate</code>. L'espressione booleana è
+salvata in <code>c.expression</code> e <code>c.event_formula</code>.</p>
+<h3 id="cosa-rende-un-evento-interessante">Cosa rende un evento interessante</h3>
+<p>Non tutti gli eventi sono utili. Un evento che si attiva una volta sola, o
+sempre nello stesso mese, o con una frequenza del 0.1% delle barre, non
+permette di misurare nulla di affidabile. I criteri di selezione sono
+puramente <strong>strutturali</strong>. L'unità di conteggio di default è l'<strong>episodio</strong>
+(una sequenza di attivazioni consecutive), non la singola barra attivata
+— un segnale che resta attivo per più barre di fila conta una volta sola,
+non una volta per barra:</p>
+<table>
+<thead>
+<tr>
+<th>Criterio</th>
+<th>Significato</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Frequenza</td>
+<td>Episodi al mese ≥ <code>min_tpm</code> (default 0.5 episodi/mese)</td>
+</tr>
+<tr>
+<td>Potenza</td>
+<td>Almeno <code>min_episodes</code> episodi nel campione (default 10)</td>
+</tr>
+<tr>
+<td>Dispersione</td>
+<td>Indice di Dispersione a livello di episodio (Var/Media dei conteggi mensili di episodi) ≤ una soglia Poisson-χ² scalata da <code>dispersion_margin</code> (default 1.3) — <code>eff_max_dispersion = poisson_floor(n_months) × dispersion_margin</code></td>
+</tr>
+</tbody>
+</table>
+<p>Il gate non rigetta mai un evento statisticamente coerente con un processo
+casuale alla sua stessa frequenza osservata, pur lasciando che la tolleranza
+di un preset per la burstiness continui davvero a vincolare. Non esiste più
+una regola fissa "nessun mese sopra il 40% delle attivazioni" —
+<code>max_monthly_share</code> è ancora riportato, ma solo come diagnostica; il vero
+controllo di dispersione è il test Poisson-χ² sopra. (Una modalità di
+conteggio legacy <code>"bar"</code>, più vicina alla vecchia semantica, resta
+disponibile per retrocompatibilità.)</p>
+<p>Il ConsistencyGate di Modulo 1 filtra tutti gli eventi che non rispettano questi
+criteri. Quello che supera il gate è un evento con <strong>struttura temporale stabile</strong>
+— indipendentemente dal fatto che produca rendimenti positivi o negativi.</p>
+<h3 id="soglie-distribuzionali-non-assolute">Soglie distribuzionali, non assolute</h3>
+<p>La soglia <code>RSI_14 &lt; 31.2</code> non è scelta perché 31.2 è un valore magico. È il
+<strong>10° percentile della distribuzione IS del RSI su quell'asset specifico</strong>.
+Questo è chiamato "soglia distribuzionale": rappresenta uno stato estremo
+dell'indicatore <em>per quell'asset</em>, non un valore assoluto universale.</p>
+<p>Il risultato è che lo stesso pattern strutturale ("RSI in zona bassa") produce
+soglie diverse su asset diversi:</p>
+<table>
+<thead>
+<tr>
+<th>Asset</th>
+<th>RSI p10</th>
+<th>Significato</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BTC</td>
+<td>27.8</td>
+<td>BTC entra in ipervenduto a 27.8</td>
+</tr>
+<tr>
+<td>ADA</td>
+<td>31.2</td>
+<td>ADA entra in ipervenduto a 31.2</td>
+</tr>
+<tr>
+<td>ETH</td>
+<td>29.1</td>
+<td>ETH entra in ipervenduto a 29.1</td>
+</tr>
+</tbody>
+</table>
+<p>La struttura è la stessa (RSI al 10° percentile), la soglia è adattiva.</p>
+<h3 id="lisolamento-dal-forward-return">L'isolamento dal forward return</h3>
+<p>Il principio fondamentale di Modulo 1 è che <strong>non vede mai il rendimento
+futuro</strong>. Le feature vengono classificate, le soglie vengono fissate sulla
+distribuzione IS, la stabilità temporale viene misurata — tutto senza mai
+calcolare un singolo forward return.</p>
+<p>Questo garantisce che le soglie dell'evento non siano contaminate dalla
+conoscenza di ciò che succede dopo. Non c'è look-ahead bias nella selezione
+del segnale.</p>
+<h3 id="le-soglie-sono-immutabili">Le soglie sono immutabili</h3>
+<p>Una volta che l'Event Discovery fissa le soglie — <code>RSI_14 &lt; 31.2</code>,
+<code>spread_ema_9_25 &lt; -0.0118</code> — queste non cambiano mai, nemmeno se i moduli
+successivi scoprissero che una soglia diversa produce un Profit Factor più alto.
+Cambiare la soglia richiederebbe una nuova sessione di Event Discovery, con
+un nuovo campione IS.</p>
+<p>Questo previene la forma più sottile di look-ahead bias: ottimizzare le soglie
+dopo aver visto i rendimenti.</p>
+<h3 id="artefatto-eventcandidate">Artefatto: <code>EventCandidate</code></h3>
+<pre><code class="language-python">c = candidates[0]
+c.expression      # &quot;rsi_14 &lt; 31.2 AND spread_ema_9_25 &lt; -0.0118&quot;
+c.event_formula   # versione human-readable con notazione percentile
+c.activation_stats.n_activations  # 87 attivazioni IS
+c.activation_stats.n_active_months # attivo in 18 mesi diversi
+
+# Applicare l'evento su qualsiasi DataFrame con le stesse colonne native
+signal = c.apply(new_kpi_table)   # pd.Series bool
+</code></pre>
+<p>L'EventCandidate è portabile: può essere applicato a dati futuri senza
+richiedere la sessione di scoperta. Le soglie sono salvate nelle componenti.</p>
+<hr />
+<h2 id="2-lalpha-misurare-il-potere-predittivo">2. L'Alpha: Misurare il Potere Predittivo</h2>
+<h3 id="il-passaggio-al-forward-return">Il passaggio al forward return</h3>
+<p>Un evento descrive una configurazione di mercato. Ma non dice nulla su cosa
+succede dopo. È normale che RSI sia al 10° percentile — può essere un segnale
+di rimbalzo o l'inizio di un crollo ulteriore.</p>
+<p>L'<strong>alpha</strong> è la risposta empirica alla domanda: <em>dato che l'evento si è
+attivato, che cosa succede statisticamente nei prossimi h bar?</em></p>
+<p>Questa è la <strong>prima esposizione al rendimento futuro</strong> dell'intera pipeline. Il
+forward return non è mai stato calcolato prima di questo punto.</p>
+<h3 id="derivare-il-target-senza-assunzioni">Derivare il target senza assunzioni</h3>
+<p>Alpha Discovery non riceve dall'utente un orizzonte temporale, una direzione di
+trading, o un take-profit. Li <strong>deriva dai dati</strong> per ogni evento.</p>
+<p><strong>Selezione dell'orizzonte <code>h*</code>:</strong></p>
+<p>La grid di orizzonti stessa non è una costante fissa — è risolta a livello di
+sessione per classe di timeframe da <code>PipelineContext</code>: <code>(1, 2, 3, 5, 7, 10)</code>
+barre sui timeframe giornalieri, <code>(1, 2, 4, 8, 12, 24)</code> sull'intraday,
+<code>(1, 2, 5, 10, 20, 50)</code> sull'HFT. (Costruire un <code>AlphaConfig</code> standalone,
+fuori da <code>forge()</code>, ricade sulla grid oraria/intraday <code>(1, 2, 4, 8, 12, 24)</code>
+a prescindere dal timeframe dichiarato.)</p>
+<p>Per ogni evento, Alpha Discovery calcola il rendimento log in eccesso a ogni
+orizzonte della grid, <code>Δ_h = mean_advantage[h]</code> — il rendimento log medio
+delle barre attive meno la baseline <em>incondizionata</em> su tutte le barre valide
+a quell'orizzonte — e poi lo standardizza rispetto a una <strong>null di rotazione
+circolare</strong>: il pattern di attivazione dell'evento viene ruotato rispetto
+alla serie dei rendimenti reali molte volte, per costruire una distribuzione
+nulla di come apparirebbe <code>Δ_h</code> in assenza di una relazione reale, ottenendo
+uno score standardizzato <code>z_h = Δ_h / σ_null,h</code> e un p-value per ogni
+orizzonte. L'orizzonte selezionato è:</p>
+<pre><code>h* = argmax |z_h|
+</code></pre>
+<p>Questo ha sostituito una precedente deflazione naive <code>Δ_h / (σ_cond / √n)</code>
+(divisione per l'errore standard naive, all'incirca una correzione a forma
+<code>1/√h</code>) perché quell'approccio tratta le finestre di forward-return
+sovrapposte di un evento clusterizzato o episodico come campioni
+indipendenti: il suo denominatore si riduce con l'orizzonte a prescindere dal
+fatto che l'evento si concentri davvero in raffiche, il che gonfia lo score
+agli orizzonti lunghi e spinge <code>h*</code> verso l'estremo della grid anche in
+assenza di un vero edge. Standardizzare rispetto a una null costruita sul
+pattern di attivazione dell'evento stesso rimuove questa distorsione.</p>
+<p>Viene poi applicato un gate FDR di Benjamini-Hochberg ai p-value su tutta la
+grid, producendo l'insieme di orizzonti <code>h_sig</code> che superano la
+significatività. <code>h*</code> è sempre scelto come <code>argmax |z_h|</code> sull'<em>intera</em> grid
+— ma se <code>h*</code> cade fuori da <code>h_sig</code>, il target viene marcato
+<code>statistically_weak</code> (questo penalizza, non scarta, lo score alpha risultante
+— vedi lo score composito più sotto).</p>
+<p><strong>Derivazione della direzione:</strong></p>
+<p><code>direction</code> è <code>"undetermined"</code> — e l'evento viene rigettato — in uno
+qualsiasi dei tre casi seguenti:</p>
+<ul>
+<li>nessun orizzonte produce un eccesso finito <code>Δ_h</code> (non finito su tutta la
+  grid);</li>
+<li>l'eccesso standardizzato all'orizzonte selezionato è troppo piccolo,
+  <code>|z_h*| &lt; min_direction_t</code> (default 0.5);</li>
+<li>(comportamento di default, <code>require_significant_direction=True</code>) <code>h*</code>
+  stesso non è BH-significativo (<code>statistically_weak</code>) — l'eccesso è
+  statisticamente indistinguibile dalla null di rotazione ovunque, quindi
+  leggere una direzione da <code>argmax|z_h|</code> equivarrebbe a un lancio di moneta,
+  spesso distorto verso il drift dell'asset stesso all'estremo lungo della
+  grid.</li>
+</ul>
+<p>Altrimenti la direzione è <code>"long"</code> quando <code>Δ_h*</code> (<code>mean_advantage[h*]</code>) è
+positivo, <code>"short"</code> quando è negativo.</p>
+<p><strong>Derivazione del <code>sell_pct</code>:</strong></p>
+<p>Il take-profit baseline non è la media dei rendimenti (che include le barre
+perdenti), ma il <strong>quantile della distribuzione delle Maximum Favorable
+Excursion (MFE)</strong> delle barre attive all'orizzonte <code>h*</code>:</p>
+<pre><code>sell_pct = max(quantile(MFE_active_bars, 0.5), 0.005)
+</code></pre>
+<p>La MFE di una barra attiva è la massima escursione favorevole raggiunta nelle
+<code>h*</code> barre successive. Il 50° percentile di questa distribuzione è la stima
+conservativa del take-profit: metà delle attivazioni IS ha raggiunto o superato
+questa escursione.</p>
+<h3 id="misurare-levidenza-statistica">Misurare l'evidenza statistica</h3>
+<p>Con il target derivato <code>(h*, direction*, sell_pct*)</code>, Alpha Discovery misura
+l'evidenza statistica su IS:</p>
+<table>
+<thead>
+<tr>
+<th>Misura</th>
+<th>Significato</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>IC</strong> (Information Coefficient)</td>
+<td>Correlazione di Spearman tra la feature continua e il rendimento forward a <code>h*</code>. Misura la forza del segnale continuo prima della soglia.</td>
+</tr>
+<tr>
+<td><strong>Win rate e lift</strong></td>
+<td>Frequenza di barre attive con rendimento orientato positivo; lift = win_rate - base_rate. Misura quante volte l'evento "ha ragione".</td>
+</tr>
+<tr>
+<td><strong>Cohen's d</strong></td>
+<td>Separazione tra la distribuzione dei rendimenti sulle barre attive e sulle barre inattive. Misura la grandezza dell'effetto.</td>
+</tr>
+<tr>
+<td><strong>IC rolling</strong></td>
+<td>Stabilità del segno IC su ≈20 finestre scorrevoli. Misura se la relazione è stabile nel tempo.</td>
+</tr>
+</tbody>
+</table>
+<p>Tutte le misure IS vengono calcolate con primitive statistiche implementate in
+<strong>puro numpy</strong> — Spearman, t-test, FDR di Benjamini-Hochberg, beta incompleta.</p>
+<h3 id="conferma-out-of-sample">Conferma out-of-sample</h3>
+<p>Dopo le misure IS, il target derivato <code>(h*, direction*, sell_pct*)</code> viene
+<strong>replicato sull'OOS tail</strong> (l'ultimo 30% del dataset, non mai toccato da IS):</p>
+<ul>
+<li>I rendimenti OOS vengono orientati per la direction derivata</li>
+<li>Si misura win rate, lift, mean_advantage e t-test sull'OOS</li>
+<li>L'OOS viene considerato confermato se: mean_advantage &gt; 0 e p-value &lt; 0.10
+  (<code>oos_max_p</code>). Non esiste una soglia separata sul numero di attivazioni —
+  il commento nel codice sorgente è esplicito: "solo il p-value determina il
+  passed: la dimensione del campione è già incorporata nel p" (un campione
+  OOS piccolo rende semplicemente il p-value più difficile da superare).</li>
+</ul>
+<p>La conferma OOS è una <strong>diagnostica non bloccante</strong>: un contratto OOS-debole
+viene comunque promosso se ha direzione determinata, ma il suo grade riflette
+la mancanza di conferma. Questo evita di rigettare eventi rari ma strutturalmente
+solidi per i quali l'OOS ha poche attivazioni.</p>
+<h3 id="il-grade-ad">Il grade A–D</h3>
+<p>Lo score composito (0–1) integra le misure IS. I pesi di default
+(<code>AlphaConfig.score_weights</code>) sono <code>(0.20, 0.25, 0.15, 0.25, 0.15)</code> per
+<code>(ic, lift, cohens_d, z, breadth)</code> — una formula a <strong>cinque</strong> termini:</p>
+<pre><code>score = 0.20 × IC_norm + 0.25 × lift_norm + 0.15 × d_norm
+      + 0.25 × z_norm  + 0.15 × regime_breadth
+</code></pre>
+<p><code>z_norm</code> è l'eccesso standardizzato rispetto alla null di rotazione a <code>h*</code>
+normalizzato (<code>|z_h*|</code>, il rapporto edge-rumore calcolato sopra) — un termine
+che la formula naive omette del tutto. <code>d_norm</code> è <strong>con segno</strong> in
+<code>[-1, 1]</code>: un Cohen's d negativo (il gruppo condizionato performa peggio del
+background) penalizza attivamente lo score invece di essere troncato a zero.</p>
+<p>Vengono poi applicati due ulteriori aggiustamenti dopo la somma pesata:</p>
+<ul>
+<li>se l'orizzonte selezionato è <code>statistically_weak</code> (fuori dall'insieme
+  BH-significativo), il composito viene moltiplicato per
+  <code>statistically_weak_penalty</code> (default <code>0.6</code>) — un orizzonte scelto proprio
+  a causa del bias di selezione che il controllo FDR vuole prevenire non può
+  ottenere uno score alto;</li>
+<li>se la conferma OOS passa, viene aggiunto <code>oos_bonus</code> (default <code>0.05</code>).</li>
+</ul>
+<p>Il risultato è troncato a <code>[0, 1]</code>. Ogni componente grezza è normalizzata su
+una scala 0–1 prima della ponderazione. Il grade:</p>
+<table>
+<thead>
+<tr>
+<th>Grade</th>
+<th>Score</th>
+<th>Significato</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A</td>
+<td>≥ 0.75</td>
+<td>Evidenza statistica forte</td>
+</tr>
+<tr>
+<td>B</td>
+<td>≥ 0.50</td>
+<td>Evidenza solida</td>
+</tr>
+<tr>
+<td>C</td>
+<td>≥ 0.25</td>
+<td>Evidenza moderata</td>
+</tr>
+<tr>
+<td>D</td>
+<td>&lt; 0.25</td>
+<td>Evidenza debole — potenzialmente solo rumore</td>
+</tr>
+</tbody>
+</table>
+<p>Tutti e quattro i grade passano a Rule Discovery. Il grade non è un filtro di
+promozione: è un'indicazione della forza dell'evidenza statistica.</p>
+<h3 id="artefatto-alphacontract">Artefatto: <code>AlphaContract</code></h3>
+<pre><code class="language-python">c = promoted[0]
+
+# Il target derivato dai dati
+dt = c.derived_target
+print(f&quot;Orizzonte: {dt.holding_period_h}h&quot;)
+print(f&quot;Direzione: {dt.direction}&quot;)        # &quot;long&quot; o &quot;short&quot;
+print(f&quot;sell_pct:  {dt.sell_pct:.4f}&quot;)     # es. 0.0312 = 3.12%
+
+# L'evidenza statistica IS
+print(f&quot;IC: {c.underlying_feature.ic:.4f}, p={c.underlying_feature.p_value:.4f}&quot;)
+print(f&quot;Lift: {c.event_stats.lift:.4f}&quot;)
+print(f&quot;Grade: {c.alpha_score.grade}&quot;)     # &quot;A&quot;, &quot;B&quot;, &quot;C&quot; o &quot;D&quot;
+
+# Conferma OOS
+oos = c.oos_validation
+print(f&quot;OOS passed: {oos.passed}, lift OOS: {oos.lift:.4f}&quot;)
+
+# Status
+print(f&quot;Status: {c.status}&quot;)               # &quot;HYPOTHESIS&quot; o &quot;REJECTED&quot;
+</code></pre>
+<p>Un AlphaContract con <code>status="HYPOTHESIS"</code> è l'ipotesi formale che l'evento
+ha potere predittivo nella direzione indicata all'orizzonte indicato. Non è una
+certezza — è un'ipotesi da testare operativamente.</p>
+<hr />
+<h2 id="3-la-regola-tradare-in-modo-realistico">3. La Regola: Tradare in Modo Realistico</h2>
+<h3 id="perche-lalpha-non-e-sufficiente">Perché l'alpha non è sufficiente</h3>
+<p>Un evento con grade A, IC=0.08, lift=0.12, confermato OOS — è un risultato
+notevole. Ma non risponde alla domanda che conta in produzione: <em>posso guadagnare
+soldi tradando questo segnale, con fee reali, con ordini limite che potrebbero
+non venire eseguiti, su un orizzonte che devo chiudere anche se il mercato non
+ha mosso abbastanza?</em></p>
+<p>L'evidenza statistica misura la separazione delle distribuzioni. Non misura
+la redditività operativa. Questa è la responsabilità di Modulo 3.</p>
+<h3 id="la-meccanica-dellentrata-una-valutazione-auto-a-due-stadi">La meccanica dell'entrata: una valutazione auto a due stadi</h3>
+<p>Rule Discovery traduce l'AlphaContract in un backtest con meccaniche d'ordine
+realistiche. Dall'issue #185, <code>RuleDiscoveryConfig.entry_mode</code> ha default
+<code>"auto"</code>, che esegue la valutazione in <strong>due stadi</strong> invece di assumere
+un'entrata a limite fin dall'inizio:</p>
+<p><strong>Stadio 1 — entrata a mercato (autoritativa per il verdetto).</strong> La regola
+viene backtestata entrando all'apertura della barra successiva (fill ≈
+100%). Questo isola l'edge del <em>segnale</em> da qualsiasi ottimizzazione del
+prezzo d'entrata, e il suo verdetto è definitivo: lo Stadio 2 può raffinare
+quali parametri vengono pubblicati, ma non può mai trasformare un NON-EDGE
+dello Stadio 1 in un edge.</p>
+<p><strong>Stadio 2 — sweep opzionale del prezzo limite.</strong> Su un sopravvissuto dello
+Stadio 1, Rule Discovery esplora opzionalmente <code>buy_drop_pct</code> (un ordine
+limite a <code>fill_price = close × (1 - buy_drop_pct)</code>, valido per
+<code>buy_delay_bar</code> barre, eseguito quando il prezzo scende a quel livello nelle
+barre successive usando il close come approssimazione conservativa) e
+replica il candidato vincente out-of-sample. Il prezzo limite viene
+<strong>adottato</strong> — pubblicato al posto dell'entrata a mercato — solo se supera
+tutte e tre le condizioni OOS:</p>
+<ol>
+<li><code>fill_rate &gt;= min_fill_rate_opt</code> — nessun PF gonfiato da fill rari.</li>
+<li><code>opportunity_sharpe &gt;= quello del mercato</code> — uno Sharpe <em>per frequenza di
+   trade</em>, quindi un punto che tratta meno spesso deve guadagnare di più per
+   trade per compensare.</li>
+<li><code>net_gain &gt;= min_net_gain_retention × quello del mercato</code> — una rete di
+   sicurezza per il caso che lo Sharpe non vede (una mu minuscola con una
+   sigma minuscola).</li>
+</ol>
+<p><code>RuleDiscoveryResponse.entry_optimization.failed_condition</code> indica quale
+delle tre ha bloccato l'adozione (<code>"fill"</code> / <code>"sharpe"</code> / <code>"net_gain"</code>), o
+<code>None</code> quando è stata adottata. Questo esiste perché il vecchio default
+solo-limite lasciava che un limite profondo e raramente eseguito gonfiasse
+il profit factor su un sottoinsieme di trade non rappresentativo (il "fill
+confound") — l'entrata svolgeva un doppio ruolo, meccanica d'ordine e
+ottimizzatore del prezzo d'entrata, e il verdetto finiva per misurare il
+prezzo d'entrata invece del segnale.</p>
+<p><strong>Uscita (in entrambe le modalità d'entrata):</strong>
+- <strong>Take-profit:</strong> si esce quando il prezzo sale a
+  <code>take_profit = fill_price × (1 + sell_pct)</code>
+- <strong>Stop a orizzonte:</strong> se il take-profit non viene raggiunto entro <code>target_h</code>
+  barre dal fill, si chiude al close di quella barra
+- <strong>Short:</strong> specchio simmetrico — entrata sopra anchor, take-profit sotto fill</p>
+<p><strong>Fee:</strong> dedotte sia all'entrata sia all'uscita su ogni trade (<code>fee_per_side</code>).</p>
+<p><code>entry_mode="limit"</code> — il default pre-#185 — resta pienamente supportato: la
+grid varia direttamente <code>buy_drop_pct</code> e l'entrata a limite svolge il doppio
+ruolo di ottimizzatore del prezzo d'entrata, senza una baseline a mercato.
+Rimane la scelta giusta quando l'ordine limite <em>è</em> la strategia, non una mera
+raffinatura dell'esecuzione. Una terza modalità, <code>entry_mode="market"</code>,
+esegue solo lo Stadio 1 senza alcun ottimizzatore d'entrata.</p>
+<h3 id="la-grid-dei-parametri">La grid dei parametri</h3>
+<p>Rule Discovery non assume i valori ottimali di <code>buy_drop_pct</code>, <code>sell_pct</code> e
+<code>target_h</code>. Invece di un menu fisso di valori candidati, <code>build_grid()</code>
+costruisce un piccolo <strong>ventaglio simmetrico</strong> aritmeticamente attorno a
+ciascun valore base derivato dal contratto:</p>
+<pre><code>buy_drop_pct = [d − 0.005, d − 0.002, d, d + 0.002, d + 0.005]   (floor a 0.001)
+sell_pct     = [s − 0.02,  s − 0.01,  s, s + 0.01,  s + 0.02]    (floor a 0.005)
+target_h     = {round(h × 0.5), round(h × 1.0), round(h × 2.0)}
+buy_delay_bar = [valore base]   — un unico valore, non esplorato, a meno che
+                                  il chiamante imposti esplicitamente
+                                  GridSpec.buy_delay_bar
+</code></pre>
+<p>dove <code>d</code>, <code>s</code> e <code>h</code> sono <code>buy_drop_pct</code>, <code>sell_pct</code> e <code>target_h</code> presi dal
+target derivato dell'AlphaContract (via <code>base.resolved()</code>). Qualsiasi asse
+che il chiamante imposti esplicitamente su <code>GridSpec</code> sovrascrive questo
+ventaglio automatico.</p>
+<p>Per ogni configurazione viene calcolato il composite score <code>pf_score_tpm</code> che
+bilancia Profit Factor, frequenza di trading e consistenza mensile. Le
+configurazioni vengono filtrate contro una soglia dinamica sul numero di
+trade, <code>max(pf_min_trades, n_months × pf_min_tpm)</code> — <code>pf_min_trades</code> ha
+default 15 e <code>pf_min_tpm</code> ha default 2 trade/mese, quindi la soglia cresce
+con la lunghezza della finestra di selezione invece di restare fissa a un
+conteggio piatto. Le configurazioni sotto questa soglia, o con PF &lt; 1,
+vengono scartate immediatamente.</p>
+<p>La configurazione migliore tra quelle che superano le soglie di selezione viene
+passata alla validazione statistica e walk-forward.</p>
+<h3 id="la-validazione-walk-forward">La validazione walk-forward</h3>
+<p>Il backtest IS da solo sarebbe ancora ottimistico: si è scelto il miglior set
+di parametri su IS, quindi il risultato IS è ottimisticamente biased.</p>
+<p>Il walk-forward OOS divide la storia in finestre scorrevoli (train + test):</p>
+<pre><code>  [────────── train 1 ──────────] [test 1]
+        [────────── train 2 ──────────] [test 2]
+              [────────── train 3 ──────────] [test 3]
+</code></pre>
+<p>Su ogni finestra di train, i parametri vengono re-ottimizzati. Sul test
+successivo si misura il PF con quei parametri. Il <code>wf.consistency</code> è la
+quota di finestre test con PF &gt; 1 — la misura più diretta di robustezza
+out-of-sample.</p>
+<h3 id="il-verdetto-edge-partial-edge-non-edge-insufficient-data">Il verdetto EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA</h3>
+<p>Il verdetto finale integra gate hard e gate soft:</p>
+<p><strong>NON-EDGE (gate hard):</strong>
+- PF &lt; 1.5 su IS (<code>partial_min_profit_factor</code>)
+- Tutti i mesi con risultato negativo o zero (troppo irregolare)
+- Nessuna configurazione con fill rate adeguato</p>
+<p><strong>EDGE</strong> richiede tutti i seguenti:
+- PF ≥ 2.0 su IS (<code>min_profit_factor</code>)
+- Win rate ≥ 55%
+- Deflated Sharpe ≥ 1.0 (penalizzato per il numero di configurazioni testate)
+- Dipendenza regime &lt; 30% (l'edge non è concentrato in un solo regime)
+- Stabilità temporale: PF prima metà ≈ PF seconda metà
+- Walk-forward <code>consistency ≥ 0.5</code> (almeno metà delle finestre di test OOS
+  hanno PF &gt; 1)
+- La null di rotazione a livello di ricerca è superata: <code>rotation_p ≤
+  max_rotation_p</code>. È il meccanismo <code>fast_null</code>/<code>FastRotationNull</code> che
+  <code>forge()</code> esegue di default, che quota la superficie di multiple-testing
+  dell'intera sessione di scoperta — un contratto che vince solo quella
+  lotteria resta limitato sotto il pieno EDGE anche se supera ogni altro
+  gate.</p>
+<p><strong>PARTIAL-EDGE:</strong> supera i gate hard (NON-EDGE) ma non tutti i gate EDGE.</p>
+<p><strong>INSUFFICIENT-DATA:</strong> un verdetto che sarebbe <code>EDGE</code>/<code>PARTIAL-EDGE</code> viene
+declassato a <code>INSUFFICIENT-DATA</code> quando l'evidenza out-of-sample aggregata è
+troppo esigua da supportare un giudizio positivo con fiducia (governato da
+<code>SelectionCriteria.power_gate</code>, default <code>True</code>, tramite
+<code>_power_assessment()</code>). Un <code>NON-EDGE</code> non viene mai salvato in questo modo —
+sotto-potenziato o meno, la conseguenza operativa è la stessa. Il verdetto
+è quindi uno dei <strong>quattro</strong> valori:
+<code>"EDGE" | "PARTIAL-EDGE" | "NON-EDGE" | "INSUFFICIENT-DATA"</code>
+(<code>RuleDiscoveryResponse.verdict</code>).</p>
+<h3 id="artefatto-validatedrule-dentro-rulediscoveryresponse">Artefatto: <code>ValidatedRule</code> (dentro <code>RuleDiscoveryResponse</code>)</h3>
+<pre><code class="language-python">resp = rd.run()
+
+print(f&quot;Verdetto: {resp.verdict}&quot;)   # &quot;EDGE&quot;, &quot;PARTIAL-EDGE&quot;, &quot;NON-EDGE&quot; o &quot;INSUFFICIENT-DATA&quot;
+print(f&quot;È edge: {resp.is_edge}&quot;)     # True per EDGE e PARTIAL-EDGE
+
+if resp.is_edge:
+    vr = resp.validated_rule
+    params = vr.params
+    print(f&quot;Entrata: limite a -{params.buy_drop_pct:.2%} dal close&quot;)
+    print(f&quot;Take-profit: +{params.sell_pct:.2%} dal fill&quot;)
+    print(f&quot;Orizzonte massimo: {params.target_h} barre&quot;)
+    print(f&quot;Direzione: {params.direction}&quot;)
+
+# Metriche IS
+s = resp.in_sample_summary
+print(f&quot;Trade: {s.total_trades}, PF: {s.profit_factor:.2f}, WR: {s.win_rate_pct:.2%}&quot;)
+
+# Walk-forward
+wf = resp.walk_forward
+print(f&quot;Consistenza OOS: {wf.consistency:.0%}&quot;)  # es. 75% delle finestre con PF&gt;1
+</code></pre>
+<p>Una <code>ValidatedRule</code> contiene i parametri operativi precisi — non stime
+statistiche, ma valori pronti per un sistema di esecuzione.</p>
+<hr />
+<h2 id="4-dal-contratto-al-segnale-di-trading">4. Dal Contratto al Segnale di Trading</h2>
+<h3 id="quando-levento-si-riattiva-su-nuovi-dati">Quando l'evento si riattiva su nuovi dati</h3>
+<p>Una volta che il sistema ha prodotto un <code>AlphaContract</code> (HYPOTHESIS) e una
+<code>ValidatedRule</code> (EDGE o PARTIAL-EDGE), la logica operativa è semplice:</p>
+<blockquote>
+<p>Quando l'evento si attiva su nuovi dati → genera un segnale di trading.</p>
+</blockquote>
+<pre><code class="language-python"># Nuovi dati in arrivo (live o batch)
+new_kpi = fetch_latest_bars(asset=&quot;BTC&quot;, timeframe=&quot;1H&quot;)
+
+# Il segnale è l'evento applicato ai nuovi dati
+signal = event_candidate.apply(new_kpi)    # pd.Series bool
+
+# Le barre con segnale True sono candidati all'ingresso
+signal_bars = new_kpi[signal]
+</code></pre>
+<h3 id="i-parametri-dellordine">I parametri dell'ordine</h3>
+<p>La <code>ValidatedRule</code> traduce il segnale in istruzioni d'ordine precise:</p>
+<pre><code class="language-python">params = validated_rule.params
+
+for ts, row in signal_bars.iterrows():
+    # Calcolo del prezzo limite (long)
+    limit_price = row[&quot;close&quot;] * (1 - params.buy_drop_pct)
+    take_profit = limit_price * (1 + params.sell_pct)
+    max_bars    = params.target_h   # chiudiamo entro questo numero di barre
+
+    # Istruzione al sistema di esecuzione
+    place_limit_order(
+        direction   = params.direction,    # &quot;long&quot; o &quot;short&quot;
+        limit_price = limit_price,
+        take_profit = take_profit,
+        max_bars    = max_bars,
+        fee         = params.fee,
+    )
+</code></pre>
+<p>Ogni parametro è il risultato di un processo empirico strutturato:
+- <code>direction</code> — derivato da Alpha Discovery (sign del mean_advantage)
+- <code>buy_drop_pct</code> — ottimizzato da Rule Discovery su IS, validato su OOS
+- <code>sell_pct</code> — radicato nella distribuzione MFE IS, raffinato da Rule Discovery
+- <code>target_h</code> — radicato nell'orizzonte Alpha, raffinato da Rule Discovery</p>
+<h3 id="filtrare-per-regime">Filtrare per regime</h3>
+<p>Un edge statisticamente valido può essere più robusto in certi regimi. La
+<code>RuleDiscoveryResponse</code> espone l'analisi per regime:</p>
+<pre><code class="language-python">ra = resp.regime_analysis
+print(f&quot;Regime da evitare: {ra.avoid_in}&quot;)
+print(f&quot;Score di dipendenza dal regime: {ra.dependency_score:.2f}&quot;)
+
+# Filtrare il segnale per regime
+enriched = MarketContext(new_kpi).run()
+regime_now = enriched[&quot;regime&quot;].iloc[-1]
+
+if regime_now not in ra.avoid_in:
+    # L'edge è presente in questo regime → procedi con l'ordine
+    pass
+</code></pre>
+<h3 id="il-flusso-completo-dal-dato-al-segnale">Il flusso completo dal dato al segnale</h3>
+<pre><code>Dati storici (KPI Table)
+       │
+       ▼
+[Modulo 0] Classifica ogni barra per regime
+       │
+       ▼
+[Modulo 1] Scopre eventi con struttura temporale stabile
+           → EventCandidate  (soglie distribuzionali, immutabili)
+       │
+       ▼
+[Modulo 2] Misura il potere predittivo (senza assunzioni a priori)
+           → AlphaContract   (orizzonte, direzione, sell_pct derivati)
+       │
+       ▼
+[Modulo 3] Valida operativamente con meccaniche d'ordine realistiche
+           → ValidatedRule   (parametri precisi per il sistema di esecuzione)
+       │
+       ▼
+Nuovi dati (live)
+       │
+       ▼
+EventCandidate.apply()  →  segnale bool per barra
+       │ True
+       ▼
+ValidatedRule.params    →  limit_price, take_profit, max_bars, direction
+       │
+       ▼
+Sistema di esecuzione   →  ordine
+</code></pre>
+<hr />
+<h2 id="5-perche-questa-separazione-e-necessaria">5. Perché Questa Separazione è Necessaria</h2>
+<h3 id="i-tre-confini-formali">I tre confini formali</h3>
+<p>La pipeline FORGE impone tre confini che non possono essere attraversati in
+nessuna direzione:</p>
+<p><strong>Confine 1: Modulo 1 non vede il forward return.</strong>
+Se l'evento venisse scoperto guardando i rendimenti, le soglie sarebbero
+calibrate per massimizzare il PF — non per catturare una struttura di mercato
+reale. Le soglie immutabili sono la conseguenza diretta di questo confine.</p>
+<p><strong>Confine 2: Alpha Discovery non riceve parametri economici in input.</strong>
+L'orizzonte e la direzione non sono assunzioni dell'utente: sono misure
+empiriche. Se l'utente potesse specificare "ho ipotesi che questo evento sia
+un segnale long a 24 barre", la misura confermerebbe l'ipotesi anche quando
+i dati la contraddicono parzialmente.</p>
+<p><strong>Confine 3: Rule Discovery valuta su OOS scorrevole, non su IS.</strong>
+La configurazione ottimale dei parametri operativi trovata su IS sarebbe
+sovra-adattata. Il walk-forward separa l'ottimizzazione dalla misurazione su
+ogni finestra.</p>
+<h3 id="le-soglie-immutabili-come-garanzia">Le soglie immutabili come garanzia</h3>
+<p>Il principio che le soglie degli eventi non cambiano mai — nemmeno se una soglia
+diversa producesse un PF migliore — è la protezione contro la forma più sottile
+di look-ahead bias: ottimizzare le soglie dell'evento <em>dopo</em> aver visto i
+rendimenti.</p>
+<p>Recalibrarle richiederebbe una nuova sessione di Event Discovery, su un nuovo
+campione IS, con una nuova serie storica.</p>
+<h3 id="il-target-derivato-come-misura-non-come-assunzione">Il target derivato come misura, non come assunzione</h3>
+<p>Il fatto che Alpha Discovery derivi l'orizzonte, la direzione e il sell_pct dai
+dati — invece di riceverli come parametri — significa che ogni AlphaContract
+è una risposta empirica, non la verifica di un'ipotesi preconcetta.</p>
+<p>Un utente potrebbe intuire che "RSI basso è un segnale di rimbalzo a 24 ore".
+FORGE misura se l'evento ha un vantaggio più forte a 6, 12, 24 o 36 ore, e
+seleziona l'orizzonte con il miglior rapporto segnale/orizzonte — che potrebbe
+essere diverso dall'intuizione.</p>
+<h3 id="loos-come-gate-formale-non-come-check-post-hoc">L'OOS come gate formale, non come check post-hoc</h3>
+<p>L'OOS di Alpha Discovery e il walk-forward di Rule Discovery non sono analisi
+opzionali eseguite dopo la promozione: sono condizioni formali della pipeline.
+I dati OOS non partecipano a nessun calcolo IS — sono un osservatore
+indipendente che non ha mai "visto" le soglie, il target derivato, o la
+configurazione operativa ottimale.</p>
+<h3 id="due-strati-che-mantengono-onesti-i-confini-lungo-tutta-la-sessione">Due strati che mantengono onesti i confini lungo tutta la sessione</h3>
+<p>Due meccanismi, entrambi invisibili nelle descrizioni dei singoli moduli qui
+sopra, si trovano sotto ogni esecuzione di <code>forge()</code> e fanno rispettare la
+separazione nella pratica:</p>
+<p><strong>Un resolver centrale dei parametri.</strong> <code>forge()</code> costruisce un
+<code>PipelineContext</code> (la fonte unica di verità della sessione per timeframe,
+nomi delle colonne dello schema, fee e policy statistica — <code>forgedge.resolver</code>)
+e risolve ogni campo di configurazione lasciato non impostato dal chiamante
+contro di esso, prima ancora che il Modulo 0 venga eseguito. Il bundle
+risolto viene poi controllato per contraddizioni interne da <code>config_report()</code>
+(<code>ConfigReport</code>): <code>forge(strict=True)</code> — il default — solleva un
+<code>ValueError</code> invece di eseguire una sessione la cui configurazione non può
+strutturalmente produrre un verdetto (es. una finestra di selezione di
+Modulo 3 troppo corta per la frequenza di arrivo che le è stato chiesto di
+richiedere). Un muro di rigetti silenziosi è indistinguibile da "il segnale
+è cattivo"; rifiutarsi di partire è la risposta onesta.</p>
+<p><strong>Calibrazione della null di rotazione sulla ricerca stessa.</strong> Ogni singolo
+<code>AlphaContract</code> è già standardizzato rispetto alla propria null di rotazione
+circolare (§2 sopra). Di default <code>forge()</code> esegue inoltre una null di
+rotazione <em>a livello di ricerca</em> (<code>fast_null=True</code>,
+<code>calibration.fast_null.FastRotationNull</code>) che quota la superficie di
+multiple-testing dell'intera sessione di scoperta — quanti candidati sono
+stati tentati, non solo quanto appare forte un candidato isolatamente — e
+annota il risultato su <code>AlphaContract.rotation_p</code>. Il gate EDGE di Rule
+Discovery legge questo valore direttamente (§3 sopra): un contratto che vince
+solo la lotteria del multiple-testing resta limitato a <code>PARTIAL-EDGE</code> anche
+se supera ogni altro gate.</p>
+<hr />
+<h2 id="riepilogo-dei-tre-concetti">Riepilogo dei tre concetti</h2>
+<table>
+<thead>
+<tr>
+<th>Concetto</th>
+<th>Domanda</th>
+<th>Modulo</th>
+<th>Artefatto</th>
+<th>Gate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Evento</strong></td>
+<td>"Questa configurazione di mercato è stabile e ripetibile?"</td>
+<td>Modulo 1</td>
+<td><code>EventCandidate</code></td>
+<td>ConsistencyGate (strutturale, no forward return)</td>
+</tr>
+<tr>
+<td><strong>Alpha</strong></td>
+<td>"Questo evento predice statisticamente un rendimento orientato?"</td>
+<td>Modulo 2</td>
+<td><code>AlphaContract</code></td>
+<td>direction ≠ "undetermined" (unico gate hard)</td>
+</tr>
+<tr>
+<td><strong>Regola</strong></td>
+<td>"Questo alpha è redditizio con meccaniche d'ordine realistiche?"</td>
+<td>Modulo 3</td>
+<td><code>ValidatedRule</code></td>
+<td>EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA</td>
+</tr>
+</tbody>
+</table>
+<p>Un segnale di trading nasce dall'intersezione di questi tre accertamenti: una
+configurazione di mercato strutturalmente stabile (<code>Evento</code>), con evidenza
+empirica di potere predittivo (<code>Alpha</code>), che reggere sotto condizioni operative
+realistiche (<code>Regola</code>).</p>
+<hr />
+<h2 id="riferimenti">Riferimenti</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Contenuto</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>index_it.md</code></td>
+<td>Panoramica del sistema e quick start</td>
+</tr>
+<tr>
+<td><code>how_to_use_it.md</code></td>
+<td>Guida pratica end-to-end con configurazione completa</td>
+</tr>
+<tr>
+<td><code>configuration_it.md</code></td>
+<td>Riferimento globale della configurazione — ogni dataclass e campo</td>
+</tr>
+<tr>
+<td><code>modulo_0_it.md</code></td>
+<td>Market Context: classificazione dei regimi</td>
+</tr>
+<tr>
+<td><code>modulo_1_it.md</code></td>
+<td>Event Discovery: pipeline, ConsistencyGate, EventCandidate</td>
+</tr>
+<tr>
+<td><code>modulo_2_it.md</code></td>
+<td>Alpha Discovery: derivazione target, IC, OOS, AlphaContract</td>
+</tr>
+<tr>
+<td><code>modulo_3_it.md</code></td>
+<td>Rule Discovery: backtest, verdetto EDGE, walk-forward, report</td>
+</tr>
+<tr>
+<td><code>modulo_4_it.md</code></td>
+<td>Rule Registry: dedup, replay cross-ticker, genericità</td>
+</tr>
+</tbody>
+</table>
+</article>
+</main>
+</body>
+</html>

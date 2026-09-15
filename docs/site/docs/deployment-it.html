@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Deployment — FORGE</title>
+<meta name="description" content="Guida alle funzioni di gate, export e monitoraggio per portare le regole scoperte da FORGE in produzione." />
+<meta name="robots" content="index, follow" />
+<link rel="canonical" href="https://forgedge.it/docs/deployment-it.html" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/docs.css">
+</head>
+<body>
+<a class="back" href="../index.html">&larr; FORGE</a>
+<main>
+<article id="content">
+<h1 id="forge-deployment-portare-le-regole-scoperte-in-produzione">FORGE — Deployment: portare le regole scoperte in produzione</h1>
+<p><code>forgedge.deployment</code> è il modulo gemello di <code>forgedge.playground</code> che
+prosegue da dove finisce il toolkit di analisi: dati i contratti tradeable
+(<code>EDGE</code>/<code>PARTIAL-EDGE</code>) prodotti da una sessione <code>forge()</code>, decide quali sono
+abbastanza solidi da andare live, li scrive su disco in un formato
+replicabile, e indicizza cosa è stato esportato per un job di monitoraggio
+periodico. A differenza di <code>forgedge.playground</code>, questo modulo ha
+<strong>effetti reali</strong> — <code>promotion_gate()</code> prende una decisione di go/no-go,
+<code>export_rules()</code> scrive file.</p>
+<p>Questa è una guida all'utilizzo: firme, parametri, colonne restituite ed
+esempi verificati. Per la motivazione di design (perché il modulo è stato
+separato da <code>forgedge.playground</code>, perché le tre funzioni girano in
+sequenza fissa, perché solo <code>export_rules</code> tocca il filesystem) vedi
+<code>src/forgedge/docs/modules/Deployment.md</code>.</p>
+<p><strong>Storia del naming:</strong> queste tre funzioni vivevano originariamente dentro
+<code>forgedge.playground</code> (issue #245). Sono state spostate nel proprio modulo
+top-level da PR #247 perché hanno effetti reali che un nome "playground" di
+sola lettura non descriveva più onestamente — vedi
+<code>src/forgedge/docs/modules/Playground.md</code> §10 per la storia completa.
+Nessun cambio di comportamento, solo il percorso di import:</p>
+<pre><code class="language-python"># prima (issue #245, ora obsoleto)
+from forgedge.playground import PromotionGateConfig, promotion_gate, export_rules, monitoring_manifest
+
+# dopo (PR #247, attuale)
+from forgedge.deployment import PromotionGateConfig, promotion_gate, export_rules, monitoring_manifest
+</code></pre>
+<hr />
+<h2 id="utilizzo-di-base">Utilizzo di base</h2>
+<pre><code class="language-python">from forgedge import forge
+from forgedge.deployment import PromotionGateConfig, promotion_gate, export_rules, monitoring_manifest
+
+result_ada = forge(kpi_ada, ticker=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;)
+result_btc = forge(kpi_btc, ticker=&quot;BTCUSDC&quot;, timeframe=&quot;1D&quot;)
+results = [result_ada, result_btc]
+
+# i registries sono opzionali — passali per gatire anche su is_duplicate/is_isolated
+gate = promotion_gate(results, registries=[result_ada.registry, result_btc.registry])
+exported = export_rules(results, &quot;exported_rules/&quot;, registries=[result_ada.registry, result_btc.registry])
+manifest = monitoring_manifest(results)
+</code></pre>
+<p>La sequenza prevista è <code>forge() -&gt; promotion_gate() [filtra] -&gt; export_rules()
+[scrive, sulle sole regole promuovibili] -&gt; monitoring_manifest() [indicizza
+l'export]</code> — <code>export_rules()</code> riesegue internamente lo stesso calcolo del
+gate (vedi il documento di design), quindi non è mai in disaccordo con
+<code>promotion_gate()</code> su cosa sia promuovibile.</p>
+<hr />
+<h2 id="promotiongateconfig"><code>PromotionGateConfig</code></h2>
+<p>Dataclass che porta la policy di promozione condivisa da <code>promotion_gate()</code>
+ed <code>export_rules()</code>. Ogni flag sotto è sempre calcolato e riportato su ogni
+riga indipendentemente da questi settaggi — i campi <code>block_*</code>/
+<code>require_consistency</code> decidono solo quali flag confluiscono nella colonna
+finale <code>promotable</code>, così disattivare un controllo non fa mai perdere
+visibilità su cosa avrebbe segnalato.</p>
+<table>
+<thead>
+<tr>
+<th>Campo</th>
+<th>Default</th>
+<th>Effetto</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>min_consistency</code></td>
+<td><code>0.5</code></td>
+<td>Soglia su <code>RuleDiscoveryResponse.walk_forward.consistency</code> (frazione di fold walk-forward OOS profittevoli) — la stessa soglia che la pipeline usa internamente per un verdetto positivo.</td>
+</tr>
+<tr>
+<td><code>require_consistency</code></td>
+<td><code>True</code></td>
+<td>Se <code>min_consistency</code> partecipa a <code>promotable</code>.</td>
+</tr>
+<tr>
+<td><code>block_rotation_only</code></td>
+<td><code>False</code></td>
+<td>Blocca un <code>PARTIAL-EDGE</code> il cui unico ostacolo al pieno <code>EDGE</code> era il rotation null a livello di ricerca. Default <code>False</code> — un rotation-only miss è di solito un compromesso accettabile, non un campanello d'allarme.</td>
+</tr>
+<tr>
+<td><code>block_duplicate</code></td>
+<td><code>True</code></td>
+<td>Blocca una regola che il Rule Registry ha marcato <code>is_duplicate=True</code>.</td>
+</tr>
+<tr>
+<td><code>block_isolated</code></td>
+<td><code>True</code></td>
+<td>Blocca una regola classificata <code>"ISOLATED"</code> sul replay cross-ticker. Nessun effetto (<code>is_isolated</code> resta <code>None</code>) se non sono stati passati <code>registries</code>.</td>
+</tr>
+<tr>
+<td><code>min_fold_stability_score</code></td>
+<td><code>None</code></td>
+<td>Soglia sullo stability score penalizzato per varianza tra fold (#253): <code>mean(fold_pf) - std(fold_pf)</code> calcolato sui <code>test_summary.profit_factor</code> per-fold di <code>RuleDiscoveryResponse.walk_forward.splits</code> (ciascuno prima limitato a <code>fold_pf_cap</code>). Cattura una regola il cui PF walk-forward aggregato sembra forte solo perché un singolo fold ad alta varianza (spesso il sentinel <code>9999.0</code> "zero trade in perdita") domina l'aggregato. <code>None</code> disattiva il gate; una regola con meno di due split walk-forward lo supera sempre (la std campionaria è indefinita su un solo fold).</td>
+</tr>
+<tr>
+<td><code>fold_pf_cap</code></td>
+<td><code>10.0</code></td>
+<td>Cap applicato al <code>test_summary.profit_factor</code> di ciascun fold prima di calcolare <code>fold_stability_score</code>, così un singolo fold col valore sentinel non può dominare media/std.</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">config = PromotionGateConfig(block_rotation_only=True, min_consistency=0.6)
+config = PromotionGateConfig(min_fold_stability_score=1.0)   # #253
+</code></pre>
+<hr />
+<h2 id="promotion_gateresults-registriesnone-configpromotiongateconfig-pddataframe"><code>promotion_gate(results, registries=None, config=PromotionGateConfig()) -&gt; pd.DataFrame</code></h2>
+<p>Gate di qualità in formato long su ogni contratto tradeable (<code>EDGE</code>/<code>PARTIAL-EDGE</code>).</p>
+<p>Calcola, per contratto, gli stessi flag che le funzioni playground M3/M4
+espongono singolarmente (<code>rotation_only</code> di <code>lottery_only_winners</code>,
+<code>is_duplicate</code> di <code>duplicate_clusters</code>, la classificazione <code>"ISOLATED"</code> di
+<code>classification_by_grade</code>, la <code>consistency</code> del walk-forward, e lo stability
+score penalizzato per varianza tra fold <code>fold_stability_score</code>, #253), poi
+li combina in <code>promotable</code> secondo <code>config</code>. Pura — nessun I/O su filesystem.</p>
+<p><strong>Parametri:</strong>
+- <code>results: Iterable[ForgeResult]</code> — R, uno o più output di <code>forge()</code>/<code>forge_multi()</code>.
+- <code>registries: Iterable[RuleRegistry], opzionale</code> — sorgente per <code>is_duplicate</code>/<code>classification</code> (vedi <code>modules/Deployment.md</code> per il perché è separato da <code>results</code>, stessa motivazione delle funzioni M4 di <code>forgedge.playground</code>). <code>None</code> salta questi due controlli (le colonne restano <code>None</code>) invece di fallire.
+- <code>config: PromotionGateConfig</code> — quali controlli bloccano la promozione, e a quale soglia.</p>
+<p><strong>Colonne restituite:</strong> <code>ticker</code>, <code>alpha_id</code>, <code>grade</code>, <code>verdict</code>,
+<code>rotation_only</code>, <code>is_duplicate</code>, <code>is_isolated</code>, <code>consistency</code>,
+<code>fold_stability_score</code>, <code>promotable</code>.</p>
+<pre><code class="language-python">gate = promotion_gate(results, registries=[result_ada.registry, result_btc.registry])
+gate[gate[&quot;promotable&quot;]].groupby(&quot;ticker&quot;).size()   # quante regole superano il gate, per ticker
+</code></pre>
+<p><strong>Verificato</strong>, mettendo in pool <code>forge_multi()</code> su <code>ADAUSDC</code> (il fixture di
+riferimento del repository) e una seconda serie sintetica etichettata
+<code>BTCUSDC</code> — lo stesso pool usato da ogni esempio "Verificato" nelle sezioni
+M1/M3/M4 di <code>playground_it.md</code> e sotto:</p>
+<pre><code>pg.shape == (96, 10)
+pg[&quot;promotable&quot;].value_counts()
+# False    91
+# True      5
+pg.groupby(&quot;ticker&quot;)[&quot;promotable&quot;].sum()
+# ADAUSDC    0
+# BTCUSDC    5
+</code></pre>
+<p><code>min_fold_stability_score</code> è <code>None</code> di default, quindi non contribuisce a
+<code>promotable</code> qui — i conteggi sopra sono invariati rispetto a prima di</p>
+<h1 id="253-la-nuova-colonna-fold_stability_score-e-comunque-popolata-per">253; la nuova colonna <code>fold_stability_score</code> è comunque popolata per</h1>
+<p>l'audit.</p>
+<p>Ogni contratto <code>ADAUSDC</code> è bloccato su questo fixture — <code>duplicate_clusters</code>
+(<code>forgedge.playground</code>) ha già mostrato che il 51% dei contratti in pool è
+duplicato e <code>classification_by_grade</code> ha mostrato che la maggior parte
+delle regole si classifica <code>"ISOLATED"</code>, e i due blocchi di default a
+<code>True</code> (<code>block_duplicate</code>, <code>block_isolated</code>) si sommano su un ticker dove
+entrambi sono comuni. È il gate che fa il suo lavoro conservativo di
+default, non un bug.</p>
+<hr />
+<h2 id="export_rulesresults-output_dir-registriesnone-configpromotiongateconfig-promotable_onlytrue-pddataframe"><code>export_rules(results, output_dir, *, registries=None, config=PromotionGateConfig(), promotable_only=True) -&gt; pd.DataFrame</code></h2>
+<p>Scrive un <code>.pkl</code> (evento) + un <code>.yaml</code> (parametri della regola) per ogni
+contratto esportato. L'unica funzione di questo modulo — e dell'intera
+libreria, a parte gli helper espliciti di scrittura report — il cui scopo è
+un effetto collaterale sul filesystem.</p>
+<p>Esegue lo stesso calcolo di <code>promotion_gate()</code> internamente (così le due non
+sono mai in disaccordo su cosa sia promuovibile) e, per ogni contratto
+selezionato, scrive:</p>
+<ul>
+<li><strong><code>{output_dir}/{alpha_id}.pkl</code></strong> — l'<code>EventCandidate</code> via <code>pickle</code>, che porta con sé la propria funzione di attivazione deterministica (<code>EventCandidate.apply</code>) — nessuna ricostruzione manuale necessaria per rigiocare l'evento in seguito.</li>
+<li><strong><code>{output_dir}/{alpha_id}.yaml</code></strong> — <code>ValidatedRule.to_dict()</code> (il punto operativo pubblicato: direzione, entry mode, parametri buy/sell, holding period, fee) più <code>ticker</code>/<code>alpha_id</code>/<code>verdict</code> per contesto, scritto con un piccolo writer YAML senza dipendenze (ogni valore è uno scalare piatto, quindi non serve una libreria YAML).</li>
+</ul>
+<p><strong>Parametri:</strong>
+- <code>results: Iterable[ForgeResult]</code> — R.
+- <code>output_dir: str | Path</code> — directory in cui scrivere; creata se mancante.
+- <code>registries: Iterable[RuleRegistry], opzionale</code> — inoltrato al calcolo del gate sottostante.
+- <code>config: PromotionGateConfig</code> — inoltrato al calcolo del gate sottostante.
+- <code>promotable_only: bool, default True</code> — esporta solo i contratti che il gate marca <code>promotable</code>. Imposta <code>False</code> per esportare ogni contratto tradeable indipendentemente dal gate (le colonne del gate sono comunque riportate per audit).</p>
+<p>Una riga il cui candidato non risolve o il cui <code>response.validated_rule</code> è
+<code>None</code> viene saltata silenziosamente — nessun file scritto, nessuna eccezione.</p>
+<p><strong>Colonne restituite:</strong> <code>ticker</code>, <code>alpha_id</code>, <code>event_candidate_id</code>,
+<code>verdict</code>, <code>promotable</code>, <code>pkl_path</code>, <code>yaml_path</code> — una riga per ogni
+contratto effettivamente esportato.</p>
+<pre><code class="language-python">exported = export_rules(results, &quot;exported_rules/&quot;, registries=[result_ada.registry, result_btc.registry])
+len(exported)   # quanti contratti sono stati effettivamente scritti su disco
+</code></pre>
+<p><strong>Verificato</strong>, stesso pool, config di default (<code>promotable_only=True</code>):</p>
+<pre><code>exp.shape == (5, 7)
+# 10 file scritti (5 .pkl + 5 .yaml)
+exp.iloc[0][[&quot;ticker&quot;, &quot;alpha_id&quot;, &quot;verdict&quot;, &quot;promotable&quot;]]
+# ticker       BTCUSDC
+# alpha_id     ALPHA-BTCUSDC-1D-260830-1196
+# verdict      PARTIAL-EDGE
+# promotable       True
+</code></pre>
+<p>Tutti e 5 i contratti esportati sono <code>BTCUSDC</code> — coerente con
+<code>promotion_gate</code> sopra, che su questo fixture non trova nessun contratto
+<code>ADAUSDC</code> promuovibile.</p>
+<hr />
+<h2 id="monitoring_manifestresults-iterableforgeresult-pddataframe"><code>monitoring_manifest(results: Iterable[ForgeResult]) -&gt; pd.DataFrame</code></h2>
+<p>Indice in formato long di ogni regola tradeable, per un job di ricontrollo periodico.</p>
+<p>Applica <code>RuleSpec.from_forge_result</code> (già fornita da <code>forgedge.rule_report</code>
+per una singola run — vedi il manuale, §9, pattern 5) su tutto R, così un
+job di monitoraggio ha un unico file che elenca ogni regola da rigiocare su
+candele fresche via <code>RuleDiscovery</code> — mai <code>AlphaDiscovery</code> — invece di
+ricostruire a mano il riferimento a ciascuna.</p>
+<p><strong>Colonne restituite:</strong> <code>ticker</code>, <code>rule_name</code>, <code>event_candidate_id</code>,
+<code>is_end</code>, <code>verdict</code>, <code>oos_expectancy</code>. Fai il join su <code>event_candidate_id</code>
+contro l'output di <code>export_rules</code> per restringerti alle sole regole
+effettivamente esportate.</p>
+<pre><code class="language-python">manifest = monitoring_manifest(results)
+manifest.merge(exported[[&quot;event_candidate_id&quot;]], on=&quot;event_candidate_id&quot;)   # restringi alle sole regole esportate
+</code></pre>
+<p><strong>Verificato</strong>, stesso pool:</p>
+<pre><code>mm.shape == (96, 6)
+mm[&quot;verdict&quot;].value_counts()
+# PARTIAL-EDGE    96
+</code></pre>
+<p>Ogni regola tradeable su questo fixture è <code>PARTIAL-EDGE</code> — lo stesso fatto
+che <code>lottery_only_winners</code> in <code>forgedge.playground</code> osserva dal lato
+dell'analisi (<code>src/forgedge/docs/specs/playground_it.md</code>).</p>
+<hr />
+<h2 id="cosa-manca-ancora">Cosa manca ancora</h2>
+<p>I tre casi d'uso di questo modulo (issue #245) sono tutti implementati — non
+c'è una checklist aperta qui come per <code>forgedge.playground</code> (o come c'era).
+Eventuali futuri casi d'uso sulla messa in produzione verrebbero tracciati
+come nuove issue GitHub su questo modulo, non riaprendo la #245.</p>
+</article>
+</main>
+</body>
+</html>

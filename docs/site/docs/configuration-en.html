@@ -1,0 +1,1750 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Configuration reference — FORGE</title>
+<meta name="description" content="Complete FORGE configuration reference: every dataclass field, type, default and description." />
+<meta name="robots" content="index, follow" />
+<link rel="canonical" href="https://forgedge.it/docs/configuration-en.html" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/docs.css">
+</head>
+<body>
+<a class="back" href="../index.html">&larr; FORGE</a>
+<main>
+<article id="content">
+<h1 id="forge-complete-configuration-reference">FORGE — Complete Configuration Reference</h1>
+<p>All configuration objects in FORGE are Python dataclasses. They ship with
+sensible defaults calibrated for crypto 1H data and can be instantiated with no
+arguments for typical use cases. Fields are mutable after construction: you only
+need to set the fields you want to change from their defaults. Every
+configuration object is passed explicitly to its corresponding pipeline
+component; there are no global singletons or environment-level settings.</p>
+<hr />
+<h2 id="module-0-market-context">Module 0 — Market Context</h2>
+<h3 id="emaproxyconfig">EMAProxyConfig</h3>
+<p>Configures the EMA-proxy classifier: data source, automatic window derivation,
+regime thresholds, and adaptive calibration.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_col</code></td>
+<td>str</td>
+<td><code>"close"</code></td>
+<td>OHLCV column on which the EMAs are computed. The EMAs themselves do not need to be present in the KPI Table.</td>
+</tr>
+<tr>
+<td><code>auto_window</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>When True, derives EMA spans from the data via Hurst/OU analysis. When False, uses <code>short_period</code>/<code>long_period</code> directly.</td>
+</tr>
+<tr>
+<td><code>short_period</code></td>
+<td>int</td>
+<td><code>9</code></td>
+<td>Fast EMA span — used as fallback when <code>auto_window=False</code> or OU does not converge.</td>
+</tr>
+<tr>
+<td><code>long_period</code></td>
+<td>int</td>
+<td><code>25</code></td>
+<td>Slow EMA span — same fallback conditions as above.</td>
+</tr>
+<tr>
+<td><code>thresholds</code></td>
+<td>list[float]</td>
+<td><code>[0.975, 0.990, 1.010, 1.025]</code></td>
+<td>4 cut points on the <code>ema_short/ema_long</code> ratio in <code>"fixed"</code> mode.</td>
+</tr>
+<tr>
+<td><code>threshold_mode</code></td>
+<td>str</td>
+<td><code>"fixed"</code></td>
+<td><code>"fixed"</code>: absolute threshold cuts. <code>"balanced"</code>: thresholds are recomputed as quantiles of the EMA ratio to match <code>target_distribution</code>.</td>
+</tr>
+<tr>
+<td><code>target_distribution</code></td>
+<td>list[float]</td>
+<td><code>[0.10, 0.20, 0.40, 0.20, 0.10]</code></td>
+<td>Target regime frequencies for <code>"balanced"</code> mode, one per label.</td>
+</tr>
+<tr>
+<td><code>threshold_basis</code></td>
+<td>str</td>
+<td><code>"global"</code></td>
+<td><code>"global"</code>: quantiles computed over the whole series (not causal). <code>"expanding"</code>: causal quantiles — look-ahead free but approximate.</td>
+</tr>
+<tr>
+<td><code>threshold_warmup</code></td>
+<td>int</td>
+<td><code>200</code></td>
+<td>Leading bars that use fixed thresholds before <code>"expanding"</code> mode is stable.</td>
+</tr>
+<tr>
+<td><code>window_unit</code></td>
+<td>str</td>
+<td><code>"day"</code></td>
+<td>Unit for <code>window_estimation</code>/<code>window_stride</code>: <code>"day"</code> (calendar days) or <code>"bar"</code> (candles).</td>
+</tr>
+<tr>
+<td><code>window_estimation</code></td>
+<td>float</td>
+<td><code>168</code></td>
+<td>Width of the EMA derivation window in the selected unit. 168 days ≈ 24 weeks.</td>
+</tr>
+<tr>
+<td><code>window_stride</code></td>
+<td>float</td>
+<td><code>1</code></td>
+<td>Step between successive estimates, in the same unit.</td>
+</tr>
+<tr>
+<td><code>bar_hours</code></td>
+<td>float | None</td>
+<td><em>(resolved: from <code>timeframe</code>)</em></td>
+<td>Explicit candle duration in hours (e.g. <code>4.0</code> for 4H bars). Session-resolved; left unset without a session it is inferred from the DatetimeIndex.</td>
+</tr>
+<tr>
+<td><code>fast_ratio</code></td>
+<td>float</td>
+<td><code>1/2.3 ≈ 0.435</code></td>
+<td>Fast-to-slow span ratio for automatic derivation.</td>
+</tr>
+<tr>
+<td><code>min_window_estimates</code></td>
+<td>int</td>
+<td><code>10</code></td>
+<td>Minimum number of converging OU estimates to trust the automatic derivation.</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge import MarketContext, MarketContextConfig, EMAProxyConfig
+
+enriched = MarketContext(
+    kpi,
+    config=MarketContextConfig(
+        stable_window=12,
+        ema_proxy=EMAProxyConfig(
+            auto_window=True,
+            window_unit=&quot;day&quot;,
+            bar_hours=4.0,              # 4H bars
+            threshold_mode=&quot;balanced&quot;,
+            target_distribution=[0.10, 0.20, 0.40, 0.20, 0.10],
+            threshold_basis=&quot;expanding&quot;,  # causal, no look-ahead
+        ),
+    ),
+).run()
+</code></pre>
+<hr />
+<h3 id="marketcontextconfig">MarketContextConfig</h3>
+<p>Top-level configuration container for Module 0.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>classifier</code></td>
+<td>str</td>
+<td><code>"ema_proxy"</code></td>
+<td>Classifier implementation. In v1.0 only <code>"ema_proxy"</code> is available.</td>
+</tr>
+<tr>
+<td><code>ema_proxy</code></td>
+<td>EMAProxyConfig</td>
+<td><code>EMAProxyConfig()</code></td>
+<td>EMA-proxy classifier configuration.</td>
+</tr>
+<tr>
+<td><code>labels</code></td>
+<td>list[str]</td>
+<td><code>["STRONG_BEAR","BEAR","NEUTRAL","BULL","STRONG_BULL"]</code></td>
+<td>Regime labels ordered from most bearish to most bullish.</td>
+</tr>
+<tr>
+<td><code>stable_window</code></td>
+<td>int</td>
+<td><em>(resolved: 12h of unchanged regime, min 2 bars)</em></td>
+<td>Number of consecutive identical bars required for <code>regime_stable=True</code>. 12 on 1H, 3 on 4H, 2 on 1D, 48 on 15m — a flat 12 asked for twelve <em>days</em> on daily candles.</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge import MarketContext, MarketContextConfig, EMAProxyConfig
+
+enriched = MarketContext(
+    kpi,
+    config=MarketContextConfig(
+        stable_window=6,          # more reactive to regime changes
+        ema_proxy=EMAProxyConfig(
+            auto_window=True,
+            window_unit=&quot;day&quot;,
+            bar_hours=1.0,
+        ),
+    ),
+).run()
+</code></pre>
+<hr />
+<h2 id="module-1-event-discovery">Module 1 — Event Discovery</h2>
+<h3 id="gateparams">GateParams</h3>
+<p>Thresholds for the ConsistencyGate — the structural filter that verifies whether
+an event has stable temporal structure.</p>
+<p>Since issue #134, the gate operates in one of two counting modes, selected by
+<code>event_counting</code>: <strong><code>"episode"</code></strong> (the default) counts maximal runs of
+consecutive activations rather than raw bars, so a persistent multi-bar state
+(a 3–5 bar <code>RSI &lt; 30</code> stretch) is not wrongly penalised as if it were several
+independent triggers; <strong><code>"bar"</code></strong> reproduces the pre-#134 counting exactly,
+bar by bar. The two modes are identical for impulse events (crossovers,
+candlestick patterns — one bar per episode).</p>
+<p>The dual mode changes which dispersion field the gate actually reads
+(issue #205): <code>max_dispersion</code> is the raw Index-of-Dispersion threshold, but
+it is read <strong>only in <code>"bar"</code> mode</strong>. In <code>"episode"</code> mode the gate instead
+compares against <code>poisson_floor(n_months) × dispersion_margin</code> — a margin
+over the statistically-defensible Poisson floor, not an absolute ID — because
+the floor almost always dominated a fixed <code>max_dispersion</code> in practice
+(measured: 12 of 16 preset×timeframe combinations never had <code>max_dispersion</code>
+bind). So on the default <code>event_counting="episode"</code>, tune <code>dispersion_margin</code>,
+not <code>max_dispersion</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>min_tpm</code></td>
+<td>float</td>
+<td><code>0.5</code></td>
+<td>Minimum average <em>triggers</em> per month, in the unit chosen by <code>event_counting</code> (episodes/month in <code>"episode"</code> mode, bars/month in <code>"bar"</code> mode). Default 0.5 ≈ "at least one episode every two months".</td>
+</tr>
+<tr>
+<td><code>max_dispersion</code></td>
+<td>float</td>
+<td><code>1.5</code></td>
+<td>Maximum allowed Index of Dispersion (<code>Var/Mean</code> of monthly counts). <strong><code>"bar"</code> mode only</strong> — in <code>"episode"</code> mode (the default) this field is not read by the gate at all; see <code>dispersion_margin</code>.</td>
+</tr>
+<tr>
+<td><code>dispersion_margin</code></td>
+<td>float</td>
+<td><code>1.3</code></td>
+<td><strong><code>"episode"</code> mode's dispersion tolerance</strong> — a margin over the Poisson χ² floor (<code>eff_max_dispersion = poisson_floor(n_months) × dispersion_margin</code>), not an absolute Index of Dispersion. <code>1.05</code> stays close to what a Poisson process itself would produce; <code>3.0</code> tolerates Poisson-implausible clustering on purpose. Unread in <code>"bar"</code> mode.</td>
+</tr>
+<tr>
+<td><code>event_counting</code></td>
+<td><code>"episode"</code> | <code>"bar"</code></td>
+<td><code>"episode"</code></td>
+<td>Counting unit for the rate/dispersion criteria — see above.</td>
+</tr>
+<tr>
+<td><code>min_episodes</code></td>
+<td>int</td>
+<td><code>10</code></td>
+<td>Absolute floor on the number of episodes required to pass in <code>"episode"</code> mode (statistical-power guard). Ignored in <code>"bar"</code> mode, and applied in-sample only. <code>forge_preset()</code> lowers this to <code>5</code> on <code>"sweep"</code> (permissive by design); other presets keep <code>10</code>.</td>
+</tr>
+<tr>
+<td><code>episode_gap</code></td>
+<td>int</td>
+<td><code>1</code></td>
+<td>Maximum gap, in bars, that still belongs to the same episode. With the default <code>1</code>, a single missing bar inside a run does not start a new episode. <code>0</code> gives strict consecutive runs.</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge import DiscoveryConfig
+from forgedge.event_discovery.models import GateParams
+
+config = DiscoveryConfig(
+    gate_params=GateParams(
+        min_tpm=0.3,             # less strict for shorter datasets
+        dispersion_margin=1.6,   # more slack above the Poisson floor
+        min_episodes=5,
+        event_counting=&quot;episode&quot;,  # default; &quot;bar&quot; reproduces pre-#134 behaviour
+    )
+)
+</code></pre>
+<blockquote>
+<p>The fields above replaced an older <code>GateParams(min_act, min_months,
+max_conc, min_tpm)</code> schema; none of <code>min_act</code>/<code>min_months</code>/<code>max_conc</code> exist
+any more, and constructing <code>GateParams</code> with them raises <code>TypeError</code>
+today. Several of this repo's own <code>examples/*.py</code> scripts still use the old
+schema — see the <code>forgedge</code> skill's pitfall list before copying from them.</p>
+</blockquote>
+<hr />
+<h3 id="eventwalkforwardconfig-module-1">EventWalkForwardConfig (Module 1)</h3>
+<p>Configures Module 1 walk-forward OOS validation. Formerly named
+<code>WalkForwardConfig</code>, which collided with Module 3's distinct class of the
+same name; the old name still works as an alias in
+<code>event_discovery.models</code>, but prefer the explicit one.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>n_splits</code></td>
+<td>int</td>
+<td><code>3</code></td>
+<td>Number of equal OOS windows on which each event is replayed.</td>
+</tr>
+<tr>
+<td><code>min_pass_rate</code></td>
+<td>float</td>
+<td><code>0.6</code></td>
+<td>Minimum fraction of OOS windows in which an event must pass the gate to be marked OOS-stable.</td>
+</tr>
+<tr>
+<td><code>oos_gate_params</code></td>
+<td>GateParams | None</td>
+<td><code>None</code></td>
+<td>Gate thresholds for OOS evaluation. When None, thresholds are scaled automatically proportional to the OOS window length relative to IS.</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge import DiscoveryConfig
+from forgedge.event_discovery.models import EventWalkForwardConfig, GateParams
+
+config = DiscoveryConfig(
+    train_ratio=0.80,
+    walk_forward=EventWalkForwardConfig(
+        n_splits=4,
+        min_pass_rate=0.75,   # stricter: 3 of 4 windows must pass
+    ),
+)
+</code></pre>
+<hr />
+<h3 id="discoveryconfig">DiscoveryConfig</h3>
+<p>Main configuration for Module 1. Controls gate thresholds, AND composition,
+IS/OOS split, and walk-forward.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gate_params</code></td>
+<td>GateParams</td>
+<td><code>GateParams()</code></td>
+<td>ConsistencyGate thresholds.</td>
+</tr>
+<tr>
+<td><code>max_categorical_classes</code></td>
+<td>int</td>
+<td><code>20</code></td>
+<td>Categorical columns with more distinct values than this limit are classified but excluded from event generation.</td>
+</tr>
+<tr>
+<td><code>scale_free_overrides</code></td>
+<td>dict[str,bool] | None</td>
+<td><code>None</code></td>
+<td>Manual scale-free flag overrides for specific columns (e.g. <code>{"rsi_14": True}</code>). Useful when the auto-heuristic fails on short history.</td>
+</tr>
+<tr>
+<td><code>timestamp_col</code></td>
+<td>str</td>
+<td><code>"open_dt"</code> <em>(session-resolved)</em></td>
+<td>Datetime column name in the KPI Table (or DatetimeIndex name).</td>
+</tr>
+<tr>
+<td><code>max_and_components</code></td>
+<td>int</td>
+<td><code>1</code> <em>(was <code>2</code> pre-issue #254 Phase 8)</em></td>
+<td>Maximum number of single events to combine in one AND composition; <code>1</code> disables this module's own AND composition, the precondition for <code>forge(two_pass_composition=True)</code> — the default (composition happens downstream instead, see Module 2's spec). Raise for the legacy single-pass path (<code>forge(two_pass_composition=False)</code>) or a caller with its own composition stage (e.g. <code>TargetOptimizer</code>). Values &gt; 3 are accepted but strongly discouraged (structural overfitting risk).</td>
+</tr>
+<tr>
+<td><code>train_ratio</code></td>
+<td>float</td>
+<td><code>1.0</code></td>
+<td>IS fraction (0 &lt; train_ratio ≤ 1.0). Default 1.0 = all IS, no split.</td>
+</tr>
+<tr>
+<td><code>walk_forward</code></td>
+<td>EventWalkForwardConfig | None</td>
+<td><code>None</code></td>
+<td>Walk-forward OOS configuration. Active only when <code>train_ratio &lt; 1.0</code>.</td>
+</tr>
+<tr>
+<td><code>diversity_gate_enabled</code></td>
+<td>bool</td>
+<td><code>False</code></td>
+<td>When True, applies Jaccard-based deduplication of single events after the ConsistencyGate and before AND composition. Opt-in — no breaking change.</td>
+</tr>
+<tr>
+<td><code>diversity_threshold</code></td>
+<td>float</td>
+<td><code>0.85</code></td>
+<td>Maximum tolerated Jaccard similarity between any two kept events. Only used when <code>diversity_gate_enabled=True</code>. At p99 of the inter-event Jaccard distribution (12 months of 1H data), Jaccard=0.47 — values above 0.70 are genuine near-duplicates.</td>
+</tr>
+<tr>
+<td><code>indicator_lag_cross_lags</code></td>
+<td>tuple[int,...]</td>
+<td><code>(1, 3)</code></td>
+<td>Lag set for the indicator × OHLC-base cross-time feature family (issue #165, e.g. <code>close_sma_12[t] &gt; low[t-3]</code>), restricted to price-scale indicators (SMA/EMA/WMA/HMA) vs a raw OHLC base. Pass <code>()</code> to disable this always-on family entirely.</td>
+</tr>
+<tr>
+<td><code>retain_raw_events</code></td>
+<td>bool</td>
+<td><code>False</code> <em>(was <code>True</code> pre-issue #254 Phase 8)</em></td>
+<td>Whether <code>EventDiscovery.raw_events</code> (the full pre-gate candidate population, every one carrying its own full-length activation series) stays resident after <code>.run()</code> (issue #232). Set <code>True</code> explicitly for <code>TargetOptimizer</code>, which reads <code>.raw_events</code> directly and pins this on its own fallback config — the standard <code>forge()</code> path never reads it, hence the default flip for a measured 4.2x reduction in retained memory.</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge import EventDiscovery, DiscoveryConfig
+from forgedge.event_discovery.models import GateParams, EventWalkForwardConfig
+
+ed = EventDiscovery(
+    enriched,
+    config=DiscoveryConfig(
+        train_ratio=0.80,
+        max_and_components=2,                   # legacy single-pass composition (see below)
+        gate_params=GateParams(min_tpm=0.5, dispersion_margin=1.3, min_episodes=10),
+        walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
+        scale_free_overrides={&quot;rsi_14&quot;: True},  # force scale-free on RSI
+        diversity_gate_enabled=True,            # opt-in Jaccard deduplication
+        diversity_threshold=0.85,
+        retain_raw_events=True,                 # e.g. for TargetOptimizer, which needs .raw_events
+    ),
+)
+candidates = ed.run()
+</code></pre>
+<h3 id="forge-composition-parameters-issue-254-phase-8"><code>forge()</code> composition parameters (issue #254 Phase 8)</h3>
+<p>Not <code>DiscoveryConfig</code> fields — orchestrator-level parameters on <code>forge()</code>
+itself that decide <em>where</em> AND composition happens:</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>two_pass_composition</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>Compose after Module 2's first grading pass, using the letter grade as the pairing criterion, instead of Module 1's own <code>max_and_components</code>-driven composition. Requires <code>event_discovery_config.max_and_components &lt;= 1</code> — <code>ValueError</code> otherwise (composition must happen in exactly one place). <code>False</code> reproduces the pre-#254 single-pass behaviour exactly.</td>
+</tr>
+<tr>
+<td><code>grade_pairing_config</code></td>
+<td>GradePairingConfig | None</td>
+<td><code>None</code> → <code>GradePairingConfig()</code></td>
+<td>Pairing scheme/budget for <code>two_pass_composition=True</code>; ignored otherwise.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="gradepairingconfig-forgedgecomposition"><code>GradePairingConfig</code> (<code>forgedge.composition</code>)</h3>
+<p>Read only when <code>two_pass_composition=True</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_components</code></td>
+<td>int</td>
+<td><code>2</code></td>
+<td><code>3</code> also composes triples (issue #254 Phase 4); a triple's third component is constrained by the seed pair's own root grade.</td>
+</tr>
+<tr>
+<td><code>adjacency</code></td>
+<td>dict[str, tuple[str,...]]</td>
+<td><code>{"A": ("A","B"), "B": ("B","C"), "C": ("C","D")}</code></td>
+<td>Which grades a root grade may pair with. Symmetric — an <code>(X, Y)</code> pair is allowed whenever <code>Y</code> is listed under <code>X</code> or vice versa.</td>
+</tr>
+<tr>
+<td><code>per_stratum_pair_cap</code></td>
+<td>int</td>
+<td><code>100</code></td>
+<td>Guaranteed minimum representation per grade stratum present in the pool, round-robin interleaved (not a hard ceiling).</td>
+</tr>
+<tr>
+<td><code>per_stratum_triple_cap</code></td>
+<td>int</td>
+<td><code>50</code></td>
+<td>Same, for triples.</td>
+</tr>
+<tr>
+<td><code>include_singles_in_pass2</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>Pool the original 1D candidates alongside composed ones for the second Alpha Discovery pass.</td>
+</tr>
+<tr>
+<td><code>max_constituent_jaccard</code></td>
+<td>float | None</td>
+<td><code>None</code></td>
+<td>Forwarded to <code>ANDComposer.compose()</code> — reject a pair whose constituents' Jaccard similarity exceeds this.</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge import forge, DiscoveryConfig
+from forgedge.composition import GradePairingConfig
+
+result = forge(
+    kpi,
+    timeframe=&quot;1D&quot;,
+    event_discovery_config=DiscoveryConfig(max_and_components=1),  # required
+    two_pass_composition=True,          # the default — explicit here for clarity
+    grade_pairing_config=GradePairingConfig(max_components=3, per_stratum_pair_cap=150),
+)
+result.grading_candidates   # pass-1, pre-composition 1D pool
+result.candidates            # pass-2 pooled output — what M3 actually operated on
+</code></pre>
+<hr />
+<h2 id="module-2-alpha-discovery">Module 2 — Alpha Discovery</h2>
+<h3 id="promotionthresholds">PromotionThresholds</h3>
+<p>IS statistical thresholds that contribute to the A–D grade. They do not block
+promotion (except in extreme cases) — they inform the grade.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ic_min_abs</code></td>
+<td>float</td>
+<td><code>0.02</code></td>
+<td>Minimum absolute IC (Spearman). Below this threshold the IC metric is recorded in <code>AlphaContract.diagnostics</code> (non-blocking).</td>
+</tr>
+<tr>
+<td><code>ic_max_p</code></td>
+<td>float</td>
+<td><em>(resolved: <code>ctx.alpha</code> = 0.05)</em></td>
+<td>Maximum p-value for IC significance. One of the five per-hypothesis alphas, session-resolved (#182). Feeds a non-blocking diagnostic that only weighs on the grade.</td>
+</tr>
+<tr>
+<td><code>min_lift</code></td>
+<td>float</td>
+<td><code>0.08</code></td>
+<td>Minimum lift (win_rate − base_rate).</td>
+</tr>
+<tr>
+<td><code>min_cohens_d</code></td>
+<td>float</td>
+<td><code>0.15</code></td>
+<td>Minimum Cohen's d (distribution separation between active and inactive bars).</td>
+</tr>
+<tr>
+<td><code>max_p_value</code></td>
+<td>float</td>
+<td><em>(resolved: <code>ctx.alpha</code> = 0.05)</em></td>
+<td>Maximum t-test p-value on the mean advantage. Session-resolved (#182), but <strong>reachable only with <code>use_fdr=False</code></strong> — every preset and the class default set <code>use_fdr=True</code>, so under any preset this field is inert.</td>
+</tr>
+<tr>
+<td><code>use_fdr</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>Apply Benjamini-Hochberg FDR correction across the test family.</td>
+</tr>
+<tr>
+<td><code>fdr_q</code></td>
+<td>float</td>
+<td><code>0.10</code></td>
+<td>Target FDR level (q). <strong>Not</strong> tied to <code>ctx.alpha</code>: a <code>q</code> is a false-discovery rate over a family, an alpha is a per-test error rate. Chosen by the preset, because the right <code>q</code> depends on how wide the search is (#182).</td>
+</tr>
+<tr>
+<td><code>oos_max_p</code></td>
+<td>float</td>
+<td><code>0.10</code></td>
+<td>Maximum OOS confirmation p-value. <strong>Not</strong> tied to <code>ctx.alpha</code>, and legitimately looser: a confirmation level for an already-selected hypothesis — one pre-specified test, no multiplicity, on a small sample by construction (#182).</td>
+</tr>
+<tr>
+<td><code>min_direction_t</code></td>
+<td>float</td>
+<td><code>0.5</code></td>
+<td>Minimum <code>\|z_h*\|</code> (rotation-standardised excess) to assign a direction; below it → <code>undetermined</code>.</td>
+</tr>
+<tr>
+<td><code>require_significant_direction</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>When True, a direction is assigned only if <code>h*</code> clears Benjamini-Hochberg (not <code>statistically_weak</code>); otherwise → <code>undetermined</code>. False = legacy non-blocking behaviour.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><code>min_activations</code>/<code>min_oos_activations</code> do <strong>not</strong> exist on this dataclass
+any more — the IS/OOS sample-size check is now a hardcoded module constant,
+<code>_MIN_STATS_CASES = 10</code>, in <code>alpha_discovery/discovery.py</code> (a non-blocking
+diagnostic, not a configurable field). Constructing <code>PromotionThresholds</code>
+with either name raises <code>TypeError</code> today.</p>
+</blockquote>
+<pre><code class="language-python">from forgedge import AlphaConfig, PromotionThresholds
+
+config = AlphaConfig(
+    asset=&quot;BTC&quot;,
+    timeframe=&quot;1H&quot;,
+    thresholds=PromotionThresholds(
+        ic_min_abs=0.03,
+        min_lift=0.10,
+        min_cohens_d=0.20,
+        oos_max_p=0.05,
+    ),
+)
+</code></pre>
+<hr />
+<h3 id="alphaconfig">AlphaConfig</h3>
+<p>Main configuration for Module 2. Controls the horizon grid, target derivation,
+IS/OOS split, and traceability metadata.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>horizon_grid</code></td>
+<td>tuple[int,...]</td>
+<td><em>(resolved: the session's horizon class)</em></td>
+<td>Horizon grid (in bars) scanned to derive <code>h*</code>. <code>(1,2,4,8,12,24)</code> on hourly and 4H, <code>(1,2,3,5,7,10)</code> on daily and slower, <code>(1,2,5,10,20,50)</code> on sub-hourly — class-calibrated like <code>BacktestParams.target_h</code>, not wall-clock converted (#196). It used to be substituted only when no <code>AlphaConfig</code> was passed at all, so an explicit config on daily candles scanned up to 48 <em>days</em>.</td>
+</tr>
+<tr>
+<td><code>mfe_quantile</code></td>
+<td>float</td>
+<td><code>0.5</code></td>
+<td>Quantile of the MFE distribution of active bars used as baseline <code>sell_pct</code>.</td>
+</tr>
+<tr>
+<td><code>mfe_floor</code></td>
+<td>float</td>
+<td><code>0.005</code></td>
+<td>Floor for <code>sell_pct</code>: take-profit cannot be &lt; 0.5% regardless of MFE.</td>
+</tr>
+<tr>
+<td><code>train_ratio</code></td>
+<td>float</td>
+<td><code>0.7</code></td>
+<td>IS fraction for statistical measurement. The remaining <code>1 - train_ratio</code> is the OOS tail.</td>
+</tr>
+<tr>
+<td><code>embargo_bars</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Extra quarantine after the IS/OOS split: OOS confirmation starts <code>embargo_bars</code> bars after the split. Default <code>0</code> — the purge already removes the mechanical forward-window overlap; this additionally guards against serial correlation.</td>
+</tr>
+<tr>
+<td><code>horizon_enrichment</code></td>
+<td>tuple[float,...] | None</td>
+<td><code>(0.5, 1.0, 2.0)</code></td>
+<td>Per-event horizon-grid enrichment from the event's own structural timescale: for every candidate, <code>round(m · w)</code> for each multiplier <code>m</code> (where <code>w</code> is <code>EventCandidate.dominant_window()</code>) is <strong>added</strong> to the base <code>horizon_grid</code> (union, never a restriction), capped by <code>horizon_enrichment_min_obs</code>. <code>None</code>/<code>()</code> disables enrichment.</td>
+</tr>
+<tr>
+<td><code>horizon_enrichment_min_obs</code></td>
+<td>int</td>
+<td><code>20</code></td>
+<td>Statistical cap for enriched horizons: an added <code>h</code> must leave at least this many non-overlapping forward windows in the IS span (<code>h &lt;= split // min_obs</code>). Never restricts the base <code>horizon_grid</code>.</td>
+</tr>
+<tr>
+<td><code>thresholds</code></td>
+<td>PromotionThresholds</td>
+<td><code>PromotionThresholds()</code></td>
+<td>IS thresholds for statistical metrics.</td>
+</tr>
+<tr>
+<td><code>asset</code></td>
+<td>str</td>
+<td><code>"ASSET"</code></td>
+<td>Asset name (traceability in AlphaContracts).</td>
+</tr>
+<tr>
+<td><code>exchange</code></td>
+<td>str</td>
+<td><code>""</code></td>
+<td>Exchange/market (optional, traceability).</td>
+</tr>
+<tr>
+<td><code>timeframe</code></td>
+<td>str</td>
+<td><code>"1H"</code></td>
+<td>Timeframe (traceability).</td>
+</tr>
+<tr>
+<td><code>fee_per_side</code></td>
+<td>float</td>
+<td><code>0.002</code> <em>(session-resolved)</em></td>
+<td>Fee per side (0.2%), recorded in the contract <strong>and charged by the backtest</strong> — it now propagates into <code>BacktestParams.fee</code> instead of being an independent copy.</td>
+</tr>
+<tr>
+<td><code>close_col</code></td>
+<td>str</td>
+<td><code>"close"</code> <em>(session-resolved)</em></td>
+<td>Close price column. Propagates to <code>BacktestParams.{target_col, buy_price_anchor}</code>.</td>
+</tr>
+<tr>
+<td><code>timestamp_col</code></td>
+<td>str</td>
+<td><code>"open_dt"</code> <em>(session-resolved)</em></td>
+<td>Datetime column.</td>
+</tr>
+<tr>
+<td><code>regime_col</code></td>
+<td>str</td>
+<td><code>"regime"</code> <em>(session-resolved)</em></td>
+<td>Regime column (from Module 0).</td>
+</tr>
+<tr>
+<td><code>regime_stable_col</code></td>
+<td>str</td>
+<td><code>"regime_stable"</code> <em>(session-resolved)</em></td>
+<td>Regime-stable column (from Module 0).</td>
+</tr>
+<tr>
+<td><code>use_stable_regime_only</code></td>
+<td>bool</td>
+<td><code>False</code></td>
+<td>When True, excludes bars with <code>regime_stable=False</code> from per-regime analysis.</td>
+</tr>
+<tr>
+<td><code>min_regime_obs</code></td>
+<td>int</td>
+<td><code>10</code></td>
+<td>Minimum observations per regime to compute reliable per-regime metrics.</td>
+</tr>
+<tr>
+<td><code>rolling_ic_window</code></td>
+<td>int | None</td>
+<td><code>None</code></td>
+<td>Rolling IC window size. When None, computed automatically (≈ n/20).</td>
+</tr>
+<tr>
+<td><code>bars_per_day</code></td>
+<td>float | None</td>
+<td><em>(resolved: from <code>timeframe</code>)</em></td>
+<td>Bars per day, sizing the default rolling-IC window. Session-resolved; left unset without a session it is inferred from the timestamps.</td>
+</tr>
+<tr>
+<td><code>score_weights</code></td>
+<td>tuple[float,...]</td>
+<td><code>(0.20, 0.25, 0.15, 0.25, 0.15)</code></td>
+<td>Composite score weights (IC, lift, Cohen's d, z, regime breadth). A legacy 4-tuple (IC, lift, Cohen's d, breadth) is also accepted.</td>
+</tr>
+<tr>
+<td><code>statistically_weak_penalty</code></td>
+<td>float</td>
+<td><code>0.6</code></td>
+<td>Composite-score multiplier when the target is <code>statistically_weak</code>. <code>1.0</code> disables it.</td>
+</tr>
+<tr>
+<td><code>oos_bonus</code></td>
+<td>float</td>
+<td><code>0.05</code></td>
+<td>Additive composite-score bonus when the OOS confirmation passes. <code>0.0</code> disables it.</td>
+</tr>
+<tr>
+<td><code>discovery_date</code></td>
+<td>str | None</td>
+<td><code>None</code></td>
+<td>Discovery date (ISO, e.g. <code>"2026-01-15"</code>). When None, uses today's date.</td>
+</tr>
+<tr>
+<td><code>fixed_target</code></td>
+<td>TargetConfig | None</td>
+<td><code>None</code></td>
+<td>When set, <strong>skip target derivation</strong> and measure every candidate against the user's <code>(horizon, min_return, side)</code>. The horizon is added to the forward-return grid if absent.</td>
+</tr>
+<tr>
+<td><code>fixed_target_diagnostic</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>Fixed-target mode only: also run the derivation read-only to fill the per-horizon diagnostics and <code>data_derived_*</code> convergence fields. <code>False</code> = pure bypass.</td>
+</tr>
+<tr>
+<td><code>target_mode</code></td>
+<td><code>"abs"</code> | <code>"proj"</code></td>
+<td><code>"proj"</code></td>
+<td>Binary-target definition for win rate / lift / base rate. <code>"proj"</code> (PROJ_LOG) scores the long forward return in <strong>excess of the local trend</strong> (<code>log(fwd_max/close) − log(SMA_w/SMA_w[−h]) ≥ log(1+sell_pct)</code>), so a trend-riding long is not credited with the trend premium — markedly more stable IS→OOS. <code>"abs"</code> = legacy absolute return. PROJ applies to long only (short → abs); reverts to abs when history <code>&lt; (trend_sma_mult+1)·h</code>.</td>
+</tr>
+<tr>
+<td><code>trend_sma_mult</code></td>
+<td>float</td>
+<td><code>2.0</code></td>
+<td>PROJ_LOG only: trend SMA window = <code>round(trend_sma_mult·h)</code> bars. Bar-relative (auto-scales across timeframes); lower tracks the horizon more tightly, higher smooths the trend.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="targetconfig">TargetConfig</h4>
+<p>User-specified economic target for <code>AlphaConfig.fixed_target</code> and the TargetOptimizer workflow.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>horizon</code></td>
+<td>int</td>
+<td>—</td>
+<td>Holding period in bars (<code>&gt; 0</code>).</td>
+</tr>
+<tr>
+<td><code>min_return</code></td>
+<td>float</td>
+<td>—</td>
+<td>Take-profit threshold as a fraction (e.g. <code>0.02</code> = 2%), used as <code>sell_pct</code> (<code>&gt; 0</code>).</td>
+</tr>
+<tr>
+<td><code>side</code></td>
+<td>str</td>
+<td>—</td>
+<td><code>"long"</code> or <code>"short"</code> — never overwritten by the data.</td>
+</tr>
+<tr>
+<td><code>min_activations</code></td>
+<td>int</td>
+<td><code>10</code></td>
+<td>TargetOptimizer: min activations for valid lift scoring. Candidates firing on fewer bars are skipped (conditional win rate too noisy). Ignored by Alpha Discovery's fixed-target mode.</td>
+</tr>
+<tr>
+<td><code>min_lift_atoms</code></td>
+<td>float</td>
+<td><code>1.0</code></td>
+<td>TargetOptimizer's <strong>1st pass</strong> (atomic events, pre-AND): prune threshold on conditional lift. The "lossless" pruning property holds only at the default <code>1.0</code> — values above it actively suppress AND compositions with emergent lift.</td>
+</tr>
+<tr>
+<td><code>min_lift_result</code></td>
+<td>float</td>
+<td><code>1.0</code></td>
+<td>TargetOptimizer's <strong>2nd pass</strong>: prune threshold on the final result set (surviving atoms <em>and</em> compositions). Raise it to shorten the result list without touching AND discovery.</td>
+</tr>
+<tr>
+<td><code>min_lift</code></td>
+<td>float | None</td>
+<td><code>None</code></td>
+<td><strong>Deprecated</strong> — use <code>min_lift_atoms</code>/<code>min_lift_result</code> instead. When set, applies to both passes (the legacy single-threshold behaviour) and raises <code>DeprecationWarning</code>; a value above <code>1.0</code> then also suppresses AND discovery, since the legacy field drove the 1st pass too.</td>
+</tr>
+<tr>
+<td><code>target_mode</code></td>
+<td><code>"abs"</code> | <code>"proj"</code></td>
+<td><code>"proj"</code></td>
+<td>Binary-target definition (see <code>AlphaConfig.target_mode</code>).</td>
+</tr>
+<tr>
+<td><code>trend_sma_mult</code></td>
+<td>float</td>
+<td><code>2.0</code></td>
+<td>PROJ_LOG trend SMA window multiplier (see <code>AlphaConfig.trend_sma_mult</code>).</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge import AlphaDiscovery, AlphaConfig, PromotionThresholds
+
+ad = AlphaDiscovery(
+    ed.df,
+    candidates,
+    AlphaConfig(
+        asset=&quot;ADAUSDC&quot;,
+        timeframe=&quot;4H&quot;,
+        horizon_grid=(4, 8, 12, 24, 48, 72, 96),   # horizons in 4H bars
+        train_ratio=0.75,
+        fee_per_side=0.001,
+        thresholds=PromotionThresholds(
+            min_lift=0.08,
+            min_cohens_d=0.15,
+            oos_max_p=0.10,
+        ),
+    ),
+)
+contracts = ad.run()
+</code></pre>
+<hr />
+<h2 id="module-3-rule-discovery">Module 3 — Rule Discovery</h2>
+<h3 id="backtestparams">BacktestParams</h3>
+<p>Execution parameters for a single backtest run: direction, order type,
+entry/exit levels, and fee.</p>
+<blockquote>
+<p><code>BacktestParams</code> is rarely used directly. The grid is defined via <code>GridSpec</code>;
+<code>RuleDiscovery</code> derives <code>direction</code>, <code>sell_pct</code>, and <code>target_h</code> from the
+AlphaContract.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>direction</code></td>
+<td>str</td>
+<td><code>"long"</code></td>
+<td>Trade direction: <code>"long"</code> or <code>"short"</code>. Normally derived from the AlphaContract.</td>
+</tr>
+<tr>
+<td><code>buy_type</code></td>
+<td>str</td>
+<td><code>"limit"</code></td>
+<td>Entry order type. In v1.0 only <code>"limit"</code> is supported.</td>
+</tr>
+<tr>
+<td><code>buy_drop_pct</code></td>
+<td>float</td>
+<td><code>0.010</code></td>
+<td>Percentage drop below close at which the limit order is placed (1%).</td>
+</tr>
+<tr>
+<td><code>buy_delay_bar</code></td>
+<td>int</td>
+<td><em>(resolved: 6h of live order)</em></td>
+<td>Bars the limit order stays live. 6 on 1H, 2 on 4H, 1 on 1D, 24 on 15m — a flat 6 left the order resting six <em>days</em> on daily candles.</td>
+</tr>
+<tr>
+<td><code>buy_price_anchor</code></td>
+<td>str</td>
+<td><code>"close"</code> <em>(session-resolved)</em></td>
+<td>Column the limit offset is applied to: <code>buy_price = anchor × (1 ∓ buy_drop_pct)</code>. <strong>Any numeric column is legal</strong>, including a derived indicator — <code>buy_price_anchor="close_sma_3", buy_drop_pct=0.10</code> means "a limit at 90% of the 3-bar SMA". Filled in from <code>close_col</code> so that renaming the price column carries the <em>default</em> anchor along; an explicit anchor is a reference level of its own and does <strong>not</strong> redefine the session's price column.</td>
+</tr>
+<tr>
+<td><code>sell_pct</code></td>
+<td>float</td>
+<td><code>0.040</code></td>
+<td>Take-profit as percentage from fill price (4%).</td>
+</tr>
+<tr>
+<td><code>target_h</code></td>
+<td>int</td>
+<td><em>(resolved: top of the session's horizon class)</em></td>
+<td>Horizon stop in bars: if take-profit is not reached within this number of bars, close at that bar's close. 24 on hourly, 10 on daily, 50 on sub-hourly — class-calibrated like <code>horizon_grid</code>, not wall-clock converted. Normally seeded from the contract's <code>holding_period_h</code> before this applies.</td>
+</tr>
+<tr>
+<td><code>target_col</code></td>
+<td>str</td>
+<td><code>"close"</code> <em>(session-resolved)</em></td>
+<td>Column used to check horizon stop. Must name the same series <code>close_col</code> does; a disagreement is reported.</td>
+</tr>
+<tr>
+<td><code>target_hit_col</code></td>
+<td>str</td>
+<td><code>"close"</code></td>
+<td>Column used to check take-profit hit.</td>
+</tr>
+<tr>
+<td><code>fee</code></td>
+<td>float</td>
+<td><code>0.002</code> <em>(session-resolved)</em></td>
+<td>Per-side fee (0.2%), derived from <code>AlphaConfig.fee_per_side</code>.</td>
+</tr>
+<tr>
+<td><code>early_stopping</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>When True, the grid search stops early when the top-K ranking is stable (compute optimisation).</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="scoringparams">ScoringParams</h3>
+<p>Thresholds used by the grid scoring function to combine Profit Factor with the
+regularity of the trade arrivals. <code>pf_score_tpm = profit_factor × c_norm</code>, where
+<code>c_norm</code> is the inverse index of dispersion (<code>μ/σ²</code>, capped at 1) — scale-free,
+so a rule is not penalised for trading more often, only for trading in bursts.
+"Enough trades" is a separate question, enforced by <code>criteria.min_tpm</code> and the
+dynamic trade floor below.</p>
+<p>Both fields are <strong>session-resolved</strong>: leave them unset and <code>resolve()</code> fills
+them in, <code>config_report()</code> shows the value that will run.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pf_min_trades</code></td>
+<td>int</td>
+<td><em>(resolved: <code>15</code>)</em></td>
+<td>Absolute floor of the dynamic trade count <code>max(pf_min_trades, n_months × pf_min_tpm)</code> that feeds <code>pf_score</code>.</td>
+</tr>
+<tr>
+<td><code>pf_min_tpm</code></td>
+<td>float</td>
+<td><em>(resolved: <code>criteria.min_tpm</code>)</em></td>
+<td>Rate floor of that dynamic count. Tracks the gate's own rate — 0.8/month on 1D, 76.8 on 15m — instead of a fixed 2 that agreed with the gate on no timeframe.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="gridspec">GridSpec</h3>
+<p>Defines the parameter search space for the Rule Discovery grid search.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>buy_drop_pct</code></td>
+<td>list[float] | None</td>
+<td><code>None</code></td>
+<td>List of <code>buy_drop_pct</code> values to explore. When None, the default grid is used.</td>
+</tr>
+<tr>
+<td><code>sell_pct</code></td>
+<td>list[float] | None</td>
+<td><code>None</code></td>
+<td>List of <code>sell_pct</code> values to explore.</td>
+</tr>
+<tr>
+<td><code>target_h</code></td>
+<td>list[int] | None</td>
+<td><code>None</code></td>
+<td>List of horizon values (in bars) to explore.</td>
+</tr>
+<tr>
+<td><code>buy_delay_bar</code></td>
+<td>list[int] | None</td>
+<td><code>None</code></td>
+<td>List of delay-bar values to explore.</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge.rule_discovery.models import GridSpec
+
+grid = GridSpec(
+    buy_drop_pct=[0.005, 0.010, 0.015],
+    sell_pct=[0.030, 0.040, 0.050, 0.060],
+    target_h=[12, 24, 36],
+    buy_delay_bar=[3, 6],
+)
+</code></pre>
+<hr />
+<h3 id="rulewalkforwardconfig-module-3">RuleWalkForwardConfig (Module 3)</h3>
+<p>Configures Module 3 walk-forward OOS validation. Formerly named
+<code>WalkForwardConfig</code>; the old name still works as an alias, both in
+<code>rule_discovery.models</code> and at the top level (<code>forgedge.WalkForwardConfig</code>
+has always resolved to this one).</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>n_splits</code></td>
+<td>int</td>
+<td><code>4</code></td>
+<td>Number of rolling train+test windows.</td>
+</tr>
+<tr>
+<td><code>train_span_months</code></td>
+<td>int | None</td>
+<td><code>None</code></td>
+<td>Training window width in months. When None, computed automatically.</td>
+</tr>
+<tr>
+<td><code>test_span_months</code></td>
+<td>int | None</td>
+<td><code>None</code></td>
+<td>Test window width in months. When None, computed automatically.</td>
+</tr>
+<tr>
+<td><code>min_train_months</code></td>
+<td>int</td>
+<td><em>derived</em> <em>(session-resolved)</em></td>
+<td>Minimum months required for the training window — the span the early-elimination screen runs on. <strong>Derived from <code>criteria.min_tpm</code></strong> with a 95 % Poisson margin, so the window can actually supply the trade floor it is about to demand (#173): 20 months at <code>min_tpm=0.80</code>, not the old fixed 6. The naive <code>floor / rate</code> gives 12.5 and comes up short about 44 % of the time.</td>
+</tr>
+<tr>
+<td><code>reoptimise</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>When True, re-optimises parameters on each training window. When False, uses the fixed IS configuration.</td>
+</tr>
+<tr>
+<td><code>purge_bars</code></td>
+<td>int | None</td>
+<td><code>None</code></td>
+<td>Purge width, in bars, at the end of every <strong>train</strong> window — entries opened in the last <code>purge_bars</code> bars have fill/exit windows reaching into the adjacent test window, so parameter selection would otherwise be scored on test prices. <code>None</code> (default) sizes the purge automatically from the resolved grid (largest <code>target_h</code> plus the fill delay); <code>0</code> disables purging (pre-<code>TimeBudget</code> behaviour). Deliberately <strong>not</strong> unified with <code>TimeBudget.purge_bars</code> (F6, #180) — that one is the forward-return horizon, this one is the worst-case trade span; different crossings of different boundaries.</td>
+</tr>
+<tr>
+<td><code>embargo_bars</code></td>
+<td>int</td>
+<td><code>UNSET</code> <em>(session-resolved)</em></td>
+<td>Extra quarantine at the start of every <strong>test</strong> window, in bars. Same policy as <code>AlphaConfig.embargo_bars</code> ("how many bars of serial correlation to quarantine after a boundary"), so it is session-resolved from it — an explicit value here still wins.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="selectioncriteria">SelectionCriteria</h3>
+<p>Module 3 promotion gates. Defines the conditions for EDGE, PARTIAL-EDGE, and
+NON-EDGE verdicts.</p>
+<p>Four of these fields are <strong>preset-parametrized</strong> (#207) rather than flat
+universal defaults — <code>forge_preset()</code> sets them per profile because the
+presets' own descriptions explicitly diverge on precision-vs-volume:</p>
+<table>
+<thead>
+<tr>
+<th>field</th>
+<th>class default</th>
+<th><code>sniper</code></th>
+<th><code>balanced</code></th>
+<th><code>sweep</code></th>
+<th><code>burst</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>min_profit_factor</code></td>
+<td><code>2.0</code></td>
+<td><code>2.5</code></td>
+<td><code>2.0</code></td>
+<td><code>1.8</code></td>
+<td><code>2.0</code></td>
+</tr>
+<tr>
+<td><code>min_win_rate</code></td>
+<td><code>0.55</code></td>
+<td><code>0.60</code></td>
+<td><code>0.55</code></td>
+<td><code>0.50</code></td>
+<td><code>0.55</code></td>
+</tr>
+<tr>
+<td><code>min_pf_score_tpm</code></td>
+<td><code>0.30</code></td>
+<td><code>0.40</code></td>
+<td><code>0.30</code></td>
+<td><code>0.25</code></td>
+<td><code>0.30</code></td>
+</tr>
+<tr>
+<td><code>min_fill_rate_opt</code></td>
+<td><code>0.80</code></td>
+<td><code>0.80</code></td>
+<td><code>0.80</code></td>
+<td><code>0.70</code></td>
+<td><code>0.80</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>min_profit_factor</code></td>
+<td>float</td>
+<td><code>2.0</code></td>
+<td>Minimum IS PF for EDGE. Preset-parametrized — see table above.</td>
+</tr>
+<tr>
+<td><code>min_win_rate</code></td>
+<td>float</td>
+<td><code>0.55</code></td>
+<td>Minimum IS win rate for EDGE (55%). Preset-parametrized — see table above.</td>
+</tr>
+<tr>
+<td><code>min_tpm</code></td>
+<td>float</td>
+<td><code>2.0</code> <em>(session-resolved)</em></td>
+<td>Minimum average trading frequency (trades/month) for EDGE. Also the sole trade-count gate: the minimum executed-trade count is dynamic, <code>max(10, n_months × min_tpm)</code>, scaling with the IS length (spec RD-04) instead of a fixed absolute threshold. Resolved from <code>PipelineContext.target_rate_tpm × rate_retention</code> when M1's rate was declared; otherwise the documented <code>2.0</code> stands.</td>
+</tr>
+<tr>
+<td><code>min_pf_score_tpm</code></td>
+<td>float</td>
+<td><code>0.30</code></td>
+<td>Minimum composite PF×TPM score to include a configuration in the selection. Preset-parametrized — see table above.</td>
+</tr>
+<tr>
+<td><code>min_fill_rate</code></td>
+<td>float</td>
+<td><code>0.40</code></td>
+<td>Minimum limit order fill rate: at least 40% of events must result in a trade. <strong>Inert under the default <code>entry_mode="auto"</code></strong> (Stage 1 is a market entry, fill ≈ 100%) — meaningful only under <code>entry_mode="limit"</code>; the floor that actually bites under <code>"auto"</code> is <code>min_fill_rate_opt</code>.</td>
+</tr>
+<tr>
+<td><code>min_sell_pct</code></td>
+<td>float</td>
+<td><code>0.005</code> <em>(session-resolved)</em></td>
+<td>Operational floor on the take-profit seeded from the contract's derived target. Resolved from <code>AlphaConfig.mfe_floor</code>; it used to be a hardcoded <code>max(0.01, …)</code> inside <code>_seed_base_params</code>, so the binding constraint was the one the caller could not configure (F11).</td>
+</tr>
+<tr>
+<td><code>min_fill_rate_opt</code></td>
+<td>float</td>
+<td><code>0.80</code></td>
+<td>First adoption condition under <code>entry_mode="auto"</code>: the limit point may be published only if it still fills at ≥ this rate <strong>out-of-sample</strong>, avoiding the fill-collapse confound. Preset-parametrized — see table above.</td>
+</tr>
+<tr>
+<td><code>min_net_gain_retention</code></td>
+<td>float</td>
+<td><code>0.5</code> <em>(session-resolved)</em></td>
+<td>Third adoption condition: the fraction of the market point's OOS net gain the limit point must retain. Deliberately loose — a backstop against a tiny mu with a tiny sigma, which the Sharpe cannot see because it is scale-free in mu.</td>
+</tr>
+<tr>
+<td><code>partial_min_profit_factor</code></td>
+<td>float</td>
+<td><code>1.5</code></td>
+<td>Minimum IS PF for PARTIAL-EDGE (does not reach EDGE but not NON-EDGE).</td>
+</tr>
+<tr>
+<td><code>min_active_month_rate</code></td>
+<td>float</td>
+<td><code>0.80</code></td>
+<td>Minimum fraction of IS months that must contain at least one trade for a full EDGE: <code>active_months / n_months &gt;= min_active_month_rate</code>. Rate-based (replacing the older absolute <code>max_zero_months_edge</code>/<code>max_zero_months_partial</code>, which no longer exist) so it is timeframe-agnostic: on 1H data the rate is naturally near 1.0, on 1D data a Poisson process with dispersion up to <code>max_dispersion</code> yields 0.75–0.95, which the default accommodates.</td>
+</tr>
+<tr>
+<td><code>max_regime_dependency</code></td>
+<td>float</td>
+<td><code>0.30</code></td>
+<td>Maximum regime dependency: if &gt; 30% of trades are concentrated in a single regime, this triggers as a soft gate.</td>
+</tr>
+<tr>
+<td><code>min_dsr</code></td>
+<td>float</td>
+<td><code>1.0</code></td>
+<td>Minimum Deflated Sharpe Ratio (corrected for the number of configurations tested). An undefined DSR (selection haircut's radicand went negative — selection bias too severe to be credible) also blocks a full EDGE.</td>
+</tr>
+<tr>
+<td><code>max_ttest_p</code></td>
+<td>float</td>
+<td><em>(resolved: <code>ctx.alpha</code> = 0.05)</em></td>
+<td>Maximum t-test p-value on mean net gain. Session-resolved (#182). The pipeline's <strong>only hard per-hypothesis gate</strong> — it produces <code>NON-EDGE</code> in <code>_decide</code>. No preset has ever touched it.</td>
+</tr>
+<tr>
+<td><code>max_rotation_p</code></td>
+<td>float</td>
+<td><em>(resolved: <code>ctx.alpha</code> = 0.05)</em></td>
+<td>Maximum search-level rotation-null p-value (<code>AlphaContract.rotation_p</code>) for a full EDGE — prices the whole discovery surface, so a rule that only won the multiple-testing lottery is capped at PARTIAL-EDGE. Session-resolved (#182); inert when the contract carries no rotation-null annotation. A strict value under <code>"sweep"</code> is intentional: <code>"sweep"</code>'s upstream permissiveness (<code>fdr_q=0.25</code>) is predicated on this gate filtering downstream, paired with <code>RotationConfig(k&gt;=100)</code>.</td>
+</tr>
+<tr>
+<td><code>power_gate</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>§3.2 power-aware verdicts: when True, an EDGE/PARTIAL-EDGE is degraded to <code>INSUFFICIENT-DATA</code> when the OOS evidence can't support it — no walk-forward was possible, pooled OOS trades below <code>min_oos_trades</code>, or the pooled OOS sample's minimum detectable expectancy exceeds the IS expectancy being claimed. <code>NON-EDGE</code> verdicts are never rescued.</td>
+</tr>
+<tr>
+<td><code>min_oos_trades</code></td>
+<td>int</td>
+<td><code>10</code></td>
+<td>Minimum pooled walk-forward test trades (across all test windows) for a confident positive verdict under <code>power_gate</code>. Below it → <code>INSUFFICIENT-DATA</code>. Never applied per window.</td>
+</tr>
+<tr>
+<td><code>early_elimination</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>When True (default), immediately rejects configurations that fail the fast IS screen (&lt; 20 trades, PF &lt; 1, insufficient fill rate) without running the walk-forward — saves compute. When False, the full pipeline always runs — useful for uniform diagnostics on NON-EDGE rules.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><code>max_zero_months_edge</code>/<code>max_zero_months_partial</code> do <strong>not</strong> exist on this
+dataclass any more — replaced by the rate-based <code>min_active_month_rate</code>
+above. Constructing <code>SelectionCriteria</code> with either name raises
+<code>TypeError</code> today.</p>
+</blockquote>
+<pre><code class="language-python">from forgedge import RuleDiscovery, RuleDiscoveryConfig, SelectionCriteria
+
+config = RuleDiscoveryConfig(
+    criteria=SelectionCriteria(
+        min_profit_factor=1.8,   # less strict for high-volatility assets
+        min_win_rate=0.50,
+        early_elimination=False, # full diagnostics even on NON-EDGE
+    ),
+)
+rd = RuleDiscovery(ed.df, contract, cand, config=config)
+</code></pre>
+<hr />
+<h3 id="rulediscoveryconfig">RuleDiscoveryConfig</h3>
+<p>Main configuration for Module 3. Aggregates all sub-configurators.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>base_params</code></td>
+<td>BacktestParams</td>
+<td><code>BacktestParams()</code></td>
+<td>Base backtest parameters (starting point for the grid search).</td>
+</tr>
+<tr>
+<td><code>scoring</code></td>
+<td>ScoringParams</td>
+<td><code>ScoringParams()</code></td>
+<td>Grid scoring weights.</td>
+</tr>
+<tr>
+<td><code>grid</code></td>
+<td>GridSpec</td>
+<td><code>GridSpec()</code></td>
+<td>Grid search space. When all fields are None, the default grid is used.</td>
+</tr>
+<tr>
+<td><code>walk_forward</code></td>
+<td>RuleWalkForwardConfig</td>
+<td><code>RuleWalkForwardConfig()</code></td>
+<td>Walk-forward OOS configuration.</td>
+</tr>
+<tr>
+<td><code>criteria</code></td>
+<td>SelectionCriteria</td>
+<td><code>SelectionCriteria()</code></td>
+<td>EDGE/PARTIAL-EDGE/NON-EDGE verdict criteria.</td>
+</tr>
+<tr>
+<td><code>entry_mode</code></td>
+<td>str</td>
+<td><code>"auto"</code></td>
+<td>Entry evaluation mode: <code>"auto"</code> (default — Stage 1 market entry decides the verdict, Stage 2 sweeps <code>buy_drop_pct</code>, replays the winner out-of-sample and publishes it only if it clears all three adoption conditions), <code>"market"</code> (next-open baseline alone, fill ≈ 100%, no optimiser) or <code>"limit"</code> (the pre-#185 default: the grid optimises <code>buy_drop_pct</code>, so the entry doubles as an entry-price optimiser).</td>
+</tr>
+<tr>
+<td><code>use_contract_target</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>When True, uses <code>direction</code>, <code>sell_pct</code>, and <code>target_h</code> from the AlphaContract as the grid starting point.</td>
+</tr>
+<tr>
+<td><code>timestamp_col</code></td>
+<td>str</td>
+<td><code>"open_dt"</code></td>
+<td>Datetime column.</td>
+</tr>
+<tr>
+<td><code>signal_col</code></td>
+<td>str</td>
+<td><code>"__rule_signal__"</code></td>
+<td>Internal temporary column for the event signal.</td>
+</tr>
+<tr>
+<td><code>discovery_date</code></td>
+<td>str | None</td>
+<td><code>None</code></td>
+<td>Discovery date (ISO).</td>
+</tr>
+<tr>
+<td><code>selection_mode</code></td>
+<td><code>"walk_forward"</code> | <code>"full_sample"</code></td>
+<td><code>"walk_forward"</code></td>
+<td>Where the published operating point is <em>selected</em> (§3.4). <code>"walk_forward"</code> (default): the operating point comes from the walk-forward's train windows only (per <code>wf_param_policy</code>); no metric feeding the verdict or the published <code>ValidatedRule</code> ever reads the final test window. <code>"full_sample"</code> falls back to the pre-#217 selection over the whole IS span.</td>
+</tr>
+<tr>
+<td><code>wf_param_policy</code></td>
+<td><code>"last"</code> | <code>"consensus"</code></td>
+<td><code>"last"</code></td>
+<td>How <code>selection_mode="walk_forward"</code> picks the published operating point from the per-split train selections: <code>"last"</code> (default) — the most recent train window's winner (what you would trade next); <code>"consensus"</code> — the most frequent parameter set across splits, ties broken toward the most recent.</td>
+</tr>
+<tr>
+<td><code>n_trials_upstream</code></td>
+<td>int</td>
+<td><code>1</code></td>
+<td>Multiplier folded into the Deflated-Sharpe <code>n_trials</code> on top of the grid-cell count, for an explicit upstream search factor (e.g. sibling contracts receiving a verdict). Default <code>1</code> = grid cells only (historical behaviour).</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge import (
+    RuleDiscovery, RuleDiscoveryConfig, BacktestParams,
+    SelectionCriteria, RuleWalkForwardConfig,
+)
+from forgedge.rule_discovery.models import GridSpec, ScoringParams
+
+config = RuleDiscoveryConfig(
+    base_params=BacktestParams(fee=0.001),
+    grid=GridSpec(
+        buy_drop_pct=[0.005, 0.010, 0.015, 0.020],
+        sell_pct=[0.030, 0.040, 0.050, 0.060],
+        target_h=[12, 24, 36, 48],
+        buy_delay_bar=[3, 6],
+    ),
+    walk_forward=RuleWalkForwardConfig(n_splits=5, min_train_months=8),
+    criteria=SelectionCriteria(min_profit_factor=2.0, min_win_rate=0.55),
+)
+rd = RuleDiscovery(ed.df, contract, cand, config=config)
+resp = rd.run()
+</code></pre>
+<hr />
+<h2 id="module-4-rule-registry">Module 4 — Rule Registry</h2>
+<h3 id="registryconfig">RegistryConfig</h3>
+<p>Module 4 configuration. Controls deduplication, genericity classification, and
+export.</p>
+<blockquote>
+<p><code>generic_ratio_threshold = 2/3</code> — the value is exactly 2/3 (not 0.67). On 3
+external tickers: 2 PASS → GENERIC, 1 PASS → PARTIAL.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>overlap_threshold</code></td>
+<td>float</td>
+<td><code>0.70</code></td>
+<td>Jaccard threshold above which two rules are considered duplicates (≥ 70% overlap in activation dates).</td>
+</tr>
+<tr>
+<td><code>gain_corr_threshold</code></td>
+<td>float</td>
+<td><code>0.70</code></td>
+<td>Spearman threshold above which two rules have correlated gains. Used as a secondary metric in the correlation matrix.</td>
+</tr>
+<tr>
+<td><code>cross_pf_threshold</code></td>
+<td>float</td>
+<td><code>1.5</code> <em>(session-resolved)</em></td>
+<td>Absolute PF floor on an external ticker — half of the PASS criterion. Derived from <code>SelectionCriteria.partial_min_profit_factor</code>: the bar that admitted the rule at home. Was an independent <code>2.0</code>, which excluded every PARTIAL-EDGE rule from genericity by construction.</td>
+</tr>
+<tr>
+<td><code>min_cross_pf_retention</code></td>
+<td>float</td>
+<td><code>0.8</code> <em>(session-resolved)</em></td>
+<td>The other half: the fraction of its <strong>home</strong> PF the rule must retain on the external ticker. <code>PASS ⟺ pf ≥ cross_pf_threshold AND pf ≥ retention × pf_home</code>.</td>
+</tr>
+<tr>
+<td><code>generic_ratio_threshold</code></td>
+<td>float</td>
+<td><code>2/3 ≈ 0.667</code></td>
+<td>Minimum fraction of external tickers with PASS to classify a rule as GENERIC. PARTIAL if ≥ 1 but &lt; 2/3.</td>
+</tr>
+<tr>
+<td><code>cross_min_active</code></td>
+<td>int</td>
+<td><code>10</code></td>
+<td>Minimum activations on an external ticker to include it in the cross-ticker count.</td>
+</tr>
+<tr>
+<td><code>export_format</code></td>
+<td>str</td>
+<td><code>"excel"</code></td>
+<td>Flat table export format: <code>"excel"</code> or <code>"csv"</code>.</td>
+</tr>
+<tr>
+<td><code>export_duplicates</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>When True, includes duplicate rules in the exported table (flagged with <code>is_duplicate=True</code>).</td>
+</tr>
+<tr>
+<td><code>export_non_generic</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>When True, includes SPECIFIC and ISOLATED rules in the exported table.</td>
+</tr>
+<tr>
+<td><code>html_include_tradelog</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>When True, includes a per-rule trade log in the HTML report.</td>
+</tr>
+<tr>
+<td><code>html_charts</code></td>
+<td>bool</td>
+<td><code>True</code></td>
+<td>When True, generates inline SVG charts (equity curve, heatmap) in the HTML report.</td>
+</tr>
+<tr>
+<td><code>timestamp_col</code></td>
+<td>str</td>
+<td><code>"open_dt"</code></td>
+<td>Datetime column in the provided frames.</td>
+</tr>
+<tr>
+<td><code>session_date</code></td>
+<td>str | None</td>
+<td><code>None</code></td>
+<td>Session date (ISO). When None, uses today's date.</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge import RuleRegistry, RegistryConfig
+
+config = RegistryConfig(
+    overlap_threshold=0.65,         # more aggressive deduplication
+    cross_pf_threshold=1.8,         # raise the absolute floor for illiquid assets
+    min_cross_pf_retention=0.7,     # and tolerate a little more decay away from home
+    generic_ratio_threshold=0.5,    # GENERIC if ≥ 50% of tickers PASS
+    export_format=&quot;csv&quot;,
+    html_charts=True,
+    export_duplicates=False,         # exclude duplicates from export
+)
+registry = RuleRegistry.from_forge_results(results, config=config).run()
+</code></pre>
+<hr />
+<h2 id="presets-forge_preset">Presets — <code>forge_preset()</code></h2>
+<p>The defaults documented above (<code>GateParams</code>, <code>SelectionCriteria</code>, and several
+<code>AlphaConfig</code>/<code>PromotionThresholds</code> fields) are routinely overridden as a
+group by four named presets, chosen by <strong>search profile</strong>, not by asset:</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>Profile</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"sniper"</code></td>
+<td>Rare/regular events, high precision. Requires a long IS window. Do <strong>not</strong> pair with the rotation calibrator.</td>
+</tr>
+<tr>
+<td><code>"balanced"</code></td>
+<td>Sensible default — moderate frequency, good IS/OOS balance.</td>
+</tr>
+<tr>
+<td><code>"sweep"</code></td>
+<td>Wide/permissive search, many candidates. Pair with <code>rotation_calibration=RotationConfig(k&gt;=100)</code> and a <code>min_lift</code> filter on <code>promoted_contracts()</code>.</td>
+</tr>
+<tr>
+<td><code>"burst"</code></td>
+<td>Time-concentrated events (momentum, regime-change) — high dispersion tolerated on purpose.</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from forgedge import forge, forge_preset
+
+disc_cfg, alpha_cfg, rd_cfg = forge_preset(&quot;balanced&quot;, timeframe=&quot;1D&quot;, asset=&quot;BTC&quot;)
+result = forge(kpi, event_discovery_config=disc_cfg, alpha_config=alpha_cfg,
+                rule_discovery_config=rd_cfg)
+</code></pre>
+<p><code>forge_preset(preset, timeframe, asset="ASSET", train_ratio=0.70, **overrides)</code>
+sets M1/M2/M3's frequency criteria (and several dependent fields) consistently
+for the chosen timeframe, and returns the ready-to-use <code>(DiscoveryConfig,
+AlphaConfig, RuleDiscoveryConfig)</code> triple. Any of the parameters it computes
+can be overridden by name via <code>**overrides</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Module</th>
+<th>Accepted override keys</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>M1 (Event Discovery)</td>
+<td><code>min_tpm</code>, <code>max_dispersion</code>, <code>dispersion_margin</code>, <code>min_episodes</code>, <code>max_and_components</code>, <code>timestamp_col</code>, <code>event_counting</code></td>
+</tr>
+<tr>
+<td>M2 (Alpha Discovery)</td>
+<td><code>min_lift</code>, <code>min_cohens_d</code>, <code>fdr_q</code>, <code>oos_max_p</code>, <code>horizon_grid</code>, <code>bars_per_day</code></td>
+</tr>
+<tr>
+<td>M3 (Rule Discovery)</td>
+<td><code>rd_min_tpm</code>, <code>min_profit_factor</code>, <code>min_win_rate</code>, <code>min_pf_score_tpm</code>, <code>min_fill_rate_opt</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>forgedge.presets.preset_info()</code> prints the resolved numeric parameters for
+any (or all) presets, useful for checking what a preset actually resolves to
+on a given timeframe before running it. See the <code>forgedge</code> skill's pitfall
+list for two real, timeframe-specific gotchas: <code>"1D"</code> presets can raise
+<code>config_report()</code>'s <code>oos_span_too_short</code> on a modest history (the checker
+doing its job, not a broken preset), and <code>"sniper"</code> should not be combined
+with the rotation calibrator.</p>
+<hr />
+<h2 id="parameter-resolution-unset-and-the-resolver">Parameter resolution — <code>UNSET</code> and the resolver</h2>
+<p>Configuration fields fall into three states rather than two:</p>
+<table>
+<thead>
+<tr>
+<th>state</th>
+<th>meaning</th>
+<th>who writes it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>explicit</td>
+<td>the caller chose this value</td>
+<td>never overwritten; it is an <em>input</em> to derivation</td>
+</tr>
+<tr>
+<td><code>UNSET</code></td>
+<td>"the resolver decides"</td>
+<td>derived from the constraints that relate it to what was set</td>
+</tr>
+<tr>
+<td>no constraint</td>
+<td>neither the preset nor the session has an opinion</td>
+<td>the documented class default, exactly as before</td>
+</tr>
+</tbody>
+</table>
+<p><code>UNSET</code> exists because a plain default cannot answer the question a resolver has
+to ask: <code>AlphaConfig.timestamp_col == "open_dt"</code> looks identical whether the
+caller wrote it or inherited it.</p>
+<pre><code class="language-python">from forgedge import UNSET, PipelineContext, collect_context, resolve
+
+bundle = {&quot;event_discovery&quot;: disc, &quot;alpha&quot;: alpha, &quot;rule_discovery&quot;: rd}
+ctx = collect_context(bundle, PipelineContext.from_frame(kpi, timeframe=&quot;1D&quot;))
+resolved, trace, violations = resolve(bundle, ctx)
+print(trace.to_text())
+</code></pre>
+<p><code>resolve()</code> returns <strong>copies</strong> — inspecting a configuration is never a side
+effect on it — and is idempotent. <code>forge()</code> does this once at start-up and
+exposes the result on <code>ForgeResult.context</code> / <code>.resolution</code> / <code>.coherence</code>.</p>
+<p>Derivation reads the timeframe, the schema and the configs' own values; it never
+reads the data (<code>n_bars</code>, <code>span_months</code>), which are visible to the <em>check</em> half
+only. That keeps <code>resolve()</code> total without the frame — which is what lets an
+inspection show exactly what will run — and it removes the temptation to cap a
+requirement to fit the available history instead of reporting that it does not
+fit.</p>
+<p>Precedence, strongest first: an explicit <code>PipelineContext</code> → <code>forge()</code>'s own
+arguments → fields set in any config → the class default. Two configs that
+disagree on the same value are <strong>reported</strong>, never silently reconciled.</p>
+<h2 id="import-summary">Import summary</h2>
+<blockquote>
+<p>The two walk-forward configs are now explicitly named:
+<code>EventWalkForwardConfig</code> (Module 1) and <code>RuleWalkForwardConfig</code> (Module 3),
+both importable from <code>forgedge</code>. The legacy <code>WalkForwardConfig</code> alias still
+resolves — to the Module 3 class at the top level, and to each module's own
+class inside <code>event_discovery.models</code> / <code>rule_discovery.models</code>.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>Import</th>
+<th>Module</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>EMAProxyConfig</code></td>
+<td><code>from forgedge import EMAProxyConfig</code></td>
+<td>0 — Market Context</td>
+</tr>
+<tr>
+<td><code>MarketContextConfig</code></td>
+<td><code>from forgedge import MarketContextConfig</code></td>
+<td>0 — Market Context</td>
+</tr>
+<tr>
+<td><code>GateParams</code></td>
+<td><code>from forgedge.event_discovery.models import GateParams</code></td>
+<td>1 — Event Discovery</td>
+</tr>
+<tr>
+<td><code>EventWalkForwardConfig</code></td>
+<td><code>from forgedge import EventWalkForwardConfig</code></td>
+<td>1 — Event Discovery</td>
+</tr>
+<tr>
+<td><code>DiscoveryConfig</code></td>
+<td><code>from forgedge import DiscoveryConfig</code></td>
+<td>1 — Event Discovery</td>
+</tr>
+<tr>
+<td><code>PromotionThresholds</code></td>
+<td><code>from forgedge import PromotionThresholds</code></td>
+<td>2 — Alpha Discovery</td>
+</tr>
+<tr>
+<td><code>AlphaConfig</code></td>
+<td><code>from forgedge import AlphaConfig</code></td>
+<td>2 — Alpha Discovery</td>
+</tr>
+<tr>
+<td><code>BacktestParams</code></td>
+<td><code>from forgedge import BacktestParams</code></td>
+<td>3 — Rule Discovery</td>
+</tr>
+<tr>
+<td><code>ScoringParams</code></td>
+<td><code>from forgedge.rule_discovery.models import ScoringParams</code></td>
+<td>3 — Rule Discovery</td>
+</tr>
+<tr>
+<td><code>GridSpec</code></td>
+<td><code>from forgedge.rule_discovery.models import GridSpec</code></td>
+<td>3 — Rule Discovery</td>
+</tr>
+<tr>
+<td><code>RuleWalkForwardConfig</code></td>
+<td><code>from forgedge import RuleWalkForwardConfig</code></td>
+<td>3 — Rule Discovery</td>
+</tr>
+<tr>
+<td><code>SelectionCriteria</code></td>
+<td><code>from forgedge import SelectionCriteria</code></td>
+<td>3 — Rule Discovery</td>
+</tr>
+<tr>
+<td><code>RuleDiscoveryConfig</code></td>
+<td><code>from forgedge import RuleDiscoveryConfig</code></td>
+<td>3 — Rule Discovery</td>
+</tr>
+<tr>
+<td><code>RegistryConfig</code></td>
+<td><code>from forgedge import RegistryConfig</code></td>
+<td>4 — Rule Registry</td>
+</tr>
+</tbody>
+</table>
+</article>
+</main>
+</body>
+</html>
