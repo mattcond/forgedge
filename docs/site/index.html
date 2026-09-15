@@ -1,0 +1,875 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>FORGE — Motore di scoperta regole di trading</title>
+<meta name="description" content="FORGE è un motore open source per la scoperta sistematica di regole di trading algoritmico da dati storici, con pipeline anti look-ahead bias, validazione walk-forward out-of-sample e verdetti EDGE / PARTIAL-EDGE / NON-EDGE." />
+<meta name="keywords" content="trading algoritmico, backtest walk-forward, look-ahead bias, ricerca quantitativa, python trading, KPI table, alpha discovery, event discovery, rule discovery, edge statistico, overfitting backtest" />
+<meta name="robots" content="index, follow" />
+<link rel="canonical" href="https://forgedge.dev/" />
+
+<meta property="og:type" content="website" />
+<meta property="og:title" content="FORGE — Feature-Oriented Rule Generation Engine" />
+<meta property="og:description" content="Scoperta sistematica di regole di trading algoritmico, dalla KPI table al verdetto EDGE, senza look-ahead bias e senza ottimizzazione in-sample." />
+<meta property="og:locale" content="it_IT" />
+<meta name="twitter:card" content="summary_large_image" />
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "FORGE",
+  "alternateName": "forgedge",
+  "applicationCategory": "FinanceApplication",
+  "operatingSystem": "Cross-platform (Python)",
+  "description": "Sistema di ricerca quantitativa per la scoperta sistematica di regole di trading algoritmico da dati storici di mercato, con pipeline a moduli separati contro look-ahead bias e overfitting.",
+  "programmingLanguage": "Python",
+  "license": "https://opensource.org/licenses/MIT",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --bg: #EDEAE3;
+    --bg-elevated: #E2DEd4;
+    --bg-card: #F6F4EF;
+    --text: #1B1A17;
+    --text-muted: #5B564C;
+    --accent: #C4501E;
+    --accent-strong: #9C3C15;
+    --accent-soft: #EAD3BE;
+    --border: #D2CBBB;
+    --edge: #2F6B4F;
+    --edge-soft: #DCE7DE;
+    --partial: #9A6A1C;
+    --partial-soft: #EFE2C8;
+    --nonedge: #A33B2E;
+    --nonedge-soft: #EDDAD4;
+    --insuff: #5B564C;
+    --insuff-soft: #E4E0D6;
+    --mono-bg: #1B1A17;
+    --mono-text: #EDE8DF;
+    --shadow: 0 1px 0 rgba(27,26,23,0.06);
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14120F;
+      --bg-elevated: #1C1916;
+      --bg-card: #1E1B17;
+      --text: #EDE8E0;
+      --text-muted: #A79E92;
+      --accent: #FF7A3D;
+      --accent-strong: #FF9660;
+      --accent-soft: #3B2418;
+      --border: #322E27;
+      --edge: #5FCE97;
+      --edge-soft: #1D2C24;
+      --partial: #E0A83D;
+      --partial-soft: #302416;
+      --nonedge: #E2665A;
+      --nonedge-soft: #331F1C;
+      --insuff: #A79E92;
+      --insuff-soft: #26221C;
+      --mono-bg: #0D0C0A;
+      --mono-text: #E9E4DA;
+      color-scheme: dark;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #14120F;
+    --bg-elevated: #1C1916;
+    --bg-card: #1E1B17;
+    --text: #EDE8E0;
+    --text-muted: #A79E92;
+    --accent: #FF7A3D;
+    --accent-strong: #FF9660;
+    --accent-soft: #3B2418;
+    --border: #322E27;
+    --edge: #5FCE97;
+    --edge-soft: #1D2C24;
+    --partial: #E0A83D;
+    --partial-soft: #302416;
+    --nonedge: #E2665A;
+    --nonedge-soft: #331F1C;
+    --insuff: #A79E92;
+    --insuff-soft: #26221C;
+    --mono-bg: #0D0C0A;
+    --mono-text: #E9E4DA;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  img { max-width: 100%; }
+  [hidden] { display: none !important; }
+
+  .wrap {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding-inline: 24px;
+  }
+
+  a { color: var(--accent-strong); }
+
+  h1, h2, h3 {
+    font-family: "Big Shoulders Display", "Arial Narrow", sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.01em;
+    font-weight: 800;
+    text-wrap: balance;
+    margin: 0;
+    color: var(--text);
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.78rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent-strong);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 22px;
+    height: 1px;
+    background: var(--accent);
+  }
+
+  code, .mono, .verdict, .badge, .kpi { font-family: "IBM Plex Mono", monospace; }
+
+  /* ---------- top bar ---------- */
+  .topbar {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 20;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-block: 14px;
+    gap: 16px;
+  }
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: "Big Shoulders Display", sans-serif;
+    font-weight: 900;
+    font-size: 1.4rem;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .brand .mark { color: var(--accent); }
+  .brand small {
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+  }
+  .topnav {
+    display: flex;
+    gap: 22px;
+    font-size: 0.88rem;
+  }
+  .topnav a { color: var(--text); text-decoration: none; }
+  .topnav a:hover { color: var(--accent-strong); }
+  .btn {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 8px 14px;
+    border-radius: 3px;
+    border: 1px solid var(--accent);
+    color: var(--accent-strong);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .btn.solid {
+    background: var(--accent);
+    color: #FBF6EF;
+    border-color: var(--accent);
+  }
+
+  /* ---------- hero ---------- */
+  .hero {
+    padding-block: 64px 56px;
+    border-bottom: 1px solid var(--border);
+  }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: 48px;
+    align-items: start;
+  }
+  h1.title {
+    font-size: clamp(2.4rem, 5.4vw, 4.1rem);
+    line-height: 0.98;
+    margin-top: 14px;
+  }
+  h1.title .accent { color: var(--accent); }
+  .lede {
+    font-size: 1.1rem;
+    color: var(--text-muted);
+    max-width: 56ch;
+    margin-top: 20px;
+  }
+  .hero-ctas {
+    display: flex;
+    gap: 12px;
+    margin-top: 28px;
+    flex-wrap: wrap;
+  }
+  .hero-stats {
+    display: flex;
+    gap: 28px;
+    margin-top: 34px;
+    flex-wrap: wrap;
+  }
+  .stat .num {
+    font-family: "Big Shoulders Display", sans-serif;
+    font-weight: 800;
+    font-size: 1.6rem;
+    color: var(--accent-strong);
+  }
+  .stat .lbl {
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  /* terminal panel */
+  .terminal {
+    background: var(--mono-bg);
+    color: var(--mono-text);
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: 0 12px 30px -14px rgba(0,0,0,0.45);
+    border: 1px solid color-mix(in srgb, var(--mono-bg) 60%, #000 10%);
+  }
+  .terminal-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .terminal-head span {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: rgba(255,255,255,0.18);
+  }
+  .terminal-head .path {
+    margin-left: 8px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.72rem;
+    color: rgba(233,228,218,0.5);
+  }
+  .terminal pre {
+    margin: 0;
+    padding: 18px 16px 20px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.82rem;
+    line-height: 1.65;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .terminal .c1 { color: #7A7367; }
+  .terminal .c2 { color: #6FBF9A; }
+  .terminal .c3 { color: #F0AA6B; }
+  .terminal .c4 { color: #7FB3D5; }
+
+  /* ---------- sections ---------- */
+  section { padding-block: 60px; border-bottom: 1px solid var(--border); }
+  .section-head { max-width: 68ch; }
+  .section-head h2 { font-size: clamp(1.7rem, 3.2vw, 2.4rem); margin-top: 10px; }
+  .section-head p { color: var(--text-muted); margin-top: 14px; font-size: 1.02rem; }
+
+  /* problem triptych */
+  .triptych {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    margin-top: 36px;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .flaw {
+    background: var(--bg-card);
+    padding: 26px 24px 28px;
+  }
+  .flaw .fnum {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.75rem;
+    color: var(--accent-strong);
+  }
+  .flaw h3 {
+    font-size: 1.15rem;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 700;
+    margin-top: 10px;
+    font-family: "IBM Plex Sans", sans-serif;
+  }
+  .flaw p { color: var(--text-muted); margin-top: 10px; font-size: 0.95rem; }
+
+  /* pipeline */
+  .pipeline {
+    margin-top: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .stage {
+    display: grid;
+    grid-template-columns: 64px 1fr;
+    gap: 20px;
+    position: relative;
+    padding-block: 22px;
+  }
+  .stage-rail {
+    position: relative;
+    display: flex;
+    justify-content: center;
+  }
+  .stage-rail::before {
+    content: "";
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+  .stage:first-child .stage-rail::before { top: 50%; }
+  .stage:last-child .stage-rail::before { bottom: 50%; }
+  .stage-num {
+    position: relative;
+    z-index: 1;
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background: var(--bg);
+    border: 2px solid var(--accent);
+    color: var(--accent-strong);
+    display: flex; align-items: center; justify-content: center;
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 600;
+    font-size: 0.95rem;
+    align-self: center;
+  }
+  .stage-body {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 22px;
+  }
+  .stage-body h3 {
+    font-family: "IBM Plex Sans", sans-serif;
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 1.12rem;
+    font-weight: 700;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .stage-body h3 .modtag {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+  .stage-body p { color: var(--text-muted); margin: 10px 0 0; font-size: 0.95rem; }
+  .stage-body .out {
+    margin-top: 12px;
+    font-size: 0.8rem;
+    color: var(--accent-strong);
+  }
+  .stage-body .out code {
+    background: var(--accent-soft);
+    padding: 2px 6px;
+    border-radius: 3px;
+    color: var(--accent-strong);
+  }
+
+  /* concepts */
+  .concepts {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+    margin-top: 36px;
+  }
+  .concept {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .concept .q {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  .concept h3 {
+    font-size: 1.5rem;
+  }
+  .concept .gate {
+    margin-top: auto;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.74rem;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+  }
+  .concept .gate b { color: var(--text); font-weight: 600; }
+
+  /* verdicts */
+  .verdicts {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-top: 36px;
+  }
+  .vcard {
+    border-radius: 6px;
+    padding: 18px 18px 20px;
+    border: 1px solid var(--border);
+  }
+  .vcard .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 3px;
+    letter-spacing: 0.02em;
+  }
+  .vcard p { margin-top: 12px; font-size: 0.88rem; color: var(--text-muted); }
+  .vcard.edge { background: var(--edge-soft); }
+  .vcard.edge .badge { background: var(--edge); color: #06241A; }
+  .vcard.partial { background: var(--partial-soft); }
+  .vcard.partial .badge { background: var(--partial); color: #241A05; }
+  .vcard.nonedge { background: var(--nonedge-soft); }
+  .vcard.nonedge .badge { background: var(--nonedge); color: #2A0A06; }
+  .vcard.insuff { background: var(--insuff-soft); }
+  .vcard.insuff .badge { background: var(--insuff); color: var(--bg); }
+
+  /* invariants table */
+  table.invariants {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 36px;
+    font-size: 0.94rem;
+  }
+  table.invariants th, table.invariants td {
+    text-align: left;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.invariants th {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+  table.invariants td:first-child { color: var(--text); font-weight: 600; width: 32%; }
+  table.invariants td:last-child { color: var(--text-muted); }
+  .tbl-scroll { overflow-x: auto; }
+
+  /* quickstart */
+  .quickstart-grid {
+    margin-top: 36px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .install-line {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--mono-bg);
+    color: var(--mono-text);
+    border-radius: 6px;
+    padding: 14px 18px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.9rem;
+    margin-top: 36px;
+  }
+  .install-line .prompt { color: var(--accent); }
+
+  /* footer */
+  footer { padding-block: 40px 56px; }
+  .foot-grid {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr 1fr;
+    gap: 32px;
+  }
+  footer h4 {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.74rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+    margin: 0 0 12px;
+  }
+  footer ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  footer a { text-decoration: none; color: var(--text); font-size: 0.92rem; }
+  footer a:hover { color: var(--accent-strong); }
+  .foot-bottom {
+    margin-top: 36px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    font-family: "IBM Plex Mono", monospace;
+  }
+
+  @media (max-width: 860px) {
+    .hero-grid { grid-template-columns: 1fr; }
+    .triptych { grid-template-columns: 1fr; }
+    .concepts { grid-template-columns: 1fr; }
+    .verdicts { grid-template-columns: 1fr 1fr; }
+    .quickstart-grid { grid-template-columns: 1fr; }
+    .foot-grid { grid-template-columns: 1fr; }
+    .topnav { display: none; }
+  }
+  @media (max-width: 480px) {
+    .verdicts { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="brand"><span class="mark">◆</span>FORGE<small>feature-oriented rule generation engine</small></div>
+    <nav class="topnav">
+      <a href="#problema">Il problema</a>
+      <a href="#pipeline">Pipeline</a>
+      <a href="#concetti">Evento · Alpha · Regola</a>
+      <a href="#verdetti">Verdetti</a>
+      <a href="#quickstart">Quick start</a>
+    </nav>
+    <a class="btn solid" href="https://github.com/mattcond/forgedge" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow">Ricerca quantitativa · Python</p>
+      <h1 class="title">Ogni pattern<br>merita un<span class="accent"> verdetto onesto.</span></h1>
+      <p class="lede">FORGE è un motore open source per la <strong>scoperta sistematica di regole di trading algoritmico</strong> da dati storici di mercato. Prende una KPI table, ne estrae eventi con struttura temporale stabile, ne misura il potere predittivo e li mette alla prova in un backtest realistico — separando rigidamente ogni fase per non lasciare che il segnale "impari" il futuro prima del tempo.</p>
+      <div class="hero-ctas">
+        <a class="btn solid" href="#quickstart">Prova la pipeline</a>
+        <a class="btn" href="#pipeline">Come funziona →</a>
+      </div>
+      <div class="hero-stats">
+        <div class="stat"><div class="num">5</div><div class="lbl">moduli in pipeline</div></div>
+        <div class="stat"><div class="num">0</div><div class="lbl">dipendenze oltre numpy/pandas</div></div>
+        <div class="stat"><div class="num">4</div><div class="lbl">verdetti possibili</div></div>
+        <div class="stat"><div class="num">MIT</div><div class="lbl">licenza</div></div>
+      </div>
+    </div>
+
+    <div class="terminal" role="img" aria-label="Esempio di utilizzo della libreria forgedge in Python">
+      <div class="terminal-head"><span></span><span></span><span></span><span class="path">python3 · quickstart.py</span></div>
+      <pre><span class="c1">&gt;&gt;&gt;</span> <span class="c4">from</span> forgedge <span class="c4">import</span> forge
+<span class="c1">&gt;&gt;&gt;</span> kpi = pd.read_parquet(<span class="c3">"kpi_table.parquet"</span>)
+<span class="c1">&gt;&gt;&gt;</span>
+<span class="c1"># pipeline completa: dalla KPI table alle regole validate</span>
+<span class="c1">&gt;&gt;&gt;</span> result = forge(kpi, ticker=<span class="c3">"BTCUSDC"</span>, timeframe=<span class="c3">"1H"</span>)
+<span class="c1">&gt;&gt;&gt;</span>
+<span class="c1"># EDGE / PARTIAL-EDGE soltanto, con motivazione allegata</span>
+<span class="c1">&gt;&gt;&gt;</span> <span class="c4">for</span> contract, response <span class="c4">in</span> result.edges():
+<span class="c1">...</span>     print(contract.alpha_id, response.verdict)
+<span class="c2">rsi14_spread_ema9_25   EDGE</span>
+<span class="c2">bb_width_p20_break     PARTIAL-EDGE</span></pre>
+    </div>
+  </div>
+</header>
+
+<section id="problema">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Il problema</p>
+      <h2>"Avrebbe funzionato nel passato" è la frase più pericolosa della ricerca quant.</h2>
+      <p>Con abbastanza tempo, qualsiasi pattern può essere fatto sembrare un edge: basta scegliere le soglie giuste dopo aver visto i rendimenti. FORGE nasce per chiudere tre falle ricorrenti, una per una.</p>
+    </div>
+    <div class="triptych">
+      <article class="flaw">
+        <p class="fnum">01</p>
+        <h3>Look-ahead bias</h3>
+        <p>Se la soglia di un evento viene scelta guardando quanto rende, la soglia "conosce" già il futuro. Ogni backtest che segue è circolare, non predittivo.</p>
+      </article>
+      <article class="flaw">
+        <p class="fnum">02</p>
+        <h3>Ottimizzazione in-sample</h3>
+        <p>Cercare il miglior orizzonte, il miglior take-profit e il miglior filtro sugli stessi dati usati per misurare il Profit Factor produce un PF che riflette il rumore del campione, non una struttura reale.</p>
+      </article>
+      <article class="flaw">
+        <p class="fnum">03</p>
+        <h3>Statistica ≠ operatività</h3>
+        <p>Un evento statisticamente predittivo non è automaticamente redditizio: fee, ordini limite non eseguiti e orizzonti da chiudere comunque cambiano tutto.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="pipeline">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Pipeline a 5 moduli</p>
+      <h2>Ogni modulo risponde a una sola domanda, e passa avanti solo un artefatto formale.</h2>
+      <p>Nessun modulo accede ai dati del successivo. Nessuna soglia viene ricalibrata dopo la scoperta. Il flusso va in una sola direzione: dalla KPI table al report finale.</p>
+    </div>
+
+    <div class="pipeline">
+      <div class="stage">
+        <div class="stage-rail"><div class="stage-num">0</div></div>
+        <div class="stage-body">
+          <h3>Market Context <span class="modtag">regime classification</span></h3>
+          <p>Classifica ogni barra della KPI table per regime di mercato su 5 livelli, così che l'edge scoperto possa in seguito essere letto anche per dipendenza dal contesto.</p>
+          <div class="out">Output → <code>regime</code>, <code>regime_stable</code></div>
+        </div>
+      </div>
+      <div class="stage">
+        <div class="stage-rail"><div class="stage-num">1</div></div>
+        <div class="stage-body">
+          <h3>Event Discovery <span class="modtag">no forward return</span></h3>
+          <p>Scopre condizioni booleane dalla sola struttura temporale degli indicatori — frequenza, dispersione, stabilità mensile. Il rendimento futuro non entra mai in questo modulo.</p>
+          <div class="out">Output → <code>list[EventCandidate]</code></div>
+        </div>
+      </div>
+      <div class="stage">
+        <div class="stage-rail"><div class="stage-num">2</div></div>
+        <div class="stage-body">
+          <h3>Alpha Discovery <span class="modtag">target derivato dai dati</span></h3>
+          <p>Prima esposizione al forward return. Orizzonte, direzione e take-profit non sono assunti: sono misurati per ogni evento e confermati su una coda out-of-sample mai toccata prima.</p>
+          <div class="out">Output → <code>list[AlphaContract]</code></div>
+        </div>
+      </div>
+      <div class="stage">
+        <div class="stage-rail"><div class="stage-num">3</div></div>
+        <div class="stage-body">
+          <h3>Rule Discovery <span class="modtag">backtest realistico</span></h3>
+          <p>Order mechanics, fee per lato, entrata a mercato o a limite, validazione walk-forward su finestre scorrevoli. Qui nasce il verdetto operativo.</p>
+          <div class="out">Output → <code>EDGE / PARTIAL-EDGE / NON-EDGE</code> + parametri</div>
+        </div>
+      </div>
+      <div class="stage">
+        <div class="stage-rail"><div class="stage-num">4</div></div>
+        <div class="stage-body">
+          <h3>Rule Registry <span class="modtag">generalizzazione cross-ticker</span></h3>
+          <p>Deduplica le regole scoperte, le ribacktesta su altri asset e le classifica per genericità. Produce una tabella piatta e un report HTML autocontenuto.</p>
+          <div class="out">Output → tabella + <code>report.html</code> (SVG inline, nessuna CDN)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="concetti">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Tre concetti, tre confini</p>
+      <h2>Evento, Alpha, Regola: dal mercato al segnale, senza scorciatoie.</h2>
+      <p>Un segnale di trading nasce solo dall'intersezione dei tre accertamenti — mai da uno solo di essi.</p>
+    </div>
+    <div class="concepts">
+      <article class="concept">
+        <p class="q">"Questa configurazione di mercato è stabile e ripetibile?"</p>
+        <h3>Evento</h3>
+        <p style="color:var(--text-muted); font-size:0.95rem;">Una condizione booleana su soglie <em>distribuzionali</em> — percentili calcolati sull'asset specifico, non valori assoluti — fissata prima di calcolare un solo rendimento futuro.</p>
+        <div class="gate">Gate → <b>ConsistencyGate</b> (frequenza, dispersione, no forward return)</div>
+      </article>
+      <article class="concept">
+        <p class="q">"Questo evento predice statisticamente un rendimento orientato?"</p>
+        <h3>Alpha</h3>
+        <p style="color:var(--text-muted); font-size:0.95rem;">Orizzonte, direzione e take-profit derivati dai dati scansionando una grid e standardizzando contro una null di rotazione circolare — mai imposti dall'utente.</p>
+        <div class="gate">Gate → <b>direction ≠ "undetermined"</b> (unico gate hard)</div>
+      </article>
+      <article class="concept">
+        <p class="q">"Questo alpha è redditizio con meccaniche d'ordine reali?"</p>
+        <h3>Regola</h3>
+        <p style="color:var(--text-muted); font-size:0.95rem;">Backtest con fee, fill realistici e validazione walk-forward su finestre scorrevoli train/test — il verdetto finale, non una stima.</p>
+        <div class="gate">Gate → <b>EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA</b></div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="verdetti">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">L'output finale</p>
+      <h2>Mai un punteggio black-box. Sempre un verdetto motivato.</h2>
+      <p>Rule Discovery integra gate hard e soft — Profit Factor, win rate, Sharpe deflazionato, dipendenza dal regime, consistenza walk-forward — in uno dei quattro esiti seguenti.</p>
+    </div>
+    <div class="verdicts">
+      <div class="vcard edge">
+        <span class="badge">EDGE</span>
+        <p>PF ≥ 2.0, win rate ≥ 55%, walk-forward consistency ≥ 50%, supera la null di rotazione a livello di sessione.</p>
+      </div>
+      <div class="vcard partial">
+        <span class="badge">PARTIAL-EDGE</span>
+        <p>Supera i gate hard ma non tutti i gate EDGE: evidenza reale, non ancora operativamente solida.</p>
+      </div>
+      <div class="vcard nonedge">
+        <span class="badge">NON-EDGE</span>
+        <p>PF &lt; 1.5, mesi tutti negativi, o nessuna configurazione con fill rate adeguato.</p>
+      </div>
+      <div class="vcard insuff">
+        <span class="badge">INSUFFICIENT-DATA</span>
+        <p>Evidenza OOS troppo esigua per un giudizio con fiducia — non tradeable, ma non scartata: si rivaluta con più dati.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="invarianti">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Cosa impedisce, non cosa promette</p>
+      <h2>Quattro invarianti che la pipeline non può violare.</h2>
+    </div>
+    <div class="tbl-scroll">
+    <table class="invariants">
+      <thead>
+        <tr><th>Invariante</th><th>Cosa impedisce</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Modulo 1 non vede mai il forward return</td>
+          <td>Look-ahead bias nella selezione dell'evento</td>
+        </tr>
+        <tr>
+          <td>Le soglie sono immutabili dopo la scoperta</td>
+          <td>Ottimizzazione delle soglie sul campione di valutazione</td>
+        </tr>
+        <tr>
+          <td>Orizzonte, direzione e take-profit sono derivati dai dati per ogni evento</td>
+          <td>Assunzioni economiche che precuociono il risultato</td>
+        </tr>
+        <tr>
+          <td>Il verdetto tradeable è vincolato al walk-forward OOS (Modulo 3)</td>
+          <td>Conferma a posteriori di una conclusione già scontata</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Quick start</p>
+      <h2>Dalla KPI table alle regole validate, in una chiamata.</h2>
+      <p>FORGE dipende solo da <code>numpy</code> e <code>pandas</code>. Tutte le primitive statistiche — Spearman, t-test, regressione OU, FDR di Benjamini-Hochberg, beta incompleta — sono implementate in puro numpy: nessuna dipendenza da scipy, statsmodels o librerie ML.</p>
+    </div>
+
+    <div class="install-line"><span class="prompt">$</span> pip install forgedge</div>
+
+    <div class="quickstart-grid">
+      <div class="terminal">
+        <div class="terminal-head"><span></span><span></span><span></span><span class="path">single ticker</span></div>
+        <pre><span class="c4">from</span> forgedge <span class="c4">import</span> forge
+
+kpi = pd.read_parquet(<span class="c3">"kpi_table.parquet"</span>)
+result = forge(kpi, ticker=<span class="c3">"BTCUSDC"</span>, timeframe=<span class="c3">"1H"</span>)
+
+print(result.summary())
+<span class="c1"># una riga per candidato + rule_verdict</span>
+
+print(result.registry.summary())
+<span class="c1"># Modulo 4 — regole catalogate</span></pre>
+      </div>
+      <div class="terminal">
+        <div class="terminal-head"><span></span><span></span><span></span><span class="path">multi-ticker + report</span></div>
+        <pre><span class="c4">from</span> forgedge <span class="c4">import</span> forge_multi
+
+frames = {<span class="c3">"BTCUSDC"</span>: btc, <span class="c3">"ETHUSDC"</span>: eth}
+results, registry = forge_multi(frames, timeframe=<span class="c3">"1H"</span>)
+
+<span class="c1"># GENERIC: la regola regge su ≥ 2/3 dei ticker</span>
+df = registry.flat_table()
+
+html = registry.html_report(timeframe=<span class="c3">"1H"</span>)
+open(<span class="c3">"report.html"</span>, <span class="c3">"w"</span>).write(html)
+<span class="c1"># SVG inline, autocontenuto, nessuna CDN</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <div class="brand" style="font-size:1.1rem;"><span class="mark">◆</span>FORGE</div>
+        <p style="color:var(--text-muted); font-size:0.9rem; max-width:38ch; margin-top:10px;">Un sistema di ricerca, non un sistema di esecuzione: FORGE dice quali idee reggono, e lascia il "quando entrare a mercato" al tuo sistema operativo di trading.</p>
+      </div>
+      <div>
+        <h4>Documentazione</h4>
+        <ul>
+          <li><a href="../manuale-it.md">Manuale completo</a></li>
+          <li><a href="../../src/forgedge/docs/specs/concepts_it.md">Evento, Alpha, Regola</a></li>
+          <li><a href="../../src/forgedge/docs/specs/configuration_it.md">Riferimento configurazione</a></li>
+          <li><a href="../../src/forgedge/docs/specs/deployment_it.md">Deployment</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Progetto</h4>
+        <ul>
+          <li><a href="https://github.com/mattcond/forgedge" target="_blank" rel="noopener">Repository GitHub</a></li>
+          <li><a href="../../README_it.md">README (italiano)</a></li>
+          <li><a href="../../README.md">README (English)</a></li>
+          <li><a href="../../LICENSE">Licenza MIT</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <span>FORGE — Feature-Oriented Rule Generation Engine</span>
+      <span>MIT License</span>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
