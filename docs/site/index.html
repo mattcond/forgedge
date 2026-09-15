@@ -215,6 +215,28 @@
     color: #FBF6EF;
     border-color: var(--accent);
   }
+  .langswitch {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .lang-btn {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.74rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .lang-btn + .lang-btn { border-left: 1px solid var(--border); }
+  .lang-btn[aria-pressed="true"] { background: var(--accent); color: #FBF6EF; }
+  .lang-btn:hover:not([aria-pressed="true"]) { color: var(--text); }
+  .lang-btn:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 
   /* ---------- hero ---------- */
   .hero {
@@ -579,12 +601,17 @@
   <div class="wrap topbar-inner">
     <div class="brand"><span class="mark">◆</span>FORGE<small>feature-oriented rule generation engine</small></div>
     <nav class="topnav">
-      <a href="#problema">Il problema</a>
-      <a href="#pipeline">Pipeline</a>
-      <a href="#concetti">Evento · Alpha · Regola</a>
-      <a href="#verdetti">Verdetti</a>
-      <a href="#quickstart">Quick start</a>
+      <a href="#problema" data-i18n="nav.problem">Il problema</a>
+      <a href="#pipeline" data-i18n="nav.pipeline">Pipeline</a>
+      <a href="#concetti" data-i18n="nav.concepts">Evento · Alpha · Regola</a>
+      <a href="#verdetti" data-i18n="nav.verdicts">Verdetti</a>
+      <a href="#quickstart" data-i18n="nav.quickstart">Quick start</a>
     </nav>
+    <noscript><style>.langswitch{display:none}</style></noscript>
+    <div class="langswitch" role="group" aria-label="Lingua / Language">
+      <button type="button" class="lang-btn" data-lang="it" aria-pressed="true">IT</button>
+      <button type="button" class="lang-btn" data-lang="en" aria-pressed="false">EN</button>
+    </div>
     <a class="btn solid" href="https://github.com/mattcond/forgedge" target="_blank" rel="noopener">GitHub ↗</a>
   </div>
 </div>
@@ -592,30 +619,30 @@
 <header class="hero">
   <div class="wrap hero-grid">
     <div>
-      <p class="eyebrow">Ricerca quantitativa · Python</p>
-      <h1 class="title">Ogni pattern<br>merita un<span class="accent"> verdetto onesto.</span></h1>
-      <p class="lede">FORGE è un motore open source per la <strong>scoperta sistematica di regole di trading algoritmico</strong> da dati storici di mercato. Prende una KPI table, ne estrae eventi con struttura temporale stabile, ne misura il potere predittivo e li mette alla prova in un backtest realistico — separando rigidamente ogni fase per non lasciare che il segnale "impari" il futuro prima del tempo.</p>
+      <p class="eyebrow" data-i18n="hero.eyebrow">Ricerca quantitativa · Python</p>
+      <h1 class="title" data-i18n="hero.title" data-i18n-html>Ogni pattern<br>merita un<span class="accent"> verdetto onesto.</span></h1>
+      <p class="lede" data-i18n="hero.lede" data-i18n-html>FORGE è un motore open source per la <strong>scoperta sistematica di regole di trading algoritmico</strong> da dati storici di mercato. Prende una KPI table, ne estrae eventi con struttura temporale stabile, ne misura il potere predittivo e li mette alla prova in un backtest realistico — separando rigidamente ogni fase per non lasciare che il segnale "impari" il futuro prima del tempo.</p>
       <div class="hero-ctas">
-        <a class="btn solid" href="#quickstart">Prova la pipeline</a>
-        <a class="btn" href="#pipeline">Come funziona →</a>
+        <a class="btn solid" href="#quickstart" data-i18n="hero.cta1">Prova la pipeline</a>
+        <a class="btn" href="#pipeline" data-i18n="hero.cta2">Come funziona →</a>
       </div>
       <div class="hero-stats">
-        <div class="stat"><div class="num">5</div><div class="lbl">moduli in pipeline</div></div>
-        <div class="stat"><div class="num">0</div><div class="lbl">dipendenze oltre numpy/pandas</div></div>
-        <div class="stat"><div class="num">4</div><div class="lbl">verdetti possibili</div></div>
-        <div class="stat"><div class="num">MIT</div><div class="lbl">licenza</div></div>
+        <div class="stat"><div class="num">5</div><div class="lbl" data-i18n="stat1.label">moduli in pipeline</div></div>
+        <div class="stat"><div class="num">0</div><div class="lbl" data-i18n="stat2.label">dipendenze oltre numpy/pandas</div></div>
+        <div class="stat"><div class="num">4</div><div class="lbl" data-i18n="stat3.label">verdetti possibili</div></div>
+        <div class="stat"><div class="num">MIT</div><div class="lbl" data-i18n="stat4.label">licenza</div></div>
       </div>
     </div>
 
-    <div class="terminal" role="img" aria-label="Esempio di utilizzo della libreria forgedge in Python">
+    <div class="terminal" role="img" data-i18n="terminal.aria" data-i18n-attr="aria-label" aria-label="Esempio di utilizzo della libreria forgedge in Python">
       <div class="terminal-head"><span></span><span></span><span></span><span class="path">python3 · quickstart.py</span></div>
       <pre><span class="c1">&gt;&gt;&gt;</span> <span class="c4">from</span> forgedge <span class="c4">import</span> forge
 <span class="c1">&gt;&gt;&gt;</span> kpi = pd.read_parquet(<span class="c3">"kpi_table.parquet"</span>)
 <span class="c1">&gt;&gt;&gt;</span>
-<span class="c1"># pipeline completa: dalla KPI table alle regole validate</span>
+<span class="c1" data-i18n="hc1"># pipeline completa: dalla KPI table alle regole validate</span>
 <span class="c1">&gt;&gt;&gt;</span> result = forge(kpi, ticker=<span class="c3">"BTCUSDC"</span>, timeframe=<span class="c3">"1H"</span>)
 <span class="c1">&gt;&gt;&gt;</span>
-<span class="c1"># EDGE / PARTIAL-EDGE soltanto, con motivazione allegata</span>
+<span class="c1" data-i18n="hc2"># EDGE / PARTIAL-EDGE soltanto, con motivazione allegata</span>
 <span class="c1">&gt;&gt;&gt;</span> <span class="c4">for</span> contract, response <span class="c4">in</span> result.edges():
 <span class="c1">...</span>     print(contract.alpha_id, response.verdict)
 <span class="c2">rsi14_spread_ema9_25   EDGE</span>
@@ -627,25 +654,25 @@
 <section id="problema">
   <div class="wrap">
     <div class="section-head">
-      <p class="eyebrow">Il problema</p>
-      <h2>"Avrebbe funzionato nel passato" è la frase più pericolosa della ricerca quant.</h2>
-      <p>Con abbastanza tempo, qualsiasi pattern può essere fatto sembrare un edge: basta scegliere le soglie giuste dopo aver visto i rendimenti. FORGE nasce per chiudere tre falle ricorrenti, una per una.</p>
+      <p class="eyebrow" data-i18n="problem.eyebrow">Il problema</p>
+      <h2 data-i18n="problem.h2">"Avrebbe funzionato nel passato" è la frase più pericolosa della ricerca quant.</h2>
+      <p data-i18n="problem.p">Con abbastanza tempo, qualsiasi pattern può essere fatto sembrare un edge: basta scegliere le soglie giuste dopo aver visto i rendimenti. FORGE nasce per chiudere tre falle ricorrenti, una per una.</p>
     </div>
     <div class="triptych">
       <article class="flaw">
         <p class="fnum">01</p>
-        <h3>Look-ahead bias</h3>
-        <p>Se la soglia di un evento viene scelta guardando quanto rende, la soglia "conosce" già il futuro. Ogni backtest che segue è circolare, non predittivo.</p>
+        <h3 data-i18n="flaw1.title">Look-ahead bias</h3>
+        <p data-i18n="flaw1.p">Se la soglia di un evento viene scelta guardando quanto rende, la soglia "conosce" già il futuro. Ogni backtest che segue è circolare, non predittivo.</p>
       </article>
       <article class="flaw">
         <p class="fnum">02</p>
-        <h3>Ottimizzazione in-sample</h3>
-        <p>Cercare il miglior orizzonte, il miglior take-profit e il miglior filtro sugli stessi dati usati per misurare il Profit Factor produce un PF che riflette il rumore del campione, non una struttura reale.</p>
+        <h3 data-i18n="flaw2.title">Ottimizzazione in-sample</h3>
+        <p data-i18n="flaw2.p">Cercare il miglior orizzonte, il miglior take-profit e il miglior filtro sugli stessi dati usati per misurare il Profit Factor produce un PF che riflette il rumore del campione, non una struttura reale.</p>
       </article>
       <article class="flaw">
         <p class="fnum">03</p>
-        <h3>Statistica ≠ operatività</h3>
-        <p>Un evento statisticamente predittivo non è automaticamente redditizio: fee, ordini limite non eseguiti e orizzonti da chiudere comunque cambiano tutto.</p>
+        <h3 data-i18n="flaw3.title">Statistica ≠ operatività</h3>
+        <p data-i18n="flaw3.p">Un evento statisticamente predittivo non è automaticamente redditizio: fee, ordini limite non eseguiti e orizzonti da chiudere comunque cambiano tutto.</p>
       </article>
     </div>
   </div>
@@ -654,50 +681,50 @@
 <section id="pipeline">
   <div class="wrap">
     <div class="section-head">
-      <p class="eyebrow">Pipeline a 5 moduli</p>
-      <h2>Ogni modulo risponde a una sola domanda, e passa avanti solo un artefatto formale.</h2>
-      <p>Nessun modulo accede ai dati del successivo. Nessuna soglia viene ricalibrata dopo la scoperta. Il flusso va in una sola direzione: dalla KPI table al report finale.</p>
+      <p class="eyebrow" data-i18n="pipeline.eyebrow">Pipeline a 5 moduli</p>
+      <h2 data-i18n="pipeline.h2">Ogni modulo risponde a una sola domanda, e passa avanti solo un artefatto formale.</h2>
+      <p data-i18n="pipeline.p">Nessun modulo accede ai dati del successivo. Nessuna soglia viene ricalibrata dopo la scoperta. Il flusso va in una sola direzione: dalla KPI table al report finale.</p>
     </div>
 
     <div class="pipeline">
       <div class="stage">
         <div class="stage-rail"><div class="stage-num">0</div></div>
         <div class="stage-body">
-          <h3>Market Context <span class="modtag">regime classification</span></h3>
-          <p>Classifica ogni barra della KPI table per regime di mercato su 5 livelli, così che l'edge scoperto possa in seguito essere letto anche per dipendenza dal contesto.</p>
-          <div class="out">Output → <code>regime</code>, <code>regime_stable</code></div>
+          <h3 data-i18n="stage0.h3" data-i18n-html>Market Context <span class="modtag">classificazione del regime</span></h3>
+          <p data-i18n="stage0.p">Classifica ogni barra della KPI table per regime di mercato su 5 livelli, così che l'edge scoperto possa in seguito essere letto anche per dipendenza dal contesto.</p>
+          <div class="out" data-i18n="stage0.out" data-i18n-html>Output → <code>regime</code>, <code>regime_stable</code></div>
         </div>
       </div>
       <div class="stage">
         <div class="stage-rail"><div class="stage-num">1</div></div>
         <div class="stage-body">
-          <h3>Event Discovery <span class="modtag">no forward return</span></h3>
-          <p>Scopre condizioni booleane dalla sola struttura temporale degli indicatori — frequenza, dispersione, stabilità mensile. Il rendimento futuro non entra mai in questo modulo.</p>
-          <div class="out">Output → <code>list[EventCandidate]</code></div>
+          <h3 data-i18n="stage1.h3" data-i18n-html>Event Discovery <span class="modtag">nessun forward return</span></h3>
+          <p data-i18n="stage1.p">Scopre condizioni booleane dalla sola struttura temporale degli indicatori — frequenza, dispersione, stabilità mensile. Il rendimento futuro non entra mai in questo modulo.</p>
+          <div class="out" data-i18n="stage1.out" data-i18n-html>Output → <code>list[EventCandidate]</code></div>
         </div>
       </div>
       <div class="stage">
         <div class="stage-rail"><div class="stage-num">2</div></div>
         <div class="stage-body">
-          <h3>Alpha Discovery <span class="modtag">target derivato dai dati</span></h3>
-          <p>Prima esposizione al forward return. Orizzonte, direzione e take-profit non sono assunti: sono misurati per ogni evento e confermati su una coda out-of-sample mai toccata prima.</p>
-          <div class="out">Output → <code>list[AlphaContract]</code></div>
+          <h3 data-i18n="stage2.h3" data-i18n-html>Alpha Discovery <span class="modtag">target derivato dai dati</span></h3>
+          <p data-i18n="stage2.p">Prima esposizione al forward return. Orizzonte, direzione e take-profit non sono assunti: sono misurati per ogni evento e confermati su una coda out-of-sample mai toccata prima.</p>
+          <div class="out" data-i18n="stage2.out" data-i18n-html>Output → <code>list[AlphaContract]</code></div>
         </div>
       </div>
       <div class="stage">
         <div class="stage-rail"><div class="stage-num">3</div></div>
         <div class="stage-body">
-          <h3>Rule Discovery <span class="modtag">backtest realistico</span></h3>
-          <p>Order mechanics, fee per lato, entrata a mercato o a limite, validazione walk-forward su finestre scorrevoli. Qui nasce il verdetto operativo.</p>
-          <div class="out">Output → <code>EDGE / PARTIAL-EDGE / NON-EDGE</code> + parametri</div>
+          <h3 data-i18n="stage3.h3" data-i18n-html>Rule Discovery <span class="modtag">backtest realistico</span></h3>
+          <p data-i18n="stage3.p">Order mechanics, fee per lato, entrata a mercato o a limite, validazione walk-forward su finestre scorrevoli. Qui nasce il verdetto operativo.</p>
+          <div class="out" data-i18n="stage3.out" data-i18n-html>Output → <code>EDGE / PARTIAL-EDGE / NON-EDGE</code> + parametri</div>
         </div>
       </div>
       <div class="stage">
         <div class="stage-rail"><div class="stage-num">4</div></div>
         <div class="stage-body">
-          <h3>Rule Registry <span class="modtag">generalizzazione cross-ticker</span></h3>
-          <p>Deduplica le regole scoperte, le ribacktesta su altri asset e le classifica per genericità. Produce una tabella piatta e un report HTML autocontenuto.</p>
-          <div class="out">Output → tabella + <code>report.html</code> (SVG inline, nessuna CDN)</div>
+          <h3 data-i18n="stage4.h3" data-i18n-html>Rule Registry <span class="modtag">generalizzazione cross-ticker</span></h3>
+          <p data-i18n="stage4.p">Deduplica le regole scoperte, le ribacktesta su altri asset e le classifica per genericità. Produce una tabella piatta e un report HTML autocontenuto.</p>
+          <div class="out" data-i18n="stage4.out" data-i18n-html>Output → tabella + <code>report.html</code> (SVG inline, nessuna CDN)</div>
         </div>
       </div>
     </div>
@@ -707,28 +734,28 @@
 <section id="concetti">
   <div class="wrap">
     <div class="section-head">
-      <p class="eyebrow">Tre concetti, tre confini</p>
-      <h2>Evento, Alpha, Regola: dal mercato al segnale, senza scorciatoie.</h2>
-      <p>Un segnale di trading nasce solo dall'intersezione dei tre accertamenti — mai da uno solo di essi.</p>
+      <p class="eyebrow" data-i18n="concepts.eyebrow">Tre concetti, tre confini</p>
+      <h2 data-i18n="concepts.h2">Evento, Alpha, Regola: dal mercato al segnale, senza scorciatoie.</h2>
+      <p data-i18n="concepts.p">Un segnale di trading nasce solo dall'intersezione dei tre accertamenti — mai da uno solo di essi.</p>
     </div>
     <div class="concepts">
       <article class="concept">
-        <p class="q">"Questa configurazione di mercato è stabile e ripetibile?"</p>
-        <h3>Evento</h3>
-        <p style="color:var(--text-muted); font-size:0.95rem;">Una condizione booleana su soglie <em>distribuzionali</em> — percentili calcolati sull'asset specifico, non valori assoluti — fissata prima di calcolare un solo rendimento futuro.</p>
-        <div class="gate">Gate → <b>ConsistencyGate</b> (frequenza, dispersione, no forward return)</div>
+        <p class="q" data-i18n="concept1.q">"Questa configurazione di mercato è stabile e ripetibile?"</p>
+        <h3 data-i18n="concept1.h3">Evento</h3>
+        <p style="color:var(--text-muted); font-size:0.95rem;" data-i18n="concept1.p" data-i18n-html>Una condizione booleana su soglie <em>distribuzionali</em> — percentili calcolati sull'asset specifico, non valori assoluti — fissata prima di calcolare un solo rendimento futuro.</p>
+        <div class="gate" data-i18n="concept1.gate" data-i18n-html>Gate → <b>ConsistencyGate</b> (frequenza, dispersione, no forward return)</div>
       </article>
       <article class="concept">
-        <p class="q">"Questo evento predice statisticamente un rendimento orientato?"</p>
-        <h3>Alpha</h3>
-        <p style="color:var(--text-muted); font-size:0.95rem;">Orizzonte, direzione e take-profit derivati dai dati scansionando una grid e standardizzando contro una null di rotazione circolare — mai imposti dall'utente.</p>
-        <div class="gate">Gate → <b>direction ≠ "undetermined"</b> (unico gate hard)</div>
+        <p class="q" data-i18n="concept2.q">"Questo evento predice statisticamente un rendimento orientato?"</p>
+        <h3 data-i18n="concept2.h3">Alpha</h3>
+        <p style="color:var(--text-muted); font-size:0.95rem;" data-i18n="concept2.p">Orizzonte, direzione e take-profit derivati dai dati scansionando una grid e standardizzando contro una null di rotazione circolare — mai imposti dall'utente.</p>
+        <div class="gate" data-i18n="concept2.gate" data-i18n-html>Gate → <b>direction ≠ "undetermined"</b> (unico gate hard)</div>
       </article>
       <article class="concept">
-        <p class="q">"Questo alpha è redditizio con meccaniche d'ordine reali?"</p>
-        <h3>Regola</h3>
-        <p style="color:var(--text-muted); font-size:0.95rem;">Backtest con fee, fill realistici e validazione walk-forward su finestre scorrevoli train/test — il verdetto finale, non una stima.</p>
-        <div class="gate">Gate → <b>EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA</b></div>
+        <p class="q" data-i18n="concept3.q">"Questo alpha è redditizio con meccaniche d'ordine reali?"</p>
+        <h3 data-i18n="concept3.h3">Regola</h3>
+        <p style="color:var(--text-muted); font-size:0.95rem;" data-i18n="concept3.p">Backtest con fee, fill realistici e validazione walk-forward su finestre scorrevoli train/test — il verdetto finale, non una stima.</p>
+        <div class="gate" data-i18n="concept3.gate" data-i18n-html>Gate → <b>EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA</b></div>
       </article>
     </div>
   </div>
@@ -737,26 +764,26 @@
 <section id="verdetti">
   <div class="wrap">
     <div class="section-head">
-      <p class="eyebrow">L'output finale</p>
-      <h2>Mai un punteggio black-box. Sempre un verdetto motivato.</h2>
-      <p>Rule Discovery integra gate hard e soft — Profit Factor, win rate, Sharpe deflazionato, dipendenza dal regime, consistenza walk-forward — in uno dei quattro esiti seguenti.</p>
+      <p class="eyebrow" data-i18n="verdicts.eyebrow">L'output finale</p>
+      <h2 data-i18n="verdicts.h2">Mai un punteggio black-box. Sempre un verdetto motivato.</h2>
+      <p data-i18n="verdicts.p">Rule Discovery integra gate hard e soft — Profit Factor, win rate, Sharpe deflazionato, dipendenza dal regime, consistenza walk-forward — in uno dei quattro esiti seguenti.</p>
     </div>
     <div class="verdicts">
       <div class="vcard edge">
         <span class="badge">EDGE</span>
-        <p>PF ≥ 2.0, win rate ≥ 55%, walk-forward consistency ≥ 50%, supera la null di rotazione a livello di sessione.</p>
+        <p data-i18n="vcard1.p">PF ≥ 2.0, win rate ≥ 55%, walk-forward consistency ≥ 50%, supera la null di rotazione a livello di sessione.</p>
       </div>
       <div class="vcard partial">
         <span class="badge">PARTIAL-EDGE</span>
-        <p>Supera i gate hard ma non tutti i gate EDGE: evidenza reale, non ancora operativamente solida.</p>
+        <p data-i18n="vcard2.p">Supera i gate hard ma non tutti i gate EDGE: evidenza reale, non ancora operativamente solida.</p>
       </div>
       <div class="vcard nonedge">
         <span class="badge">NON-EDGE</span>
-        <p>PF &lt; 1.5, mesi tutti negativi, o nessuna configurazione con fill rate adeguato.</p>
+        <p data-i18n="vcard3.p">PF &lt; 1.5, mesi tutti negativi, o nessuna configurazione con fill rate adeguato.</p>
       </div>
       <div class="vcard insuff">
         <span class="badge">INSUFFICIENT-DATA</span>
-        <p>Evidenza OOS troppo esigua per un giudizio con fiducia — non tradeable, ma non scartata: si rivaluta con più dati.</p>
+        <p data-i18n="vcard4.p">Evidenza OOS troppo esigua per un giudizio con fiducia — non tradeable, ma non scartata: si rivaluta con più dati.</p>
       </div>
     </div>
   </div>
@@ -765,30 +792,30 @@
 <section id="invarianti">
   <div class="wrap">
     <div class="section-head">
-      <p class="eyebrow">Cosa impedisce, non cosa promette</p>
-      <h2>Quattro invarianti che la pipeline non può violare.</h2>
+      <p class="eyebrow" data-i18n="invariants.eyebrow">Cosa impedisce, non cosa promette</p>
+      <h2 data-i18n="invariants.h2">Quattro invarianti che la pipeline non può violare.</h2>
     </div>
     <div class="tbl-scroll">
     <table class="invariants">
       <thead>
-        <tr><th>Invariante</th><th>Cosa impedisce</th></tr>
+        <tr><th data-i18n="invariants.th1">Invariante</th><th data-i18n="invariants.th2">Cosa impedisce</th></tr>
       </thead>
       <tbody>
         <tr>
-          <td>Modulo 1 non vede mai il forward return</td>
-          <td>Look-ahead bias nella selezione dell'evento</td>
+          <td data-i18n="row1.td1">Modulo 1 non vede mai il forward return</td>
+          <td data-i18n="row1.td2">Look-ahead bias nella selezione dell'evento</td>
         </tr>
         <tr>
-          <td>Le soglie sono immutabili dopo la scoperta</td>
-          <td>Ottimizzazione delle soglie sul campione di valutazione</td>
+          <td data-i18n="row2.td1">Le soglie sono immutabili dopo la scoperta</td>
+          <td data-i18n="row2.td2">Ottimizzazione delle soglie sul campione di valutazione</td>
         </tr>
         <tr>
-          <td>Orizzonte, direzione e take-profit sono derivati dai dati per ogni evento</td>
-          <td>Assunzioni economiche che precuociono il risultato</td>
+          <td data-i18n="row3.td1">Orizzonte, direzione e take-profit sono derivati dai dati per ogni evento</td>
+          <td data-i18n="row3.td2">Assunzioni economiche che precuociono il risultato</td>
         </tr>
         <tr>
-          <td>Il verdetto tradeable è vincolato al walk-forward OOS (Modulo 3)</td>
-          <td>Conferma a posteriori di una conclusione già scontata</td>
+          <td data-i18n="row4.td1">Il verdetto tradeable è vincolato al walk-forward OOS (Modulo 3)</td>
+          <td data-i18n="row4.td2">Conferma a posteriori di una conclusione già scontata</td>
         </tr>
       </tbody>
     </table>
@@ -799,40 +826,40 @@
 <section id="quickstart">
   <div class="wrap">
     <div class="section-head">
-      <p class="eyebrow">Quick start</p>
-      <h2>Dalla KPI table alle regole validate, in una chiamata.</h2>
-      <p>FORGE dipende solo da <code>numpy</code> e <code>pandas</code>. Tutte le primitive statistiche — Spearman, t-test, regressione OU, FDR di Benjamini-Hochberg, beta incompleta — sono implementate in puro numpy: nessuna dipendenza da scipy, statsmodels o librerie ML.</p>
+      <p class="eyebrow" data-i18n="nav.quickstart">Quick start</p>
+      <h2 data-i18n="quickstart.h2">Dalla KPI table alle regole validate, in una chiamata.</h2>
+      <p data-i18n="quickstart.p" data-i18n-html>FORGE dipende solo da <code>numpy</code> e <code>pandas</code>. Tutte le primitive statistiche — Spearman, t-test, regressione OU, FDR di Benjamini-Hochberg, beta incompleta — sono implementate in puro numpy: nessuna dipendenza da scipy, statsmodels o librerie ML.</p>
     </div>
 
     <div class="install-line"><span class="prompt">$</span> pip install forgedge</div>
 
     <div class="quickstart-grid">
       <div class="terminal">
-        <div class="terminal-head"><span></span><span></span><span></span><span class="path">single ticker</span></div>
+        <div class="terminal-head"><span></span><span></span><span></span><span class="path" data-i18n="qs.terminal1.path">single ticker</span></div>
         <pre><span class="c4">from</span> forgedge <span class="c4">import</span> forge
 
 kpi = pd.read_parquet(<span class="c3">"kpi_table.parquet"</span>)
 result = forge(kpi, ticker=<span class="c3">"BTCUSDC"</span>, timeframe=<span class="c3">"1H"</span>)
 
 print(result.summary())
-<span class="c1"># una riga per candidato + rule_verdict</span>
+<span class="c1" data-i18n="qc1"># una riga per candidato + rule_verdict</span>
 
 print(result.registry.summary())
-<span class="c1"># Modulo 4 — regole catalogate</span></pre>
+<span class="c1" data-i18n="qc2"># Modulo 4 — regole catalogate</span></pre>
       </div>
       <div class="terminal">
-        <div class="terminal-head"><span></span><span></span><span></span><span class="path">multi-ticker + report</span></div>
+        <div class="terminal-head"><span></span><span></span><span></span><span class="path" data-i18n="qs.terminal2.path">multi-ticker + report</span></div>
         <pre><span class="c4">from</span> forgedge <span class="c4">import</span> forge_multi
 
 frames = {<span class="c3">"BTCUSDC"</span>: btc, <span class="c3">"ETHUSDC"</span>: eth}
 results, registry = forge_multi(frames, timeframe=<span class="c3">"1H"</span>)
 
-<span class="c1"># GENERIC: la regola regge su ≥ 2/3 dei ticker</span>
+<span class="c1" data-i18n="qc3"># GENERIC: la regola regge su ≥ 2/3 dei ticker</span>
 df = registry.flat_table()
 
 html = registry.html_report(timeframe=<span class="c3">"1H"</span>)
 open(<span class="c3">"report.html"</span>, <span class="c3">"w"</span>).write(html)
-<span class="c1"># SVG inline, autocontenuto, nessuna CDN</span></pre>
+<span class="c1" data-i18n="qc4"># SVG inline, autocontenuto, nessuna CDN</span></pre>
       </div>
     </div>
   </div>
@@ -843,24 +870,24 @@ open(<span class="c3">"report.html"</span>, <span class="c3">"w"</span>).write(h
     <div class="foot-grid">
       <div>
         <div class="brand" style="font-size:1.1rem;"><span class="mark">◆</span>FORGE</div>
-        <p style="color:var(--text-muted); font-size:0.9rem; max-width:38ch; margin-top:10px;">Un sistema di ricerca, non un sistema di esecuzione: FORGE dice quali idee reggono, e lascia il "quando entrare a mercato" al tuo sistema operativo di trading.</p>
+        <p style="color:var(--text-muted); font-size:0.9rem; max-width:38ch; margin-top:10px;" data-i18n="footer.desc">Un sistema di ricerca, non un sistema di esecuzione: FORGE dice quali idee reggono, e lascia il "quando entrare a mercato" al tuo sistema operativo di trading.</p>
       </div>
       <div>
-        <h4>Documentazione</h4>
+        <h4 data-i18n="footer.h4.docs">Documentazione</h4>
         <ul>
-          <li><a href="../manuale-it.md">Manuale completo</a></li>
-          <li><a href="../../src/forgedge/docs/specs/concepts_it.md">Evento, Alpha, Regola</a></li>
-          <li><a href="../../src/forgedge/docs/specs/configuration_it.md">Riferimento configurazione</a></li>
-          <li><a href="../../src/forgedge/docs/specs/deployment_it.md">Deployment</a></li>
+          <li><a href="../manuale-it.md" data-i18n="footer.docs.link1" data-i18n-href="footer.docs.link1">Manuale completo</a></li>
+          <li><a href="../../src/forgedge/docs/specs/concepts_it.md" data-i18n="footer.docs.link2" data-i18n-href="footer.docs.link2">Evento, Alpha, Regola</a></li>
+          <li><a href="../../src/forgedge/docs/specs/configuration_it.md" data-i18n="footer.docs.link3" data-i18n-href="footer.docs.link3">Riferimento configurazione</a></li>
+          <li><a href="../../src/forgedge/docs/specs/deployment_it.md" data-i18n="footer.docs.link4" data-i18n-href="footer.docs.link4">Deployment</a></li>
         </ul>
       </div>
       <div>
-        <h4>Progetto</h4>
+        <h4 data-i18n="footer.h4.project">Progetto</h4>
         <ul>
           <li><a href="https://github.com/mattcond/forgedge" target="_blank" rel="noopener">Repository GitHub</a></li>
           <li><a href="../../README_it.md">README (italiano)</a></li>
           <li><a href="../../README.md">README (English)</a></li>
-          <li><a href="../../LICENSE">Licenza MIT</a></li>
+          <li><a href="../../LICENSE" data-i18n="footer.project.license">Licenza MIT</a></li>
         </ul>
       </div>
     </div>
@@ -870,6 +897,199 @@ open(<span class="c3">"report.html"</span>, <span class="c3">"w"</span>).write(h
     </div>
   </div>
 </footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var I18N = {
+    "nav.problem": { it: "Il problema", en: "The problem" },
+    "nav.pipeline": { it: "Pipeline", en: "Pipeline" },
+    "nav.concepts": { it: "Evento · Alpha · Regola", en: "Event · Alpha · Rule" },
+    "nav.verdicts": { it: "Verdetti", en: "Verdicts" },
+    "nav.quickstart": { it: "Quick start", en: "Quick start" },
+
+    "hero.eyebrow": { it: "Ricerca quantitativa · Python", en: "Quantitative research · Python" },
+    "hero.title": {
+      it: 'Ogni pattern<br>merita un<span class="accent"> verdetto onesto.</span>',
+      en: 'Every pattern<br>deserves an<span class="accent"> honest verdict.</span>'
+    },
+    "hero.lede": {
+      it: 'FORGE è un motore open source per la <strong>scoperta sistematica di regole di trading algoritmico</strong> da dati storici di mercato. Prende una KPI table, ne estrae eventi con struttura temporale stabile, ne misura il potere predittivo e li mette alla prova in un backtest realistico — separando rigidamente ogni fase per non lasciare che il segnale "impari" il futuro prima del tempo.',
+      en: 'FORGE is an open-source engine for the <strong>systematic discovery of algorithmic trading rules</strong> from historical market data. It takes a KPI table, extracts events with stable temporal structure, measures their predictive power, and puts them through a realistic backtest — strictly separating every stage so the signal never "learns" the future ahead of time.'
+    },
+    "hero.cta1": { it: "Prova la pipeline", en: "Try the pipeline" },
+    "hero.cta2": { it: "Come funziona →", en: "How it works →" },
+
+    "stat1.label": { it: "moduli in pipeline", en: "pipeline modules" },
+    "stat2.label": { it: "dipendenze oltre numpy/pandas", en: "dependencies beyond numpy/pandas" },
+    "stat3.label": { it: "verdetti possibili", en: "possible verdicts" },
+    "stat4.label": { it: "licenza", en: "license" },
+
+    "terminal.aria": { it: "Esempio di utilizzo della libreria forgedge in Python", en: "Example usage of the forgedge Python library" },
+    "hc1": { it: "# pipeline completa: dalla KPI table alle regole validate", en: "# full pipeline: from KPI table to validated rules" },
+    "hc2": { it: "# EDGE / PARTIAL-EDGE soltanto, con motivazione allegata", en: "# EDGE / PARTIAL-EDGE only, with reasoning attached" },
+
+    "problem.eyebrow": { it: "Il problema", en: "The problem" },
+    "problem.h2": { it: '"Avrebbe funzionato nel passato" è la frase più pericolosa della ricerca quant.', en: '"It would have worked in the past" is the most dangerous sentence in quant research.' },
+    "problem.p": { it: "Con abbastanza tempo, qualsiasi pattern può essere fatto sembrare un edge: basta scegliere le soglie giuste dopo aver visto i rendimenti. FORGE nasce per chiudere tre falle ricorrenti, una per una.", en: "Given enough time, any pattern can be made to look like an edge: just pick the right thresholds after seeing the returns. FORGE exists to close three recurring gaps, one by one." },
+
+    "flaw1.title": { it: "Look-ahead bias", en: "Look-ahead bias" },
+    "flaw1.p": { it: 'Se la soglia di un evento viene scelta guardando quanto rende, la soglia "conosce" già il futuro. Ogni backtest che segue è circolare, non predittivo.', en: 'If an event\'s threshold is chosen by looking at how much it returns, the threshold already "knows" the future. Every backtest that follows is circular, not predictive.' },
+    "flaw2.title": { it: "Ottimizzazione in-sample", en: "In-sample optimisation" },
+    "flaw2.p": { it: "Cercare il miglior orizzonte, il miglior take-profit e il miglior filtro sugli stessi dati usati per misurare il Profit Factor produce un PF che riflette il rumore del campione, non una struttura reale.", en: "Searching for the best horizon, take-profit and filter on the same data used to measure the Profit Factor produces a PF that reflects sample noise, not real structure." },
+    "flaw3.title": { it: "Statistica ≠ operatività", en: "Statistics ≠ profitability" },
+    "flaw3.p": { it: "Un evento statisticamente predittivo non è automaticamente redditizio: fee, ordini limite non eseguiti e orizzonti da chiudere comunque cambiano tutto.", en: "A statistically predictive event is not automatically profitable: fees, unfilled limit orders and horizons that must close regardless change everything." },
+
+    "pipeline.eyebrow": { it: "Pipeline a 5 moduli", en: "5-module pipeline" },
+    "pipeline.h2": { it: "Ogni modulo risponde a una sola domanda, e passa avanti solo un artefatto formale.", en: "Each module answers exactly one question, and passes forward only a formal artefact." },
+    "pipeline.p": { it: "Nessun modulo accede ai dati del successivo. Nessuna soglia viene ricalibrata dopo la scoperta. Il flusso va in una sola direzione: dalla KPI table al report finale.", en: "No module accesses the next module's data. No threshold is recalibrated after discovery. The flow runs in one direction only: from the KPI table to the final report." },
+
+    "stage0.h3": { it: 'Market Context <span class="modtag">classificazione del regime</span>', en: 'Market Context <span class="modtag">regime classification</span>' },
+    "stage0.p": { it: "Classifica ogni barra della KPI table per regime di mercato su 5 livelli, così che l'edge scoperto possa in seguito essere letto anche per dipendenza dal contesto.", en: "Classifies every bar of the KPI table by market regime across 5 levels, so the discovered edge can later be read for context dependency too." },
+    "stage0.out": { it: 'Output → <code>regime</code>, <code>regime_stable</code>', en: 'Output → <code>regime</code>, <code>regime_stable</code>' },
+
+    "stage1.h3": { it: 'Event Discovery <span class="modtag">nessun forward return</span>', en: 'Event Discovery <span class="modtag">no forward return</span>' },
+    "stage1.p": { it: "Scopre condizioni booleane dalla sola struttura temporale degli indicatori — frequenza, dispersione, stabilità mensile. Il rendimento futuro non entra mai in questo modulo.", en: "Discovers boolean conditions purely from the temporal structure of indicators — frequency, dispersion, monthly stability. The forward return never enters this module." },
+    "stage1.out": { it: 'Output → <code>list[EventCandidate]</code>', en: 'Output → <code>list[EventCandidate]</code>' },
+
+    "stage2.h3": { it: 'Alpha Discovery <span class="modtag">target derivato dai dati</span>', en: 'Alpha Discovery <span class="modtag">data-derived target</span>' },
+    "stage2.p": { it: "Prima esposizione al forward return. Orizzonte, direzione e take-profit non sono assunti: sono misurati per ogni evento e confermati su una coda out-of-sample mai toccata prima.", en: "First exposure to the forward return. Horizon, direction and take-profit are never assumed: they are measured per event and confirmed on an out-of-sample tail never touched before." },
+    "stage2.out": { it: 'Output → <code>list[AlphaContract]</code>', en: 'Output → <code>list[AlphaContract]</code>' },
+
+    "stage3.h3": { it: 'Rule Discovery <span class="modtag">backtest realistico</span>', en: 'Rule Discovery <span class="modtag">realistic backtest</span>' },
+    "stage3.p": { it: "Order mechanics, fee per lato, entrata a mercato o a limite, validazione walk-forward su finestre scorrevoli. Qui nasce il verdetto operativo.", en: "Order mechanics, per-side fees, market or limit entry, walk-forward validation on rolling windows. This is where the operational verdict is born." },
+    "stage3.out": { it: 'Output → <code>EDGE / PARTIAL-EDGE / NON-EDGE</code> + parametri', en: 'Output → <code>EDGE / PARTIAL-EDGE / NON-EDGE</code> + operational parameters' },
+
+    "stage4.h3": { it: 'Rule Registry <span class="modtag">generalizzazione cross-ticker</span>', en: 'Rule Registry <span class="modtag">cross-ticker generalisation</span>' },
+    "stage4.p": { it: "Deduplica le regole scoperte, le ribacktesta su altri asset e le classifica per genericità. Produce una tabella piatta e un report HTML autocontenuto.", en: "Deduplicates discovered rules, re-backtests them on other assets, and classifies them by genericity. Produces a flat table and a self-contained HTML report." },
+    "stage4.out": { it: 'Output → tabella + <code>report.html</code> (SVG inline, nessuna CDN)', en: 'Output → table + <code>report.html</code> (inline SVG, no CDN)' },
+
+    "concepts.eyebrow": { it: "Tre concetti, tre confini", en: "Three concepts, three boundaries" },
+    "concepts.h2": { it: "Evento, Alpha, Regola: dal mercato al segnale, senza scorciatoie.", en: "Event, Alpha, Rule: from market to signal, no shortcuts." },
+    "concepts.p": { it: "Un segnale di trading nasce solo dall'intersezione dei tre accertamenti — mai da uno solo di essi.", en: "A trading signal is born only at the intersection of all three assessments — never from just one of them." },
+
+    "concept1.q": { it: '"Questa configurazione di mercato è stabile e ripetibile?"', en: '"Is this market configuration stable and repeatable?"' },
+    "concept1.h3": { it: "Evento", en: "Event" },
+    "concept1.p": { it: 'Una condizione booleana su soglie <em>distribuzionali</em> — percentili calcolati sull\'asset specifico, non valori assoluti — fissata prima di calcolare un solo rendimento futuro.', en: 'A boolean condition on <em>distributional</em> thresholds — percentiles computed on the specific asset, not absolute values — fixed before a single forward return is ever computed.' },
+    "concept1.gate": { it: 'Gate → <b>ConsistencyGate</b> (frequenza, dispersione, no forward return)', en: 'Gate → <b>ConsistencyGate</b> (frequency, dispersion, no forward return)' },
+
+    "concept2.q": { it: '"Questo evento predice statisticamente un rendimento orientato?"', en: '"Does this event statistically predict an oriented return?"' },
+    "concept2.h3": { it: "Alpha", en: "Alpha" },
+    "concept2.p": { it: "Orizzonte, direzione e take-profit derivati dai dati scansionando una grid e standardizzando contro una null di rotazione circolare — mai imposti dall'utente.", en: "Horizon, direction and take-profit derived from the data by scanning a grid and standardising against a circular rotation null — never imposed by the user." },
+    "concept2.gate": { it: 'Gate → <b>direction ≠ "undetermined"</b> (unico gate hard)', en: 'Gate → <b>direction ≠ "undetermined"</b> (the only hard gate)' },
+
+    "concept3.q": { it: '"Questo alpha è redditizio con meccaniche d\'ordine reali?"', en: '"Is this alpha profitable under real order mechanics?"' },
+    "concept3.h3": { it: "Regola", en: "Rule" },
+    "concept3.p": { it: "Backtest con fee, fill realistici e validazione walk-forward su finestre scorrevoli train/test — il verdetto finale, non una stima.", en: "A backtest with fees, realistic fills and walk-forward validation on rolling train/test windows — the final verdict, not an estimate." },
+    "concept3.gate": { it: 'Gate → <b>EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA</b>', en: 'Gate → <b>EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA</b>' },
+
+    "verdicts.eyebrow": { it: "L'output finale", en: "The final output" },
+    "verdicts.h2": { it: "Mai un punteggio black-box. Sempre un verdetto motivato.", en: "Never a black-box score. Always a reasoned verdict." },
+    "verdicts.p": { it: "Rule Discovery integra gate hard e soft — Profit Factor, win rate, Sharpe deflazionato, dipendenza dal regime, consistenza walk-forward — in uno dei quattro esiti seguenti.", en: "Rule Discovery integrates hard and soft gates — Profit Factor, win rate, deflated Sharpe, regime dependency, walk-forward consistency — into one of the four outcomes below." },
+
+    "vcard1.p": { it: "PF ≥ 2.0, win rate ≥ 55%, walk-forward consistency ≥ 50%, supera la null di rotazione a livello di sessione.", en: "PF ≥ 2.0, win rate ≥ 55%, walk-forward consistency ≥ 50%, beats the session-level rotation null." },
+    "vcard2.p": { it: "Supera i gate hard ma non tutti i gate EDGE: evidenza reale, non ancora operativamente solida.", en: "Clears the hard gates but not every EDGE gate: real evidence, not yet operationally solid." },
+    "vcard3.p": { it: "PF &lt; 1.5, mesi tutti negativi, o nessuna configurazione con fill rate adeguato.", en: "PF &lt; 1.5, every month negative, or no configuration with an adequate fill rate." },
+    "vcard4.p": { it: "Evidenza OOS troppo esigua per un giudizio con fiducia — non tradeable, ma non scartata: si rivaluta con più dati.", en: "OOS evidence too thin for a confident judgement — not tradeable, but not discarded: re-assessed as more data arrives." },
+
+    "invariants.eyebrow": { it: "Cosa impedisce, non cosa promette", en: "What it prevents, not what it promises" },
+    "invariants.h2": { it: "Quattro invarianti che la pipeline non può violare.", en: "Four invariants the pipeline cannot violate." },
+    "invariants.th1": { it: "Invariante", en: "Invariant" },
+    "invariants.th2": { it: "Cosa impedisce", en: "What it prevents" },
+
+    "row1.td1": { it: "Modulo 1 non vede mai il forward return", en: "Module 1 never sees the forward return" },
+    "row1.td2": { it: "Look-ahead bias nella selezione dell'evento", en: "Look-ahead bias in event selection" },
+    "row2.td1": { it: "Le soglie sono immutabili dopo la scoperta", en: "Thresholds are immutable after discovery" },
+    "row2.td2": { it: "Ottimizzazione delle soglie sul campione di valutazione", en: "Threshold optimisation on the evaluation sample" },
+    "row3.td1": { it: "Orizzonte, direzione e take-profit sono derivati dai dati per ogni evento", en: "Horizon, direction and take-profit are derived from data per event" },
+    "row3.td2": { it: "Assunzioni economiche che precuociono il risultato", en: "Economic assumptions pre-baking the result" },
+    "row4.td1": { it: "Il verdetto tradeable è vincolato al walk-forward OOS (Modulo 3)", en: "The tradeable verdict is gated by walk-forward OOS (Module 3)" },
+    "row4.td2": { it: "Conferma a posteriori di una conclusione già scontata", en: "Post-hoc confirmation of a foregone conclusion" },
+
+    "quickstart.h2": { it: "Dalla KPI table alle regole validate, in una chiamata.", en: "From KPI table to validated rules, in a single call." },
+    "quickstart.p": { it: 'FORGE dipende solo da <code>numpy</code> e <code>pandas</code>. Tutte le primitive statistiche — Spearman, t-test, regressione OU, FDR di Benjamini-Hochberg, beta incompleta — sono implementate in puro numpy: nessuna dipendenza da scipy, statsmodels o librerie ML.', en: 'FORGE depends solely on <code>numpy</code> and <code>pandas</code>. All statistical primitives — Spearman, t-test, OU regression, Benjamini-Hochberg FDR, incomplete beta — are implemented in pure numpy: no dependency on scipy, statsmodels or ML libraries.' },
+
+    "qs.terminal1.path": { it: "single ticker", en: "single ticker" },
+    "qs.terminal2.path": { it: "multi-ticker + report", en: "multi-ticker + report" },
+    "qc1": { it: "# una riga per candidato + rule_verdict", en: "# one row per candidate + rule_verdict" },
+    "qc2": { it: "# Modulo 4 — regole catalogate", en: "# Module 4 — catalogued rules" },
+    "qc3": { it: "# GENERIC: la regola regge su ≥ 2/3 dei ticker", en: "# GENERIC: rule holds on ≥ 2/3 of tickers" },
+    "qc4": { it: "# SVG inline, autocontenuto, nessuna CDN", en: "# inline SVG, self-contained, no CDN" },
+
+    "footer.desc": { it: 'Un sistema di ricerca, non un sistema di esecuzione: FORGE dice quali idee reggono, e lascia il "quando entrare a mercato" al tuo sistema operativo di trading.', en: 'A research system, not an execution system: FORGE tells you which ideas hold up, and leaves "when to enter the market" to your own trading execution system.' },
+    "footer.h4.docs": { it: "Documentazione", en: "Documentation" },
+    "footer.docs.link1": { it: "Manuale completo", en: "Full manual" },
+    "footer.docs.link2": { it: "Evento, Alpha, Regola", en: "Event, Alpha, Rule" },
+    "footer.docs.link3": { it: "Riferimento configurazione", en: "Configuration reference" },
+    "footer.docs.link4": { it: "Deployment", en: "Deployment" },
+    "footer.h4.project": { it: "Progetto", en: "Project" },
+    "footer.project.license": { it: "Licenza MIT", en: "MIT License" }
+  };
+
+  var HREF = {
+    "footer.docs.link1": { it: "../manuale-it.md", en: "../manual-en.md" },
+    "footer.docs.link2": { it: "../../src/forgedge/docs/specs/concepts_it.md", en: "../../src/forgedge/docs/specs/concepts_en.md" },
+    "footer.docs.link3": { it: "../../src/forgedge/docs/specs/configuration_it.md", en: "../../src/forgedge/docs/specs/configuration_en.md" },
+    "footer.docs.link4": { it: "../../src/forgedge/docs/specs/deployment_it.md", en: "../../src/forgedge/docs/specs/deployment_en.md" }
+  };
+
+  var TITLES = {
+    it: "FORGE — Motore di scoperta regole di trading",
+    en: "FORGE — Trading Rule Discovery Engine"
+  };
+  var DESCRIPTIONS = {
+    it: "FORGE è un motore open source per la scoperta sistematica di regole di trading algoritmico da dati storici, con pipeline anti look-ahead bias, validazione walk-forward out-of-sample e verdetti EDGE / PARTIAL-EDGE / NON-EDGE.",
+    en: "FORGE is an open-source engine for the systematic discovery of algorithmic trading rules from historical market data, with an anti look-ahead-bias pipeline, walk-forward out-of-sample validation, and EDGE / PARTIAL-EDGE / NON-EDGE verdicts."
+  };
+
+  function applyLang(lang) {
+    document.querySelectorAll("[data-i18n]").forEach(function (el) {
+      var key = el.getAttribute("data-i18n");
+      var entry = I18N[key];
+      if (!entry) return;
+      var val = entry[lang] || entry.it;
+      if (el.hasAttribute("data-i18n-attr")) {
+        el.setAttribute(el.getAttribute("data-i18n-attr"), val);
+      } else if (el.hasAttribute("data-i18n-html")) {
+        el.innerHTML = val;
+      } else {
+        el.textContent = val;
+      }
+    });
+    document.querySelectorAll("[data-i18n-href]").forEach(function (el) {
+      var key = el.getAttribute("data-i18n-href");
+      var hrefs = HREF[key];
+      if (hrefs) el.setAttribute("href", hrefs[lang] || hrefs.it);
+    });
+    document.documentElement.setAttribute("lang", lang);
+    document.title = TITLES[lang] || TITLES.it;
+    var metaDesc = document.querySelector('meta[name="description"]');
+    if (metaDesc) metaDesc.setAttribute("content", DESCRIPTIONS[lang] || DESCRIPTIONS.it);
+    document.querySelectorAll(".lang-btn").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-lang") === lang));
+    });
+    try { localStorage.setItem("forge_lang", lang); } catch (e) {}
+  }
+
+  document.querySelectorAll(".lang-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      applyLang(btn.getAttribute("data-lang"));
+    });
+  });
+
+  var initialLang = "it";
+  try {
+    var saved = localStorage.getItem("forge_lang");
+    if (saved === "it" || saved === "en") {
+      initialLang = saved;
+    } else if (navigator.language && navigator.language.toLowerCase().indexOf("it") !== 0) {
+      initialLang = "en";
+    }
+  } catch (e) {}
+  applyLang(initialLang);
+})();
+</script>
 
 </body>
 </html>
