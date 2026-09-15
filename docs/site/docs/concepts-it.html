@@ -1,19 +1,20 @@
-<!doctype html>
+<!DOCTYPE html>
+
 <html lang="it">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1, viewport-fit=cover" name="viewport"/>
 <title>Evento, Alpha, Regola — FORGE</title>
-<meta name="description" content="Guida concettuale di FORGE: come nasce un segnale di trading da evento, alpha e regola." />
-<meta name="robots" content="index, follow" />
-<link rel="canonical" href="https://forgedge.it/docs/concepts-it.html" />
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../assets/docs.css">
+<meta content="Guida concettuale di FORGE: come nasce un segnale di trading da evento, alpha e regola." name="description"/>
+<meta content="index, follow" name="robots"/>
+<link href="https://forgedge.it/docs/concepts-it.html" rel="canonical"/><link href="https://forgedge.it/docs/concepts-it.html" hreflang="x-default" rel="alternate"/><link href="https://forgedge.it/docs/concepts-en.html" hreflang="en" rel="alternate"/><link href="https://forgedge.it/docs/concepts-it.html" hreflang="it" rel="alternate"/>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="../assets/docs.css" rel="stylesheet"/>
 </head>
 <body>
-<a class="back" href="../index.html">&larr; FORGE</a>
+<a class="back" href="/">← FORGE</a>
 <main>
 <article id="content">
 <h1 id="forge-dal-mercato-al-segnale-evento-alpha-e-regola">FORGE — Dal Mercato al Segnale: Evento, Alpha e Regola</h1>
@@ -22,7 +23,7 @@ storici, costruendo progressivamente i tre concetti fondamentali del sistema:
 l'<strong>evento</strong>, l'<strong>alpha</strong> e la <strong>regola</strong>. Ogni concetto risponde a una domanda
 precisa e produce un artefatto formale che il successivo riceve in input — senza
 mai retrocedere dati, riaprire ottimizzazioni chiuse, o mescolare i domini.</p>
-<hr />
+<hr/>
 <h2 id="il-problema-che-forge-affronta">Il problema che FORGE affronta</h2>
 <p>La ricerca di trading edge sistematica è infestata da un paradosso: è sempre
 possibile trovare pattern che "avrebbero funzionato" nel passato. Basta
@@ -51,7 +52,7 @@ attraente e una strategia che in produzione non funziona.</p>
 <p>FORGE risponde a questi tre problemi con una pipeline a tre moduli separati da
 confini formali: nessun modulo può accedere ai dati del successivo, nessuna
 soglia può essere ricalibrata dopo la scoperta.</p>
-<hr />
+<hr/>
 <h2 id="1-levento-osservare-il-mercato-senza-pregiudizi">1. L'Evento: Osservare il Mercato senza Pregiudizi</h2>
 <h3 id="definizione">Definizione</h3>
 <p>Un <strong>evento</strong> è una condizione booleana su barre storiche: per ogni barra della
@@ -162,7 +163,7 @@ un nuovo campione IS.</p>
 dopo aver visto i rendimenti.</p>
 <h3 id="artefatto-eventcandidate">Artefatto: <code>EventCandidate</code></h3>
 <pre><code class="language-python">c = candidates[0]
-c.expression      # &quot;rsi_14 &lt; 31.2 AND spread_ema_9_25 &lt; -0.0118&quot;
+c.expression      # "rsi_14 &lt; 31.2 AND spread_ema_9_25 &lt; -0.0118"
 c.event_formula   # versione human-readable con notazione percentile
 c.activation_stats.n_activations  # 87 attivazioni IS
 c.activation_stats.n_active_months # attivo in 18 mesi diversi
@@ -172,7 +173,7 @@ signal = c.apply(new_kpi_table)   # pd.Series bool
 </code></pre>
 <p>L'EventCandidate è portabile: può essere applicato a dati futuri senza
 richiedere la sessione di scoperta. Le soglie sono salvate nelle componenti.</p>
-<hr />
+<hr/>
 <h2 id="2-lalpha-misurare-il-potere-predittivo">2. L'Alpha: Misurare il Potere Predittivo</h2>
 <h3 id="il-passaggio-al-forward-return">Il passaggio al forward return</h3>
 <p>Un evento descrive una configurazione di mercato. Ma non dice nulla su cosa
@@ -353,26 +354,26 @@ promozione: è un'indicazione della forza dell'evidenza statistica.</p>
 
 # Il target derivato dai dati
 dt = c.derived_target
-print(f&quot;Orizzonte: {dt.holding_period_h}h&quot;)
-print(f&quot;Direzione: {dt.direction}&quot;)        # &quot;long&quot; o &quot;short&quot;
-print(f&quot;sell_pct:  {dt.sell_pct:.4f}&quot;)     # es. 0.0312 = 3.12%
+print(f"Orizzonte: {dt.holding_period_h}h")
+print(f"Direzione: {dt.direction}")        # "long" o "short"
+print(f"sell_pct:  {dt.sell_pct:.4f}")     # es. 0.0312 = 3.12%
 
 # L'evidenza statistica IS
-print(f&quot;IC: {c.underlying_feature.ic:.4f}, p={c.underlying_feature.p_value:.4f}&quot;)
-print(f&quot;Lift: {c.event_stats.lift:.4f}&quot;)
-print(f&quot;Grade: {c.alpha_score.grade}&quot;)     # &quot;A&quot;, &quot;B&quot;, &quot;C&quot; o &quot;D&quot;
+print(f"IC: {c.underlying_feature.ic:.4f}, p={c.underlying_feature.p_value:.4f}")
+print(f"Lift: {c.event_stats.lift:.4f}")
+print(f"Grade: {c.alpha_score.grade}")     # "A", "B", "C" o "D"
 
 # Conferma OOS
 oos = c.oos_validation
-print(f&quot;OOS passed: {oos.passed}, lift OOS: {oos.lift:.4f}&quot;)
+print(f"OOS passed: {oos.passed}, lift OOS: {oos.lift:.4f}")
 
 # Status
-print(f&quot;Status: {c.status}&quot;)               # &quot;HYPOTHESIS&quot; o &quot;REJECTED&quot;
+print(f"Status: {c.status}")               # "HYPOTHESIS" o "REJECTED"
 </code></pre>
 <p>Un AlphaContract con <code>status="HYPOTHESIS"</code> è l'ipotesi formale che l'evento
 ha potere predittivo nella direzione indicata all'orizzonte indicato. Non è una
 certezza — è un'ipotesi da testare operativamente.</p>
-<hr />
+<hr/>
 <h2 id="3-la-regola-tradare-in-modo-realistico">3. La Regola: Tradare in Modo Realistico</h2>
 <h3 id="perche-lalpha-non-e-sufficiente">Perché l'alpha non è sufficiente</h3>
 <p>Un evento con grade A, IC=0.08, lift=0.12, confermato OOS — è un risultato
@@ -502,28 +503,28 @@ sotto-potenziato o meno, la conseguenza operativa è la stessa. Il verdetto
 <h3 id="artefatto-validatedrule-dentro-rulediscoveryresponse">Artefatto: <code>ValidatedRule</code> (dentro <code>RuleDiscoveryResponse</code>)</h3>
 <pre><code class="language-python">resp = rd.run()
 
-print(f&quot;Verdetto: {resp.verdict}&quot;)   # &quot;EDGE&quot;, &quot;PARTIAL-EDGE&quot;, &quot;NON-EDGE&quot; o &quot;INSUFFICIENT-DATA&quot;
-print(f&quot;È edge: {resp.is_edge}&quot;)     # True per EDGE e PARTIAL-EDGE
+print(f"Verdetto: {resp.verdict}")   # "EDGE", "PARTIAL-EDGE", "NON-EDGE" o "INSUFFICIENT-DATA"
+print(f"È edge: {resp.is_edge}")     # True per EDGE e PARTIAL-EDGE
 
 if resp.is_edge:
     vr = resp.validated_rule
     params = vr.params
-    print(f&quot;Entrata: limite a -{params.buy_drop_pct:.2%} dal close&quot;)
-    print(f&quot;Take-profit: +{params.sell_pct:.2%} dal fill&quot;)
-    print(f&quot;Orizzonte massimo: {params.target_h} barre&quot;)
-    print(f&quot;Direzione: {params.direction}&quot;)
+    print(f"Entrata: limite a -{params.buy_drop_pct:.2%} dal close")
+    print(f"Take-profit: +{params.sell_pct:.2%} dal fill")
+    print(f"Orizzonte massimo: {params.target_h} barre")
+    print(f"Direzione: {params.direction}")
 
 # Metriche IS
 s = resp.in_sample_summary
-print(f&quot;Trade: {s.total_trades}, PF: {s.profit_factor:.2f}, WR: {s.win_rate_pct:.2%}&quot;)
+print(f"Trade: {s.total_trades}, PF: {s.profit_factor:.2f}, WR: {s.win_rate_pct:.2%}")
 
 # Walk-forward
 wf = resp.walk_forward
-print(f&quot;Consistenza OOS: {wf.consistency:.0%}&quot;)  # es. 75% delle finestre con PF&gt;1
+print(f"Consistenza OOS: {wf.consistency:.0%}")  # es. 75% delle finestre con PF&gt;1
 </code></pre>
 <p>Una <code>ValidatedRule</code> contiene i parametri operativi precisi — non stime
 statistiche, ma valori pronti per un sistema di esecuzione.</p>
-<hr />
+<hr/>
 <h2 id="4-dal-contratto-al-segnale-di-trading">4. Dal Contratto al Segnale di Trading</h2>
 <h3 id="quando-levento-si-riattiva-su-nuovi-dati">Quando l'evento si riattiva su nuovi dati</h3>
 <p>Una volta che il sistema ha prodotto un <code>AlphaContract</code> (HYPOTHESIS) e una
@@ -532,7 +533,7 @@ statistiche, ma valori pronti per un sistema di esecuzione.</p>
 <p>Quando l'evento si attiva su nuovi dati → genera un segnale di trading.</p>
 </blockquote>
 <pre><code class="language-python"># Nuovi dati in arrivo (live o batch)
-new_kpi = fetch_latest_bars(asset=&quot;BTC&quot;, timeframe=&quot;1H&quot;)
+new_kpi = fetch_latest_bars(asset="BTC", timeframe="1H")
 
 # Il segnale è l'evento applicato ai nuovi dati
 signal = event_candidate.apply(new_kpi)    # pd.Series bool
@@ -546,13 +547,13 @@ signal_bars = new_kpi[signal]
 
 for ts, row in signal_bars.iterrows():
     # Calcolo del prezzo limite (long)
-    limit_price = row[&quot;close&quot;] * (1 - params.buy_drop_pct)
+    limit_price = row["close"] * (1 - params.buy_drop_pct)
     take_profit = limit_price * (1 + params.sell_pct)
     max_bars    = params.target_h   # chiudiamo entro questo numero di barre
 
     # Istruzione al sistema di esecuzione
     place_limit_order(
-        direction   = params.direction,    # &quot;long&quot; o &quot;short&quot;
+        direction   = params.direction,    # "long" o "short"
         limit_price = limit_price,
         take_profit = take_profit,
         max_bars    = max_bars,
@@ -568,12 +569,12 @@ for ts, row in signal_bars.iterrows():
 <p>Un edge statisticamente valido può essere più robusto in certi regimi. La
 <code>RuleDiscoveryResponse</code> espone l'analisi per regime:</p>
 <pre><code class="language-python">ra = resp.regime_analysis
-print(f&quot;Regime da evitare: {ra.avoid_in}&quot;)
-print(f&quot;Score di dipendenza dal regime: {ra.dependency_score:.2f}&quot;)
+print(f"Regime da evitare: {ra.avoid_in}")
+print(f"Score di dipendenza dal regime: {ra.dependency_score:.2f}")
 
 # Filtrare il segnale per regime
 enriched = MarketContext(new_kpi).run()
-regime_now = enriched[&quot;regime&quot;].iloc[-1]
+regime_now = enriched["regime"].iloc[-1]
 
 if regime_now not in ra.avoid_in:
     # L'edge è presente in questo regime → procedi con l'ordine
@@ -609,7 +610,7 @@ ValidatedRule.params    →  limit_price, take_profit, max_bars, direction
        ▼
 Sistema di esecuzione   →  ordine
 </code></pre>
-<hr />
+<hr/>
 <h2 id="5-perche-questa-separazione-e-necessaria">5. Perché Questa Separazione è Necessaria</h2>
 <h3 id="i-tre-confini-formali">I tre confini formali</h3>
 <p>La pipeline FORGE impone tre confini che non possono essere attraversati in
@@ -675,7 +676,7 @@ annota il risultato su <code>AlphaContract.rotation_p</code>. Il gate EDGE di Ru
 Discovery legge questo valore direttamente (§3 sopra): un contratto che vince
 solo la lotteria del multiple-testing resta limitato a <code>PARTIAL-EDGE</code> anche
 se supera ogni altro gate.</p>
-<hr />
+<hr/>
 <h2 id="riepilogo-dei-tre-concetti">Riepilogo dei tre concetti</h2>
 <table>
 <thead>
@@ -715,7 +716,7 @@ se supera ogni altro gate.</p>
 configurazione di mercato strutturalmente stabile (<code>Evento</code>), con evidenza
 empirica di potere predittivo (<code>Alpha</code>), che reggere sotto condizioni operative
 realistiche (<code>Regola</code>).</p>
-<hr />
+<hr/>
 <h2 id="riferimenti">Riferimenti</h2>
 <table>
 <thead>

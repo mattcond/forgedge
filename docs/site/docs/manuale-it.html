@@ -1,25 +1,26 @@
-<!doctype html>
+<!DOCTYPE html>
+
 <html lang="it">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1, viewport-fit=cover" name="viewport"/>
 <title>Manuale — FORGE</title>
-<meta name="description" content="Manuale completo di FORGE: installazione, architettura di produzione, troubleshooting, FAQ e glossario." />
-<meta name="robots" content="index, follow" />
-<link rel="canonical" href="https://forgedge.it/docs/manuale-it.html" />
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../assets/docs.css">
+<meta content="Manuale completo di FORGE: installazione, architettura di produzione, troubleshooting, FAQ e glossario." name="description"/>
+<meta content="index, follow" name="robots"/>
+<link href="https://forgedge.it/docs/manuale-it.html" rel="canonical"/><link href="https://forgedge.it/docs/manuale-it.html" hreflang="x-default" rel="alternate"/><link href="https://forgedge.it/docs/manual-en.html" hreflang="en" rel="alternate"/><link href="https://forgedge.it/docs/manuale-it.html" hreflang="it" rel="alternate"/>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="../assets/docs.css" rel="stylesheet"/>
 </head>
 <body>
-<a class="back" href="../index.html">&larr; FORGE</a>
+<a class="back" href="/">← FORGE</a>
 <main>
 <article id="content">
 <h1 id="il-manuale-di-forgedge">Il Manuale di forgedge</h1>
 <p><em>Una guida completa e pratica alla libreria Python FORGE (Feature-Oriented Rule Generation Engine).</em></p>
 <p>Versione coperta: <code>forgedge==0.2.0</code>. Ogni esempio di codice in questo manuale è stato eseguito realmente contro la libreria presente in questo repository; ogni numero citato da un'esecuzione è un valore reale e verificato, non un'illustrazione inventata. Quando il manuale afferma qualcosa che gli autori stessi hanno documentato (a differenza di qualcosa dedotto dalla lettura del codice), lo dichiara esplicitamente.</p>
-<hr />
+<hr/>
 <h2 id="indice">Indice</h2>
 <ol>
 <li><a href="#1-introduzione">Introduzione</a></li>
@@ -49,7 +50,7 @@
 <li><a href="#25-glossario">Glossario</a></li>
 <li><a href="#26-reference-api-consultazione-rapida">Reference API (consultazione rapida)</a></li>
 </ol>
-<hr />
+<hr/>
 <h2 id="1-introduzione">1. Introduzione</h2>
 <p><code>forgedge</code> è una libreria Python che prende una tabella di dati di prezzo storici più indicatori tecnici (una <strong>KPI Table</strong>) e scopre sistematicamente <strong>regole di trading booleane</strong> — espressioni come <code>rsi_14 &lt; 31.2 AND spread_ema_9_25 &lt; -0.0118</code> — che hanno un potere predittivo misurabile e confermato out-of-sample sul movimento futuro del prezzo.</p>
 <p>Lo fa attraverso una pipeline a cinque stadi, ognuno dei quali risponde a esattamente una domanda e passa allo stadio successivo un oggetto formale e ispezionabile:</p>
@@ -58,7 +59,7 @@
 </code></pre>
 <p>L'output di una sessione <code>forgedge</code> non è una previsione e non è un modello addestrato. È un insieme di <strong>specifiche formali di regole</strong> — una condizione booleana, una direzione (long/short), un periodo di detenzione, una percentuale di take-profit, e un verdetto sostenuto da statistiche walk-forward out-of-sample. Cosa farne di questa specifica (costruire un generatore di segnali, collegarla a un motore di esecuzione, revisionarla manualmente) è interamente a tua discrezione; <code>forgedge</code> non piazza ordini, non parla con un exchange e non conserva alcuno stato di posizione.</p>
 <p>Questo manuale presuppone che tu sia uno sviluppatore Python competente che non ha mai visto questa libreria prima. Non presuppone che tu conosca già il gergo della finanza quantitativa — ogni termine (KPI Table, evento, alpha, walk-forward, ConsistencyGate, rotation null...) viene introdotto prima di essere usato. Alla fine, dovresti essere in grado di installare la libreria, eseguire una sessione di discovery completa su dati reali, comprendere ogni parametro di configurazione principale e cosa costa cambiarlo, e avere un piano concreto per integrare <code>forgedge</code> in un'applicazione più grande.</p>
-<hr />
+<hr/>
 <h2 id="2-perche-esiste-forge">2. Perché esiste FORGE</h2>
 <p>La documentazione stessa della libreria (<a href="readme-en.html"><code>README.md</code></a>) enuncia il problema direttamente:</p>
 <blockquote>
@@ -77,7 +78,7 @@
 </ul>
 <h3 id="il-nome-e-la-metafora">Il nome e la metafora</h3>
 <p>La guida architetturale del repository è esplicita sul fatto che il nome sia una metafora deliberata, non un gioco di parole su un acronimo: "Come una fucina metallurgica trasforma il minerale grezzo in uno strumento lavorato attraverso fasi successive, FORGE trasforma una tabella di indicatori tecnici in regole booleane operative attraverso quattro moduli in sequenza — senza mai fare assunzioni sul sistema di esecuzione che le utilizzerà." (<code>src/forgedge/docs/README.md</code>)</p>
-<hr />
+<hr/>
 <h2 id="3-quando-usarla-e-quando-no">3. Quando usarla — e quando no</h2>
 <h3 id="usa-forgedge-quando">Usa <code>forgedge</code> quando...</h3>
 <ul>
@@ -94,7 +95,7 @@
 <li><strong>Ricerca su microstruttura sub-secondo/tick-level.</strong> Riguarda il <em>tipo di dato</em> — singoli eventi di trade/quote (microstruttura dell'order book, dinamica dello spread bid-ask) — non quanto sia breve l'intervallo della barra. Le barre OHLCV sub-orarie (15m, 5m, ...) non rientrano in questo caso: <code>forge_preset()</code> calibra una classe dedicata di griglia di orizzonti apposta per loro (internamente chiamata <code>"hft"</code> in <code>_TFClass</code>, accanto a <code>"daily"</code> e <code>"intraday"</code>, §7/§9), e ogni campo scalato sul timeframe nel resolver le tratta come caso di prima classe, non come qualcosa semplicemente tollerato. Ciò che non è testato è il dato sotto il livello di barra aggregata: ogni esempio funzionante, ogni calibrazione statistica, e lo studio di robustezza a bassa frequenza della libreria stessa (<code>docs/analysis/lowfreq_robustness.md</code>) sono costruiti su dati a barre da 1 ora fino a 1 giorno, e nessuno di essi dice nulla sui flussi tick. Nulla nel codice vieta tecnicamente l'uso a livello tick, ma vedi §16 (Trade-off) e §21 (Troubleshooting) per i problemi di potere statistico che compaiono quando la finestra in-sample non copre abbastanza <em>mesi di calendario</em> — un rischio che dipende da quanta storia hai, non da quanto è veloce l'intervallo della barra; una tabella a 15m che copre due anni ha la stessa profondità mensile di una oraria che copre due anni.</li>
 <li><strong>Qualsiasi cosa richieda un catalogo persistente e cross-sessione di regole scoperte già pronto all'uso.</strong> Il Modulo 4 (Rule Registry) è esplicitamente stateless e ricostruito da zero a ogni sessione — la persistenza è responsabilità dell'<em>applicazione host</em> (§19-20), non della libreria.</li>
 </ul>
-<hr />
+<hr/>
 <h2 id="4-concetti-fondamentali">4. Concetti fondamentali</h2>
 <p>Prima di toccare qualsiasi API, costruisci questo modello mentale. <code>forgedge</code> è organizzata attorno a tre concetti formali, ciascuno il deliverable di uno stadio della pipeline, più un concetto di input e uno di supporto:</p>
 <table>
@@ -166,18 +167,18 @@
    Modulo 4 — dedup, test di generalizzazione cross-ticker, catalogo + report HTML
 </code></pre>
 <p>I dati fluiscono sempre solo in avanti. Nessun modulo successivo torna a toccare gli interni di un modulo precedente, e — questa è l'invariante da interiorizzare prima di scrivere qualsiasi codice contro questa libreria — <strong>nessun modulo può accedere a informazioni che, cronologicamente, il suo predecessore non avrebbe potuto avere</strong>. Questa singola regola è ciò per cui esiste l'intera architettura.</p>
-<hr />
+<hr/>
 <h2 id="5-installazione">5. Installazione</h2>
 <p><code>forgedge</code> richiede <strong>Python ≥ 3.9</strong> e dipende solo da <code>pandas&gt;=1.5</code> e <code>numpy&gt;=1.23</code> (da <code>pyproject.toml</code>). Non ha alcuna dipendenza opzionale necessaria per la pipeline principale.</p>
 <pre><code class="language-bash">pip install forgedge
 </code></pre>
 <p>Per eseguire la suite di test o contribuire, installa l'extra <code>dev</code>:</p>
-<pre><code class="language-bash">pip install &quot;forgedge[dev]&quot;     # aggiunge pytest&gt;=7.0
+<pre><code class="language-bash">pip install "forgedge[dev]"     # aggiunge pytest&gt;=7.0
 </code></pre>
 <p>Se lavori da un clone di questo repository (come sono stati verificati gli esempi di questo manuale):</p>
 <pre><code class="language-bash">git clone https://github.com/mattcond/forgedge
 cd forgedge
-pip install -e &quot;.[dev]&quot;
+pip install -e ".[dev]"
 </code></pre>
 <p>Alcune cose che <code>forgedge</code> <strong>non</strong> richiede, che potresti aspettarti: nessun <code>scipy</code>, nessun <code>statsmodels</code>, nessun database, nessun file di configurazione, nessuna variabile d'ambiente, nessun accesso di rete, nessuna GPU. È una libreria stateless, di puro calcolo — tutto ciò di cui ha bisogno è ciò che le passi in memoria.</p>
 <p>Se prevedi di leggere il fixture parquet usato in questo manuale (<code>tests/fixtures/ADA_1D_TRAIN.parquet</code>), ti serve anche un motore parquet — <code>forgedge</code> stessa non lo richiede, ma <code>pandas.read_parquet</code> sì:</p>
@@ -185,9 +186,9 @@ pip install -e &quot;.[dev]&quot;
 </code></pre>
 <p><strong>Verificare l'installazione:</strong></p>
 <pre><code class="language-python">import forgedge
-print(forgedge.__version__)   # &quot;0.2.0&quot; al momento della scrittura
+print(forgedge.__version__)   # "0.2.0" al momento della scrittura
 </code></pre>
-<hr />
+<hr/>
 <h2 id="6-il-primo-esempio-funzionante">6. Il primo esempio funzionante</h2>
 <p>Questo è il più piccolo pezzo di codice possibile che dimostra l'idea centrale della libreria: scoprire un <em>evento booleano dalla storia di un indicatore</em>, senza alcun rendimento forward coinvolto. Usa il Modulo 1 (Event Discovery) in isolamento, su una piccola tabella sintetica, così puoi vedere esattamente com'è fatto un <code>EventCandidate</code> prima che entri in gioco qualunque nozione di profittabilità.</p>
 <pre><code class="language-python">import numpy as np
@@ -198,20 +199,20 @@ from forgedge import EventDiscovery
 rng = np.random.default_rng(42)
 n = 500
 kpi = pd.DataFrame({
-    &quot;open_dt&quot;: pd.date_range(&quot;2024-01-01&quot;, periods=n, freq=&quot;1h&quot;),
-    &quot;close&quot;: 100 * np.cumprod(1 + rng.normal(0, 0.004, n)),
-    &quot;close_rsi_14&quot;: np.clip(50 + rng.normal(0, 15, n).cumsum() * 0.05, 1, 99),
+    "open_dt": pd.date_range("2024-01-01", periods=n, freq="1h"),
+    "close": 100 * np.cumprod(1 + rng.normal(0, 0.004, n)),
+    "close_rsi_14": np.clip(50 + rng.normal(0, 15, n).cumsum() * 0.05, 1, 99),
 })
 
 ed = EventDiscovery(kpi)
 candidates = ed.run()
 
-print(f&quot;{len(candidates)} candidati evento hanno superato il Consistency Gate&quot;)
+print(f"{len(candidates)} candidati evento hanno superato il Consistency Gate")
 
 c = candidates[0]
-print(&quot;expression:&quot;, c.expression)
-print(&quot;attivazioni:&quot;, c.activation_stats.n_activations)
-print(&quot;trade/mese medi:&quot;, round(c.activation_stats.mean_tpm, 3))
+print("expression:", c.expression)
+print("attivazioni:", c.activation_stats.n_activations)
+print("trade/mese medi:", round(c.activation_stats.mean_tpm, 3))
 </code></pre>
 <p><strong>Output verificato</strong> (l'autore di questo manuale ha eseguito esattamente questo codice contro esattamente questo repository — i tuoi numeri potrebbero differire leggermente con una versione diversa di numpy, dato che il flusso dell'RNG può cambiare tra versioni, ma la <em>forma</em> è rappresentativa):</p>
 <pre><code>309 candidati evento hanno superato il Consistency Gate
@@ -241,22 +242,22 @@ trade/mese medi: 10.0
 <li><code>max_and_components=1</code> (issue #254 Fase 8 — era <code>2</code>) — Event Discovery qui non ha composto alcuna coppia; la composizione AND propria di <code>forgedge</code> ora avviene a valle, di default, nella composizione guidata dal grado di Alpha Discovery (§8, esempio Modulo 2, step 8), non dentro Event Discovery. Alza questo valore a <code>2</code>/<code>3</code> solo per il percorso legacy single-pass (<code>forge(two_pass_composition=False)</code>) o usando <code>EventDiscovery</code> in modo standalone, come in questo esempio, volendone la propria composizione AND strutturale (§8, esempio Modulo 1, step 5).</li>
 </ul>
 <p>Nessuna di queste scelte ha coinvolto il rendimento forward di <code>close</code> — quel concetto non esiste ancora a questo stadio della pipeline.</p>
-<hr />
+<hr/>
 <h2 id="7-quick-start-unesecuzione-completa-della-pipeline">7. Quick start: un'esecuzione completa della pipeline</h2>
 <p>La sezione 6 ha mostrato un modulo in isolamento. Questa sezione esegue l'<strong>intera pipeline</strong> con la singola funzione orchestratrice, <code>forge()</code>, su dati reali inclusi in questo repository: <code>tests/fixtures/ADA_1D_TRAIN.parquet</code> — 882 barre giornaliere OHLCV di ADA (Cardano) più 22 colonne di indicatori tecnici precalcolate, che coprono dal 2024-01-01 al 2026-05-31. Questo è lo stesso fixture su cui la suite di regressione golden della libreria stessa fissa i propri valori attesi.</p>
 <pre><code class="language-python">import pandas as pd
 from forgedge import forge
 
-kpi = pd.read_parquet(&quot;tests/fixtures/ADA_1D_TRAIN.parquet&quot;)
+kpi = pd.read_parquet("tests/fixtures/ADA_1D_TRAIN.parquet")
 print(kpi.shape)                      # (882, 26)
 print(list(kpi.columns)[:6])          # ['open_dt', 'high', 'low', 'close', 'open', 'close_ret_03']
 
-result = forge(kpi, ticker=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;, progress=False)
+result = forge(kpi, ticker="ADAUSDC", timeframe="1D", progress=False)
 
-print(&quot;Candidati M1:&quot;, len(result.candidates))
-print(&quot;Promossi M2: &quot;, len(result.promoted))
-print(&quot;Risposte M3: &quot;, len(result.rule_responses))
-print(&quot;tradabili (edges()):&quot;, len(result.edges()))
+print("Candidati M1:", len(result.candidates))
+print("Promossi M2: ", len(result.promoted))
+print("Risposte M3: ", len(result.rule_responses))
+print("tradabili (edges()):", len(result.edges()))
 </code></pre>
 <p><strong>Output verificato</strong> (l'autore di questo manuale ha eseguito esattamente questo codice contro esattamente questo repository):</p>
 <pre><code>(882, 26)
@@ -287,10 +288,10 @@ print(Counter(r.verdict for _, r in result.rule_responses))
 # Counter({'NON-EDGE': 344, 'PARTIAL-EDGE': 40, 'INSUFFICIENT-DATA': 8})
 </code></pre>
 <p>Zero verdetti <code>EDGE</code> pieni non è un bug e non è un segno che la libreria "non funzioni" — è il gate della rotation null di default (§14-15) che fa esattamente ciò per cui è progettato. Guarda il singolo miglior candidato <code>PARTIAL-EDGE</code> su questi dati:</p>
-<pre><code class="language-python">partial = [(c, r) for c, r in result.rule_responses if r.verdict == &quot;PARTIAL-EDGE&quot;]
+<pre><code class="language-python">partial = [(c, r) for c, r in result.rule_responses if r.verdict == "PARTIAL-EDGE"]
 partial.sort(key=lambda x: x[1].in_sample_summary.profit_factor, reverse=True)
 c, r = partial[0]
-print(c.event_expression, &quot;|&quot;, c.direction)
+print(c.event_expression, "|", c.direction)
 print(r.in_sample_summary.profit_factor, r.in_sample_summary.total_trades)
 print(r.walk_forward.consistency, r.walk_forward.oos_summary.profit_factor)
 print(r.rejection_reasons)
@@ -320,7 +321,7 @@ limit True
 <li>Saltato il Modulo 4 (Rule Registry) — non perché tu l'abbia disabilitato, ma perché <code>RuleRegistry.from_forge_results</code> ha bisogno di più ticker per dire qualcosa sulla generalizzazione cross-ticker; con una chiamata <code>forge()</code> a singolo ticker viene comunque eseguito e produce un registry, ma ogni regola è classificata <code>ISOLATED</code> (§9).</li>
 </ol>
 <p>Nessuno dei punti 3-10 è qualcosa che hai configurato tu. Sono tutti default scelti dagli autori della libreria specificamente affinché il percorso "quick start" e il percorso "configurato a mano" non divergano silenziosamente in onestà. §14-15 spiegano ciascuno di questi in profondità, incluso quali puoi disattivare e cosa costa farlo.</p>
-<hr />
+<hr/>
 <h2 id="8-anatomia-del-workflow">8. Anatomia del workflow</h2>
 <p>Questa sezione percorre i cinque moduli end-to-end, con abbastanza dettaglio meccanico da poter prevedere cosa farà cambiare un input — non solo come si chiama il metodo pubblico di ogni modulo.</p>
 <h3 id="modulo-0-market-context">Modulo 0 — Market Context</h3>
@@ -371,13 +372,13 @@ limit True
 <p>La logica del verdetto (gate esatti, dai default di <code>SelectionCriteria</code>) è coperta in §9 e §15 — versione breve: <code>NON-EDGE</code> è un qualsiasi fallimento rigido (troppo pochi trade, PF IS sotto 1.5, PF OOS sotto 1.0, expectancy non significativa); <code>EDGE</code> richiede il superamento di ogni gate di un insieme più stringente incluso il controllo della rotation null; qualsiasi cosa superi il pavimento <code>NON-EDGE</code> ma non ogni gate <code>EDGE</code> è <code>PARTIAL-EDGE</code>; e <code>INSUFFICIENT-DATA</code> (§15) è un quarto verdetto che declassa un <code>EDGE</code>/<code>PARTIAL-EDGE</code> altrimenti valido quando l'evidenza OOS aggregata è statisticamente troppo debole per sostenere l'affermazione, indipendentemente da quanto buona appaia la stima puntuale.</p>
 <h3 id="modulo-4-rule-registry">Modulo 4 — Rule Registry</h3>
 <p>Ingerisce ogni submission di regola <code>EDGE</code>/<code>PARTIAL-EDGE</code> (NON-EDGE viene silenziosamente saltato, non è un errore) in un <code>RuleDocument</code>. Calcola due matrici di correlazione tra tutti i documenti (overlap di Jaccard delle date di attivazione; correlazione di Spearman dei gain su un asse di date condiviso e zero-paddato), segnala — ma non elimina mai — il più debole di ogni coppia di regole quasi-duplicate (Jaccard ≥ <code>overlap_threshold</code>, default 0.70), e riesegue ogni regola su ogni <em>altro</em> ticker della sessione con le sue soglie assolute ri-percentilate sulla distribuzione di quel ticker. Una regola è <code>GENERIC</code> se supera la barra di profit factor cross-ticker su almeno <code>generic_ratio_threshold</code> (default esattamente <code>2/3</code>) degli altri ticker testati; altrimenti <code>PARTIAL</code>, <code>SPECIFIC</code>, o (se segnalata come duplicato) <code>ISOLATED</code>. Il registry è interamente stateless tra sessioni — la tabella piatta esportata o il report HTML sono gli unici artefatti di persistenza che produce.</p>
-<hr />
+<hr/>
 <h2 id="9-api-e-componenti-principali">9. API e componenti principali</h2>
 <p>Questa sezione copre le classi e funzioni principali rivolte all'utente — non un elenco esaustivo (quello è §26), ma abbastanza per scrivere codice reale contro ogni modulo. Ogni firma qui sotto è citata dal sorgente attuale, non parafrasata.</p>
 <h3 id="lorchestratore">L'orchestratore</h3>
 <pre><code class="language-python">forge(
     kpi_table: pd.DataFrame, *,
-    ticker: str | None = None, asset: str = &quot;ASSET&quot;, timeframe: str = &quot;1H&quot;,
+    ticker: str | None = None, asset: str = "ASSET", timeframe: str = "1H",
     market_context_config: MarketContextConfig | None = None,
     event_discovery_config: DiscoveryConfig | None = None,
     alpha_config: AlphaConfig | None = None,
@@ -549,7 +550,7 @@ from forgedge.deployment import export_rules
 
 alpha_id = result.edges()[0][0].alpha_id     # un qualunque AlphaContract.alpha_id che hai già
 one_rule = lookup_by_id(result, alpha_id=[alpha_id])
-export_rules(one_rule, &quot;exported_rules/&quot;, promotable_only=False)
+export_rules(one_rule, "exported_rules/", promotable_only=False)
 </code></pre>
 <p><strong>Verificato</strong>, sulla stessa run ADA sopra, isolando la sua prima voce di <code>edges()</code> (<code>alpha_id</code> incorpora la data della run, quindi la stringa esatta cambia da un giorno all'altro — <code>"ALPHA-ADAUSDC-1D-260908-337"</code> il giorno in cui è stato eseguito):</p>
 <pre><code>filtered = lookup_by_id(result, alpha_id=[alpha_id])
@@ -559,7 +560,7 @@ filtered[0].enriched.shape == result.enriched.shape   # i campi non correlati re
 </code></pre>
 <p>Un <code>event_id</code>/<code>alpha_id</code> che non trova corrispondenza produce liste vuote su ogni campo filtrato — mai un errore — quindi <code>lookup_by_id(result, event_id=["typo"])</code> è un modo sicuro per controllare "questo id esiste davvero" senza un <code>try</code>/<code>except</code>.</p>
 <h3 id="preset">Preset</h3>
-<pre><code class="language-python">forge_preset(preset: str, timeframe: str, asset: str = &quot;ASSET&quot;,
+<pre><code class="language-python">forge_preset(preset: str, timeframe: str, asset: str = "ASSET",
              train_ratio: float = 0.70, **overrides
              ) -&gt; tuple[DiscoveryConfig, AlphaConfig, RuleDiscoveryConfig]
 </code></pre>
@@ -568,7 +569,7 @@ filtered[0].enriched.shape == result.enriched.shape   # i campi non correlati re
 <pre><code class="language-python">MarketContext(kpi_table: pd.DataFrame, config: MarketContextConfig | None = None)
 mc.run() -&gt; pd.DataFrame
 mc.distribution()          # quota di barre per regime, per diagnostica
-mc.window_resolution       # {&quot;source&quot;: &quot;hurst_ou&quot; | &quot;fallback&quot; | &quot;configured&quot;, ...}
+mc.window_resolution       # {"source": "hurst_ou" | "fallback" | "configured", ...}
 </code></pre>
 <h3 id="modulo-1-eventdiscovery-eventcandidate-customevent">Modulo 1 — <code>EventDiscovery</code>, <code>EventCandidate</code>, <code>CustomEvent</code></h3>
 <pre><code class="language-python">EventDiscovery(kpi_table: pd.DataFrame, config: DiscoveryConfig | None = None,
@@ -580,7 +581,7 @@ ed.event_distribution_report   # str | None — popolato da run(), vedi sotto (#
 </code></pre>
 <p><strong><code>event_distribution_report</code>.</strong> <code>config_report()</code> (sotto) valida la coerenza della configurazione senza mai toccare i tuoi dati, quindi non può cogliere il caso in cui un preset è internamente coerente ma respinge comunque ogni candidato che uno <em>specifico asset</em> produce davvero — cosa che prima emergeva solo come una nuda riga di log <code>"M1 Event Discovery — 0 candidate(s)"</code>, indistinguibile da una pipeline rotta. <code>run()</code> ora popola sempre <code>ed.event_distribution_report</code> (<code>None</code> prima): un riassunto in testo semplice della distribuzione tpm/dispersione osservata davvero su ogni candidato grezzo valutato dal Consistency Gate, contro le soglie configurate — sotto un tasso di sopravvivenza al gate del 15% suggerisce anche parametri concreti al valore mediano osservato. La riga di log dello stadio M1 di <code>forge()</code> porta questo testo ogni volta che Event Discovery gira davvero (l'iniezione manuale di eventi via <code>manual_events=</code> salta <code>.run()</code> e mantiene la vecchia riga col solo conteggio); <code>result.event_discovery.event_distribution_report</code> lo espone su un <code>ForgeResult</code> a costo zero.</p>
 <p>Gli attributi importanti di un <code>EventCandidate</code>: <code>event_id</code>, <code>expression</code> (la condizione booleana, come stringa), <code>event_formula</code> (una resa human-readable), <code>sql_expression</code> (una traduzione SQL compatibile con DuckDB della stessa condizione, utile se vuoi valutare l'evento fuori da Python), <code>components</code>, <code>activation_stats</code> (<code>n_activations</code>, <code>n_active_months</code>, <code>zero_months</code>, <code>max_monthly_share</code>, <code>mean_tpm</code>), <code>consistency_gate</code> (un <code>GateResult</code>), <code>validation</code> (un <code>ValidationResult</code>, solo se il walk-forward era configurato). Il suo metodo <code>.apply(df) -&gt; pd.Series[bool]</code> rivaluta deterministicamente le soglie <em>memorizzate</em> su qualsiasi nuovo frame — nessuna ricalibrazione, nessun look-ahead — e <code>.persist(path)</code> dà un round-trip pickle completo (l'unico metodo che la documentazione descrive come completamente invertibile; la forma JSON di <code>.to_dict()</code> non lo è).</p>
-<pre><code class="language-python">CustomEvent(formula: str, name: str = &quot;&quot;)
+<pre><code class="language-python">CustomEvent(formula: str, name: str = "")
 </code></pre>
 <p>Per iniettare manualmente una tua ipotesi (es. <code>CustomEvent("close_rsi_14 &lt; 30")</code>) invece di eseguire la discovery automatica. Le formule sono valutate con <code>pandas.DataFrame.eval()</code>. Un <code>CustomEvent</code> attraversa comunque il Consistency Gate, ma un fallimento registra solo un warning — non viene mai scartato. La composizione AND non viene eseguita sugli eventi iniettati manualmente. Si usa via <code>forge(..., manual_events=[...])</code> — mutuamente esclusivo con <code>event_discovery_config</code>.</p>
 <h3 id="modulo-2-alphadiscovery-alphacontract">Modulo 2 — <code>AlphaDiscovery</code>, <code>AlphaContract</code></h3>
@@ -597,7 +598,7 @@ ad.summary()   # pd.DataFrame, ordinato per composite score
 <pre><code class="language-python">from forgedge import TargetOptimizer
 from forgedge.alpha_discovery.models import TargetConfig
 
-cfg = TargetConfig(horizon=10, min_return=0.05, side=&quot;long&quot;)   # +5% entro 10 barre, long
+cfg = TargetConfig(horizon=10, min_return=0.05, side="long")   # +5% entro 10 barre, long
 opt = TargetOptimizer(train_df, cfg)
 # la DiscoveryConfig propria di opt, quando non passata esplicitamente, ha
 # default DiscoveryConfig(train_ratio=1.0, max_and_components=2, retain_raw_events=True)
@@ -979,9 +980,9 @@ entry_optimization:   EntryOptimization(selected_entry='market', adopted=False,
                           failed_condition='sharpe', authoritative='market',
                           market_opportunity_sharpe=4.498, limit_opportunity_sharpe=4.365,
                           limit_buy_drop_pct=0.008,
-                          reason=&quot;limit @ buy_drop=0.008 did not hold its risk-adjusted return &quot;
-                                 &quot;per unit of time out-of-sample (4.365 &lt; market 4.498); &quot;
-                                 &quot;kept market operating point&quot;)
+                          reason="limit @ buy_drop=0.008 did not hold its risk-adjusted return "
+                                 "per unit of time out-of-sample (4.365 &lt; market 4.498); "
+                                 "kept market operating point")
 rejection_reasons:    ['active_months 13/23 = 57% &lt; 80%',
                         'search-level rotation null not cleared (rotation_p=1.0000 &gt; 0.05)']
 </code></pre>
@@ -1002,8 +1003,8 @@ rejection_reasons:    ['active_months 13/23 = 57% &lt; 80%',
 RuleRegistry.from_forge_results(results: dict[str, ForgeResult], config=None)   # entry point preferito
 reg = registry.run()
 reg.summary(); reg.flat_table(); reg.documents; reg.matrices   # .jaccard, .spearman
-reg.export(&quot;rules.xlsx&quot;)             # o .csv, secondo RegistryConfig.export_format
-reg.html_report(timeframe=&quot;1H&quot;)      # HTML autocontenuto, SVG inline, nessuna CDN
+reg.export("rules.xlsx")             # o .csv, secondo RegistryConfig.export_format
+reg.html_report(timeframe="1H")      # HTML autocontenuto, SVG inline, nessuna CDN
 </code></pre>
 <p><code>frames</code> deve contenere i frame <em>post-Event-Discovery</em> (cioè <code>ForgeResult.event_frame</code> per ticker), non KPI Table grezze — il replay cross-ticker ha bisogno delle colonne feature derivate a cui le espressioni delle regole fanno riferimento.</p>
 <p><strong>Il default di <code>reg.flat_table()</code> non filtra nulla.</strong> <code>apply_filters=False</code> di default — una chiamata semplice a <code>registry.flat_table()</code> include duplicati e regole non generiche indipendentemente da <code>RegistryConfig.export_duplicates</code>/<code>.export_non_generic</code>. Quei flag valgono solo tramite <code>reg.flat_table(apply_filters=True)</code> o <code>reg.export(...)</code>/<code>reg.html_report(...)</code> (che li applicano internamente). È una scelta di design deliberata — «FORGE mostra la complessità invece di nasconderla» — ma significa che una prima chiamata a <code>flat_table()</code> con più righe del previsto non è un bug.</p>
@@ -1054,41 +1055,41 @@ reg.html_report(timeframe=&quot;1H&quot;)      # HTML autocontenuto, SVG inline,
 <pre><code class="language-python">import pandas as pd
 
 candles = pd.DataFrame({
-    &quot;open_time&quot;: [1704067200000, 1704070800000, 1704074400000],  # epoch ms
-    &quot;open&quot;:  [100.14, 100.39, 99.20],
-    &quot;high&quot;:  [100.32, 100.61, 100.14],
-    &quot;low&quot;:   [99.97,  99.08,  98.80],
-    &quot;close&quot;: [100.31, 99.27,  100.02],
-    &quot;volume&quot;: [1169.4, 2779.8, 3188.0],
+    "open_time": [1704067200000, 1704070800000, 1704074400000],  # epoch ms
+    "open":  [100.14, 100.39, 99.20],
+    "high":  [100.32, 100.61, 100.14],
+    "low":   [99.97,  99.08,  98.80],
+    "close": [100.31, 99.27,  100.02],
+    "volume": [1169.4, 2779.8, 3188.0],
 })   # una tabella reale ha tante righe quante barre — 500 nella run sotto
 </code></pre>
 <p>Tre chiamate trasformano questo in una tabella che <code>forge()</code> può consumare:</p>
 <pre><code class="language-python">from forgedge import build_features, candle_features, lag_features, summary_report
 
-kpi = build_features(candles, timestamp_col=&quot;open_time&quot;)
+kpi = build_features(candles, timestamp_col="open_time")
 kpi = candle_features(kpi)
-kpi = lag_features(kpi, &quot;close&quot;, &quot;close_ema_09&quot;, periods=[1, 2, 3])
+kpi = lag_features(kpi, "close", "close_ema_09", periods=[1, 2, 3])
 
-rep = summary_report(kpi, timeframe=&quot;1H&quot;, verbose=False, return_report=True)
+rep = summary_report(kpi, timeframe="1H", verbose=False, return_report=True)
 print(rep.one_line())   # check opt-in sulla qualità dei dati — non blocca mai da solo, §9/§11
 </code></pre>
 <p><strong>Output verificato</strong>, su 500 barre orarie sintetiche ma internamente coerenti costruite così:</p>
 <pre><code>build_features   : (500, 6)  -&gt; (500, 116)   # +color, +open_dt, +109 colonne indicatore
 candle_features   : (500, 116) -&gt; (500, 122)  # +body, upper_wick, lower_wick, close_pos, range_pct, gap
 lag_features      : (500, 122) -&gt; (500, 128)  # +close_prev_{01,02,03}, close_ema_09_prev_{01,02,03}
-summary_report    : &quot;data quality OK&quot;
+summary_report    : "data quality OK"
 </code></pre>
 <p>Quella tabella è ora una vera KPI Table — passala direttamente a <code>forge()</code>:</p>
 <pre><code class="language-python">from forgedge import forge
-result = forge(kpi, ticker=&quot;DEMO&quot;, timeframe=&quot;1H&quot;, progress=False)
+result = forge(kpi, ticker="DEMO", timeframe="1H", progress=False)
 print(len(result.candidates), len(result.promoted))   # 26252  1108
 </code></pre>
 <p>Niente in questo è specificamente costruito per la dimostrazione: è esattamente la sequenza <code>build_features → candle_features → lag_features</code> che il Caso d'uso 2 del §12 e lo script <code>examples/kpi_builder_usage.py</code> del repository stesso seguono, eseguita qui su dati sintetici invece che reali così puoi vederla funzionare da capo a fondo senza aver bisogno di una fonte dati. Se hai dati reali con esattamente la stessa forma (una colonna timestamp più <code>open</code>/<code>high</code>/<code>low</code>/<code>close</code>, opzionalmente <code>volume</code>), questo è letteralmente tutto ciò che serve per arrivare a <code>forge()</code>.</p>
 <h4 id="cosa-fa-ciascuna-funzione-parametro-per-parametro">Cosa fa ciascuna funzione, parametro per parametro</h4>
-<pre><code class="language-python">kpi = build_features(candles, config=None, *, timestamp_col, output_timestamp_col=&quot;open_dt&quot;,
-                      timestamp_unit=&quot;ms&quot;, add_color=True, sort_output=True) -&gt; pd.DataFrame
-kpi = candle_features(kpi, *, order_on=&quot;open_dt&quot;, add_gap=True, round_to=5) -&gt; pd.DataFrame
-kpi = lag_features(kpi, *cols, periods=(1,2,3), like=None, order_on=&quot;open_dt&quot;) -&gt; pd.DataFrame
+<pre><code class="language-python">kpi = build_features(candles, config=None, *, timestamp_col, output_timestamp_col="open_dt",
+                      timestamp_unit="ms", add_color=True, sort_output=True) -&gt; pd.DataFrame
+kpi = candle_features(kpi, *, order_on="open_dt", add_gap=True, round_to=5) -&gt; pd.DataFrame
+kpi = lag_features(kpi, *cols, periods=(1,2,3), like=None, order_on="open_dt") -&gt; pd.DataFrame
 </code></pre>
 <p><strong><code>build_features(candles, config, *, ...)</code></strong> calcola un insieme configurabile di indicatori base (SMA, EMA, RSI, Bollinger Bands, ATR, MACD, min/max mobile, rendimenti, volatilità, max-drawdown) da OHLCV grezzo, e deriva la colonna timestamp <code>open_dt</code> che <code>forge()</code> si aspetta.</p>
 <ul>
@@ -1106,11 +1107,11 @@ kpi = lag_features(kpi, *cols, periods=(1,2,3), like=None, order_on=&quot;open_d
 <p>Solo <code>timestamp_col</code> e <code>close</code> sono mai strettamente richiesti — <code>close</code> perché ogni modulo a valle misura rendimenti forward su di essa. <code>open</code>/<code>high</code>/<code>low</code> servono a pezzi specifici (<code>candle_features</code> richiede tutte e quattro le colonne OHLC e solleva <code>KeyError</code> nominando quelle mancanti; <code>add_color</code> richiede <code>open</code>+<code>close</code>; l'indicatore <code>atr</code> richiede <code>high</code>+<code>low</code> oltre a qualunque <code>columns</code> tu l'abbia configurato) ma sono altrimenti opzionali — una serie di soli <code>close</code> costruisce comunque una KPI Table valida, seppure più piccola. <code>volume</code> è opzionale ovunque: il config di default pacchettizzato la referenzia (per <code>moving_average</code>), ma una colonna che il <code>config</code> referenzia e <code>candles</code> non ha viene saltata con un <code>logger.warning</code>, mai un errore — questo è precisamente il motivo per cui un input solo-OHLC, senza alcun volume, è sempre sicuro da passare a <code>build_features</code> invariato. Se non sei sicuro che i tuoi dati grezzi siano puliti prima di spendere una run di <code>forge()</code> su di essi, <code>summary_report()</code> (usato nel percorso sopra) è il check opt-in costruito proprio per questo — vedi §9/§11 per cosa cerca e §13 per un esempio reale di come ha colto un CSV genuinamente malformato.</p>
 <h4 id="configurare-quali-indicatori-vengono-costruiti">Configurare quali indicatori vengono costruiti</h4>
 <p>Un config è una mappatura semplice: <code>{nome_indicatore: {"enabled": bool, "params": {"periods": [...], "columns": [...]}}}</code>. Tre modi equivalenti per fornirne uno:</p>
-<pre><code class="language-python">kpi = build_features(candles, timestamp_col=&quot;open_time&quot;)                    # None -&gt; default pacchettizzato
-kpi = build_features(candles, {&quot;rsi&quot;: {&quot;enabled&quot;: True,                     # un dict semplice
-                                        &quot;params&quot;: {&quot;periods&quot;: [14], &quot;columns&quot;: [&quot;close&quot;]}}},
-                      timestamp_col=&quot;open_time&quot;)
-kpi = build_features(candles, &quot;my_config.yaml&quot;, timestamp_col=&quot;open_time&quot;)  # un percorso YAML (richiede PyYAML)
+<pre><code class="language-python">kpi = build_features(candles, timestamp_col="open_time")                    # None -&gt; default pacchettizzato
+kpi = build_features(candles, {"rsi": {"enabled": True,                     # un dict semplice
+                                        "params": {"periods": [14], "columns": ["close"]}}},
+                      timestamp_col="open_time")
+kpi = build_features(candles, "my_config.yaml", timestamp_col="open_time")  # un percorso YAML (richiede PyYAML)
 </code></pre>
 <p>Una chiave <code>"enabled"</code> assente ha default <code>True</code> (solo <code>"enabled": False</code> disattiva un blocco); un blocco <code>"params"</code> senza <code>"periods"</code>/<code>"columns"</code> produce liste vuote, di fatto un no-op per quell'indicatore; un nome di indicatore che la libreria non riconosce viene saltato con un warning, non un errore, quindi un typo in un config scritto a mano degrada silenziosamente invece di sollevare — controlla il log se una colonna che ti aspettavi non compare mai. Un blocco <code>"lagging"</code>, se presente (es. copiato da un config più vecchio), viene esplicitamente ignorato con una riga di log informativa — il lag ora vive in <code>lag_features()</code>, non in questo config. Il config di riferimento pacchettizzato è distribuito assieme al sorgente come file YAML modificabile e commentato (<code>kpi_builder/default_enricher.yaml</code>) con la stessa struttura che ha <code>DEFAULT_CONFIG</code> sotto — copialo come punto di partenza per il tuo file invece di scriverne uno da zero. <code>load_kpi_config(path)</code> (usata internamente quando passi uno <code>str</code>/<code>Path</code>, o chiamabile direttamente) solleva <code>ImportError</code> con un messaggio chiaro se PyYAML non è installato, e <code>FileNotFoundError</code> se <code>path</code> non esiste.</p>
 <p><strong>Convenzione di naming delle colonne, importante:</strong> perché una colonna sia riconosciuta come parte di una <em>coppia ratio same-family</em> dal feature generator di Event Discovery, il nome deve seguire <code>{base}_{indicatore}_{periodo}</code> con <code>base ∈ {close, high, low, open, volume}</code> e <code>indicatore ∈ {ema, sma, rsi, dema, tema, wma, hma, mdd, atr, natr}</code> (o i pattern di naming dedicati per Bollinger/volatilità/rendimento/MACD). Una colonna che non rispetta questa convenzione funziona comunque come feature standalone e può comunque essere raggiunta da uno degli <em>altri</em> pairing di arità 2 a scope più ristretto descritti in §8 (coppie OHLC cross-tempo, MACD-vs-signal, rendimento prezzo-vs-volume, coppie di geometria di <code>candle_features()</code>, indicatore-vs-OHLC-base-laggata) — è specificamente dal raggruppamento generico same-family che resta esclusa. Se un indicatore custom che hai aggiunto non compare mai composto con nulla nei candidati di Event Discovery, controlla prima il nome contro questa convenzione.</p>
@@ -1189,9 +1190,9 @@ kpi = build_features(candles, &quot;my_config.yaml&quot;, timestamp_col=&quot;op
 </tbody>
 </table>
 <p><strong>Verificato</strong>, su 400 barre orarie sintetiche: <code>build_features(candles, timestamp_col="open_time")</code> senza config (cioè il default pacchettizzato) non produce <strong>nessuna</strong> colonna <code>*_atr_*</code>/<code>*_macd_*</code> — conferma che <code>atr</code>/<code>macd</code> sono davvero spente di default. Passare una config che le abilita esplicitamente —</p>
-<pre><code class="language-python">CONFIG = {&quot;atr&quot;: {&quot;enabled&quot;: True, &quot;params&quot;: {&quot;periods&quot;: [14, 28], &quot;columns&quot;: [&quot;close&quot;]}},
-          &quot;macd&quot;: {&quot;enabled&quot;: True, &quot;params&quot;: {&quot;periods&quot;: [12, 26, 9], &quot;columns&quot;: [&quot;close&quot;]}}}
-kpi = build_features(candles, CONFIG, timestamp_col=&quot;open_time&quot;)
+<pre><code class="language-python">CONFIG = {"atr": {"enabled": True, "params": {"periods": [14, 28], "columns": ["close"]}},
+          "macd": {"enabled": True, "params": {"periods": [12, 26, 9], "columns": ["close"]}}}
+kpi = build_features(candles, CONFIG, timestamp_col="open_time")
 </code></pre>
 <p>aggiunge esattamente <code>close_atr_14, close_atr_28, close_natr_14, close_natr_28, close_macd_12_26, close_macd_12_26_signal_09, close_macd_12_26_hist_09</code> — sette colonne per due blocchi di indicatori. Due dettagli da sapere prima di attivarle:</p>
 <ul>
@@ -1264,7 +1265,7 @@ kpi = pattern_features(kpi)   # aggiunge una colonna categoriale: candle_pattern
 <h3 id="coerenza-della-configurazione-config_report">Coerenza della configurazione — <code>config_report</code></h3>
 <pre><code class="language-python">config_report(event_discovery=None, alpha=None, rule_discovery=None,
               registry=None, market_context=None, *, ctx=None, kpi=None,
-              timeframe=&quot;1H&quot;) -&gt; ConfigReport
+              timeframe="1H") -&gt; ConfigReport
 </code></pre>
 <p><code>summary_report</code> valida i <strong>dati</strong>; <code>config_report</code> valida la
 <strong>configurazione</strong>, con lo stesso vocabolario <code>Finding</code>. Risponde a due domande
@@ -1274,7 +1275,7 @@ per girare</em> e <em>quella configurazione è internamente soddisfacibile</em>.
 report mostra è per costruzione ciò che la pipeline eseguirà — <code>rep.configs</code>
 sono gli oggetti veri, non una ricostruzione. Non solleva mai, non avvisa mai e
 non muta mai ciò che riceve.</p>
-<pre><code class="language-python">rep = config_report(disc, alpha, rd, kpi=kpi, timeframe=&quot;1D&quot;)
+<pre><code class="language-python">rep = config_report(disc, alpha, rd, kpi=kpi, timeframe="1D")
 print(rep.to_text())          # la resolution trace, poi la diagnostica
 if rep.has_critical:
     raise ValueError(rep.one_line())
@@ -1382,8 +1383,8 @@ qualità resta sul verdetto M3 e sul grade, dove il registro già la registra.
 misurato.</p>
 </blockquote>
 <h3 id="qualita-dei-dati-summary_report">Qualità dei dati — <code>summary_report</code></h3>
-<pre><code class="language-python">summary_report(df: pd.DataFrame, *, timestamp_col=&quot;open_dt&quot;,
-                price_cols=(&quot;open&quot;,&quot;high&quot;,&quot;low&quot;,&quot;close&quot;), timeframe=None,
+<pre><code class="language-python">summary_report(df: pd.DataFrame, *, timestamp_col="open_dt",
+                price_cols=("open","high","low","close"), timeframe=None,
                 return_high_move=0.5, top_n=5, verbose=True,
                 return_report=False) -&gt; DataQualityReport | None
 </code></pre>
@@ -1479,19 +1480,19 @@ RotationCalibrator(event_frame, candidates, alpha_config, time_budget=None).run(
 
 rt = regime_transitions(results)
 print(rt.shape)                                            # (236, 6)
-print(rt[rt[&quot;run_length_before&quot;] &lt;= 2].groupby(&quot;ticker&quot;).size())
+print(rt[rt["run_length_before"] &lt;= 2].groupby("ticker").size())
 # ADAUSDC    45
 # BTCUSDC    41
 
 share = regime_time_share(results)
-top = share.sort_values(&quot;share&quot;, ascending=False).groupby(&quot;ticker&quot;).head(1)
-print(top[[&quot;ticker&quot;, &quot;regime&quot;, &quot;share&quot;]].to_string(index=False))
+top = share.sort_values("share", ascending=False).groupby("ticker").head(1)
+print(top[["ticker", "regime", "share"]].to_string(index=False))
 #  ticker      regime    share
 # BTCUSDC STRONG_BEAR 0.438776
 # ADAUSDC STRONG_BEAR 0.407029
 
 fam = undetermined_direction_by_family([result_ada])
-rate = fam.groupby(&quot;family&quot;)[&quot;direction&quot;].apply(lambda s: (s == &quot;undetermined&quot;).mean())
+rate = fam.groupby("family")["direction"].apply(lambda s: (s == "undetermined").mean())
 print(rate.sort_values(ascending=False))
 # family
 # cross_triple    0.945455
@@ -1515,15 +1516,15 @@ pooled genuino):</p>
 <pre><code class="language-python">from forgedge import forge_multi
 from forgedge.deployment import promotion_gate, export_rules
 
-results, registry = forge_multi({&quot;ADAUSDC&quot;: kpi_ada, &quot;BTCUSDC&quot;: kpi_btc}, timeframe=&quot;1D&quot;)
+results, registry = forge_multi({"ADAUSDC": kpi_ada, "BTCUSDC": kpi_btc}, timeframe="1D")
 
 gate = promotion_gate(list(results.values()), registries=[registry])
 print(gate.shape)                              # (96, 10)
-print(gate.groupby(&quot;ticker&quot;)[&quot;promotable&quot;].sum())
+print(gate.groupby("ticker")["promotable"].sum())
 # ADAUSDC    0
 # BTCUSDC    5
 
-exported = export_rules(list(results.values()), &quot;exported_rules/&quot;, registries=[registry])
+exported = export_rules(list(results.values()), "exported_rules/", registries=[registry])
 print(len(exported))                           # 5 — una riga per contratto effettivamente scritto su disco
 </code></pre>
 <p>Ogni contratto <code>ADAUSDC</code> è bloccato su questo fixture — oltre metà dei
@@ -1531,7 +1532,7 @@ contratti in pool sono duplicati e la maggior parte si classifica
 <code>"ISOLATED"</code> sul replay cross-ticker (entrambi bloccati per default), quindi
 è il gate che fa il suo lavoro conservativo per design, non un bug.</p>
 <p>Riferimento completo su parametri/ritorni, tabella completa dei campi di <code>PromotionGateConfig</code>, e ogni esempio verificato: <code>src/forgedge/docs/specs/deployment_it.md</code>. Motivazione di design — perché la sequenza è fissa, perché solo <code>export_rules</code> tocca il filesystem: <code>src/forgedge/docs/modules/Deployment.md</code>.</p>
-<hr />
+<hr/>
 <h2 id="10-configurazione">10. Configurazione</h2>
 <p>Ogni modulo accetta una dataclass che porta i suoi parametri. Questa sezione copre quelli che più probabilmente andrai effettivamente a tarare, con i default citati esattamente dal sorgente.</p>
 <h3 id="discoveryconfig-modulo-1"><code>DiscoveryConfig</code> (Modulo 1)</h3>
@@ -1810,8 +1811,8 @@ contratti in pool sono duplicati e la maggior parte si classifica
 <p>Invece di assemblare <code>DiscoveryConfig</code>/<code>AlphaConfig</code>/<code>RuleDiscoveryConfig</code> a mano, <code>forge_preset(preset, timeframe, asset, train_ratio=0.70, **overrides)</code> restituisce tutti e tre pretarati per un <em>profilo</em> di ricerca nominato:</p>
 <pre><code class="language-python">from forgedge import forge, forge_preset
 
-disc_cfg, alpha_cfg, rd_cfg = forge_preset(&quot;balanced&quot;, timeframe=&quot;1D&quot;, asset=&quot;ADAUSDC&quot;)
-result = forge(kpi, ticker=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;,
+disc_cfg, alpha_cfg, rd_cfg = forge_preset("balanced", timeframe="1D", asset="ADAUSDC")
+result = forge(kpi, ticker="ADAUSDC", timeframe="1D",
                event_discovery_config=disc_cfg, alpha_config=alpha_cfg,
                rule_discovery_config=rd_cfg)
 </code></pre>
@@ -1842,7 +1843,7 @@ result = forge(kpi, ticker=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;,
 </tbody>
 </table>
 <p>Override accettati per nome: lato M1 — <code>min_tpm</code>, <code>max_dispersion</code>, <code>dispersion_margin</code>, <code>min_episodes</code>, <code>max_and_components</code>, <code>timestamp_col</code>, <code>event_counting</code>; lato M2 — <code>min_lift</code>, <code>min_cohens_d</code>, <code>fdr_q</code>, <code>oos_max_p</code>, <code>horizon_grid</code>, <code>bars_per_day</code>; lato M3 — <code>rd_min_tpm</code>, <code>min_profit_factor</code>, <code>min_win_rate</code>, <code>min_pf_score_tpm</code>, <code>min_fill_rate_opt</code>. Una chiave di override non riconosciuta solleva <code>TypeError</code>.</p>
-<hr />
+<hr/>
 <h2 id="11-gestione-degli-errori">11. Gestione degli errori</h2>
 <p><code>forgedge</code> <strong>non ha una gerarchia di eccezioni custom</strong> — ogni errore sollevato è un built-in Python semplice (<code>ValueError</code>, <code>KeyError</code>, <code>RuntimeError</code>, <code>TypeError</code>, <code>ImportError</code>, <code>FileNotFoundError</code>). Non c'è nulla di specifico a <code>forgedge</code> da catturare selettivamente; cattura i built-in.</p>
 <h3 id="filosofia-di-validazione">Filosofia di validazione</h3>
@@ -1850,13 +1851,13 @@ result = forge(kpi, ticker=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;,
 <p><code>summary_report()</code> (§9) è la risposta della libreria a "voglio validare prima di impegnarmi in una run" — ma è interamente <strong>opt-in</strong>: non solleva mai, non blocca mai, e non viene mai chiamata automaticamente. Se vuoi uno stop rigido su dati cattivi, lo scrivi tu:</p>
 <pre><code class="language-python">rep = summary_report(kpi, return_report=True, verbose=False)
 if rep.has_critical:
-    raise ValueError(f&quot;Risolvi i problemi sui dati prima: {rep.one_line()}&quot;)
+    raise ValueError(f"Risolvi i problemi sui dati prima: {rep.one_line()}")
 </code></pre>
 <h3 id="eccezioni-comuni-verificate">Eccezioni comuni, verificate</h3>
 <p>Non sono parafrasate — ognuna è stata effettivamente scatenata e il suo messaggio catturato.</p>
 <pre><code class="language-python">from forgedge import forge, CustomEvent, DiscoveryConfig
 
-forge(kpi, manual_events=[CustomEvent(&quot;close &lt; 50&quot;)], event_discovery_config=DiscoveryConfig())
+forge(kpi, manual_events=[CustomEvent("close &lt; 50")], event_discovery_config=DiscoveryConfig())
 # ValueError: manual_events and event_discovery_config are mutually exclusive.
 # Pass one or the other, not both.
 </code></pre>
@@ -1932,7 +1933,7 @@ GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0)
 <li><code>binary_target(..., target_mode="proj")</code> ricade su <code>"abs"</code> quando non c'è abbastanza storia per il warmup della SMA di trend, registrato a livello <code>WARNING</code>.</li>
 <li><code>RuleDiscoveryConfig(selection_mode="walk_forward")</code> ricade silenziosamente sulla selezione full-sample quando lo span di dati è troppo corto anche per un singolo split walk-forward — registrato come nota nella response, non sollevato.</li>
 </ul>
-<hr />
+<hr/>
 <h2 id="12-casi-duso-progressivi">12. Casi d'uso progressivi</h2>
 <h3 id="caso-duso-1-hello-world-scoprire-un-evento">Caso d'uso 1 — Hello World: scoprire un evento</h3>
 <p>Già coperto per intero in §6. Il paradigma da portare via: <strong>Event Discovery trova struttura senza mai guardare cosa succede dopo.</strong> Tutto il resto della libreria si costruisce sopra quel singolo evento.</p>
@@ -1944,27 +1945,27 @@ GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0)
 )
 
 # candles: un DataFrame con open_time (epoch ms), open, high, low, close, volume
-summary_report(candles, timeframe=&quot;1D&quot;)   # check pre-flight opt-in, non blocca mai
+summary_report(candles, timeframe="1D")   # check pre-flight opt-in, non blocca mai
 
 DEMO_CONFIG = {
-    &quot;ema&quot;:             {&quot;enabled&quot;: True, &quot;params&quot;: {&quot;periods&quot;: [9, 25, 50], &quot;columns&quot;: [&quot;close&quot;]}},
-    &quot;rsi&quot;:             {&quot;enabled&quot;: True, &quot;params&quot;: {&quot;periods&quot;: [14], &quot;columns&quot;: [&quot;close&quot;]}},
-    &quot;bollinger_bands&quot;: {&quot;enabled&quot;: True, &quot;params&quot;: {&quot;periods&quot;: [20], &quot;columns&quot;: [&quot;close&quot;]}},
-    &quot;min&quot;:             {&quot;enabled&quot;: True, &quot;params&quot;: {&quot;periods&quot;: [24], &quot;columns&quot;: [&quot;close&quot;]}},
-    &quot;max&quot;:             {&quot;enabled&quot;: True, &quot;params&quot;: {&quot;periods&quot;: [24], &quot;columns&quot;: [&quot;close&quot;]}},
-    &quot;return&quot;:          {&quot;enabled&quot;: True, &quot;params&quot;: {&quot;periods&quot;: [1, 6, 24], &quot;columns&quot;: [&quot;close&quot;]}},
+    "ema":             {"enabled": True, "params": {"periods": [9, 25, 50], "columns": ["close"]}},
+    "rsi":             {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "bollinger_bands": {"enabled": True, "params": {"periods": [20], "columns": ["close"]}},
+    "min":             {"enabled": True, "params": {"periods": [24], "columns": ["close"]}},
+    "max":             {"enabled": True, "params": {"periods": [24], "columns": ["close"]}},
+    "return":          {"enabled": True, "params": {"periods": [1, 6, 24], "columns": ["close"]}},
 }
 
-kpi = build_features(candles, DEMO_CONFIG, timestamp_col=&quot;open_time&quot;)
+kpi = build_features(candles, DEMO_CONFIG, timestamp_col="open_time")
 kpi = candle_features(kpi)
-kpi = lag_features(kpi, &quot;close&quot;, &quot;color&quot;, like=&quot;_ema_&quot;, periods=[1, 2, 3])
+kpi = lag_features(kpi, "close", "color", like="_ema_", periods=[1, 2, 3])
 
-disc, alpha, rd = forge_preset(&quot;balanced&quot;, timeframe=&quot;1D&quot;, asset=&quot;DEMO&quot;)
-result = forge(kpi, ticker=&quot;DEMO&quot;, timeframe=&quot;1D&quot;,
+disc, alpha, rd = forge_preset("balanced", timeframe="1D", asset="DEMO")
+result = forge(kpi, ticker="DEMO", timeframe="1D",
                event_discovery_config=disc, alpha_config=alpha,
                run_rule_discovery=False, progress=False)
 
-print(f&quot;M1 candidati = {len(result.candidates)}  M2 promossi = {len(result.promoted)}&quot;)
+print(f"M1 candidati = {len(result.candidates)}  M2 promossi = {len(result.promoted)}")
 </code></pre>
 <p><strong>Output verificato</strong> (eseguendo questo script così com'è, su 2000 barre di candele sintetiche generate dallo script stesso):</p>
 <pre><code>build_features  : (2000, 21)  (indicatori base + open_dt + color)
@@ -1985,32 +1986,32 @@ from forgedge.event_discovery.models import GateParams
 # permissivo; alzare min_tpm scambia via eventi rari/marginali per
 # potere statistico per evento (vedi il trade-off frequenza-vs-selettività di §16).
 # `max_dispersion` non è la leva sulla dispersione qui — `event_counting`
-# di default è &quot;episode&quot;, dove governa `dispersion_margin` (#205).
+# di default è "episode", dove governa `dispersion_margin` (#205).
 config = DiscoveryConfig(gate_params=GateParams(min_tpm=1.5, dispersion_margin=1.8))
 ed = EventDiscovery(kpi, config=config)
 </code></pre>
 <p><strong>b) Passare il modello di ingresso di Rule Discovery da limite a mercato.</strong></p>
 <pre><code class="language-python">from forgedge import RuleDiscovery, RuleDiscoveryConfig
 
-# &quot;limit&quot; (default) può soffrire di un &quot;fill confound&quot;: un limite profondo,
+# "limit" (default) può soffrire di un "fill confound": un limite profondo,
 # raramente riempito, può mostrare un PF gonfiato su un piccolo sottoinsieme
-# non rappresentativo di trade. &quot;market&quot; isola l'edge del segnale dal
+# non rappresentativo di trade. "market" isola l'edge del segnale dal
 # meccanismo di ingresso interamente.
-config = RuleDiscoveryConfig(entry_mode=&quot;market&quot;)
+config = RuleDiscoveryConfig(entry_mode="market")
 resp = RuleDiscovery(event_frame, contract, candidate, config=config).run()
 </code></pre>
 <p><strong>c) Eseguire il calibratore di rotazione completo e campionato invece di quello veloce di default — con il preset <code>"sweep"</code>, come la documentazione raccomanda di abbinarli.</strong></p>
 <pre><code class="language-python">from forgedge import forge, RotationConfig
 
-disc, alpha, rd = forge_preset(&quot;sweep&quot;, timeframe=&quot;1D&quot;, asset=&quot;ADAUSDC&quot;)
-result = forge(kpi, ticker=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;,
+disc, alpha, rd = forge_preset("sweep", timeframe="1D", asset="ADAUSDC")
+result = forge(kpi, ticker="ADAUSDC", timeframe="1D",
                event_discovery_config=disc, alpha_config=alpha, rule_discovery_config=rd,
                rotation_calibration=RotationConfig(k=100))   # sostituisce fast_null
 promoted = result.alpha_discovery.promoted_contracts(min_lift=0.05)
 </code></pre>
 <p><strong>d) Passare lo scoring del target binario di Alpha Discovery da eccesso-sul-trend (<code>"proj"</code>, il default) a rendimento assoluto (<code>"abs"</code>).</strong></p>
 <pre><code class="language-python">from forgedge import AlphaConfig
-config = AlphaConfig(asset=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;, target_mode=&quot;abs&quot;)
+config = AlphaConfig(asset="ADAUSDC", timeframe="1D", target_mode="abs")
 </code></pre>
 <p>Per ognuno: cosa cambia, perché esiste, e il costo di cambiarlo sono coperti punto per punto in §15 (comportamenti opt-in) e §16 (trade-off) — questa sezione è il "come", quelle sono il "perché".</p>
 <h3 id="caso-duso-5-errori-e-dati-problematici">Caso d'uso 5 — Errori e dati problematici</h3>
@@ -2018,7 +2019,7 @@ config = AlphaConfig(asset=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;, target
 <pre><code class="language-python">import pandas as pd
 from forgedge import summary_report
 
-rep = summary_report(pd.DataFrame(columns=[&quot;open&quot;, &quot;high&quot;, &quot;low&quot;, &quot;close&quot;]),
+rep = summary_report(pd.DataFrame(columns=["open", "high", "low", "close"]),
                       verbose=False, return_report=True)
 print(rep.worst, [f.code for f in rep.findings])
 # FAIL ['empty']
@@ -2032,7 +2033,7 @@ GateParams(min_act=50, min_months=8, max_conc=0.40, min_tpm=2.0)
 <p>Questa è la vecchia API di <code>GateParams</code>, che diversi script <code>examples/*.py</code> di questo repository usano ancora. Vedi §11 per la spiegazione completa e quali script sono coinvolti.</p>
 <p><strong>Configurazione mutuamente esclusiva.</strong></p>
 <pre><code class="language-python">from forgedge import forge, CustomEvent, DiscoveryConfig
-forge(kpi, manual_events=[CustomEvent(&quot;close &lt; 50&quot;)], event_discovery_config=DiscoveryConfig())
+forge(kpi, manual_events=[CustomEvent("close &lt; 50")], event_discovery_config=DiscoveryConfig())
 # ValueError: manual_events and event_discovery_config are mutually exclusive.
 </code></pre>
 <p><strong>La trappola silenziosa "nessun risultato" più comune: <code>direction="undetermined"</code>.</strong></p>
@@ -2044,11 +2045,11 @@ forge(kpi, manual_events=[CustomEvent(&quot;close &lt; 50&quot;)], event_discove
 <pre><code class="language-python">rejected = [c for c in result.contracts if not c.promoted]
 for c in rejected[:3]:
     print(c.event_candidate_id, c.rejection_reasons)
-# ogni contratto rifiutato ha &quot;no derivable target&quot; nelle rejection_reasons
+# ogni contratto rifiutato ha "no derivable target" nelle rejection_reasons
 # — l'unica ragione di rigetto a gate rigido che questo modulo produce
 </code></pre>
 <p><strong>Un nome di colonna feature non conforme.</strong></p>
-<pre><code class="language-python">kpi[&quot;my_custom_signal&quot;] = ...   # non corrisponde a {base}_{indicatore}_{periodo}
+<pre><code class="language-python">kpi["my_custom_signal"] = ...   # non corrisponde a {base}_{indicatore}_{periodo}
 </code></pre>
 <p>Questo <strong>non</strong> solleva né avverte. <code>my_custom_signal</code> funziona comunque come feature standalone di Event Discovery — semplicemente non viene mai accoppiata in una feature ratio/spread con un'altra colonna (§9). Se ti aspettavi di vedere <code>ratio_my_custom_signal_something</code> nella lista di candidati e non c'è, questa convenzione di naming è la prima cosa da controllare, non un bug da segnalare.</p>
 <h3 id="caso-duso-6-unapplicazione-realistica-un-servizio-di-monitoraggio-attorno-a-una-sessione-di-discovery">Caso d'uso 6 — Un'applicazione realistica: un servizio di monitoraggio attorno a una sessione di discovery</h3>
@@ -2057,7 +2058,7 @@ for c in rejected[:3]:
 from forgedge import forge, RuleSpec, rule_performance_report
 
 class MonitoringService:
-    &quot;&quot;&quot;Avvolge una sessione di discovery forge() e la espone per il monitoraggio continuo.&quot;&quot;&quot;
+    """Avvolge una sessione di discovery forge() e la espone per il monitoraggio continuo."""
 
     def __init__(self, kpi_table: pd.DataFrame, ticker: str, timeframe: str):
         self.result = forge(kpi_table, ticker=ticker, timeframe=timeframe, progress=False)
@@ -2073,27 +2074,27 @@ class MonitoringService:
         # tramite lo stesso percorso EventCandidate.apply() che usa Rule Discovery —
         # fresh_candles non deve essere la tabella di scoperta.
         return rule_performance_report(self.specs, fresh_candles,
-                                        title=f&quot;{self.result.ticker} monitoring&quot;)
+                                        title=f"{self.result.ticker} monitoring")
 
 
-svc = MonitoringService(kpi, ticker=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;)
-print(f&quot;{len(svc.published_rules())} regole pubblicate: {svc.published_rules()[:3]} ...&quot;)
+svc = MonitoringService(kpi, ticker="ADAUSDC", timeframe="1D")
+print(f"{len(svc.published_rules())} regole pubblicate: {svc.published_rules()[:3]} ...")
 html = svc.health_report_html(kpi)   # in produzione: tabella di scoperta + barre genuinamente nuove
 </code></pre>
 <p><strong>Output verificato</strong> sul fixture ADA: <code>40 regole pubblicate: ['RULE_ADA_01', 'RULE_ADA_02', 'RULE_ADA_03'] ...</code> (combacia col conteggio attuale di <code>result.edges()</code>, §7/§9), e un report HTML generato di ~5 MB (grafici SVG inline, nessuna risorsa esterna — sicuro da salvare o inviare via email come singolo file). I nomi <code>RuleSpec</code> seguono la stessa convenzione <code>RULE_{TICKER}_{NN}</code> che il Modulo 4 usa internamente, anche quando non passi affatto per <code>RuleRegistry</code>.</p>
-<hr />
+<hr/>
 <h2 id="13-lavorare-con-i-dati-presenti-in-questo-repository">13. Lavorare con i dati presenti in questo repository</h2>
 <p>Due dataset reali sono inclusi in questo repository, più un artefatto derivato. Nessuno dei due è un giocattolo — entrambi sono dati di mercato genuini.</p>
 <h3 id="testsfixturesada_1d_trainparquet"><code>tests/fixtures/ADA_1D_TRAIN.parquet</code></h3>
 <p>882 barre giornaliere OHLCV di ADAUSDC (Cardano), dal 2024-01-01 al 2026-05-31, con 22 colonne indicatore precalcolate già allegate: <code>close_ret_{03,12,96}</code> (rendimenti), Bollinger Bands (<code>close_bb_{mid,upper,lower,width}_20</code>), un max-drawdown mobile (<code>close_mdd_48</code>), EMA su due finestre sia su <code>close</code> sia su <code>low</code> (con tre copie shiftate ciascuna, <code>_prev_01..03</code>), e volatilità mobile (<code>close_vol_{05,12,24}</code>). Questo è esattamente il fixture su cui la suite di regressione golden della libreria stessa (<code>tests/test_golden.py</code>) fissa i propri valori attesi — cioè se esegui <code>forge()</code> con gli argomenti mostrati in §7, stai riproducendo a mano parte della suite di test della libreria stessa.</p>
 <pre><code class="language-python">import pandas as pd
-kpi = pd.read_parquet(&quot;tests/fixtures/ADA_1D_TRAIN.parquet&quot;)
+kpi = pd.read_parquet("tests/fixtures/ADA_1D_TRAIN.parquet")
 </code></pre>
 <p>Nessun preprocessing necessario — questa tabella è già una KPI Table valida (ha <code>close</code>, ha <code>open_dt</code> come <code>datetime64[ns]</code>, ordinata cronologicamente). Questo è il dataset usato in §7 e nei Casi d'uso 4-6 di §12.</p>
 <h3 id="examplesdataamzn_1dcsv"><code>examples/data/AMZN_1D.csv</code></h3>
 <p>1378 barre giornaliere di AMZN (Amazon), un export da un provider di dati finanziari in un formato comune ma <strong>non direttamente compatibile con <code>forge()</code></strong>:</p>
 <pre><code class="language-python">import pandas as pd
-raw = pd.read_csv(&quot;examples/data/AMZN_1D.csv&quot;)
+raw = pd.read_csv("examples/data/AMZN_1D.csv")
 print(raw.columns.tolist())
 # ['Date', 'Price', 'Open', 'High', 'Low', 'Vol.', 'Change %']
 print(raw.head(2))
@@ -2102,19 +2103,19 @@ print(raw.head(2))
 # 1  06/29/2026  240.14  234.22  249.71  233.80   77.62M    3.20%
 </code></pre>
 <p>Nota cosa non va in questa tabella, dal punto di vista di <code>forgedge</code>: il prezzo di chiusura si chiama <code>"Price"</code>, non <code>"close"</code>; il volume è una <strong>stringa</strong> con un suffisso di unità (<code>"31.50M"</code>); le date sono in ordine <strong>decrescente</strong> (più recente per prima) e memorizzate come stringhe <code>MM/DD/YYYY</code>, non una colonna o un indice <code>datetime64</code>. Questo è realistico, ed è esattamente il tipo di problema che <code>summary_report</code> è pensata per catturare prima di sprecare una run di <code>forge()</code>. Il walkthrough completo del repository stesso (<code>examples/forge_amzn_walkthrough.ipynb</code>), che questo manuale ha verificato cella per cella, mostra la pulizia necessaria:</p>
-<pre><code class="language-python">raw.columns = [c.strip().lower().replace(&quot;.&quot;, &quot;&quot;).replace(&quot; &quot;, &quot;_&quot;) for c in raw.columns]
-raw = raw.rename(columns={&quot;price&quot;: &quot;close&quot;, &quot;vol&quot;: &quot;volume&quot;, &quot;change_%&quot;: &quot;chg_pct&quot;})
+<pre><code class="language-python">raw.columns = [c.strip().lower().replace(".", "").replace(" ", "_") for c in raw.columns]
+raw = raw.rename(columns={"price": "close", "vol": "volume", "change_%": "chg_pct"})
 
-raw[&quot;open_dt&quot;] = pd.to_datetime(raw[&quot;date&quot;], format=&quot;%m/%d/%Y&quot;)
-raw = raw.sort_values(&quot;open_dt&quot;).reset_index(drop=True)   # ordine ascendente — richiesto
+raw["open_dt"] = pd.to_datetime(raw["date"], format="%m/%d/%Y")
+raw = raw.sort_values("open_dt").reset_index(drop=True)   # ordine ascendente — richiesto
 
-for col in [&quot;open&quot;, &quot;high&quot;, &quot;low&quot;, &quot;close&quot;]:
-    raw[col] = pd.to_numeric(raw[col].astype(str).str.replace(&quot;,&quot;, &quot;&quot;), errors=&quot;coerce&quot;)
+for col in ["open", "high", "low", "close"]:
+    raw[col] = pd.to_numeric(raw[col].astype(str).str.replace(",", ""), errors="coerce")
 
-raw[&quot;volume&quot;] = (raw[&quot;volume&quot;].astype(str).str.replace(&quot;M&quot;, &quot;e6&quot;).str.replace(&quot;B&quot;, &quot;e9&quot;))
-raw[&quot;volume&quot;] = pd.to_numeric(raw[&quot;volume&quot;], errors=&quot;coerce&quot;)
+raw["volume"] = (raw["volume"].astype(str).str.replace("M", "e6").str.replace("B", "e9"))
+raw["volume"] = pd.to_numeric(raw["volume"], errors="coerce")
 
-candles = raw[[&quot;open_dt&quot;, &quot;open&quot;, &quot;high&quot;, &quot;low&quot;, &quot;close&quot;, &quot;volume&quot;]]
+candles = raw[["open_dt", "open", "high", "low", "close", "volume"]]
 </code></pre>
 <p>Dopo la pulizia, il notebook esegue <code>summary_report(candles, timestamp_col="open_dt", timeframe="1D", return_report=True)</code> e — vale la pena citarlo direttamente perché è un riscontro genuino e reale, non un esempio didattico costruito — fa emergere un'anomalia reale: "l'<strong>ultima barra</strong> del dataset (2026-06-30, la barra 'di oggi' al momento dell'estrazione) ha <code>open</code> leggermente sotto il <code>low</code> registrato — sintomo tipico di una barra ancora <strong>incompleta</strong> (sessione di mercato in corso al momento dello scarico del CSV)." Questa è un'illustrazione genuinamente utile e reale del perché si esegue <code>summary_report</code> prima, non dopo, una sessione di discovery: una barra finale incompleta non è una ragione per diffidare dell'intero dataset, ma è una ragione per considerare di scartare quella singola riga prima di eseguire Event Discovery, dato che la relazione OHLC di una barra parziale viola l'assunzione che ogni altra barra della tabella soddisfa.</p>
 <p>Il notebook procede poi attraverso <code>build_features()</code> (con <code>atr</code>/<code>macd</code> esplicitamente abilitati, a differenza della config demo del Caso d'uso 2), <code>forge_preset("sweep", ...)</code>, e una chiamata <code>forge()</code> completa, arrivando — su dati AMZN reali — a esattamente <strong>2</strong> segnali <code>PARTIAL-EDGE</code> e <strong>zero</strong> <code>EDGE</code> pieni, su 3035 candidati M1 e 508 contratti promossi M2. L'interpretazione dello stesso notebook (§14 copre il "perché" in profondità) è esplicita e vale la pena citarla: "Il risultato onesto: quasi nessun edge, ed è la cosa giusta."</p>
@@ -2122,7 +2123,7 @@ candles = raw[[&quot;open_dt&quot;, &quot;open&quot;, &quot;high&quot;, &quot;lo
 <p>Un <strong>artefatto di output</strong> pre-generato, non un dataset di input — è ciò che <code>examples/kpi_table_1d.py</code> produce confrontando il percorso di event-discovery proprio di FORGE contro il <code>TargetOptimizer</code> standalone (§9) su dati giornalieri ADA attraverso tre finestre temporali (2024 in-sample, 2025 e 2026 out-of-sample). Le sue 19 colonne (<code>ID, Pipeline, EVENT_ID, EXPRESSION, IS 2024_WR, IS 2024_PF, ...</code>) sono un esempio lavorato di confronto tra due strategie di discovery e il loro decadimento out-of-sample fianco a fianco — utile da leggere come <em>forma di output di riferimento</em>, non qualcosa che devi rigenerare per usare questo manuale.</p>
 <h3 id="notebook">Notebook</h3>
 <p>Da <code>notebooks/01_event_discovery.ipynb</code> a <code>06_rule_registry.ipynb</code> percorrono ogni modulo individualmente e in profondità; <code>notebooks/hurst.ipynb</code> è un approfondimento dedicato sulla stima dell'half-life Hurst/OU che Market Context usa per la selezione automatica delle finestre EMA (§8). <code>examples/forge_amzn_walkthrough.ipynb</code> (usato per tutta questa sezione) è l'unico costruito interamente attorno a un dataset incluso in questo repository ed è la cosa più vicina a un walkthrough canonico, completamente riproducibile, su dati reali.</p>
-<hr />
+<hr/>
 <h2 id="14-scelte-di-design">14. Scelte di design</h2>
 <p>Questa sezione distingue tre categorie in modo esplicito: <strong>(documentato)</strong> — il ragionamento dichiarato dagli autori stessi, citato o parafrasato da vicino dalla documentazione del repository; <strong>(misurato)</strong> — un risultato reale, riportato da un'esecuzione su dati reali, non un benchmark inventato; <strong>(inferito)</strong> — la lettura del codice fatta da questo manuale, chiaramente segnalata come tale, mai presentata come un fatto dichiarato dagli autori.</p>
 <h3 id="la-separazione-a-tre-domini-e-architetturale-non-convenzionale-documentato">La separazione a tre domini è architetturale, non convenzionale (documentato)</h3>
@@ -2155,7 +2156,7 @@ candles = raw[[&quot;open_dt&quot;, &quot;open&quot;, &quot;high&quot;, &quot;lo
 <p><code>lowfreq_robustness.md</code> identifica questo come un punto debole specifico, referenziato nel codice: "<code>horizon_grid</code> non è scalata sulla frequenza... <code>forge(..., timeframe="1D")</code> la usa invariata → periodi di detenzione fino a 48 giorni. A differenza di MarketContext / Hurst / rolling-IC / bars-per-year, che si auto-scalano, la griglia di orizzonti è una trappola silenziosa." Questo è il motivo per cui §7 di questo manuale dedica un paragrafo al fatto che <code>forge()</code> sostituisca una griglia giornaliera per te — è una correzione per un bug documentato e precedentemente reale, non una feature cosmetica.</p>
 <h3 id="perche-la-deduplicazione-solo-segnala-non-elimina-mai-documentato">Perché la deduplicazione solo segnala, non elimina mai (documentato)</h3>
 <p><code>src/forgedge/docs/README.md</code> dà una ragione specifica e non ovvia per cui due regole strutturalmente sovrapposte potrebbero valere la pena di essere entrambe tenute: "Una coppia <code>INDEPENDENT_CONFIRMATION</code> non è un duplicato da scartare — è la conferma indipendente dello stesso edge da due meccanismi diversi." (Nota: la classificazione a due livelli che questo passaggio descrive — <code>DUPLICATE_STRUCTURAL</code>/<code>DUPLICATE_BEHAVIORAL</code>/<code>INDEPENDENT_CONFIRMATION</code> — è elencata nella roadmap dello stesso repository come <strong>non ancora implementata</strong>; il comportamento attuale, effettivamente distribuito, è il più semplice flag binario <code>is_duplicate</code> descritto in §8/§9. Questo manuale segnala esplicitamente questo divario invece di descrivere una feature pianificata come attuale.)</p>
-<hr />
+<hr/>
 <h2 id="15-comportamenti-opt-in">15. Comportamenti opt-in</h2>
 <p>Questa è la sezione che il compito ha chiesto di trattare con particolare cura. "Opt-in" qui significa specificamente: un comportamento che <strong>non</strong> avviene a meno che tu non imposti esplicitamente un valore non-default. Diversi default sotto (la rotation null, il purging, il power gate, l'arricchimento degli orizzonti) sono essi stessi <em>attivi</em> di default e devono essere esplicitamente <em>disattivati</em> — sono segnalati come "default-on, opt-out" invece di essere impropriamente classificati come opt-in.</p>
 <table>
@@ -2300,7 +2301,7 @@ candles = raw[[&quot;open_dt&quot;, &quot;open&quot;, &quot;high&quot;, &quot;lo
 </tr>
 </tbody>
 </table>
-<hr />
+<hr/>
 <h2 id="16-trade-off">16. Trade-off</h2>
 <p>Questi sono i trade-off effettivamente visibili nel codice e nella documentazione di design — non una lista generica.</p>
 <p><strong>Automazione vs. controllo.</strong> <code>forge()</code> prende un gran numero di decisioni per te di default (scalatura della griglia di orizzonti, la rotation null, il purging, l'arricchimento degli orizzonti) specificamente affinché una run "quick start" e una run "curata attentamente" non divergano silenziosamente in onestà statistica (§14). Il costo è che un lettore alla prima esperienza non può davvero prevedere il comportamento completo di <code>forge()</code> dalla sola firma di chiamata — la lista "cosa ha fatto <code>forge()</code> che non hai chiesto" di §7 esiste perché quel divario è reale, non perché questo manuale sia insolitamente meticoloso.</p>
@@ -2309,7 +2310,7 @@ candles = raw[[&quot;open_dt&quot;, &quot;open&quot;, &quot;high&quot;, &quot;lo
 <p><strong>Validazione eager vs. lazy.</strong> Non c'è un singolo passaggio di validazione dello schema sulla tua KPI Table (§11). Questo compra la capacità di passare una tabella arbitraria ed evolutiva senza pre-registrarne lo schema da nessuna parte — ma significa che una colonna malformata emerge come <code>KeyError</code>/<code>ValueError</code> potenzialmente diversi moduli dentro una chiamata <code>forge()</code>, non alla porta. <code>summary_report()</code> esiste specificamente per lasciarti scegliere la validazione eager quando la vuoi, senza forzarla su ogni chiamata.</p>
 <p><strong>Riproducibilità vs. performance in Rule Discovery.</strong> <code>SelectionCriteria.early_elimination=True</code> (default) scarta una regola da ulteriore elaborazione nel momento in cui fallisce uno screen in-sample economico — è un vantaggio di performance reale (l'intero scopo è evitare di eseguire walk-forward e validazione statistica completa su regole che falliranno comunque), ma significa che le regole <code>NON-EDGE</code> portano di default diagnostiche incomplete (nessun <code>walk_forward</code> popolato). La voce <code>early_elimination=False</code> di §15 è esattamente la via d'uscita per quando il reporting uniforme conta più della velocità.</p>
 <p><strong>Purezza delle dipendenze vs. rischio di reimplementazione.</strong> L'anti-goal esplicito "niente dipendenze statistiche esterne" (§14) significa che correlazione di Spearman, t-test, funzione beta incompleta, e controllo FDR di Benjamini-Hochberg sono tutti scritti a mano in numpy invece di essere delegati a <code>scipy.stats</code>/<code>statsmodels</code>. Il beneficio dichiarato è l'auditabilità — puoi leggere esattamente cosa calcola <code>forgedge</code> senza addentrarti nel sorgente di una libreria esterna molto più grande. Il rischio corrispondente (questa è un'inferenza chiaramente propria di questo manuale, non dichiarata) è che queste primitive non ereditano automaticamente i decenni di irrobustimento sui casi limite di <code>scipy</code>; l'estesa suite di test (§18) è presumibilmente la mitigazione, anche se i documenti di design non lo inquadrano esplicitamente in questi termini.</p>
-<hr />
+<hr/>
 <h2 id="17-performance-e-scalabilita">17. Performance e scalabilità</h2>
 <p>Nulla in questa sezione è un benchmark inventato. Ogni numero è misurato e riportato nella documentazione del repository stesso, oppure è un'osservazione qualitativa di complessità tratta direttamente dal codice.</p>
 <p><strong>Misurazioni riportate (da <code>docs/analysis/</code> e dalle esecuzioni verificate da questo manuale):</strong></p>
@@ -2327,11 +2328,11 @@ candles = raw[[&quot;open_dt&quot;, &quot;open&quot;, &quot;high&quot;, &quot;lo
 <li>Costo a livello <code>pandas</code>: diversi passaggi interni di generazione feature inseriscono colonne una alla volta in un DataFrame in crescita invece di concatenarle tutte insieme, il che l'esecuzione di test verificata da questo manuale ha fatto emergere direttamente come un <code>pandas.errors.PerformanceWarning</code> ("DataFrame is highly fragmented... Consider joining all columns at once using pd.concat(axis=1)") durante la suite golden. È un dettaglio implementativo interno, non qualcosa che puoi configurare, ma vale la pena sapere che il warning è atteso e non un segno che il tuo codice abbia fatto qualcosa di sbagliato.</li>
 </ul>
 <p><strong>Nessuna GPU, nessun calcolo distribuito, nessun I/O asincrono da nessuna parte nella libreria</strong> — ogni modulo è codice numpy/pandas sincrono, single-process, single-thread. Se ti serve eseguire la discovery su molti ticker, <code>forge_multi()</code> li esegue comunque sequenzialmente, un ticker alla volta (§9); parallelizzare tra ticker o tra i backtest per-contratto di Rule Discovery è squisitamente una responsabilità a livello applicativo (§19-20), non qualcosa che la libreria fa per te.</p>
-<hr />
+<hr/>
 <h2 id="18-testing">18. Testing</h2>
 <p>La suite di test del repository stesso è il miglior modello per testare codice che usa <code>forgedge</code> — è sostanziale (<strong>586 funzioni di test su 15 file</strong>, <code>testpaths = ["tests"]</code> in <code>pyproject.toml</code>) e le sue convenzioni sono abbastanza coerenti da valere la pena adottarle direttamente.</p>
 <h3 id="eseguirla">Eseguirla</h3>
-<pre><code class="language-bash">pip install -e &quot;.[dev]&quot;      # pytest&gt;=7.0
+<pre><code class="language-bash">pip install -e ".[dev]"      # pytest&gt;=7.0
 pytest                        # l'intera suite
 pytest tests/test_rule_discovery.py                          # un modulo
 pytest tests/test_forge.py::TestForgeManualEvents             # una classe
@@ -2358,10 +2359,10 @@ pytest -k golden                                                # per keyword
 - <strong><code>@pytest.mark.parametrize</code> è usato esattamente una volta</strong> nell'intera suite (<code>test_target_optimizer.py</code>) — la convenzione stessa del codebase favorisce fortemente un metodo di test esplicito e nominato per comportamento invece di tabelle parametrizzate, anche per casi strutturalmente simili.</p>
 <h3 id="un-esempio-lavorato-di-golden-test-che-illustra-il-pattern">Un esempio lavorato di golden test, che illustra il pattern</h3>
 <pre><code class="language-python"># tests/test_golden.py (struttura, condensata)
-@pytest.fixture(scope=&quot;session&quot;)
+@pytest.fixture(scope="session")
 def forge_result():
     kpi = pd.read_parquet(FIXTURE_PATH)   # tests/fixtures/ADA_1D_TRAIN.parquet
-    return forge(kpi, ticker=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;,
+    return forge(kpi, ticker="ADAUSDC", timeframe="1D",
                  run_rule_discovery=True, run_registry=False, progress=False)
 
 class TestGoldenEventDiscovery:
@@ -2378,7 +2379,7 @@ class TestGoldenEventDiscovery:
 <li><strong>Fissa in regressione la tua stessa logica a valle</strong>, come <code>test_golden.py</code> fissa quella della libreria: se la tua applicazione deriva una decisione (es. "agisci solo su regole EDGE di voto A") da <code>ForgeResult</code>, scrivi un test che esegue un input fisso attraverso <code>forge()</code> una volta e verifica la decisione derivata, non solo l'output grezzo di <code>forgedge</code> — quello è lo strato più probabile che vada silenziosamente alla deriva mentre tari la tua stessa configurazione.</li>
 <li><strong>Non mockare <code>forge()</code> stessa</strong> nei test pensati per validare la tua logica di integrazione — la libreria non ha I/O da fingere, e l'intero valore della pipeline sta nel suo comportamento statistico reale; mockarla via non testa nulla di vero. Usa una KPI Table sintetica piccola e veloce (vedi il pattern di <code>conftest.py</code>) invece di un dataset reale multi-anno per mantenere veloce la tua stessa suite di test.</li>
 </ul>
-<hr />
+<hr/>
 <h2 id="19-integrare-forgedge-in-unapplicazione-reale">19. Integrare forgedge in un'applicazione reale</h2>
 <p><code>forgedge</code> è una <strong>libreria di ricerca</strong>, e questa sezione è esplicita, per tutta la sua estensione, sul confine tra cosa dà la libreria e cosa la tua applicazione deve costruire sopra di essa. Nulla sotto è un'API <code>forgedge</code> — è la guida architetturale di questo manuale, chiaramente separata dalla reference API di §9.</p>
 <h3 id="cosa-da-forgedge">Cosa dà forgedge</h3>
@@ -2404,14 +2405,14 @@ from forgedge import forge, ForgeResult, RuleSpec, RuleDiscovery
 
 @dataclass
 class DiscoverySession:
-    &quot;&quot;&quot;Wrapper a livello applicativo: una run forge() più ciò che serve per monitorarla in seguito.&quot;&quot;&quot;
+    """Wrapper a livello applicativo: una run forge() più ciò che serve per monitorarla in seguito."""
     ticker: str
     timeframe: str
     result: ForgeResult
     specs: list[RuleSpec]
 
     @classmethod
-    def run(cls, kpi_table: pd.DataFrame, ticker: str, timeframe: str) -&gt; &quot;DiscoverySession&quot;:
+    def run(cls, kpi_table: pd.DataFrame, ticker: str, timeframe: str) -&gt; "DiscoverySession":
         result = forge(kpi_table, ticker=ticker, timeframe=timeframe, progress=False)
         specs = RuleSpec.from_forge_result(result)
         return cls(ticker=ticker, timeframe=timeframe, result=result, specs=specs)
@@ -2421,15 +2422,15 @@ class DiscoverySession:
         # AlphaContract.to_contract_dict() / RuleDiscoveryResponse.to_dict()
         # sono i mattoni serializzabili in JSON.
         rows = [
-            {&quot;ticker&quot;: self.ticker, &quot;rule_id&quot;: spec.name,
-             &quot;contract&quot;: next(c for c in self.result.promoted
+            {"ticker": self.ticker, "rule_id": spec.name,
+             "contract": next(c for c in self.result.promoted
                                if c.event_candidate_id == spec.candidate.event_id).to_contract_dict()}
             for spec in self.specs
         ]
         store.save_rules(self.ticker, rows)
 
     def check_signals(self, fresh_bars: pd.DataFrame) -&gt; list[str]:
-        &quot;&quot;&quot;Quali regole pubblicate si stanno attivando sulle barre più recenti, ora.&quot;&quot;&quot;
+        """Quali regole pubblicate si stanno attivando sulle barre più recenti, ora."""
         active = []
         for spec in self.specs:
             fires = spec.candidate.apply(fresh_bars).fillna(0).astype(bool)
@@ -2438,8 +2439,8 @@ class DiscoverySession:
         return active
 
     def revalidate(self, eval_df: pd.DataFrame) -&gt; dict[str, str]:
-        &quot;&quot;&quot;Ricontrolla se ogni regola pubblicata regge ancora, su dati di scoperta + nuovi.
-        Usa RuleDiscovery (non AlphaDiscovery) — vedi §21 per perché questa distinzione conta.&quot;&quot;&quot;
+        """Ricontrolla se ogni regola pubblicata regge ancora, su dati di scoperta + nuovi.
+        Usa RuleDiscovery (non AlphaDiscovery) — vedi §21 per perché questa distinzione conta."""
         by_id = {c.event_id: c for c in self.result.candidates}
         verdicts = {}
         for spec in self.specs:
@@ -2451,12 +2452,12 @@ class DiscoverySession:
         return verdicts
 </code></pre>
 <p>Questo è genuinamente eseguibile contro il fixture ADA:</p>
-<pre><code class="language-python">kpi = pd.read_parquet(&quot;tests/fixtures/ADA_1D_TRAIN.parquet&quot;)
-session = DiscoverySession.run(kpi, ticker=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;)
-print(f&quot;{len(session.specs)} regole pubblicate&quot;)     # 40
+<pre><code class="language-python">kpi = pd.read_parquet("tests/fixtures/ADA_1D_TRAIN.parquet")
+session = DiscoverySession.run(kpi, ticker="ADAUSDC", timeframe="1D")
+print(f"{len(session.specs)} regole pubblicate")     # 40
 print(session.check_signals(kpi))                     # regole attive sull'ultima barra del fixture
 </code></pre>
-<hr />
+<hr/>
 <h2 id="20-unarchitettura-production-ready">20. Un'architettura production-ready</h2>
 <p>Adattando il pattern generale a ciò che questo codebase effettivamente supporta — uno stadio di ricerca/discovery stateless, che alimenta uno strato di persistenza e monitoraggio che la libreria non fornisce:</p>
 <pre><code>                     ┌───────────────────────────┐
@@ -2502,7 +2503,7 @@ print(session.check_signals(kpi))                     # regole attive sull'ultim
         │  .apply() +            │
         │  replay RuleDiscovery) │
         └──────────┬────────────┘
-                    │  eventi &quot;segnale attivo&quot; / verdetto-cambiato
+                    │  eventi "segnale attivo" / verdetto-cambiato
                     ▼
         ┌─────────────────────┐
         │ Sistema di alerting/  │   ← interamente esterno a forgedge, per
@@ -2584,7 +2585,7 @@ print(session.check_signals(kpi))                     # regole attive sull'ultim
 </tr>
 </tbody>
 </table>
-<hr />
+<hr/>
 <h2 id="21-troubleshooting">21. Troubleshooting</h2>
 <p>Ogni voce: sintomo → causa probabile → come verificarla → correzione → come prevenirla in futuro.</p>
 <h3 id="zero-o-quasi-zero-candidati-di-event-discovery-solo-m1-event-discovery-0-candidates-nel-log">"Zero (o quasi zero) candidati di Event Discovery, solo <code>\"M1 Event Discovery — 0 candidate(s)\"</code> nel log"</h3>
@@ -2652,7 +2653,7 @@ print(session.check_signals(kpi))                     # regole attive sull'ultim
 <li><strong>Correzione:</strong> fissa <code>PYTHONHASHSEED=0</code> (o un altro valore fisso) nell'ambiente prima di avviare il processo — <code>examples/wf_period_reduction_test.py</code> lo fa automaticamente ri-eseguendo se stesso (<code>os.environ["PYTHONHASHSEED"] = "0"; os.execv(sys.executable, ...)</code>) se la variabile non è già impostata, dato che Python legge <code>PYTHONHASHSEED</code> solo all'avvio dell'interprete — impostarla via <code>os.environ</code> a metà processo non ha alcun effetto sul processo corrente. Applica lo stesso pattern di ri-esecuzione (o imposta la variabile d'ambiente prima di lanciare Python) in qualunque script o servizio dove riprodurre esattamente un risultato di <code>forge()</code> tra le run è importante, es. un test di regressione in CI o un audit trail.</li>
 <li><strong>Portata:</strong> questo riguarda la <em>riproducibilità esatta</em> di una run specifica, non la correttezza — ogni singolo verdetto è comunque calcolato onestamente; è la popolazione di ciò che ha la possibilità di essere misurato (quale candidato sopravvive a un cap) che può spostarsi di una manciata di contratti tra run non fissate.</li>
 </ul>
-<hr />
+<hr/>
 <h2 id="22-best-practice">22. Best practice</h2>
 <ul>
 <li><strong>Esegui <code>summary_report()</code> prima di ogni sessione di discovery, e decidi esplicitamente cosa fare con <code>has_critical</code>/<code>has_warnings</code>.</strong> Costa quasi nulla e la libreria non lo farà mai per te (§11).</li>
@@ -2663,7 +2664,7 @@ print(session.check_signals(kpi))                     # regole attive sull'ultim
 <li><strong>Usa <code>RuleDiscovery</code>, mai <code>AlphaDiscovery</code>, per verificare se un edge precedentemente scoperto regge ancora su nuovi dati.</strong> Questa è la singola regola di correttezza più consequenziale di questo manuale (§21).</li>
 <li><strong>Logga <code>result.ledger.describe()</code> e <code>result.calibration.summary()</code> (o <code>.tippett_p</code>) insieme a ogni run di discovery che persisti.</strong> Sono economici, già calcolati, e sono esattamente i numeri che vorrai in seguito se mai dovrai spiegare <em>perché</em> un dato verdetto è stato o non è stato raggiunto.</li>
 </ul>
-<hr />
+<hr/>
 <h2 id="23-anti-pattern">23. Anti-pattern</h2>
 <ul>
 <li><strong>Ri-derivare il target di Alpha Discovery su dati freschi per "monitorare" una regola pubblicata.</strong> Coperto in profondità in §21 — lo strumento corretto è <code>RuleDiscovery</code>. Farlo in modo sbagliato non causa un crash; produce silenziosamente un risultato dall'aspetto peggiore (o <code>undetermined</code>) che si legge come "l'edge è decaduto" quando la causa reale è metodologica.</li>
@@ -2674,7 +2675,7 @@ print(session.check_signals(kpi))                     # regole attive sull'ultim
 <li><strong>Assumere che un <code>AlphaContract</code> promosso (<code>status="HYPOTHESIS"</code>) sia esso stesso un segnale di trading.</strong> È l'output del Modulo 2, non del Modulo 3 — non è ancora stato backtestato con meccaniche d'ordine realistiche né validato out of sample da Rule Discovery. Tratta <code>AlphaContract.status == "HYPOTHESIS"</code> come "vale la pena backtestarlo", non "vale la pena tradarlo".</li>
 <li><strong>Mockare <code>forge()</code> nei test della tua stessa applicazione.</strong> Come coperto in §18 — non c'è I/O da fingere, e l'intero valore della chiamata sta nel suo output statistico reale; un mock non dice nulla sulla correttezza del tuo codice di integrazione.</li>
 </ul>
-<hr />
+<hr/>
 <h2 id="24-faq">24. FAQ</h2>
 <p><strong><code>forgedge</code> piazza ordini o si connette a un exchange?</strong>
 No. Non ha alcuna capacità di esecuzione, per scelta esplicita di design (§2, §3, §19). Produce specifiche di regole; un sistema di esecuzione che costruisci separatamente le implementa.</p>
@@ -2692,7 +2693,7 @@ No — esplicitamente e per scelta di design (gli anti-goal di §14, §19). Ogni
 Sono gli output rispettivamente dei Moduli 1, 2 e 3 (§4, §8) — una condizione booleana senza ancora significato economico; la stessa condizione più un target economico derivato e un voto statistico; e infine un verdetto backtestato e validato walk-forward. Una <code>RuleSpec</code> (§9, §12) è un quarto oggetto, più leggero, che raggruppa ciò che serve per <em>riprodurre</em> in seguito una regola tradabile.</p>
 <p><strong>Perché il <code>min_tpm</code> di default di <code>GateParams</code> è così basso (0.5)?</strong>
 È deliberatamente permissivo così che il Consistency Gate non scarti eventi genuinamente rari-ma-reali prima ancora che raggiungano i controlli statistici molto più potenti di Alpha Discovery (§10, §16). Se scopri che Event Discovery produce troppi candidati di bassa qualità, alzare <code>min_tpm</code> è la leva prevista (il trade-off frequenza-vs-selettività di §16) — ma capisci il trade-off prima di farlo.</p>
-<hr />
+<hr/>
 <h2 id="25-glossario">25. Glossario</h2>
 <ul>
 <li><strong>AND composition</strong> — combinare due (o tre) eventi a singola colonna con un AND booleano per formare un evento composto più specifico, esso stesso riverificato contro il Consistency Gate.</li>
@@ -2717,7 +2718,7 @@ Sono gli output rispettivamente dei Moduli 1, 2 e 3 (§4, §8) — una condizion
 <li><strong>TimeBudget</strong> — lo split condiviso, purgato (ed eventualmente embargato) di indici di barra IS/OOS usato da Event e Alpha Discovery.</li>
 <li><strong>walk-forward</strong> — validare un punto operativo fisso su una sequenza di finestre di test out-of-sample rolling, ciascuna preceduta dalla propria finestra di train, concatenate in un unico track record OOS.</li>
 </ul>
-<hr />
+<hr/>
 <h2 id="26-reference-api-consultazione-rapida">26. Reference API (consultazione rapida)</h2>
 <p>Questo è un indice compatto, non un sostituto della trattazione più completa di §9-10. Ogni voce nomina il modulo in cui vive.</p>
 <table>
@@ -2822,7 +2823,7 @@ Sono gli output rispettivamente dei Moduli 1, 2 e 3 (§4, §8) — una condizion
 </tbody>
 </table>
 <p>Per la lista completa dei campi e default di ogni dataclass, vedi §10 (quelli che più probabilmente andrai a tarare) o direttamente il sorgente — ogni default citato in questo manuale è stato verificato contro il pacchetto installato al momento della scrittura.</p>
-<hr />
+<hr/>
 <p><em>Questo manuale è stato scritto leggendo il codice sorgente di <code>forgedge</code>, la sua suite di test, la sua stessa documentazione e le note di analisi di design, ed eseguendo codice reale contro la versione della libreria installata da questo repository. Dove un'affermazione riflette il ragionamento dichiarato dagli autori stessi piuttosto che la lettura del codice fatta da questo manuale, è citata e attribuita come tale in tutto il testo. L'edizione inglese gemella, <code>docs/manual-en.md</code>, copre contenuti identici.</em></p>
 </article>
 </main>

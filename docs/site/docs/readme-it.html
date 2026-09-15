@@ -1,25 +1,26 @@
-<!doctype html>
+<!DOCTYPE html>
+
 <html lang="it">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1, viewport-fit=cover" name="viewport"/>
 <title>README (italiano) — FORGE</title>
-<meta name="description" content="Il README italiano del progetto FORGE: cosa fa, perché, pipeline e quick start." />
-<meta name="robots" content="index, follow" />
-<link rel="canonical" href="https://forgedge.it/docs/readme-it.html" />
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../assets/docs.css">
+<meta content="Il README italiano del progetto FORGE: cosa fa, perché, pipeline e quick start." name="description"/>
+<meta content="index, follow" name="robots"/>
+<link href="https://forgedge.it/docs/readme-it.html" rel="canonical"/><link href="https://forgedge.it/docs/readme-it.html" hreflang="x-default" rel="alternate"/><link href="https://forgedge.it/docs/readme-en.html" hreflang="en" rel="alternate"/><link href="https://forgedge.it/docs/readme-it.html" hreflang="it" rel="alternate"/>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="../assets/docs.css" rel="stylesheet"/>
 </head>
 <body>
-<a class="back" href="../index.html">&larr; FORGE</a>
+<a class="back" href="/">← FORGE</a>
 <main>
 <article id="content">
 <h1 id="forge-feature-oriented-rule-generation-engine">FORGE — Feature-Oriented Rule Generation Engine</h1>
 <p>FORGE è un sistema di ricerca quantitativa per la <strong>scoperta sistematica di regole di trading algoritmico</strong> da dati storici di mercato. A partire da una KPI Table (OHLCV + indicatori tecnici), FORGE identifica eventi booleani con struttura temporale stabile, ne misura il potere predittivo rispetto a un target economico derivato dai dati, e produce contratti formali pronti per la validazione operativa.</p>
 <p><a href="readme-en.html">🇬🇧 English version</a></p>
-<hr />
+<hr/>
 <h2 id="cosa-fa-forge-in-parole-semplici">Cosa fa FORGE, in parole semplici</h2>
 <p>Se fai trading — o lavori con chi lo fa — probabilmente hai già sentito frasi tipo <em>"ogni volta che succede X, il prezzo tende a salire."</em> Individuare un pattern del genere è la parte facile. Quella difficile è capire se sia <strong>reale</strong>, o se sembri buono solo perché sono state provate abbastanza idee che una, per puro caso, doveva per forza sembrare buona. È esattamente la trappola che FORGE è costruito per evitare, in quattro passaggi:</p>
 <ol>
@@ -31,7 +32,7 @@
 <p>Ogni pattern esce da questo processo con un verdetto onesto — <em>funziona</em>, <em>è al limite</em>, oppure <em>non regge</em> — più le ragioni specifiche dietro a quel verdetto, mai un punteggio a scatola chiusa. Nessun pattern viene mai aggiustato a posteriori per farlo sembrare migliore; una regola che non supera la soglia viene riportata così com'è, non rimaneggiata di nascosto finché non la supera.</p>
 <p>Una cosa che FORGE deliberatamente <strong>non</strong> fa: piazzare ordini, o parlare con un exchange. È uno strumento di ricerca che ti dice quali idee vale la pena approfondire e passa il testimone con i dettagli operativi (quando entrare, quando uscire, quanto è forte l'evidenza) — trasformare questo in trading dal vivo è un passo separato e deliberato, affidato a qualunque sistema tu usi davvero per eseguire gli ordini.</p>
 <p>Il resto di questo documento entra nel funzionamento tecnico, per chi vuole eseguire FORGE in prima persona.</p>
-<hr />
+<hr/>
 <h2 id="perche-forge">Perché FORGE</h2>
 <p>La ricerca sistematica di edge di trading soffre di tre problemi ricorrenti:</p>
 <ul>
@@ -40,7 +41,7 @@
 <li><strong>Mancanza di separazione operativa</strong> — l'evidenza statistica del potere predittivo non equivale alla profittabilità sotto commissioni reali e meccaniche di esecuzione degli ordini</li>
 </ul>
 <p>FORGE affronta tutti e tre con un'<strong>architettura a pipeline rigidamente separata</strong>: ogni modulo risponde a una sola domanda e passa al successivo solo un artefatto formale. Nessun modulo può accedere ai dati del modulo successivo; nessuna soglia può essere ricalibrata dopo la scoperta.</p>
-<hr />
+<hr/>
 <h2 id="pipeline">Pipeline</h2>
 <pre><code>KPI Table (OHLCV + indicatori tecnici)
     │
@@ -81,7 +82,7 @@
 │  Output: tabella piatta + report HTML autocontenuto              │
 └──────────────────────────────────────────────────────────────────┘
 </code></pre>
-<hr />
+<hr/>
 <h2 id="invarianti-fondamentali">Invarianti fondamentali</h2>
 <table>
 <thead>
@@ -109,21 +110,21 @@
 </tr>
 </tbody>
 </table>
-<hr />
+<hr/>
 <h2 id="installazione">Installazione</h2>
 <p>FORGE dipende unicamente da <code>numpy</code> e <code>pandas</code>. Nessuna dipendenza da <code>scipy</code>, <code>statsmodels</code> o librerie ML: tutte le primitive statistiche (Spearman, t-test, regressione OU, FDR Benjamini-Hochberg, funzione beta incompleta) sono implementate in puro numpy.</p>
 <pre><code class="language-bash">pip install forgedge
 </code></pre>
-<hr />
+<hr/>
 <h2 id="quick-start">Quick start</h2>
 <pre><code class="language-python">import pandas as pd
 from forgedge import forge
 
 # KPI Table con OHLCV + indicatori tecnici (colonna 'close' richiesta)
-kpi = pd.read_parquet(&quot;kpi_table.parquet&quot;)
+kpi = pd.read_parquet("kpi_table.parquet")
 
 # Pipeline completa: da KPI Table a regole validate in una singola chiamata
-result = forge(kpi, ticker=&quot;BTCUSDC&quot;, timeframe=&quot;1H&quot;)
+result = forge(kpi, ticker="BTCUSDC", timeframe="1H")
 
 print(result.summary())                         # una riga per candidato + rule_verdict
 for contract, response in result.edges():       # solo EDGE / PARTIAL-EDGE
@@ -175,16 +176,16 @@ walk-forward (corte by design).  Disattivabile con
 <p>Sessioni multi-ticker con <code>forge_multi</code>:</p>
 <pre><code class="language-python">from forgedge import forge_multi
 
-frames = {&quot;BTCUSDC&quot;: btc_kpi, &quot;ETHUSDC&quot;: eth_kpi, &quot;ADAUSDC&quot;: ada_kpi}
-results, registry = forge_multi(frames, timeframe=&quot;1H&quot;)
+frames = {"BTCUSDC": btc_kpi, "ETHUSDC": eth_kpi, "ADAUSDC": ada_kpi}
+results, registry = forge_multi(frames, timeframe="1H")
 
 # GENERIC: la regola si generalizza su ≥ 2/3 dei ticker testati
 df = registry.flat_table()
-print(df[[&quot;rule_id&quot;, &quot;classification&quot;, &quot;pf&quot;, &quot;cross_ticker_score&quot;]])
+print(df[["rule_id", "classification", "pf", "cross_ticker_score"]])
 
 # Report HTML autocontenuto (SVG inline, nessuna CDN)
-html = registry.html_report(timeframe=&quot;1H&quot;)
-with open(&quot;report.html&quot;, &quot;w&quot;) as f:
+html = registry.html_report(timeframe="1H")
+with open("report.html", "w") as f:
     f.write(html)
 </code></pre>
 <p>Monitoraggio delle regole pubblicate su candele fresche:</p>
@@ -196,7 +197,7 @@ specs = RuleSpec.from_forge_result(result)
 
 # Oppure passa direttamente il ForgeResult — stesso effetto.
 html = rule_performance_report(result, candele_fresche)
-with open(&quot;rules_report.html&quot;, &quot;w&quot;) as f:
+with open("rules_report.html", "w") as f:
     f.write(html)
 </code></pre>
 <p>Ogni regola viene rieseguita in modo <strong>deterministico</strong> sulle candele fornite
@@ -215,13 +216,13 @@ cui Rule Discovery fa trading), base vs evento — uno scatter MAE→net
 (rilevatore di decadimento dell'edge), la performance per regime, gli ultimi
 trade e un badge "segnale
 attivo ora".</p>
-<hr />
+<hr/>
 <h2 id="i-tre-concetti">I tre concetti</h2>
 <p>FORGE struttura il processo di scoperta attorno a tre concetti formali che rispondono ciascuno a una domanda distinta e producono un artefatto distinto.</p>
 <h3 id="evento-osservare-il-mercato-senza-bias">Evento — osservare il mercato senza bias</h3>
 <p>Un <strong>evento</strong> è una condizione booleana sulle barre storiche, scoperta dalla struttura temporale degli indicatori senza mai calcolare un forward return. Le soglie sono distribuzionali (percentili specifici per asset) e immutabili una volta fissate.</p>
 <pre><code class="language-python">c = candidates[0]
-print(c.expression)            # &quot;rsi_14 &lt; 31.2 AND spread_ema_9_25 &lt; -0.0118&quot;
+print(c.expression)            # "rsi_14 &lt; 31.2 AND spread_ema_9_25 &lt; -0.0118"
 signal = c.apply(new_kpi)      # pd.Series bool — deterministico, senza look-ahead
 </code></pre>
 <p>Il ConsistencyGate filtra gli eventi con struttura temporale instabile (attivazioni insufficienti, clustering stagionale, bassa frequenza mensile) prima che venga calcolato qualsiasi rendimento.</p>
@@ -229,21 +230,21 @@ signal = c.apply(new_kpi)      # pd.Series bool — deterministico, senza look-a
 <p>Un <strong>alpha</strong> è la risposta empirica alla domanda: <em>dato che l'evento si è attivato, cosa succede statisticamente nelle prossime h barre?</em> Orizzonte, direzione e take-profit (<code>sell_pct</code>) sono tutti <strong>derivati dai dati</strong> — mai assunti — scansionando <code>|mean_advantage|/√h</code> su una grid di orizzonti e prendendo il quantile MFE delle barre attive.</p>
 <pre><code class="language-python">c = promoted[0]
 dt = c.derived_target
-print(f&quot;{dt.direction} a h={dt.holding_period_h}h  sell_pct={dt.sell_pct:.4f}&quot;)
-print(f&quot;Grade {c.alpha_score.grade}  |  OOS lift: {c.oos_validation.lift:.4f}&quot;)
+print(f"{dt.direction} a h={dt.holding_period_h}h  sell_pct={dt.sell_pct:.4f}")
+print(f"Grade {c.alpha_score.grade}  |  OOS lift: {c.oos_validation.lift:.4f}")
 </code></pre>
 <p>L'unico gate di rigetto rigido è la direzione indeterminata (nessun vantaggio finito su nessun orizzonte). Tutte le altre metriche statistiche (IC, Cohen's d, lift, FDR) contribuiscono al grade A–D senza bloccare la promozione.</p>
 <h3 id="regola-tradare-in-modo-realistico">Regola — tradare in modo realistico</h3>
 <p>Una <strong>regola</strong> è il verdetto operativo su un contratto alpha. Rule Discovery esegue un backtest realistico — uscita a take-profit, stop a orizzonte, commissioni per lato — valutato prima con un ingresso a mercato (quel verdetto è autoritativo), poi opzionalmente con un ingresso a limite adottato solo se supera condizioni out-of-sample rigorose — e valida la migliore configurazione di parametri su un walk-forward OOS rolling.</p>
 <pre><code class="language-python">resp = RuleDiscovery(ed.df, contract, cand).run()
-print(resp.verdict)                               # &quot;EDGE&quot;, &quot;PARTIAL-EDGE&quot;, &quot;NON-EDGE&quot;
+print(resp.verdict)                               # "EDGE", "PARTIAL-EDGE", "NON-EDGE"
 if resp.is_edge:
     p = resp.validated_rule.params
-    print(f&quot;Entry: limit -{p.buy_drop_pct:.2%}  TP: +{p.sell_pct:.2%}  h={p.target_h}&quot;)
-    print(f&quot;IS PF: {resp.in_sample_summary.profit_factor:.2f}&quot;
-          f&quot;  WF consistency: {resp.walk_forward.consistency:.0%}&quot;)
+    print(f"Entry: limit -{p.buy_drop_pct:.2%}  TP: +{p.sell_pct:.2%}  h={p.target_h}")
+    print(f"IS PF: {resp.in_sample_summary.profit_factor:.2f}"
+          f"  WF consistency: {resp.walk_forward.consistency:.0%}")
 </code></pre>
-<hr />
+<hr/>
 <h2 id="panoramica-dei-moduli">Panoramica dei moduli</h2>
 <table>
 <thead>
@@ -281,7 +282,7 @@ if resp.is_edge:
 </tr>
 </tbody>
 </table>
-<hr />
+<hr/>
 <h2 id="stato-implementazione">Stato implementazione</h2>
 <table>
 <thead>
@@ -313,7 +314,7 @@ if resp.is_edge:
 </tr>
 </tbody>
 </table>
-<hr />
+<hr/>
 <h2 id="documentazione">Documentazione</h2>
 <p><strong>Inizia dal manuale</strong> — <a href="manuale-it.html"><code>docs/manuale-it.md</code></a> è un'unica guida completa, verificata con esempi, che copre l'installazione fino all'architettura di produzione, il troubleshooting, best practice/anti-pattern, una FAQ e un glossario. Ogni cosa al suo interno è stata verificata contro il sorgente attuale e, dove è citato un numero, contro una run reale. Tutto quello sotto è materiale di riferimento più stretto e complementare.</p>
 <table>
@@ -374,7 +375,7 @@ if resp.is_edge:
 <a href="https://github.com/mattcond/forgedge/tree/main/.claude/skills/forgedge/"><code>.claude/skills/forgedge/</code></a> copre l'API della
 libreria, i verdetti e gli invarianti della pipeline in una forma che un
 agente può usare direttamente.</p>
-<hr />
+<hr/>
 <h2 id="licenza">Licenza</h2>
 <p>MIT</p>
 </article>

@@ -1,19 +1,20 @@
-<!doctype html>
+<!DOCTYPE html>
+
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1, viewport-fit=cover" name="viewport"/>
 <title>Deployment — FORGE</title>
-<meta name="description" content="Guide to the gate, export and monitoring functions that put rules discovered by FORGE into production." />
-<meta name="robots" content="index, follow" />
-<link rel="canonical" href="https://forgedge.it/docs/deployment-en.html" />
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../assets/docs.css">
+<meta content="Guide to the gate, export and monitoring functions that put rules discovered by FORGE into production." name="description"/>
+<meta content="index, follow" name="robots"/>
+<link href="https://forgedge.it/docs/deployment-en.html" rel="canonical"/><link href="https://forgedge.it/docs/deployment-it.html" hreflang="x-default" rel="alternate"/><link href="https://forgedge.it/docs/deployment-en.html" hreflang="en" rel="alternate"/><link href="https://forgedge.it/docs/deployment-it.html" hreflang="it" rel="alternate"/>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="../assets/docs.css" rel="stylesheet"/>
 </head>
 <body>
-<a class="back" href="../index.html">&larr; FORGE</a>
+<a class="back" href="/en/">← FORGE</a>
 <main>
 <article id="content">
 <h1 id="forge-deployment-putting-discovered-rules-into-production">FORGE — Deployment: Putting Discovered Rules into Production</h1>
@@ -41,18 +42,18 @@ from forgedge.playground import PromotionGateConfig, promotion_gate, export_rule
 # after (PR #247, current)
 from forgedge.deployment import PromotionGateConfig, promotion_gate, export_rules, monitoring_manifest
 </code></pre>
-<hr />
+<hr/>
 <h2 id="basic-usage">Basic usage</h2>
 <pre><code class="language-python">from forgedge import forge
 from forgedge.deployment import PromotionGateConfig, promotion_gate, export_rules, monitoring_manifest
 
-result_ada = forge(kpi_ada, ticker=&quot;ADAUSDC&quot;, timeframe=&quot;1D&quot;)
-result_btc = forge(kpi_btc, ticker=&quot;BTCUSDC&quot;, timeframe=&quot;1D&quot;)
+result_ada = forge(kpi_ada, ticker="ADAUSDC", timeframe="1D")
+result_btc = forge(kpi_btc, ticker="BTCUSDC", timeframe="1D")
 results = [result_ada, result_btc]
 
 # registries are optional — pass them to also gate on is_duplicate/is_isolated
 gate = promotion_gate(results, registries=[result_ada.registry, result_btc.registry])
-exported = export_rules(results, &quot;exported_rules/&quot;, registries=[result_ada.registry, result_btc.registry])
+exported = export_rules(results, "exported_rules/", registries=[result_ada.registry, result_btc.registry])
 manifest = monitoring_manifest(results)
 </code></pre>
 <p>The intended sequence is <code>forge() -&gt; promotion_gate() [filter] -&gt; export_rules()
@@ -60,7 +61,7 @@ manifest = monitoring_manifest(results)
 export]</code> — <code>export_rules()</code> re-runs the same gate computation internally
 (see the design doc), so it never disagrees with <code>promotion_gate()</code> about
 what is promotable.</p>
-<hr />
+<hr/>
 <h2 id="promotiongateconfig"><code>PromotionGateConfig</code></h2>
 <p>Dataclass holding the promotion policy shared by <code>promotion_gate()</code> and
 <code>export_rules()</code>. Every flag below is always computed and reported on every
@@ -116,7 +117,7 @@ turning a check off never loses visibility into what it would have flagged.</p>
 <pre><code class="language-python">config = PromotionGateConfig(block_rotation_only=True, min_consistency=0.6)
 config = PromotionGateConfig(min_fold_stability_score=1.0)   # #253
 </code></pre>
-<hr />
+<hr/>
 <h2 id="promotion_gateresults-registriesnone-configpromotiongateconfig-pddataframe"><code>promotion_gate(results, registries=None, config=PromotionGateConfig()) -&gt; pd.DataFrame</code></h2>
 <p>Long-format quality gate over every tradeable (<code>EDGE</code>/<code>PARTIAL-EDGE</code>)
 contract.</p>
@@ -134,17 +135,17 @@ into <code>promotable</code> per <code>config</code>. Pure — no filesystem I/O
 <code>rotation_only</code>, <code>is_duplicate</code>, <code>is_isolated</code>, <code>consistency</code>,
 <code>fold_stability_score</code>, <code>promotable</code>.</p>
 <pre><code class="language-python">gate = promotion_gate(results, registries=[result_ada.registry, result_btc.registry])
-gate[gate[&quot;promotable&quot;]].groupby(&quot;ticker&quot;).size()   # how many rules clear the gate, per ticker
+gate[gate["promotable"]].groupby("ticker").size()   # how many rules clear the gate, per ticker
 </code></pre>
 <p><strong>Verified</strong>, pooling <code>forge_multi()</code> over ADAUSDC (the repository's
 reference fixture) and a second, synthetic series labelled BTCUSDC — the
 same pool used by every "Verified" example in <code>playground_en.md</code>'s M1/M3/M4
 sections and below:</p>
 <pre><code>pg.shape == (96, 10)
-pg[&quot;promotable&quot;].value_counts()
+pg["promotable"].value_counts()
 # False    91
 # True      5
-pg.groupby(&quot;ticker&quot;)[&quot;promotable&quot;].sum()
+pg.groupby("ticker")["promotable"].sum()
 # ADAUSDC    0
 # BTCUSDC    5
 </code></pre>
@@ -157,7 +158,7 @@ duplicates and <code>classification_by_grade</code> showed most rules classify
 <code>"ISOLATED"</code>, and the two default-<code>True</code> blocks (<code>block_duplicate</code>,
 <code>block_isolated</code>) compound on a ticker where both are common. This is the
 gate doing its conservative-by-default job, not a bug.</p>
-<hr />
+<hr/>
 <h2 id="export_rulesresults-output_dir-registriesnone-configpromotiongateconfig-promotable_onlytrue-pddataframe"><code>export_rules(results, output_dir, *, registries=None, config=PromotionGateConfig(), promotable_only=True) -&gt; pd.DataFrame</code></h2>
 <p>Writes one <code>.pkl</code> (event) + one <code>.yaml</code> (rule parameters) per exported
 contract. The only function in this module — and in the library as a whole
@@ -180,13 +181,13 @@ disagree on what is promotable) and, for every selected contract, writes:</p>
 <p><strong>Returns columns:</strong> <code>ticker</code>, <code>alpha_id</code>, <code>event_candidate_id</code>, <code>verdict</code>,
 <code>promotable</code>, <code>pkl_path</code>, <code>yaml_path</code> — one row per contract actually
 exported.</p>
-<pre><code class="language-python">exported = export_rules(results, &quot;exported_rules/&quot;, registries=[result_ada.registry, result_btc.registry])
+<pre><code class="language-python">exported = export_rules(results, "exported_rules/", registries=[result_ada.registry, result_btc.registry])
 len(exported)   # how many contracts were actually written to disk
 </code></pre>
 <p><strong>Verified</strong>, same pool, default config (<code>promotable_only=True</code>):</p>
 <pre><code>exp.shape == (5, 7)
 # 10 files written (5 .pkl + 5 .yaml)
-exp.iloc[0][[&quot;ticker&quot;, &quot;alpha_id&quot;, &quot;verdict&quot;, &quot;promotable&quot;]]
+exp.iloc[0][["ticker", "alpha_id", "verdict", "promotable"]]
 # ticker       BTCUSDC
 # alpha_id     ALPHA-BTCUSDC-1D-260830-1196
 # verdict      PARTIAL-EDGE
@@ -194,7 +195,7 @@ exp.iloc[0][[&quot;ticker&quot;, &quot;alpha_id&quot;, &quot;verdict&quot;, &quo
 </code></pre>
 <p>All 5 exported contracts are <code>BTCUSDC</code> — consistent with <code>promotion_gate</code>
 above finding zero promotable <code>ADAUSDC</code> contracts on this fixture.</p>
-<hr />
+<hr/>
 <h2 id="monitoring_manifestresults-iterableforgeresult-pddataframe"><code>monitoring_manifest(results: Iterable[ForgeResult]) -&gt; pd.DataFrame</code></h2>
 <p>Long-format index of every tradeable rule, for a periodic re-check job.</p>
 <p>Applies <code>RuleSpec.from_forge_result</code> (already provided by
@@ -206,17 +207,17 @@ of reconstructing the reference to each rule by hand.</p>
 <code>verdict</code>, <code>oos_expectancy</code>. Join on <code>event_candidate_id</code> against
 <code>export_rules</code>'s output to restrict to rules that were actually exported.</p>
 <pre><code class="language-python">manifest = monitoring_manifest(results)
-manifest.merge(exported[[&quot;event_candidate_id&quot;]], on=&quot;event_candidate_id&quot;)   # restrict to exported rules only
+manifest.merge(exported[["event_candidate_id"]], on="event_candidate_id")   # restrict to exported rules only
 </code></pre>
 <p><strong>Verified</strong>, same pool:</p>
 <pre><code>mm.shape == (96, 6)
-mm[&quot;verdict&quot;].value_counts()
+mm["verdict"].value_counts()
 # PARTIAL-EDGE    96
 </code></pre>
 <p>Every tradeable rule on this fixture is <code>PARTIAL-EDGE</code> — the same fact
 <code>lottery_only_winners</code> in <code>forgedge.playground</code> observes from the analysis
 side (<code>src/forgedge/docs/specs/playground_en.md</code>).</p>
-<hr />
+<hr/>
 <h2 id="whats-next">What's next</h2>
 <p>This module's three use cases (issue #245) are all implemented — there is no
 open checklist here the way <code>forgedge.playground</code> has (or had) one. Future

@@ -1,24 +1,25 @@
-<!doctype html>
+<!DOCTYPE html>
+
 <html lang="it">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1, viewport-fit=cover" name="viewport"/>
 <title>Riferimento configurazione — FORGE</title>
-<meta name="description" content="Riferimento completo alla configurazione di FORGE: ogni campo dataclass, tipo, default e descrizione." />
-<meta name="robots" content="index, follow" />
-<link rel="canonical" href="https://forgedge.it/docs/configuration-it.html" />
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../assets/docs.css">
+<meta content="Riferimento completo alla configurazione di FORGE: ogni campo dataclass, tipo, default e descrizione." name="description"/>
+<meta content="index, follow" name="robots"/>
+<link href="https://forgedge.it/docs/configuration-it.html" rel="canonical"/><link href="https://forgedge.it/docs/configuration-it.html" hreflang="x-default" rel="alternate"/><link href="https://forgedge.it/docs/configuration-en.html" hreflang="en" rel="alternate"/><link href="https://forgedge.it/docs/configuration-it.html" hreflang="it" rel="alternate"/>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="../assets/docs.css" rel="stylesheet"/>
 </head>
 <body>
-<a class="back" href="../index.html">&larr; FORGE</a>
+<a class="back" href="/">← FORGE</a>
 <main>
 <article id="content">
 <h1 id="forge-riferimento-completo-dei-configuratori">FORGE — Riferimento completo dei configuratori</h1>
 <p>Tutti i configuratori di FORGE sono dataclass Python standard: mutabili dopo l'istanziazione, componibili per nesting e dotati di default calibrati su dati crypto 1H liquidi. Non è necessario specificare tutti i parametri: l'utente tocca solo ciò che vuole cambiare rispetto ai default. I configuratori di alto livello (es. <code>MarketContextConfig</code>, <code>DiscoveryConfig</code>, <code>RuleDiscoveryConfig</code>) accettano i sotto-configuratori come argomenti nidificati, seguendo esattamente la gerarchia descritta in questo documento.</p>
-<hr />
+<hr/>
 <h2 id="modulo-0">Modulo 0</h2>
 <h3 id="emaproxyconfig">EMAProxyConfig</h3>
 <p>Configura il classificatore EMA-proxy: sorgente dati, calcolo automatico delle finestre, soglie di regime e calibrazione adattiva. Viene passato come campo <code>ema_proxy</code> di <code>MarketContextConfig</code>.</p>
@@ -129,15 +130,15 @@
 config = MarketContextConfig(
     ema_proxy=EMAProxyConfig(
         auto_window=True,
-        window_unit=&quot;day&quot;,
+        window_unit="day",
         bar_hours=4.0,                # candele da 4H
-        threshold_mode=&quot;balanced&quot;,
+        threshold_mode="balanced",
         target_distribution=[0.10, 0.20, 0.40, 0.20, 0.10],
-        threshold_basis=&quot;expanding&quot;,  # causale, no look-ahead
+        threshold_basis="expanding",  # causale, no look-ahead
     )
 )
 </code></pre>
-<hr />
+<hr/>
 <h3 id="marketcontextconfig">MarketContextConfig</h3>
 <p>Contenitore di primo livello per la configurazione del Modulo 0. Aggrega la scelta del classificatore, i suoi parametri e le opzioni di stabilità del regime.</p>
 <table>
@@ -184,13 +185,13 @@ enriched = MarketContext(
         stable_window=6,          # più reattivo al cambio di regime
         ema_proxy=EMAProxyConfig(
             auto_window=True,
-            window_unit=&quot;day&quot;,
+            window_unit="day",
             bar_hours=1.0,
         ),
     ),
 ).run()
 </code></pre>
-<hr />
+<hr/>
 <h2 id="modulo-1">Modulo 1</h2>
 <h3 id="gateparams">GateParams</h3>
 <p>Soglie del ConsistencyGate — il filtro strutturale che verifica se un evento ha struttura temporale stabile. Viene passato come campo <code>gate_params</code> di <code>DiscoveryConfig</code>.</p>
@@ -266,7 +267,7 @@ config = DiscoveryConfig(
         min_tpm=0.3,             # meno restrittivo per dataset più corti
         dispersion_margin=1.6,   # più margine sopra il floor di Poisson
         min_episodes=5,
-        event_counting=&quot;episode&quot;,  # default; &quot;bar&quot; riproduce il comportamento pre-#134
+        event_counting="episode",  # default; "bar" riproduce il comportamento pre-#134
     )
 )
 </code></pre>
@@ -278,7 +279,7 @@ oggi un <code>TypeError</code>. Alcuni script <code>examples/*.py</code> di ques
 ancora lo schema vecchio — vedi la lista dei pitfall della skill <code>forgedge</code>
 prima di copiarli.</p>
 </blockquote>
-<hr />
+<hr/>
 <h3 id="eventwalkforwardconfig-modulo-1">EventWalkForwardConfig (Modulo 1)</h3>
 <p>Configura la validazione walk-forward OOS del Modulo 1. Prima si chiamava <code>WalkForwardConfig</code> e collideva con l'omonima classe — diversa — del Modulo 3; il vecchio nome resta come alias in <code>event_discovery.models</code>, ma è preferibile quello esplicito.</p>
 <table>
@@ -322,7 +323,7 @@ config = DiscoveryConfig(
     ),
 )
 </code></pre>
-<hr />
+<hr/>
 <h3 id="discoveryconfig">DiscoveryConfig</h3>
 <p>Configurazione principale del Modulo 1. Controlla gate, composizione degli eventi AND, split IS/OOS e walk-forward.</p>
 <table>
@@ -413,7 +414,7 @@ ed = EventDiscovery(
         max_and_components=2,                   # composizione single-pass legacy (vedi sotto)
         gate_params=GateParams(min_tpm=0.5, dispersion_margin=1.3, min_episodes=10),
         walk_forward=EventWalkForwardConfig(n_splits=4, min_pass_rate=0.75),
-        scale_free_overrides={&quot;rsi_14&quot;: True},  # forza scale-free su RSI
+        scale_free_overrides={"rsi_14": True},  # forza scale-free su RSI
         diversity_gate_enabled=True,            # deduplicazione Jaccard opt-in
         diversity_threshold=0.85,
         retain_raw_events=True,                 # es. per TargetOptimizer, che ha bisogno di .raw_events
@@ -503,7 +504,7 @@ from forgedge.composition import GradePairingConfig
 
 result = forge(
     kpi,
-    timeframe=&quot;1D&quot;,
+    timeframe="1D",
     event_discovery_config=DiscoveryConfig(max_and_components=1),  # richiesto
     two_pass_composition=True,          # il default — esplicito qui per chiarezza
     grade_pairing_config=GradePairingConfig(max_components=3, per_stratum_pair_cap=150),
@@ -511,7 +512,7 @@ result = forge(
 result.grading_candidates   # pool 1D pre-composizione della passata 1
 result.candidates            # output pooled della passata 2 — ciò su cui M3 ha realmente operato
 </code></pre>
-<hr />
+<hr/>
 <h2 id="modulo-2">Modulo 2</h2>
 <h3 id="promotionthresholds">PromotionThresholds</h3>
 <p>Soglie statistiche IS che contribuiscono al grade A–D. Non bloccano la promozione (eccetto casi estremi): informano il grade. Viene passato come campo <code>thresholds</code> di <code>AlphaConfig</code>.</p>
@@ -598,8 +599,8 @@ nomi solleva oggi un <code>TypeError</code>.</p>
 <pre><code class="language-python">from forgedge import AlphaConfig, PromotionThresholds
 
 config = AlphaConfig(
-    asset=&quot;BTC&quot;,
-    timeframe=&quot;1H&quot;,
+    asset="BTC",
+    timeframe="1H",
     thresholds=PromotionThresholds(
         ic_min_abs=0.03,
         min_lift=0.10,
@@ -608,7 +609,7 @@ config = AlphaConfig(
     ),
 )
 </code></pre>
-<hr />
+<hr/>
 <h3 id="alphaconfig">AlphaConfig</h3>
 <p>Configurazione principale del Modulo 2. Controlla la grid degli orizzonti, la derivazione del target, la suddivisione IS/OOS e i metadati di tracciabilità.</p>
 <table>
@@ -865,8 +866,8 @@ ad = AlphaDiscovery(
     ed.df,
     candidates,
     AlphaConfig(
-        asset=&quot;ADAUSDC&quot;,
-        timeframe=&quot;4H&quot;,
+        asset="ADAUSDC",
+        timeframe="4H",
         horizon_grid=(4, 8, 12, 24, 48, 72, 96),   # orizzonti in barre 4H
         train_ratio=0.75,
         fee_per_side=0.001,
@@ -879,7 +880,7 @@ ad = AlphaDiscovery(
 )
 contracts = ad.run()
 </code></pre>
-<hr />
+<hr/>
 <h2 id="modulo-3">Modulo 3</h2>
 <h3 id="backtestparams">BacktestParams</h3>
 <p>Parametri dell'esecuzione di un singolo backtest: direzione, tipo di ordine, livelli di ingresso/uscita e fee. Raramente usato direttamente dall'utente — la grid viene costruita da <code>GridSpec</code> e <code>RuleDiscovery</code> deriva <code>direction</code>, <code>sell_pct</code> e <code>target_h</code> di partenza dall'<code>AlphaContract</code>.</p>
@@ -961,7 +962,7 @@ contracts = ad.run()
 </tr>
 </tbody>
 </table>
-<hr />
+<hr/>
 <h3 id="scoringparams">ScoringParams</h3>
 <p>Soglie usate dalla funzione di scoring della grid per combinare il Profit Factor con la regolarità degli arrivi dei trade. <code>pf_score_tpm = profit_factor × c_norm</code>, dove <code>c_norm</code> è l'inverso dell'indice di dispersione (<code>μ/σ²</code>, troncato a 1): è scale-free, quindi una regola non viene penalizzata perché opera più spesso, ma solo perché opera a raffiche. "Abbastanza trade" è una domanda separata, presidiata da <code>criteria.min_tpm</code> e dal floor dinamico qui sotto.</p>
 <p>Entrambi i campi sono <strong>risolti a livello di sessione</strong>: lasciandoli non impostati li riempie <code>resolve()</code>, e <code>config_report()</code> mostra il valore che verrà eseguito.</p>
@@ -989,7 +990,7 @@ contracts = ad.run()
 </tr>
 </tbody>
 </table>
-<hr />
+<hr/>
 <h3 id="gridspec">GridSpec</h3>
 <p>Definisce lo spazio di ricerca della grid search dei parametri operativi. I campi lasciati a <code>None</code> usano la grid di default predefinita da <code>RuleDiscovery</code>.</p>
 <table>
@@ -1037,7 +1038,7 @@ grid = GridSpec(
     buy_delay_bar=[3, 6],
 )
 </code></pre>
-<hr />
+<hr/>
 <h3 id="rulewalkforwardconfig-modulo-3">RuleWalkForwardConfig (Modulo 3)</h3>
 <p>Configura la validazione walk-forward OOS del Modulo 3. Prima si chiamava <code>WalkForwardConfig</code>; il vecchio nome resta come alias, sia in <code>rule_discovery.models</code> sia al livello superiore (<code>forgedge.WalkForwardConfig</code> ha sempre risolto a questa classe).</p>
 <table>
@@ -1094,7 +1095,7 @@ grid = GridSpec(
 </tr>
 </tbody>
 </table>
-<hr />
+<hr/>
 <h3 id="selectioncriteria">SelectionCriteria</h3>
 <p>Gate di promozione del Modulo 3. Definisce le condizioni per i verdetti <code>EDGE</code>, <code>PARTIAL-EDGE</code> e <code>NON-EDGE</code>.</p>
 <p>Quattro di questi campi sono <strong>preset-parametrizzati</strong> (#207) invece di
@@ -1277,7 +1278,7 @@ config = RuleDiscoveryConfig(
 )
 rd = RuleDiscovery(ed.df, contract, cand, config=config)
 </code></pre>
-<hr />
+<hr/>
 <h3 id="rulediscoveryconfig">RuleDiscoveryConfig</h3>
 <p>Configurazione principale del Modulo 3. Aggrega tutti i sotto-configuratori: parametri base del backtest, scoring, grid di ricerca, walk-forward e criteri di selezione.</p>
 <table>
@@ -1390,7 +1391,7 @@ config = RuleDiscoveryConfig(
 rd = RuleDiscovery(ed.df, contract, cand, config=config)
 resp = rd.run()
 </code></pre>
-<hr />
+<hr/>
 <h2 id="modulo-4">Modulo 4</h2>
 <h3 id="registryconfig">RegistryConfig</h3>
 <p>Configurazione del Modulo 4. Controlla deduplicazione, classificazione genericity e opzioni di export.</p>
@@ -1491,13 +1492,13 @@ config = RegistryConfig(
     cross_pf_threshold=1.8,         # alza il floor assoluto per asset illiquidi
     min_cross_pf_retention=0.7,     # e tollera un po' più di decadimento fuori casa
     generic_ratio_threshold=0.5,    # GENERIC se ≥ 50% ticker PASS
-    export_format=&quot;csv&quot;,
+    export_format="csv",
     html_charts=True,
     export_duplicates=False,        # escludi i duplicati dall'export
 )
 registry = RuleRegistry.from_forge_results(results, config=config).run()
 </code></pre>
-<hr />
+<hr/>
 <h2 id="preset-forge_preset">Preset — <code>forge_preset()</code></h2>
 <p>I default documentati sopra (<code>GateParams</code>, <code>SelectionCriteria</code>, e diversi
 campi di <code>AlphaConfig</code>/<code>PromotionThresholds</code>) vengono regolarmente sovrascritti
@@ -1531,7 +1532,7 @@ per asset:</p>
 </table>
 <pre><code class="language-python">from forgedge import forge, forge_preset
 
-disc_cfg, alpha_cfg, rd_cfg = forge_preset(&quot;balanced&quot;, timeframe=&quot;1D&quot;, asset=&quot;BTC&quot;)
+disc_cfg, alpha_cfg, rd_cfg = forge_preset("balanced", timeframe="1D", asset="BTC")
 result = forge(kpi, event_discovery_config=disc_cfg, alpha_config=alpha_cfg,
                 rule_discovery_config=rd_cfg)
 </code></pre>
@@ -1569,7 +1570,7 @@ dato timeframe prima di lanciarlo. Vedi la lista dei pitfall della skill
 possono far scattare <code>oos_span_too_short</code> in <code>config_report()</code> su una storia
 modesta (il controllo che fa il suo lavoro, non un preset rotto), e
 <code>"sniper"</code> non va combinato con il rotation calibrator.</p>
-<hr />
+<hr/>
 <h2 id="riepilogo-delle-importazioni">Riepilogo delle importazioni</h2>
 <table>
 <thead>
@@ -1655,7 +1656,7 @@ modesta (il controllo che fa il suo lavoro, non un preset rotto), e
 <blockquote>
 <p><strong>Nota:</strong> le due config walk-forward hanno ora nomi espliciti — <code>EventWalkForwardConfig</code> (Modulo 1) e <code>RuleWalkForwardConfig</code> (Modulo 3), entrambe importabili da <code>forgedge</code>. L'alias <code>WalkForwardConfig</code> continua a funzionare: al livello superiore risolve alla classe del Modulo 3, dentro <code>event_discovery.models</code> / <code>rule_discovery.models</code> a quella del modulo corrispondente.</p>
 </blockquote>
-<hr />
+<hr/>
 <h2 id="risoluzione-dei-parametri-unset-e-il-resolver">Risoluzione dei parametri — <code>UNSET</code> e il resolver</h2>
 <p>I campi di configurazione hanno tre stati, non due:</p>
 <table>
@@ -1689,8 +1690,8 @@ resolver deve porsi: <code>AlphaConfig.timestamp_col == "open_dt"</code> è iden
 l'utente l'abbia scritto sia che l'abbia ereditato.</p>
 <pre><code class="language-python">from forgedge import UNSET, PipelineContext, collect_context, resolve
 
-bundle = {&quot;event_discovery&quot;: disc, &quot;alpha&quot;: alpha, &quot;rule_discovery&quot;: rd}
-ctx = collect_context(bundle, PipelineContext.from_frame(kpi, timeframe=&quot;1D&quot;))
+bundle = {"event_discovery": disc, "alpha": alpha, "rule_discovery": rd}
+ctx = collect_context(bundle, PipelineContext.from_frame(kpi, timeframe="1D"))
 resolved, trace, violations = resolve(bundle, ctx)
 print(trace.to_text())
 </code></pre>
