@@ -8,4 +8,12 @@ AddDefaultCharset UTF-8
 <IfModule mod_mime.c>
   AddType 'text/html; charset=UTF-8' .html
   AddType 'text/css; charset=UTF-8' .css
+  # Force these explicitly too -- generic shared-hosting mime.types
+  # configs sometimes lack .xml/.txt entries entirely, which makes
+  # Apache fall back to application/octet-stream. A sitemap served as
+  # a binary/unknown type is exactly what makes Google Search Console
+  # report "couldn't fetch" / "unsupported format" for a file whose
+  # content is perfectly valid XML.
+  AddType 'application/xml; charset=UTF-8' .xml
+  AddType 'text/plain; charset=UTF-8' .txt
 </IfModule>
