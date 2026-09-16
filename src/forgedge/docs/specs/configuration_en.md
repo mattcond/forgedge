@@ -117,6 +117,8 @@ not `max_dispersion`.
 | `event_counting` | `"episode"` \| `"bar"` | `"episode"` | Counting unit for the rate/dispersion criteria — see above. |
 | `min_episodes` | int | `10` | Absolute floor on the number of episodes required to pass in `"episode"` mode (statistical-power guard). Ignored in `"bar"` mode, and applied in-sample only. `forge_preset()` lowers this to `5` on `"sweep"` (permissive by design); other presets keep `10`. |
 | `episode_gap` | int | `1` | Maximum gap, in bars, that still belongs to the same episode. With the default `1`, a single missing bar inside a run does not start a new episode. `0` gives strict consecutive runs. |
+| `tpm_mode` | `"floor"` \| `"ranged"` | `"floor"` | `"floor"` (unchanged behaviour) accepts `rate >= min_tpm`. `"ranged"` (opt-in, `"episode"` counting only — `ValueError` under `"bar"`) instead treats `min_tpm` as the **centre** of a band, rejecting an event that fires *too often* as well as one too rare. See `tpm_tolerance` and `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §2. |
+| `tpm_tolerance` | float | `UNSET` | Half-width of the `"ranged"` band, same unit as `min_tpm`. Left `UNSET`, derived from the session's own dispersion tolerance (`σ = sqrt(eff_max_dispersion·min_tpm/n_total_months)`, half-width `= 1.959964·σ`) rather than the event's own `episode_id`. Set explicitly for a literal band (`tpm_tolerance=2.0` with `min_tpm=4.0` always gives `[2.0, 6.0]`). Unread when `tpm_mode="floor"`; not exposed through `ResolutionTrace` (depends on `n_total_months`, a dataset fact the resolver never sees). |
 
 ```python
 from forgedge import DiscoveryConfig
@@ -129,6 +131,11 @@ config = DiscoveryConfig(
         min_episodes=5,
         event_counting="episode",  # default; "bar" reproduces pre-#134 behaviour
     )
+)
+
+# Opt-in: reject events firing too often, not just too rarely
+ranged_config = DiscoveryConfig(
+    gate_params=GateParams(tpm_mode="ranged", min_tpm=4.0, tpm_tolerance=2.0)  # band = [2.0, 6.0]
 )
 ```
 
@@ -265,7 +272,9 @@ promotion (except in extreme cases) — they inform the grade.
 | `fdr_q` | float | `0.10` | Target FDR level (q). **Not** tied to `ctx.alpha`: a `q` is a false-discovery rate over a family, an alpha is a per-test error rate. Chosen by the preset, because the right `q` depends on how wide the search is (#182). |
 | `oos_max_p` | float | `0.10` | Maximum OOS confirmation p-value. **Not** tied to `ctx.alpha`, and legitimately looser: a confirmation level for an already-selected hypothesis — one pre-specified test, no multiplicity, on a small sample by construction (#182). |
 | `min_direction_t` | float | `0.5` | Minimum `\|z_h*\|` (rotation-standardised excess) to assign a direction; below it → `undetermined`. |
-| `require_significant_direction` | bool | `True` | When True, a direction is assigned only if `h*` clears Benjamini-Hochberg (not `statistically_weak`); otherwise → `undetermined`. False = legacy non-blocking behaviour. |
+| `require_significant_direction` | bool | `True` | When True, a direction is assigned only if `h*` clears Benjamini-Hochberg (`h_sig`, not `statistically_weak`) **or** the whole-grid AUC test below is significant (`p_auc < auc_max_p`) — an OR of the two tests, not BH-FDR alone (see `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §3.9). `False` restores the older, purely `argmax\|z_h\|`-driven behaviour with no significance check at all. |
+| `auc_max_p` | float | `0.10` | Idea B stage (a): max p-value for the trapezoidal-weighted AUC of the per-bar excess rate (`Δ_h/h`) against the rotation null, integrated over the whole horizon grid. Only reached when `require_significant_direction=True`; feeds `AlphaContract.promotion_route`/`.nature` (§3.3/§3.9 of the doc above). |
+| `rho_momentum_threshold` | float | `0.5` | Idea B stage (b), computed only when stage (a) is significant: the Spearman-rank slope of the per-bar rate along the horizon grid needed to label `AlphaContract.nature` `"momentum-aligned"` (`rho > threshold`) or `"mean-reversion-aligned"` (`rho < -threshold`); otherwise `"idiosyncratic"`. |
 
 > `min_activations`/`min_oos_activations` do **not** exist on this dataclass
 > any more — the IS/OOS sample-size check is now a hardcoded module constant,

@@ -163,20 +163,29 @@ dt.statistically_weak      # bool: True when h* is not in h_sig
 dt.fixed_target            # bool: True when the target was user-specified (fixed-target mode) rather than derived
 dt.data_derived_horizon_h  # int | None: fixed-target mode only — the horizon the data derivation would have picked
 dt.data_derived_sell_pct   # float | None: fixed-target mode only — the sell_pct the data derivation would have produced
+dt.nature                  # str: "momentum-aligned" | "mean-reversion-aligned" | "idiosyncratic" | "non_significativo" (default) — see Step 9
+dt.horizon_at_boundary     # bool: is h* pinned to the grid's edge for a reason that survives scrutiny? See Step 9
+dt.promotion_route         # str | None: "z_score" | "auc" | "both" | None — which significance test(s) found the edge, see Step 9
+dt.p_auc                   # float: idea B stage (a)'s p-value (whole-grid AUC test); nan if not computed
+dt.rho                     # float: idea B stage (b)'s Spearman slope; nan when stage (a) wasn't significant
 ```
+
+`AlphaContract` mirrors `nature`/`horizon_at_boundary`/`promotion_route` directly (`contract.nature`, not just `contract.derived_target.nature`) — `p_auc`/`rho` are only on `DerivedTarget`.
 
 `direction = "undetermined"` (the contract is rejected) when **any** of:
 - no horizon produces a finite excess log-return `Δ_h`;
 - `|z_h*| < min_direction_t` (default `0.5`) — the excess at the selected
   horizon is not distinguishable from the rotation null;
 - `require_significant_direction = True` (the default, on
-  `PromotionThresholds`) **and** `h*` is not in `h_sig` — no horizon cleared
-  the Benjamini-Hochberg gate, so `argmax|z_h|` would otherwise assign a
-  direction off what is effectively a coin-flip (often the drift-driven long
-  edge of the grid). Set `require_significant_direction = False` for the
-  legacy non-blocking behaviour — a direction is always assigned subject only
-  to `min_direction_t`, with thin evidence surfaced via `statistically_weak`
-  instead of gated.
+  `PromotionThresholds`) **and neither** test below found a distinguishable
+  edge: `h*` is not in `h_sig` (BH-FDR, one horizon at a time) **and** the
+  whole-grid AUC test (Step 9, `p_auc >= auc_max_p`) is not significant
+  either. Before Step 9 existed this was BH-FDR alone; a candidate the AUC
+  test now promotes would previously have been left `"undetermined"` here.
+  Set `require_significant_direction = False` for the legacy non-blocking
+  behaviour — a direction is always assigned subject only to
+  `min_direction_t`, with thin evidence surfaced via `statistically_weak`
+  instead of gated, and neither significance test participates.
 
 All subsequent measurements (IC, win rate, regime) are computed **at the
 derived target** (`h*`, `sell_pct*`, `direction*`).
@@ -475,6 +484,102 @@ inheriting `DiscoveryConfig`'s class defaults.
 
 ---
 
+### Step 9 — Market-alignment labeling and the AUC promotion route
+
+> Source: `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §3-§4
+> (frozen after empirical validation on ADA/BTC/EURUSD/DAX). Default-on,
+> not opt-in, computed for **every** candidate regardless of whether a
+> direction was ever assigned.
+
+Step 1's BH-FDR test (`h_sig`) looks at one horizon at a time. An edge
+spread thinly across the whole grid — no single horizon individually
+significant — is missed the same way a noisy single-horizon spike could
+otherwise slip through. Step 9 adds a whole-grid significance test and,
+only when it fires, a market-alignment label — neither ever touches `lift`
+or `promoted_contracts()`.
+
+**Stage (a) — whole-grid AUC significance test.** Integrates the
+trapezoidal-weighted *per-bar* excess rate (`Δ_h / h` — the cumulated
+`Δ_h` alone spuriously looks "momentum" for any persistent-but-flat edge,
+purely from cumulative-return arithmetic) across the entire horizon grid
+and tests it against the same rotation-null machinery `h_sig` already
+uses:
+
+```python
+p_auc                 # float on DerivedTarget: whole-grid AUC test p-value
+auc_significant = p_auc < PromotionThresholds.auc_max_p   # default 0.10
+```
+
+A candidate now clears promotion via **either** test.
+`AlphaContract.promotion_route` (`Literal["z_score", "auc", "both"] | None`)
+records which:
+
+```python
+route = "z_score"   # h_sig non-empty only — h* stays argmax|z_h|
+route = "auc"        # p_auc significant only — the case BH-FDR alone leaves undetermined
+route = "both"       # both tests pass
+route = None         # neither, or direction == "undetermined"
+```
+
+On the `"auc"`-only route, `h*` is **not** `argmax|z_h|` (that profile is
+flat and diffuse by construction, so the argmax often lands on an
+unrepresentative point) but an "elbow" rule: the first horizon, walking
+outward from the shortest, where the marginal per-bar rate stops moving in
+the whole-grid trend's direction. Two refinements (a two-consecutive-
+marginal count, a materiality threshold on the rotation-null's spread)
+were tried against this rule and rejected empirically — both make the
+boundary rate on the "auc"-only group worse (82.2%/74.8% vs. the raw rule's
+28.9%), not better; the raw single-marginal rule is what ships.
+
+**Stage (b) — direction of the profile, only when stage (a) is
+significant.**
+
+```python
+rho                    # float on DerivedTarget: Spearman slope, nan if stage (a) wasn't significant
+nature                 # str, mirrored on AlphaContract:
+#   "momentum-aligned"        rho >  rho_momentum_threshold (default 0.5)
+#   "mean-reversion-aligned"  rho < -rho_momentum_threshold
+#   "idiosyncratic"           otherwise
+#   "non_significativo"       stage (a) not significant — always the case on the "z_score"-only route
+```
+
+**`horizon_at_boundary`** (`bool`, mirrored on `AlphaContract`) — is `h*`
+pinned to the grid's edge for a reason that survives scrutiny? On
+`"z_score"`/`"both"` it needs two consecutive `score_by_h` increases
+approaching the last horizon with a finite score (one increase alone is
+treated as noise, matching Step 4's `event_distribution_report`-style
+caution); on `"auc"` it's the elbow rule's own boundary flag
+(`boundary_monotone`), not a separate computation. It does **not** discount
+`nature` — validated on ADA and DAX (an asset chosen for a non-trivial
+momentum sample), the boundary rate is *highest* for `"momentum-aligned"`
+labels (60.0%/35.5%) and *lowest* for `"mean-reversion-aligned"`
+(11.2%/8.7%): a genuine trend-follower is, by definition, a profile that
+hasn't stopped growing when the grid runs out. Treat `nature` and
+`horizon_at_boundary` as independent, combinable facts, never a hierarchy.
+
+**Verified**, `forge_preset("balanced", timeframe="1D")` on the ADA
+fixture, full default `forge()` pipeline (2162 total contracts):
+
+```python
+from collections import Counter
+route = Counter(c.promotion_route for c in result.contracts)
+# {None: 1643, 'both': 313, 'z_score': 145, 'auc': 61}
+
+nature = Counter(c.derived_target.nature for c in result.contracts if c.promotion_route)
+# {'mean-reversion-aligned': 284, 'non_significativo': 145,   # == the 145 z_score-only
+#  'idiosyncratic': 75, 'momentum-aligned': 15}
+
+#   both     n=313  median h*=2  horizon_at_boundary rate=15.3%
+#   z_score  n=145  median h*=2  horizon_at_boundary rate=16.6%
+#   auc      n=61   median h*=5  horizon_at_boundary rate=23.0%
+```
+
+The 61 `"auc"`-only contracts would have been `"undetermined"` under
+`require_significant_direction=False` — a real change in what a default
+`forge()` call returns, not just a new diagnostic field to ignore.
+
+---
+
 ## Data structure: `AlphaContract`
 
 ```python
@@ -516,6 +621,11 @@ c.promoted            # bool: True if direction is "long" or "short"
 c.rejection_reasons   # list[str]: blocking causes only — empty when promoted
 c.diagnostics         # list[str]: non-blocking observations that feed the grade
 c.fdr_promoted        # bool | None: BH FDR outcome (non-blocking)
+
+# Market-alignment diagnostics (Step 9) — mirrored from derived_target
+c.nature              # str: "momentum-aligned" | "mean-reversion-aligned" | "idiosyncratic" | "non_significativo"
+c.horizon_at_boundary # bool: is h* pinned to the grid's edge for a reason that survives scrutiny?
+c.promotion_route     # str | None: "z_score" | "auc" | "both" | None — which test found the edge
 
 # Handoff to Rule Discovery
 c.handoff_status      # str: "PENDING_RULE_DISCOVERY"
@@ -625,7 +735,9 @@ fields that actually participate in it.
 | `fdr_q` | `0.10` | Target false-discovery rate for BH (drives Step 1's `h_sig`) |
 | `oos_max_p` | `0.10` | Maximum one-sided p-value for OOS confirmation |
 | `min_direction_t` | `0.5` | Minimum \|z_h*\| for a direction to be assigned — below this, `direction = "undetermined"` (**gates promotion**) |
-| `require_significant_direction` | `True` | A direction is assigned only if `h*` is in `h_sig` (BH-significant); otherwise `direction = "undetermined"` (**gates promotion**). `False` restores the legacy non-blocking behaviour |
+| `require_significant_direction` | `True` | A direction is assigned only if `h*` is in `h_sig` (BH-significant) **or** the whole-grid AUC test (Step 9) is significant — an OR of the two, not BH-FDR alone; otherwise `direction = "undetermined"` (**gates promotion**). `False` restores the legacy non-blocking behaviour with no significance check at all |
+| `auc_max_p` | `0.10` | Step 9 stage (a): max p-value for the whole-grid AUC test. Only reached when `require_significant_direction=True` |
+| `rho_momentum_threshold` | `0.5` | Step 9 stage (b): Spearman-slope threshold for the `"momentum-aligned"`/`"mean-reversion-aligned"` labels |
 
 `PromotionThresholds` has no `min_activations` or `min_oos_activations`
 fields — there is no minimum-activation-count promotion gate anywhere in

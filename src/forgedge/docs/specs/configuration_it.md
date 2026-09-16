@@ -106,6 +106,8 @@ va calibrato `dispersion_margin`, non `max_dispersion`.
 | `event_counting` | `"episode"` \| `"bar"` | `"episode"` | Unità di conteggio per i criteri di frequenza/dispersione — vedi sopra. |
 | `min_episodes` | int | `10` | Floor assoluto sul numero di episodi richiesto per passare in modalità `"episode"` (guardia di potenza statistica). Ignorato in modalità `"bar"`, e applicato solo in-sample. `forge_preset()` lo abbassa a `5` su `"sweep"` (permissivo per design); gli altri preset mantengono `10`. |
 | `episode_gap` | int | `1` | Gap massimo, in barre, che appartiene ancora allo stesso episodio. Con il default `1`, una singola barra mancante dentro un run non apre un nuovo episodio. `0` impone run strettamente consecutivi. |
+| `tpm_mode` | `"floor"` \| `"ranged"` | `"floor"` | `"floor"` (comportamento invariato) accetta `rate >= min_tpm`. `"ranged"` (opt-in, solo conteggio `"episode"` — `ValueError` sotto `"bar"`) tratta invece `min_tpm` come il **centro** di una banda, rigettando anche un evento che si attiva *troppo spesso*, non solo uno troppo raro. Vedi `tpm_tolerance` e `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §2. |
+| `tpm_tolerance` | float | `UNSET` | Mezza-larghezza della banda `"ranged"`, stessa unità di `min_tpm`. Lasciata `UNSET`, derivata dalla tolleranza di dispersione della sessione stessa (`σ = sqrt(eff_max_dispersion·min_tpm/n_total_months)`, mezza-larghezza `= 1.959964·σ`) invece che dall'`episode_id` dell'evento. Fissala esplicitamente per una banda letterale (`tpm_tolerance=2.0` con `min_tpm=4.0` dà sempre `[2.0, 6.0]`). Non letta quando `tpm_mode="floor"`; non esposta via `ResolutionTrace` (dipende da `n_total_months`, un fatto del dataset che il resolver non vede mai). |
 
 ```python
 from forgedge import DiscoveryConfig
@@ -118,6 +120,11 @@ config = DiscoveryConfig(
         min_episodes=5,
         event_counting="episode",  # default; "bar" riproduce il comportamento pre-#134
     )
+)
+
+# Opt-in: rigetta anche gli eventi che si attivano troppo spesso, non solo troppo raramente
+ranged_config = DiscoveryConfig(
+    gate_params=GateParams(tpm_mode="ranged", min_tpm=4.0, tpm_tolerance=2.0)  # banda = [2.0, 6.0]
 )
 ```
 
@@ -250,7 +257,9 @@ Soglie statistiche IS che contribuiscono al grade A–D. Non bloccano la promozi
 | `fdr_q` | float | `0.10` | Livello FDR (q) target. **Non** legato a `ctx.alpha`: un `q` è un tasso di falsa scoperta su una famiglia, un alpha è un tasso di errore per singolo test. Lo sceglie il preset, perché il `q` giusto dipende da quanto è ampia la ricerca (#182). |
 | `oos_max_p` | float | `0.10` | P-value massimo per la conferma OOS. **Non** legato a `ctx.alpha`, e legittimamente più lasco: è un livello di *conferma* di un'ipotesi già selezionata — un test singolo pre-specificato, senza molteplicità, su un campione piccolo per costruzione (#182). |
 | `min_direction_t` | float | `0.5` | `\|z_h*\|` minimo (excess standardizzato dalla rotazione) per assegnare una direzione; sotto → `undetermined`. |
-| `require_significant_direction` | bool | `True` | Se True, la direzione è assegnata solo se `h*` supera Benjamini-Hochberg (non `statistically_weak`); altrimenti → `undetermined`. False = comportamento legacy non-bloccante. |
+| `require_significant_direction` | bool | `True` | Se True, la direzione è assegnata solo se `h*` supera Benjamini-Hochberg (`h_sig`, non `statistically_weak`) **oppure** il test AUC sull'intera griglia sotto è significativo (`p_auc < auc_max_p`) — un OR dei due test, non solo BH-FDR (vedi `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §3.9). `False` ripristina il comportamento più vecchio, guidato solo da `argmax|z_h|`, senza alcun controllo di significatività. |
+| `auc_max_p` | float | `0.10` | Idea B, stadio (a): p-value massimo per l'AUC pesata a trapezio del tasso di eccesso per barra (`Δ_h/h`) contro la rotation null, integrata sull'intera griglia degli orizzonti. Raggiunto solo quando `require_significant_direction=True`; alimenta `AlphaContract.promotion_route`/`.nature` (§3.3/§3.9 del documento sopra). |
+| `rho_momentum_threshold` | float | `0.5` | Idea B, stadio (b), calcolato solo quando lo stadio (a) è significativo: la pendenza di Spearman del tasso per barra lungo la griglia degli orizzonti necessaria per etichettare `AlphaContract.nature` `"momentum-aligned"` (`rho > soglia`) o `"mean-reversion-aligned"` (`rho < -soglia`); altrimenti `"idiosyncratic"`. |
 
 > `min_activations`/`min_oos_activations` **non esistono più** su questa
 > dataclass — il controllo sulla numerosità del campione IS/OOS è ora una
