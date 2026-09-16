@@ -23,8 +23,9 @@
 10. [Step 8 — Handoff e Risposta di Rule Discovery](#10-step-8--handoff-e-risposta-di-rule-discovery)
 11. [Esempio Concreto: Valutazione di proto-RI_01](#11-esempio-concreto-valutazione-di-proto-ri_01)
 12. [Step 9 — Composizione guidata dal grado (two-pass, issue #254 Fase 8)](#12-step-9--composizione-guidata-dal-grado-two-pass-issue-254-fase-8)
-13. [Generalizzazione ad Altri Ticker](#13-generalizzazione-ad-altri-ticker)
-14. [Anti-pattern e Falsi Alpha](#14-anti-pattern-e-falsi-alpha)
+13. [Step 10 — Etichettatura di allineamento al mercato e via di promozione AUC (idea B/C)](#13-step-10--etichettatura-di-allineamento-al-mercato-e-via-di-promozione-auc-idea-bc)
+14. [Generalizzazione ad Altri Ticker](#14-generalizzazione-ad-altri-ticker)
+15. [Anti-pattern e Falsi Alpha](#15-anti-pattern-e-falsi-alpha)
     - [Multiple Testing e False Discovery Rate](#-overfitting-per-multiple-testing)
 
 ---
@@ -1165,9 +1166,37 @@ interlacciata round-robin — non un tetto rigido — così la sola coppia di
 uno strato piccolo non viene scavalcata da uno strato molto più grande
 prima che il cap condiviso sia raggiunto. Riusa gli hook pluggable di
 `ANDComposer.compose()` (issue #254 Fase 1) invece di reimplementare
-pairing o gate: un'unica chiamata a `compose()` sull'intero pool
-ammissibile, con uno `stratify_fn` che chiave ogni coppia valida per il suo
-strato di grado.
+pairing o gate.
+
+**Corretto in un secondo momento (issue #254, fix di copertura e
+determinismo, `docs/analysis/exhaustive_and_composition_coverage_proposal.md`).**
+La prima implementazione faceva **un'unica chiamata condivisa** a
+`compose()` sull'intero pool con uno `stratify_fn` che chiave ogni coppia
+per strato di grado, budget complessivo `n_strata x per_stratum_pair_cap`.
+Misurato su DAX 1H, questo approccio aveva due problemi reali: (1) **non
+determinismo cross-processo** — l'ordine del pool in ingresso dipende
+dall'iterazione di `set()` di `FeatureGenerator` con hash randomizzato per
+processo (vedi pitfall #24 della skill `forgedge`), e lo shuffle a seed
+fisso di `ANDComposer` riproduce lo stesso risultato solo a parità di
+ordine del pool — due run identiche producevano quindi una regola composta
+diversa per il solo riavvio del processo; (2) **sotto-copertura severa**
+(~0.01%) dello spazio di coppie ammissibili sotto il cap condiviso, con
+rischio di collasso della diversità (16% contro 49% di copertura di coppie
+di feature distinte misurata) se un ranking per merito avesse sostituito lo
+shuffle. La correzione ora esegue **una chiamata `ANDComposer.compose()`
+indipendente per ogni strato di grado**, ciascuna con il proprio budget
+(senza tetto, salvo un cap di sicurezza difensivo, per gli strati radicati
+solo sui gradi rari A/B; `per_stratum_pair_cap` per tutti gli altri), e
+ordina il pool di candidati per una chiave canonica prima di processarlo,
+rimuovendo del tutto la dipendenza dall'ordine cross-processo. Per
+`max_components=3`, il pool di uno strato same-grade viene esteso a
+includere anche il grado adiacente della radice (necessario perché la
+ricerca del terzo componente di `ANDComposer` guarda solo dentro il pool
+passato a quella chiamata), con un passaggio finale di deduplicazione a
+guardia della possibilità che la stessa tripla venga trovata
+indipendentemente da due chiamate di strato diverse. La firma di
+`grade_guided_compose()` non è cambiata — l'orchestrazione two-pass di
+`forge()` non è toccata da questa correzione.
 
 ### Cosa arriva al Modulo 3
 
@@ -1195,7 +1224,209 @@ in nessun caso — compone gli atomi prima che sia visto un ritorno
 qualsiasi e non può quindi usare strutturalmente il composer guidato dal
 grado.
 
-## 13. Generalizzazione ad Altri Ticker
+## 13. Step 10 — Etichettatura di allineamento al mercato e via di promozione AUC (idea B/C)
+
+> Fonte: `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §3-§4
+> (formule congelate dopo validazione empirica su ADA/BTC/EURUSD/DAX).
+> Attivo di default — non un flag opt-in — da quando è stato implementato.
+
+Lo Step 1 (§3) sceglie `h*` per `argmax|z_h|` e testa la sola
+significatività BH-FDR *a un orizzonte alla volta* (`h_sig`). Un edge reale
+ma diffuso su tutta la griglia — nessun singolo orizzonte individualmente
+significativo, ma un effetto integrato genuino — viene perso da questo
+test esattamente come un picco isolato ma rumoroso a un solo orizzonte lo
+supererebbe per caso. Le due idee qui sotto rispondono a questo senza
+toccare `lift`, il voto, o `promoted_contracts()` — sono diagnostici di
+*come* e *cosa tipo di* edge è stato trovato, calcolati per **ogni**
+candidato indipendentemente dal fatto che una direzione sia mai stata
+assegnata.
+
+### Stadio (a) — significatività sull'intera griglia (idea B, prima metà)
+
+Non un confronto di magnitudine ma un test di significatività che riusa
+l'infrastruttura del rotation-null già esistente (`_rotation_null`, la
+stessa matrice `null[shift, h]` che alimenta `h_sig`):
+
+```
+w = pesi trapezoidali sulla griglia reale (rispetta spaziature non uniformi)
+rate_h = Δ_h / h                                    # tasso per-barra, MAI Δ_h grezzo
+AUC_Δ = Σ_i w_i · rate_{h_i}
+p_auc = (1 + #{|AUC^(shift)| >= |AUC_Δ|}) / (1 + n_shift_validi)
+
+auc_significant = p_auc < PromotionThresholds.auc_max_p   # default 0.10
+```
+
+**Perché il tasso per-barra e non `Δ_h` cumulato — una falsa partenza
+trovata due volte durante la validazione (§3.4/§3.9 del documento
+sorgente).** `Δ_h` è cumulato su una finestra di `h` barre: qualunque edge
+persistente ma *costante per barra* mostra `Δ_h` crescente con `h` per
+pura aritmetica del log-return cumulato — non perché il fenomeno sia
+davvero trend-following. La prima stesura, che integrava `Δ_h` grezzo,
+etichettava quasi ogni edge genuino come momentum (40% dei casi dominati
+dall'ultimo orizzonte scansionato) e sceglieva un `h*` sistematicamente al
+bordo della griglia sul gruppo "solo AUC" (43%). Dividere per `h` (esatto
+in log-space) elimina l'artefatto quasi del tutto (10.7% al bordo, `h*`
+mediano 5 invece di 10).
+
+Scartata la combinazione alla Fisher dei `p_value_by_h` esistenti come
+alternativa più economica: i p-value per-orizzonte sono correlati tra loro
+(orizzonti vicini condividono finestre sovrapposte), quindi Fisher li
+tratterebbe come indipendenti quando non lo sono, sovrastimando la
+significatività. Costruire la nulla sulla statistica già aggregata (come
+sopra) preserva automaticamente quella correlazione.
+
+### Rafforzamento OR della promozione — `promotion_route`
+
+`_derive_target` (`discovery.py`) calcola comunque `h*`, `direction` e
+`sell_pct` per ogni candidato — la clausola che oggi li scarta guadagna una
+sola condizione OR in più:
+
+```python
+undetermined = (
+    not isfinite(adv) or adv == 0.0
+    or not isfinite(z_star) or abs(z_star) < min_direction_t
+    or (require_significant_direction and statistically_weak and not auc_significant)
+)
+```
+
+`direction`/`sell_pct` non richiedono una nuova derivazione — escono dallo
+stesso codice già eseguito oggi, semplicemente non più scartati quando lo
+stadio (a) trova un edge che il BH-FDR a un orizzonte solo non vedeva.
+`AlphaContract.promotion_route` registra **quale** verifica ha promosso la
+regola (costo zero — combinazione booleana di due valori già calcolati):
+
+```python
+promotion_route: Literal["z_score", "auc", "both"] | None
+# "z_score" — solo BH-FDR (h_sig non vuoto), h* da argmax|z_h| (invariato)
+# "auc"     — solo lo stadio (a) (h_sig vuoto, p_auc significativo)
+# "both"    — entrambi i test superati
+# None      — nessuno dei due (o direction=="undetermined")
+```
+
+Per la via `"auc"` da sola, `h*` **non** viene da `argmax|z_h|`: quel
+profilo è per costruzione piatto e diffuso (z moderati ovunque, mai un
+picco), quindi l'argmax vince per un margine spesso minimo e può cadere su
+un punto poco rappresentativo. Viene usata invece una regola "elbow" — il
+primo orizzonte dove il tasso marginale smette di muoversi nella direzione
+del trend integrato:
+
+```
+marginal_1 = Δ_h1 / h1
+marginal_i = (Δ_hi - Δ_h(i-1)) / (hi - h(i-1))      # eccesso nelle sole barre aggiuntive
+h*_elbow = h(i-1) al primo i con segno(AUC_Δ)·marginal_i <= 0
+         = ultimo orizzonte della griglia se non si annulla mai (boundary_monotone)
+```
+
+Due raffinamenti di questa regola sono stati validati e scartati
+esplicitamente (non nascosti): un conteggio "due marginali consecutivi"
+(mutuato dall'idea C sotto) fa collassare quasi tutto al bordo su griglie
+corte (82.2% contro il 28.9% della regola grezza sul gruppo "solo AUC");
+una soglia di materialità sul rumore del marginale nullo esplode ancora
+peggio (74.8% a soglia=1.0) perché differenziare due cumulate consecutive
+amplifica la varianza oltre quanto un solo sigma di rumore possa filtrare.
+Resta in vigore la regola grezza a un solo marginale, con il rischio
+residuo noto e documentato (un singolo calo isolato poi recuperato può
+fermare la regola troppo presto).
+
+### Stadio (b) — natura del profilo (idea B, seconda metà)
+
+Calcolato **solo** quando lo stadio (a) è significativo:
+
+```
+rho = spearman(h, (segno_direction · Δ_h) / h)    # tasso per-barra, come sopra
+
+rho > rho_momentum_threshold   → "momentum-aligned"        (default soglia 0.5)
+rho < -rho_momentum_threshold  → "mean-reversion-aligned"
+altrimenti                     → "idiosyncratic"
+```
+
+`AlphaContract.nature` (`Literal["momentum-aligned", "mean-reversion-aligned", "idiosyncratic", "non_significativo"]`,
+default `"non_significativo"` — sempre il valore sulla via `"z_score"` da
+sola, per costruzione, dato che lì lo stadio (a) non è mai stato testato
+come significativo).
+
+### Idea C — diagnostica di sufficienza della griglia, unificata
+
+Tutto il necessario per rispondere a "`h*` è ancorato al bordo della
+griglia per un motivo che regge, o è a un picco interno genuino?" è già
+esposto su `derived_target.score_by_h` — nessun dato nuovo. Il confronto va
+fatto contro il massimo degli orizzonti con punteggio **finito** (un
+orizzonte scartato per attivazioni valide insufficienti ha punteggio `NaN`
+ed esce dall'`argmax` comunque):
+
+```python
+horizons_validi = sorted(h for h, s in derived_target.score_by_h.items() if isfinite(s))
+al_bordo = h_star == horizons_validi[-1]
+```
+
+Un confronto a un solo passo è rumoroso — servono almeno due incrementi
+consecutivi di `|z_h|` avvicinandosi al bordo per dichiarare alta
+confidenza (`bordo_in_salita`); un solo incremento resta `bordo_ambiguo`;
+meno di tre orizzonti validi dà `bordo_grid_troppo_corta`; nessun incremento
+dà `bordo_plateau`. Questi quattro stati fini restano disponibili come
+stringhe in `AlphaContract.diagnostics`
+(`"horizon_at_grid_boundary_climbing"`/`"horizon_at_grid_boundary_ambiguous"`)
+per chi vuole la granularità originale sulla sola via `"z_score"`/`"both"`.
+
+**Unificazione con le due vie di promozione.** `promotion_route` dice quale
+diagnostica applicare, senza doverlo dedurre da `h_sig`/`p_auc` a valle:
+
+```python
+if contract.promotion_route in ("z_score", "both"):
+    stato = diagnostica_su_score_by_h(derived_target)        # sopra, invariata
+else:  # "auc"
+    stato = "bordo_in_salita" if h_elbow_status == "boundary_monotone" else "interno"
+    # nessun ricalcolo: è già un sottoprodotto della scelta di h* via elbow
+```
+
+`"both"` usa la diagnostica su `score_by_h` perché su quel percorso `h*`
+resta `argmax|z_h|` — la domanda "la griglia è abbastanza lunga?" va posta
+sulla stessa quantità con cui `h*` è stato scelto. La regola elbow a un
+solo marginale non distingue i quattro stati fini sulla via `"auc"` — solo
+`AlphaContract.horizon_at_boundary` (booleano) è disponibile lì.
+
+**Disegno finale: tre campi ortogonali, non una gerarchia.**
+`AlphaContract.nature`/`.horizon_at_boundary`/`.promotion_route` sono
+indipendenti — una regola può essere `nature="momentum-aligned",
+horizon_at_boundary=True, promotion_route="auc"` (il caso da manuale: un
+trend-follower ancora in corsa, trovato proprio dal test che non richiede
+un picco isolato) senza che nessun campo scavalchi l'altro. La prima
+stesura di questa proposta immaginava il bordo come un segnale di
+**sfiducia** verso `nature` — la validazione su ADA e, soprattutto, DAX
+(l'asset scelto apposta per un campione di momentum non trascurabile) ha
+mostrato l'opposto: **tra le regole di ciascuna etichetta**, il momentum ha
+sistematicamente il tasso di bordo più alto (60.0% su ADA n=5, 35.5% su
+DAX n=31), il mean-reversion il più basso (11.2% / 8.7%) — coerente con
+l'intuizione che un vero trend-follower, per natura, non ha ancora smesso
+di crescere quando la griglia finisce. Declassare l'etichetta al bordo
+cancellerebbe l'informazione più utile, non del rumore.
+
+### Verificato
+
+`forge_preset("balanced", timeframe="1D")` sul fixture ADA di riferimento,
+pipeline `forge()` di default completa (issue #254 two-pass incluso, 2162
+contratti totali):
+
+```python
+from collections import Counter
+route = Counter(c.promotion_route for c in result.contracts)
+# {None: 1643, 'both': 313, 'z_score': 145, 'auc': 61}
+
+nature = Counter(c.derived_target.nature for c in result.contracts if c.promotion_route)
+# {'mean-reversion-aligned': 284, 'non_significativo': 145,   # == i 145 "z_score"-only
+#  'idiosyncratic': 75, 'momentum-aligned': 15}               # 284+75+15 == 313+61
+
+#   both     n=313  h* mediano=2  tasso horizon_at_boundary=15.3%
+#   z_score  n=145  h* mediano=2  tasso horizon_at_boundary=16.6%
+#   auc      n=61   h* mediano=5  tasso horizon_at_boundary=23.0%
+```
+
+I 61 contratti sulla via `"auc"` da sola sono esattamente quelli che
+`require_significant_direction=False` avrebbe lasciato `"undetermined"`
+prima di questa idea — un cambio di comportamento di default reale, non
+solo un nuovo campo diagnostico da ignorare.
+
+## 14. Generalizzazione ad Altri Ticker
 
 ### Cosa cambia per ogni asset
 
@@ -1217,7 +1448,7 @@ grado.
 
 ---
 
-## 14. Anti-pattern e Falsi Alpha
+## 15. Anti-pattern e Falsi Alpha
 
 ### ❌ Modificare le soglie degli Event Candidate
 

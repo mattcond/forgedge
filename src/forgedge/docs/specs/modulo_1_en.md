@@ -221,6 +221,20 @@ if and only if it satisfies **both** criteria:
 
 `min_episodes` and `dispersion_margin` play no role in `"bar"` mode.
 
+**`tpm_mode="ranged"`** (opt-in, `"episode"` mode only — `GateParams(tpm_mode="ranged", event_counting="bar")` raises `ValueError`). Every mode above treats `min_tpm` as a one-sided floor. Setting `tpm_mode="ranged"` instead treats it as the **centre of a band** `[min_tpm - tpm_tolerance, min_tpm + tpm_tolerance]` (clipped at 0), rejecting an event that fires too *often* as well as one too rare — useful for isolating regular-cadence patterns. Left at `UNSET` (the default), `tpm_tolerance`'s half-width is derived from the session's own dispersion tolerance rather than chosen by you; set it explicitly for a literal band with no statistics involved:
+
+```python
+from forgedge.event_discovery.models import GateParams
+
+# Derived band: half-width from the session's dispersion tolerance
+GateParams(tpm_mode="ranged")
+
+# Literal band: [2.0, 6.0], on any dataset
+GateParams(tpm_mode="ranged", min_tpm=4.0, tpm_tolerance=2.0)
+```
+
+An event with `n_episodes == 0` is always rejected regardless of the band. See `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §2 for the frozen formula and `docs/modules/EventDiscovery.md` for the full derivation.
+
 `GateResult` includes a `fail_reason` field with the first failing criterion
 (useful for debugging and parameter tuning), plus diagnostic fields that are
 always computed regardless of mode: `n_episodes` (episode count),
@@ -773,6 +787,8 @@ for cand in candidates:
 | `event_counting` | `"episode"` | Counting unit for the rate/dispersion criteria: `"episode"` or `"bar"` |
 | `min_episodes` | 10 | Absolute floor on episode count (statistical-power guard, `"episode"` mode only); applied **in-sample only**, forced to 0 on walk-forward OOS folds |
 | `episode_gap` | 1 | Maximum gap (bars) that still belongs to the same episode; `0` = strict consecutive runs |
+| `tpm_mode` | `"floor"` | `"ranged"` (opt-in, `"episode"` mode only) turns `min_tpm` into the centre of a band instead of a one-sided floor — see above |
+| `tpm_tolerance` | `UNSET` | Half-width of the `"ranged"` band; `UNSET` derives it from the session's dispersion tolerance |
 
 ### `EventWalkForwardConfig`
 

@@ -527,7 +527,8 @@ fallback config already does this, decoupled from this class default).
 `GateParams` (Consistency Gate, Step 4) — `min_tpm: float = 0.5`,
 `max_dispersion: float = 1.5`, `dispersion_margin: float = 1.3`,
 `event_counting: "episode"|"bar" = "episode"`, `min_episodes: int = 10`,
-`episode_gap: int = 1`. `"episode"` counts maximal runs of consecutive
+`episode_gap: int = 1`, `tpm_mode: "floor"|"ranged" = "floor"`,
+`tpm_tolerance: float = UNSET`. `"episode"` counts maximal runs of consecutive
 activations (bridged by gaps ≤ `episode_gap`) rather than raw bars — the
 default because a persistent multi-bar state otherwise inflates
 monthly-count variance and gets wrongly rejected. `"bar"` reproduces the
@@ -546,6 +547,16 @@ confidence (#206) — `poisson_min_window(min_episodes, min_tpm)`, not the
 naive `min_episodes / min_tpm`. **Note:** an older `GateParams` API
 (`min_act`, `min_months`, `max_conc`) appears in several `examples/*.py`
 scripts and now raises `TypeError` — see *Errors and warnings*.
+`tpm_mode="ranged"` (opt-in, `"episode"` counting only — `ValueError` under
+`"bar"`, `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §2)
+turns `min_tpm` into the centre of a band (`[min_tpm - tpm_tolerance,
+min_tpm + tpm_tolerance]`, clipped at 0) instead of a one-sided floor, so an
+event firing too *often* is rejected too. `tpm_tolerance` left `UNSET`
+derives the half-width from the session's own dispersion tolerance
+(`σ = sqrt(eff_max_dispersion·min_tpm/n_total_months)`, half-width
+`= 1.959964·σ`, not exposed via `ResolutionTrace`); set explicitly for a
+literal band with no statistics involved. `n_episodes == 0` is always
+rejected regardless of the band.
 AND-composed pairs/triples (`ANDComposer`, below) are judged by this same
 mode-aware criterion as single events — `"episode"` mode gates on episode
 rate/count/dispersion, `"bar"` mode on raw `max_dispersion`, with no
@@ -693,10 +704,42 @@ false-discovery rate over the horizon family, deliberately *not*
 alpha-derived — a different kind of quantity than a per-hypothesis
 significance level), `oos_max_p: float = 0.10` (a confirmation threshold,
 also not alpha-derived), `min_direction_t: float = 0.5`,
-`require_significant_direction: bool = True`. **The only hard rejection gate
-is undetermined direction** ("no derivable target" — no horizon produces a
-finite advantage); every other metric here feeds the A–D grade via
-`diagnostics`, not a pass/fail gate.
+`require_significant_direction: bool = True`, `auc_max_p: float = 0.10`,
+`rho_momentum_threshold: float = 0.5` (the last two only read when
+`require_significant_direction=True` — see idea B/C below). **The only hard
+rejection gate is undetermined direction** ("no derivable target" — no
+horizon produces a finite advantage, or neither significance test below
+finds the edge distinguishable from noise); every other metric here feeds
+the A–D grade via `diagnostics`, not a pass/fail gate.
+
+**Market-alignment labeling and the AUC promotion route (idea B/C,
+`docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §3-§4,
+default-on)** — `require_significant_direction=True` used to mean "`h*` in
+`h_sig`" (BH-FDR, one horizon at a time); it now means "`h_sig` **or** a
+whole-grid AUC test" (`p_auc < auc_max_p`, integrating the trapezoidal-
+weighted per-bar excess rate `Δ_h/h` — never raw `Δ_h`, an arithmetic
+artifact found and fixed twice during validation — against the same
+rotation-null machinery `h_sig` uses). `AlphaContract.promotion_route`
+(`"z_score"|"auc"|"both"|None`) records which test found it; on the
+`"auc"`-only route `h*` comes from an "elbow" rule on the marginal per-bar
+rate instead of `argmax|z_h|` (that profile is flat/diffuse by
+construction). `AlphaContract.nature`
+(`"momentum-aligned"|"mean-reversion-aligned"|"idiosyncratic"|
+"non_significativo"`, computed only when the AUC test is significant) and
+`.horizon_at_boundary` (`bool`) are new diagnostics computed for every
+candidate regardless of whether a direction was assigned — `nature`'s
+mirrored fields (`p_auc`, `rho`) live only on `DerivedTarget`.
+`horizon_at_boundary` does **not** discount `nature`; empirically it
+correlates *more*, not less, with genuinely `"momentum-aligned"` candidates
+(a true trend-follower is a profile that hasn't stopped growing when the
+grid ends) — verified on ADA and DAX. Verified end-to-end on
+`forge_preset("balanced", "1D")` over the ADA fixture (2162 contracts):
+`promotion_route` crosstab `{None: 1643, 'both': 313, 'z_score': 145,
+'auc': 61}`; among the 374 `auc`/`both` contracts, `nature` breaks down
+`{'mean-reversion-aligned': 284, 'idiosyncratic': 75, 'momentum-aligned':
+15}`. The 61 `"auc"`-only contracts are exactly the ones
+`require_significant_direction=False` would have left `"undetermined"`
+before this existed.
 
 **Grade-guided composition (issue #254, `forgedge.composition`)** — the
 default path since Phase 8 (`forge(two_pass_composition=True)`, on by
@@ -725,20 +768,30 @@ read off `adjacency` (default A<->{A,B}, B<->{B,C}, C<->{C,D} — D is never a
 root, only ever reached as B/C's partner; a triple's third component is
 constrained by the seed pair's own *root* grade, the alphabetically-first
 of the two). `per_stratum_pair_cap`/`_triple_cap` are a guaranteed minimum
-representation per stratum, round-robin interleaved — not a hard ceiling —
-so a small stratum's sole pair can't be crowded out by a much larger one
-before the shared `ANDComposer` cap is reached (the exact under-sampling
-bug a flat concatenate-then-truncate would reproduce). Freshly composed
-candidates get new `event_id`s and are evaluated from scratch by M2's
-second pass — nothing is inherited from pass 1's grade or target.
-`include_singles_in_pass2=True` (default) pools the original 1D candidates
-alongside the composed ones for that second pass, matching the historical
-implicit `all_passing = passing_single + passing_composed` M1's own Step 5
-used to do. Reuses `ANDComposer.compose()`'s Phase 1 pluggable hooks
-(`pool_selector`/`stratify_fn`/`max_pairs`/`max_triples`) rather than
+representation per stratum, round-robin interleaved — not a hard ceiling.
+Freshly composed candidates get new `event_id`s and are evaluated from
+scratch by M2's second pass — nothing is inherited from pass 1's grade or
+target. `include_singles_in_pass2=True` (default) pools the original 1D
+candidates alongside the composed ones for that second pass, matching the
+historical implicit `all_passing = passing_single + passing_composed` M1's
+own Step 5 used to do. Reuses `ANDComposer.compose()`'s Phase 1 pluggable
+hooks (`pool_selector`/`stratify_fn`/`max_pairs`/`max_triples`) rather than
 re-deriving any pairing or gate logic — the shared gate/chunking machinery
 documented under M1 above (episode-mode dispatch, memory-bounded chunking,
-permuted enumeration order) applies unchanged here too.
+permuted enumeration order) applies unchanged here too. **Fixed after
+Phase 8** (`docs/analysis/exhaustive_and_composition_coverage_proposal.md`):
+the original implementation made one `compose()` call across the whole
+graded pool with a shared `n_strata x per_stratum_pair_cap` budget, which
+measured both cross-process non-determinism (the incoming pool order
+depends on `FeatureGenerator`'s hash-seed-randomized `set()` iteration —
+pitfall #24 — and `ANDComposer`'s own fixed-seed shuffle only reproduces
+given a fixed pool order) and severe pair-space under-coverage (~0.01%,
+16% vs. 49% distinct feature-pair coverage). Now each grade stratum gets
+its **own independent** `ANDComposer.compose()` call with its own budget
+(uncapped, up to a defensive safety cap, for A/B-rooted strata;
+`per_stratum_pair_cap` for the rest), and the incoming pool is sorted by a
+canonical key first, removing the ordering dependency entirely.
+`grade_guided_compose()`'s signature is unchanged.
 
 `target_mode="proj"` (default, long events only) scores the binary target as
 excess return over a local trend SMA (`window = round(trend_sma_mult * h)`)

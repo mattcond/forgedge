@@ -637,6 +637,27 @@ median. `forge()`'s M1 stage line carries this text; `result.event_discovery
     first lines, as `examples/wf_period_reduction_test.py` does). Matters
     for CI regression tests or any audit trail that expects an exact
     `forge()` result to reproduce run to run.
+25. **A candidate that used to come back `direction="undetermined"` on the
+    default config may now get a direction.** `PromotionThresholds
+    .require_significant_direction=True` (the default) used to mean "`h*`
+    must be in `h_sig`" (BH-FDR, one horizon at a time) — it now means "`h_sig`
+    **or** a whole-grid AUC significance test" (`docs/analysis
+    /ranged_tpm_and_market_alignment_proposal.md` §3.9,
+    `PromotionThresholds.auc_max_p`, default `0.10`): an edge spread thinly
+    across the grid, with no single horizon individually significant, no
+    longer gets discarded. `AlphaContract.promotion_route`
+    (`"z_score"`/`"auc"`/`"both"`/`None`) records which test actually found
+    it; `.nature` (`"momentum-aligned"`/`"mean-reversion-aligned"`/
+    `"idiosyncratic"`/`"non_significativo"`) and `.horizon_at_boundary`
+    (`bool`) are new market-alignment diagnostics computed alongside it, for
+    every candidate regardless of whether a direction was assigned. No
+    `direction`/`lift`/grading logic changed for a candidate that already
+    had `h_sig` non-empty — this only affects candidates the old BH-FDR-only
+    check would have left `"undetermined"`. Set
+    `require_significant_direction=False` to disable both tests and restore
+    the pre-existing, purely `argmax|z_h|`-driven behaviour. See
+    `references/api-reference.md`'s M2 section and
+    `docs/modules/AlphaDiscovery.md` §13 for the full mechanics.
 
 ### Entry mode and what a verdict now measures
 

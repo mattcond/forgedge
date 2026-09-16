@@ -225,6 +225,20 @@ se e solo se soddisfa **entrambi** i criteri:
 
 `min_episodes` e `dispersion_margin` non hanno alcun ruolo in modalità `"bar"`.
 
+**`tpm_mode="ranged"`** (opt-in, solo modalità `"episode"` — `GateParams(tpm_mode="ranged", event_counting="bar")` solleva `ValueError`). Ogni modalità sopra tratta `min_tpm` come un floor a senso unico. Impostare `tpm_mode="ranged"` lo tratta invece come il **centro di una banda** `[min_tpm - tpm_tolerance, min_tpm + tpm_tolerance]` (troncata a 0), rigettando un evento che si attiva troppo *spesso* oltre a uno troppo raro — utile per isolare pattern a cadenza regolare. Lasciato a `UNSET` (il default), la mezza-larghezza di `tpm_tolerance` è derivata dalla tolleranza di dispersione della sessione stessa invece che scelta da te; fissala esplicitamente per una banda letterale senza alcuna statistica coinvolta:
+
+```python
+from forgedge.event_discovery.models import GateParams
+
+# Banda derivata: mezza-larghezza dalla tolleranza di dispersione della sessione
+GateParams(tpm_mode="ranged")
+
+# Banda letterale: [2.0, 6.0], su qualunque dataset
+GateParams(tpm_mode="ranged", min_tpm=4.0, tpm_tolerance=2.0)
+```
+
+Un evento con `n_episodes == 0` viene sempre rigettato indipendentemente dalla banda. Vedi `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §2 per la formula congelata e `docs/modules/EventDiscovery.md` per la derivazione completa.
+
 Il `GateResult` include il campo `fail_reason` con il primo criterio fallito
 (utile per debug e tuning dei parametri), più campi diagnostici sempre
 calcolati indipendentemente dalla modalità: `n_episodes` (conteggio episodi),
@@ -782,6 +796,8 @@ for cand in candidates:
 | `event_counting` | `"episode"` | Unità di conteggio per i criteri di frequenza/dispersione: `"episode"` o `"bar"` |
 | `min_episodes` | 10 | Floor assoluto sul numero di episodi (guardia di potenza statistica, solo modalità `"episode"`); applicato **solo in-sample**, forzato a 0 nei fold OOS del walk-forward |
 | `episode_gap` | 1 | Gap massimo (in barre) ancora appartenente allo stesso episodio; `0` = run strettamente consecutivi |
+| `tpm_mode` | `"floor"` | `"ranged"` (opt-in, solo modalità `"episode"`) trasforma `min_tpm` nel centro di una banda invece di un floor a senso unico — vedi sopra |
+| `tpm_tolerance` | `UNSET` | Mezza-larghezza della banda `"ranged"`; `UNSET` la deriva dalla tolleranza di dispersione della sessione |
 
 ### `EventWalkForwardConfig`
 

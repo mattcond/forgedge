@@ -631,6 +631,81 @@ Meno del 15% dei candidati generati supera il Consistency Gate (312/2400 = 13.0%
 Prova questi parametri (mediana osservata su tpm e dispersione): min_tpm<=0.35, dispersion_margin>=1.17.
 ```
 
+### `tpm_mode="ranged"` — quarto criterio opt-in, `min_tpm` come centro di banda
+
+> Fonte: `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §2
+> (idea A, formule congelate). Opt-in, solo modalità `"episode"` —
+> `GateParams(tpm_mode="ranged", event_counting="bar")` solleva `ValueError`
+> alla valutazione.
+
+I tre criteri sopra trattano `min_tpm` come un **floor a senso unico**: si
+accetta un evento se il suo tasso è *almeno* `min_tpm`. Non c'è modo di
+dire "voglio eventi che si attivano *in media* a questo ritmo", ammettendo
+sia eventi più rari sia eventi più frequenti solo entro la variabilità che
+il processo stesso mostra — un caso d'uso tipico è selezionare pattern
+"regolari" a una cadenza attesa, scartando sia i pattern troppo rari (poco
+potere statistico) sia quelli quasi-sempre-attivi (spesso condizioni
+banali/degeneri, es. un indicatore quasi sempre sopra soglia).
+
+`GateParams.tpm_mode="ranged"` aggiunge un quarto criterio, **indipendente**
+dal criterio di burstiness (Criterio 3, invariato — la modalità ranged
+aggiunge un vincolo sul *livello* del tasso, non ne modifica uno esistente
+sulla *regolarità*):
+
+```
+CRITERIO 4 — Banda di frequenza (solo tpm_mode="ranged")
+  banda = [max(0, min_tpm - tolleranza), min_tpm + tolleranza]
+  n_episodes/n_months in banda
+  Precondizione strutturale: n_episodes == 0 è sempre scartato,
+  indipendentemente dalla banda (non è "un tasso di 0 che rientra nella
+  banda per troncamento", è semplicemente non un evento)
+```
+
+La mezza-larghezza `tpm_tolerance` ha due comportamenti, stesso idioma
+`UNSET`→derivato usato ovunque nel resolver ma risolto **localmente dentro
+il gate**, non nella tabella `CONSTRAINTS` di `resolver.py` (deriva da
+`n_total_months`, un fatto del dataset che il resolver non vede mai — nello
+stesso posto in cui vive già `eff_max_dispersion`):
+
+- **`UNSET` (default) → derivata dalla tolleranza di dispersione di
+  sessione**, non dall'`episode_id` del singolo evento (scelta deliberata:
+  accoppiarla a quest'ultimo premierebbe un evento già bursty con più
+  tolleranza sul tasso, il verso sbagliato per un filtro di qualità):
+
+  ```
+  σ_tpm = sqrt(eff_max_dispersion · min_tpm / n_total_months)
+  tpm_tolerance_effettivo = 1.959964 · σ_tpm     (quantile normale a due code, 95%)
+  ```
+
+- **Fissata esplicitamente → banda letterale**, nessuna statistica
+  coinvolta: `min_tpm=4.0, tpm_tolerance=2.0` dà sempre `[2.0, 6.0]`, su
+  qualunque dataset.
+
+**Verificato**, sulla lunghezza di sessione del fixture ADA usato in tutto
+questo repository (29.37 mesi), `min_tpm`/`dispersion_margin` di default:
+
+```python
+from forgedge.event_discovery.consistency_gate import _eff_max_dispersion, _tpm_band
+from forgedge.event_discovery.models import GateParams
+
+p = GateParams(tpm_mode="ranged")
+eff = _eff_max_dispersion(29.37, p.dispersion_margin)   # 1.9146
+lo, hi = _tpm_band(p, eff, 29.37)                        # (0.1461, 0.8539)
+```
+
+La banda derivata a `min_tpm=0.5` è **`[0.146, 0.854]`** episodi/mese —
+circa ±0.35 attorno al floor, su una sessione di questa lunghezza; una
+sessione più lunga (`n_total_months` più grande al denominatore di `σ_tpm`)
+produce una banda derivata più stretta a parità di `min_tpm`.
+
+Sulla stessa base chokepoint condivisa (`_gate_pass`, `consistency_gate.py`)
+usata sia da `ConsistencyGate.evaluate()` sia dal percorso vettorizzato di
+`ANDComposer` (fix #226) — la modalità ranged è quindi rispettata
+identicamente da entrambi i percorsi, singoli ed eventi AND-composti.
+`forge_preset()` espone `tpm_mode`/`tpm_tolerance` nella propria whitelist
+di override per M1, con default `"floor"`/`UNSET` — nessun preset cambia
+comportamento a meno di richiederlo esplicitamente.
+
 La riga di log dello stage M1 di `forge()` riporta lo stesso testo — non serve chiamare `EventDiscovery` a mano per vederlo, appare già nei log di un run standard.
 
 ---

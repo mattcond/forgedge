@@ -161,7 +161,14 @@ dt.statistically_weak      # bool: True quando h* non è in h_sig
 dt.fixed_target            # bool: True quando il target è specificato dall'utente (modalità fixed-target) invece che derivato
 dt.data_derived_horizon_h  # int | None: solo modalità fixed-target — l'orizzonte che la derivazione dai dati avrebbe scelto
 dt.data_derived_sell_pct   # float | None: solo modalità fixed-target — il sell_pct che la derivazione dai dati avrebbe prodotto
+dt.nature                  # str: "momentum-aligned" | "mean-reversion-aligned" | "idiosyncratic" | "non_significativo" (default) — vedi Step 9
+dt.horizon_at_boundary     # bool: h* è ancorato al bordo della griglia per un motivo che regge al controllo? Vedi Step 9
+dt.promotion_route         # str | None: "z_score" | "auc" | "both" | None — quale test di significatività ha trovato l'edge, vedi Step 9
+dt.p_auc                   # float: p-value dello stadio (a) dell'idea B (test AUC sull'intera griglia); nan se non calcolato
+dt.rho                     # float: pendenza di Spearman dello stadio (b) dell'idea B; nan quando lo stadio (a) non era significativo
 ```
+
+`AlphaContract` replica direttamente `nature`/`horizon_at_boundary`/`promotion_route` (`contract.nature`, non solo `contract.derived_target.nature`) — `p_auc`/`rho` esistono solo su `DerivedTarget`.
 
 `direction = "undetermined"` (il contratto viene rifiutato) quando si
 verifica **una qualsiasi** di queste condizioni:
@@ -169,14 +176,17 @@ verifica **una qualsiasi** di queste condizioni:
 - `|z_h*| < min_direction_t` (default `0.5`) — l'eccesso all'orizzonte
   selezionato non è distinguibile dalla rotation null;
 - `require_significant_direction = True` (default, su
-  `PromotionThresholds`) **e** `h*` non è in `h_sig` — nessun orizzonte ha
-  superato il gate Benjamini-Hochberg, quindi `argmax|z_h|` assegnerebbe
-  altrimenti una direction equivalente a un lancio di moneta (spesso il bordo
-  lungo della grid guidato dal drift). Impostare
+  `PromotionThresholds`) **e nessuno** dei due test sotto ha trovato un edge
+  distinguibile: `h*` non è in `h_sig` (BH-FDR, un orizzonte alla volta) **e**
+  il test AUC sull'intera griglia (Step 9, `p_auc >= auc_max_p`) non è
+  significativo neanche lui. Prima che lo Step 9 esistesse, questa era solo
+  BH-FDR; un candidato che oggi il test AUC promuove sarebbe stato prima
+  lasciato `"undetermined"` qui. Impostare
   `require_significant_direction = False` per il comportamento legacy non
   bloccante — una direction viene sempre assegnata soggetta solo a
   `min_direction_t`, con l'evidenza debole segnalata via
-  `statistically_weak` invece che bloccata.
+  `statistically_weak` invece che bloccata, e nessuno dei due test di
+  significatività partecipa.
 
 Tutte le misure successive (IC, win rate, regime) sono calcolate **al target
 derivato** (`h*`, `sell_pct*`, `direction*`).
@@ -487,6 +497,106 @@ default di classe di `DiscoveryConfig`.
 
 ---
 
+### Step 9 — Etichettatura di allineamento al mercato e via di promozione AUC
+
+> Fonte: `docs/analysis/ranged_tpm_and_market_alignment_proposal.md` §3-§4
+> (formule congelate dopo validazione empirica su ADA/BTC/EURUSD/DAX).
+> Attivo di default, non opt-in, calcolato per **ogni** candidato
+> indipendentemente dal fatto che una direction sia mai stata assegnata.
+
+Il test BH-FDR dello Step 1 (`h_sig`) guarda un orizzonte alla volta. Un
+edge diffuso su tutta la griglia — nessun singolo orizzonte individualmente
+significativo — viene perso allo stesso modo in cui un picco isolato ma
+rumoroso a un solo orizzonte potrebbe altrimenti passare. Lo Step 9 aggiunge
+un test di significatività sull'intera griglia e, solo quando scatta,
+un'etichetta di allineamento al mercato — nessuno dei due tocca mai `lift`
+né `promoted_contracts()`.
+
+**Stadio (a) — test di significatività AUC sull'intera griglia.** Integra
+il tasso di eccesso *per barra*, pesato a trapezio (`Δ_h / h` — il solo
+`Δ_h` cumulato sembra spuriamente "momentum" per qualunque edge persistente
+ma piatto, per pura aritmetica del rendimento cumulato) sull'intera griglia
+degli orizzonti e lo testa contro la stessa infrastruttura di rotation-null
+che `h_sig` già usa:
+
+```python
+p_auc                 # float su DerivedTarget: p-value del test AUC sull'intera griglia
+auc_significant = p_auc < PromotionThresholds.auc_max_p   # default 0.10
+```
+
+Un candidato ora supera la promozione tramite **uno dei due** test.
+`AlphaContract.promotion_route` (`Literal["z_score", "auc", "both"] | None`)
+registra quale:
+
+```python
+route = "z_score"   # solo h_sig non vuoto — h* resta argmax|z_h|
+route = "auc"        # solo p_auc significativo — il caso che il solo BH-FDR lascia undetermined
+route = "both"       # entrambi i test superati
+route = None         # nessuno dei due, oppure direction == "undetermined"
+```
+
+Sulla via `"auc"` da sola, `h*` **non** viene da `argmax|z_h|` (quel
+profilo è per costruzione piatto e diffuso, quindi l'argmax cade spesso su
+un punto poco rappresentativo) ma da una regola "elbow": il primo
+orizzonte, camminando verso l'esterno dal più corto, in cui il tasso
+marginale per barra smette di muoversi nella direzione del trend
+dell'intera griglia. Due raffinamenti (un conteggio a due marginali
+consecutivi, una soglia di materialità sul rumore della rotation null) sono
+stati provati contro questa regola e scartati empiricamente — entrambi
+peggiorano il tasso di bordo sul gruppo solo "auc" (82.2%/74.8% contro il
+28.9% della regola grezza), non lo migliorano; la regola grezza a un solo
+marginale è quella che viene rilasciata.
+
+**Stadio (b) — direzione del profilo, solo quando lo stadio (a) è
+significativo.**
+
+```python
+rho                    # float su DerivedTarget: pendenza di Spearman, nan se lo stadio (a) non era significativo
+nature                 # str, replicato su AlphaContract:
+#   "momentum-aligned"        rho >  rho_momentum_threshold (default 0.5)
+#   "mean-reversion-aligned"  rho < -rho_momentum_threshold
+#   "idiosyncratic"           altrimenti
+#   "non_significativo"       stadio (a) non significativo — sempre il caso sulla via "z_score" da sola
+```
+
+**`horizon_at_boundary`** (`bool`, replicato su `AlphaContract`) — `h*` è
+ancorato al bordo della griglia per un motivo che regge al controllo? Su
+`"z_score"`/`"both"` richiede due incrementi consecutivi di `score_by_h`
+avvicinandosi all'ultimo orizzonte con punteggio finito (un solo incremento
+è trattato come rumore); su `"auc"` è il flag di bordo della stessa regola
+elbow (`boundary_monotone`), non un calcolo separato. **Non** declassa
+`nature` — validato su ADA e DAX (asset scelto apposta per un campione di
+momentum non trascurabile), il tasso di bordo è **più alto** per
+l'etichetta `"momentum-aligned"` (60.0%/35.5%) e **più basso** per
+`"mean-reversion-aligned"` (11.2%/8.7%): un vero trend-follower è, per
+definizione, un profilo che non ha smesso di crescere quando la griglia
+finisce. Tratta `nature` e `horizon_at_boundary` come fatti indipendenti e
+combinabili, mai come una gerarchia.
+
+**Verificato**, `forge_preset("balanced", timeframe="1D")` sul fixture ADA,
+pipeline `forge()` di default completa (2162 contratti totali):
+
+```python
+from collections import Counter
+route = Counter(c.promotion_route for c in result.contracts)
+# {None: 1643, 'both': 313, 'z_score': 145, 'auc': 61}
+
+nature = Counter(c.derived_target.nature for c in result.contracts if c.promotion_route)
+# {'mean-reversion-aligned': 284, 'non_significativo': 145,   # == i 145 "z_score"-only
+#  'idiosyncratic': 75, 'momentum-aligned': 15}
+
+#   both     n=313  h* mediano=2  tasso horizon_at_boundary=15.3%
+#   z_score  n=145  h* mediano=2  tasso horizon_at_boundary=16.6%
+#   auc      n=61   h* mediano=5  tasso horizon_at_boundary=23.0%
+```
+
+I 61 contratti sulla via "auc" da sola sarebbero stati `"undetermined"` con
+`require_significant_direction=False` — un cambio reale in ciò che una
+chiamata `forge()` di default restituisce, non solo un nuovo campo
+diagnostico da ignorare.
+
+---
+
 ## Struttura dati: `AlphaContract`
 
 ```python
@@ -528,6 +638,11 @@ c.promoted            # bool: True se direction è "long" o "short"
 c.rejection_reasons   # list[str]: solo cause bloccanti — vuoto se promosso
 c.diagnostics         # list[str]: osservazioni non bloccanti che pesano sul grade
 c.fdr_promoted        # bool | None: esito BH FDR (non bloccante)
+
+# Diagnostici di allineamento al mercato (Step 9) — replicati da derived_target
+c.nature              # str: "momentum-aligned" | "mean-reversion-aligned" | "idiosyncratic" | "non_significativo"
+c.horizon_at_boundary # bool: h* è ancorato al bordo della griglia per un motivo che regge al controllo?
+c.promotion_route     # str | None: "z_score" | "auc" | "both" | None — quale test ha trovato l'edge
 
 # Handoff a Rule Discovery
 c.handoff_status      # str: "PENDING_RULE_DISCOVERY"
@@ -638,7 +753,9 @@ effettivamente.
 | `fdr_q` | `0.10` | Target false-discovery rate BH (guida `h_sig` dello Step 1) |
 | `oos_max_p` | `0.10` | p-value massimo one-sided per la conferma OOS |
 | `min_direction_t` | `0.5` | \|z_h*\| minimo perché venga assegnata una direction — sotto questa soglia, `direction = "undetermined"` (**blocca la promozione**) |
-| `require_significant_direction` | `True` | Una direction viene assegnata solo se `h*` è in `h_sig` (BH-significativo); altrimenti `direction = "undetermined"` (**blocca la promozione**). `False` ripristina il comportamento legacy non bloccante |
+| `require_significant_direction` | `True` | Una direction viene assegnata solo se `h*` è in `h_sig` (BH-significativo) **oppure** il test AUC sull'intera griglia (Step 9) è significativo — un OR dei due, non solo BH-FDR; altrimenti `direction = "undetermined"` (**blocca la promozione**). `False` ripristina il comportamento legacy non bloccante, senza alcun controllo di significatività |
+| `auc_max_p` | `0.10` | Step 9, stadio (a): p-value massimo per il test AUC sull'intera griglia. Raggiunto solo quando `require_significant_direction=True` |
+| `rho_momentum_threshold` | `0.5` | Step 9, stadio (b): soglia sulla pendenza di Spearman per le etichette `"momentum-aligned"`/`"mean-reversion-aligned"` |
 
 `PromotionThresholds` non ha campi `min_activations` o
 `min_oos_activations` — non esiste alcun gate di promozione basato su un

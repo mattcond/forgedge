@@ -598,7 +598,7 @@ print(resp.verdict, resp.in_sample_summary.profit_factor)
 | `test_span_months` | `None` | Test months (None = divided equally) |
 | `min_train_months` | `6` *(session-resolved)* | Minimum train before the first test window — sized from `criteria.min_tpm` with a 95% Poisson margin to reach `_MIN_TRADES_ABS` (10) trades |
 | `reoptimise` | `True` | Re-optimise grid on each train window |
-| `purge_bars` | `None` *(auto)* | Purge width, in bars, at the end of every train window — entries opened there could fill/exit inside the adjacent test window, leaking train selection into test prices. `None` (default) auto-sizes it from the resolved grid's largest `target_h` plus the fill delay; `0` disables purging |
+| `purge_bars` | `None` *(auto)* | Purge width, in bars, at the end of every train window — entries opened there could fill/exit inside the adjacent test window, leaking train selection into test prices. `None` (default) auto-sizes it from the resolved grid's largest `target_h`, plus `buy_delay_bar` **only when the base `BacktestParams.buy_type=="limit"`** (fix #278 — under `"market"` the fill always happens at `signal + 1` bar and `buy_delay_bar` is never read, so adding it would have shrunk the usable window for no reason tied to the actual order mechanics); `0` disables purging |
 | `embargo_bars` | `0` *(session-resolved)* | Extra quarantine at the start of every test window, in bars — session-resolved from `AlphaConfig.embargo_bars` (same "how much serial correlation to quarantine after a boundary" policy, applied at the fold boundary instead of the IS/OOS session split); an explicit value here still wins |
 
 ### `SelectionCriteria`
