@@ -1,0 +1,200 @@
+{
+  "_warning": "REJECTED CONTRACT \u2014 NOT PRODUCTION READY. status=REJECTED, promoted=false, direction=undetermined. Exported for audit/documentation purposes only; do not deploy.",
+  "contract": {
+    "alpha_id": "ALPHA-E_DAAX-1H-260916-000",
+    "version": "1.0",
+    "discovery_date": "2026-09-16",
+    "status": "REJECTED",
+    "asset": "E_DAAX",
+    "exchange": "",
+    "timeframe": "1H",
+    "direction": "undetermined",
+    "fee_per_side": 0.002,
+    "event_candidate_id": "CUSTOM-close_ema20_gt_high_ema9",
+    "event_expression": "close_ema_20 > high_ema_09",
+    "pattern_family": "mean_reversion",
+    "derived_target": {
+      "holding_period_h": 4,
+      "sell_pct": NaN,
+      "direction": "undetermined",
+      "mean_advantage": NaN,
+      "advantage_by_h": {
+        "1": -3.218024053950809e-07,
+        "2": -1.612271116243379e-05,
+        "4": -6.629231871985114e-05,
+        "8": -7.231112112131051e-05,
+        "10": -7.064321041088505e-05,
+        "12": -0.00010667346448351313,
+        "20": 4.129976935400402e-05,
+        "24": 4.672053707695733e-05,
+        "40": -0.00035111684618489977
+      },
+      "t_stat_by_h": {
+        "1": -0.009316293972924663,
+        "2": -0.2385532134437568,
+        "4": -0.5057847050633951,
+        "8": -0.2906509823286478,
+        "10": -0.23305458673328275,
+        "12": -0.30094057841911775,
+        "20": 0.07754692505020884,
+        "24": 0.07685656181438849,
+        "40": -0.41154814223551234
+      },
+      "score_by_h": {
+        "1": 0.009316293972924663,
+        "2": 0.2385532134437568,
+        "4": 0.5057847050633951,
+        "8": 0.2906509823286478,
+        "10": 0.23305458673328275,
+        "12": 0.30094057841911775,
+        "20": 0.07754692505020884,
+        "24": 0.07685656181438849,
+        "40": 0.41154814223551234
+      },
+      "p_value_by_h": {
+        "1": 0.991603443866678,
+        "2": 0.7750831131190862,
+        "4": 0.5389566106896257,
+        "8": 0.7241923109709317,
+        "10": 0.7746142698832155,
+        "12": 0.7135367828829596,
+        "20": 0.9251555707100844,
+        "24": 0.9263489898559373,
+        "40": 0.6159321455971358
+      },
+      "h_sig": [],
+      "statistically_weak": true,
+      "fixed_target": false,
+      "data_derived_horizon_h": null,
+      "data_derived_sell_pct": null,
+      "nature": "non_significativo",
+      "horizon_at_boundary": false,
+      "promotion_route": null,
+      "p_auc": 0.8180462023697894,
+      "rho": NaN,
+      "base_rate": NaN
+    },
+    "statistical_evidence": {
+      "n_observations": 23458,
+      "underlying_feature": {
+        "name": "close_ema20_gt_high_ema9",
+        "ic": -0.008126265648303058,
+        "p_value": 0.21328858379289584,
+        "ic_rolling_stable": false
+      },
+      "event_stats": {
+        "n_activations": 4353,
+        "win_rate": NaN,
+        "lift_vs_base": NaN,
+        "fwd_return_mean": NaN,
+        "cohens_d": NaN,
+        "t_stat": NaN,
+        "p_value": NaN
+      }
+    },
+    "oos_validation": {
+      "n_bars": 10055,
+      "n_activations": 0,
+      "mean_advantage": NaN,
+      "t_stat": NaN,
+      "p_value": NaN,
+      "win_rate": NaN,
+      "base_rate": NaN,
+      "lift": NaN,
+      "passed": false,
+      "min_detectable_effect": NaN
+    },
+    "market_structure": {
+      "hurst": 0.033792337303820676,
+      "hurst_interpretation": "mean_reverting",
+      "expected_family": "mean_reversion",
+      "autocorr": {
+        "1": 0.8735029103014623,
+        "2": 0.7491964246513605,
+        "3": 0.6238134408625073,
+        "6": 0.2529609397610554,
+        "12": -0.002680707024679891,
+        "24": -0.03982198239850484
+      }
+    },
+    "regime_analysis": [
+      {
+        "regime": "STRONG_BEAR",
+        "n": 225,
+        "ic": -0.11029766988116627,
+        "p_value": 0.09888384734625222,
+        "win_rate": NaN,
+        "strength": "negligible"
+      },
+      {
+        "regime": "BEAR",
+        "n": 1954,
+        "ic": 0.0620706753407061,
+        "p_value": 0.006057221594564906,
+        "win_rate": NaN,
+        "strength": "strong"
+      },
+      {
+        "regime": "NEUTRAL",
+        "n": 16736,
+        "ic": -0.012500865872656081,
+        "p_value": 0.10584578351603768,
+        "win_rate": NaN,
+        "strength": "negligible"
+      },
+      {
+        "regime": "BULL",
+        "n": 4292,
+        "ic": -0.011690942117343369,
+        "p_value": 0.44384533970735196,
+        "win_rate": NaN,
+        "strength": "negligible"
+      },
+      {
+        "regime": "STRONG_BULL",
+        "n": 251,
+        "ic": -0.12716273677814222,
+        "p_value": 0.04414001913174238,
+        "win_rate": NaN,
+        "strength": "strong"
+      }
+    ],
+    "regime_dependency": {
+      "type": "conditional",
+      "active_regimes": [
+        "BEAR",
+        "STRONG_BULL"
+      ],
+      "weak_regimes": [
+        "STRONG_BEAR",
+        "NEUTRAL",
+        "BULL"
+      ],
+      "regime_breadth": 0.4
+    },
+    "alpha_score": {
+      "ic_magnitude": 0.008126265648303058,
+      "lift": NaN,
+      "cohens_d": NaN,
+      "regime_breadth": 0.4,
+      "composite_score": 0.071,
+      "grade": "D"
+    },
+    "promoted": false,
+    "rejection_reasons": [
+      "no derivable target (no finite advantage on the grid)"
+    ],
+    "diagnostics": [
+      "IC weak (|IC|=0.0081 < 0.02 or p=0.2133)",
+      "not significant under BH FDR (q=0.1)",
+      "OOS sample too small for reliable statistics (n_oos_activations=0 < 10)",
+      "OOS weak (p=nan vs 0.1, mean_adv=nan, n_act=0)"
+    ],
+    "fdr_promoted": false,
+    "nature": "non_significativo",
+    "horizon_at_boundary": false,
+    "promotion_route": null,
+    "handoff_status": "PENDING_RULE_DISCOVERY",
+    "rule_discovery_response": null
+  }
+}
