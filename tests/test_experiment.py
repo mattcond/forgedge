@@ -71,6 +71,11 @@ class TestMaxJaccard:
         a = np.array([True, False, True, True, False])
         assert max_jaccard(a, [a.copy()]) == pytest.approx(1.0)
 
+    def test_return_type_is_native_float_not_numpy_scalar(self):
+        a = np.array([True, True, False, False])
+        b = np.array([True, True, False, False])
+        assert type(max_jaccard(a, [b])) is float
+
     def test_disjoint_series_is_zero(self):
         a = np.array([True, True, False, False])
         b = np.array([False, False, True, True])
@@ -98,6 +103,16 @@ class TestMaxAbsCorr:
         series_by_col = {"a": x, "b": 2 * x + 1}
         corr = max_abs_corr([_component("a")], ["b"], series_by_col)
         assert corr == pytest.approx(1.0, abs=1e-9)
+
+    def test_return_type_is_native_float_not_numpy_scalar(self):
+        # Found via manual troubleshooting: np.corrcoef()[0, 1] is np.float64,
+        # and abs()/comparison preserve that type — a caller storing this in
+        # a plain dataclass field (SeedAttempt.abs_corr_vs_seeds) got a
+        # numpy scalar leaking into what should be a clean public API.
+        x = np.linspace(0, 10, 200)
+        series_by_col = {"a": x, "b": 2 * x + 1}
+        corr = max_abs_corr([_component("a")], ["b"], series_by_col)
+        assert type(corr) is float
 
     def test_perfectly_anticorrelated_series_is_abs(self):
         x = np.linspace(0, 10, 200)
