@@ -202,10 +202,13 @@ warning e consente comunque l'esecuzione.
 | `configuration_it.md` | Riferimento completo alla configurazione: ogni campo dataclass, tipo, default e descrizione |
 | `playground_it.md` | Playground: guida all'utilizzo degli helper di analisi sopra i `ForgeResult` messi in pool (tutti gli 11 casi d'uso, issue #237) |
 | `deployment_it.md` | Deployment: guida all'utilizzo delle funzioni di gate/export/monitoraggio che portano le regole scoperte in produzione |
+| `experiment_it.md` | Experiment: guida all'utilizzo di `StepWiseDiscovery` — una ricerca partition & compose che fa crescere una regola confermata sull'hold-out una condizione AND alla volta sopra `forge()` |
 
 `forgedge.playground` — un livello di analisi di sola lettura sopra i `ForgeResult` messi in pool — è coperto nel manuale principale (`docs/manuale-it.md`, §9). La sua checklist di tracciamento (issue #237) è completa (10 funzioni più il trasversale `conversion_funnel`), ma resta uno strato diagnostico, non un'API core stabile. [`playground_it.md`](playground_it.md) è il suo riferimento dettagliato all'utilizzo (firme, parametri, esempi verificati); [`modules/Playground.md`](../modules/Playground.md) copre invece la motivazione di design e gli algoritmi interni.
 
 `forgedge.deployment` — il suo modulo gemello per portare le regole promosse in produzione (gate di qualità, export su disco, manifest di monitoraggio) — è stato separato da `forgedge.playground` da PR #247 (issue #245) perché quelle funzioni hanno effetti reali che un nome di sola lettura non descriveva più onestamente. [`deployment_it.md`](deployment_it.md) è il suo riferimento all'utilizzo; [`modules/Deployment.md`](../modules/Deployment.md) copre la motivazione di design.
+
+`forgedge.experiment` — un terzo modulo gemello che, a differenza dei due sopra, ESEGUE una propria pipeline multi-fase sopra `forge()` invece di limitarsi a leggerla o ad agire su di essa — è anch'esso coperto nel manuale principale (`docs/manuale-it.md`, §9). [`experiment_it.md`](experiment_it.md) è il suo riferimento all'utilizzo; [`modules/Experiment.md`](../modules/Experiment.md) copre la motivazione di design, inclusa la ricerca manuale che generalizza.
 
 Le versioni inglesi sono nei file corrispondenti `*_en.md`.
 

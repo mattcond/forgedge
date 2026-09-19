@@ -305,6 +305,7 @@ if resp.is_edge:
 | [`configuration_it.md`](src/forgedge/docs/specs/configuration_it.md) | Riferimento completo alla configurazione: ogni campo dataclass, tipo, default e descrizione |
 | [`playground_it.md`](src/forgedge/docs/specs/playground_it.md) | `forgedge.playground`: helper di analisi di sola lettura sopra i `ForgeResult` messi in pool |
 | [`deployment_it.md`](src/forgedge/docs/specs/deployment_it.md) | `forgedge.deployment`: gate di promozione, export delle regole, manifest di monitoraggio per portare le regole scoperte in produzione |
+| [`experiment_it.md`](src/forgedge/docs/specs/experiment_it.md) | `forgedge.experiment`: `StepWiseDiscovery` — una ricerca partition & compose che fa crescere una regola confermata sull'hold-out una condizione AND alla volta sopra `forge()` |
 
 Lavori su questo codebase con un agente AI? La skill `forgedge` in
 [`.claude/skills/forgedge/`](.claude/skills/forgedge/) copre l'API della
