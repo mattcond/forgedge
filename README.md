@@ -296,6 +296,7 @@ if resp.is_edge:
 | [`configuration_en.md`](src/forgedge/docs/specs/configuration_en.md) | Complete configuration reference: every dataclass field, type, default, and description |
 | [`playground_en.md`](src/forgedge/docs/specs/playground_en.md) | `forgedge.playground`: read-only analysis helpers over pooled `ForgeResult` output |
 | [`deployment_en.md`](src/forgedge/docs/specs/deployment_en.md) | `forgedge.deployment`: promotion gate, rule export, monitoring manifest for putting discovered rules into production |
+| [`experiment_en.md`](src/forgedge/docs/specs/experiment_en.md) | `forgedge.experiment`: `StepWiseDiscovery` — a partition & compose search that grows a hold-out-confirmed rule one AND-condition at a time on top of `forge()` |
 
 Working on this codebase with an AI coding agent? The `forgedge` skill in
 [`.claude/skills/forgedge/`](.claude/skills/forgedge/) covers the library's

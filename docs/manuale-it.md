@@ -1479,6 +1479,47 @@ contratti in pool sono duplicati e la maggior parte si classifica
 
 Riferimento completo su parametri/ritorni, tabella completa dei campi di `PromotionGateConfig`, e ogni esempio verificato: `src/forgedge/docs/specs/deployment_it.md`. Motivazione di design — perché la sequenza è fissa, perché solo `export_rules` tocca il filesystem: `src/forgedge/docs/modules/Deployment.md`.
 
+### `forgedge.experiment` — pipeline di esperimenti costruite su `forge()`
+
+`forgedge.playground` legge cosa una run ha già prodotto; `forgedge.deployment` agisce su quel risultato. `forgedge.experiment` è un terzo tipo di modulo gemello: **esegue una propria pipeline multi-fase sopra `forge()`**, né di sola lettura né orientato alla produzione. `StepWiseDiscovery`, la sua prima classe, risponde a una domanda più esplorativa e mirata di una singola chiamata a `forge()`: *partendo dalle regole a condizione singola più forti e confermate sull'hold-out, si può far crescere ciascuna, una condizione AND alla volta, cercando solo nella sotto-popolazione che già seleziona una seconda dimensione?* — una ricerca locale per seme, in contrapposizione all'unico passaggio globale di `forge()` (inclusa la sua composizione a due passate guidata dal grade, §8).
+
+```python
+from forgedge.experiment import StepWiseDiscovery, StepWiseDiscoveryConfig
+```
+
+L'algoritmo, in ordine:
+
+1. **Risolvere una volta sola.** Le configurazioni del chiamante (o quelle di default) — `event_discovery_config`/`alpha_config`/`rule_discovery_config` — vengono risolte una sola volta tramite `forgedge.config_report()`, contro la sola *forma* della KPI table completa (lunghezza/span — mai i suoi valori, quindi risolvere prima dello split successivo non introduce alcun look-ahead). Ogni chiamata interna a `EventDiscovery`/`AlphaDiscovery`/`RuleDiscovery` che la ricerca effettua a valle riusa queste stesse configurazioni risolte, mai una nuova configurazione parzialmente `UNSET` — un `EventDiscovery`/`AlphaDiscovery` costruito standalone altrimenti ricade su una calibrazione oraria per qualunque campo che conta le barre (`horizon_grid` e simili) lasciato non impostato, indipendentemente dal `timeframe` reale — la stessa trappola che i walkthrough dei Moduli 1/2 di questo manuale segnalano per l'uso standalone diretto, più sopra in questa sezione. `StepWiseDiscovery` la chiude per costruzione, allo stesso modo in cui lo fa internamente `forge()`.
+2. **Separare un hold-out esterno.** Indipendente da, e in aggiunta a, qualunque split train/test interno che le configurazioni passate già usano — `holdout_df` non viene mai letto da alcuna chiamata di discovery, solo dalla riconferma sull'hold-out. Dimensionato di default dal `alpha_config.horizon_grid`/`embargo_bars` risolto (`StepWiseDiscoveryConfig.outer_horizon_bars`/`outer_embargo_bars`, `None` — sovrascrivibile con un valore specifico del dominio, es. una scala derivata dalla semivita OU, se se ne ha una).
+3. **Iterazione 1** — un'unica chiamata a `forge()` su `search_df` da sola, con la composizione forzata a spenta (è compito di questa classe stessa): ogni candidato/contratto/verdetto a condizione singola che la KPI table supporta.
+4. **Selezione dei semi** — classifica i risultati dell'iterazione 1 e ne accetta fino a `config.n_seeds`, ciascuno richiedendo una famiglia di feature distinta, conferma sull'hold-out, **e** diversità da ogni seme già accettato (Jaccard sull'attivazione booleana, più un controllo di correlazione continua — `forgedge.experiment.redundancy` — così che un rapporto su ATR e il suo analogo su NATR sotto nomi diversi non spendano ciascuno un'intera catena di ricerca indipendente sulla stessa informazione).
+5. **Partition & compose**, per ogni seme, fino a `config.depth`: partiziona `search_df` sulle righe attualmente attive della catena, cerca in quella partizione una seconda condizione tra figli puntuali (costruiti direttamente sulla partizione) e figli a trasformazione rolling (pctrank/zscore/delta — recuperati calcolando la trasformazione sull'INTERA `search_df` e calibrando solo la soglia sulla partizione, evitando il look-ahead che un approccio ingenuo "trasformazione sulla partizione" introdurrebbe su una partizione non contigua), scarta ogni candidato ridondante con un componente già nella catena, riprova ogni figlio confermato sull'hold-out in ordine di classifica finché uno si compone in un target derivabile da Alpha Discovery, e mette a stato la composizione solo una volta che essa stessa si riconferma sull'hold-out — un tentativo di composizione fallito non sovrascrive mai un risultato più superficiale genuinamente confermato.
+
+Niente di tutto questo è specifico per asset o timeframe — la calibrazione di fee/`mfe_floor`, quali periodi degli indicatori sono entrati nella KPI table, e quanto embargo esterno riservare sono tutte decisioni del chiamante, fatte tramite le configurazioni passate. Questa classe possiede solo l'algoritmo di ricerca.
+
+**Verificato**, sul fixture di riferimento di questo repository `tests/fixtures/ADA_1D_TRAIN.parquet` (882 barre), `DiscoveryConfig`/`AlphaConfig`/`RuleDiscoveryConfig` di default, `StepWiseDiscoveryConfig(n_seeds=2, depth=2)`:
+
+```python
+import pandas as pd
+from forgedge.experiment import StepWiseDiscovery, StepWiseDiscoveryConfig
+
+kpi = pd.read_parquet("tests/fixtures/ADA_1D_TRAIN.parquet")
+engine = StepWiseDiscovery(kpi, ticker="ADAUSDC", timeframe="1D",
+                            config=StepWiseDiscoveryConfig(n_seeds=2, depth=2))
+result = engine.run()
+print(result.summary()[["chain", "expression", "depth_reached", "verdict"]].to_string(index=False))
+```
+
+```
+                                        chain                                                            expression  depth_reached  verdict
+seed1:diffnorm_close_vol_vol|rolling_pctrank                          pr_diffnorm_close_vol12_vol24_168 < 0.172619              0  PARTIAL-EDGE
+          seed2:ratio_close_ema_ema|identity  (ratio_close_ema03_ema12 < 0.952059) AND (zs_close_ema_03_96 < -1.5)              1  NON-EDGE
+```
+
+`seed1` resta una `PARTIAL-EDGE` a condizione singola — l'unica composizione tentata a profondità 0 non ha superato la conferma sull'hold-out, quindi la catena riporta l'ultimo stato genuinamente confermato (il seme stesso) invece del tentativo fallito. `seed2` raggiunge la profondità 1: il suo `RuleDiscoveryResponse.verdict` a livello di ricerca è `NON-EDGE`, ma la regola composta a due condizioni si riconferma sulla valutazione concatenata search+holdout (expectancy media sui fold walk-forward post-holdout `+0.01574 > 0`) — la stessa sfumatura "il verdetto dice una cosa, la riconferma sull'hold-out ne dice un'altra" che `confirms_on_holdout` è costruita per catturare, riportata onestamente invece di essere collassata in un singolo booleano. Nessuna delle due catene raggiunge la profondità 2 su questo fixture — un esito negativo onesto, non un errore: come il resto di `forgedge`, questo modulo non forza mai un risultato positivo su una configurazione che non lo sostiene.
+
+Riferimento completo su parametri/ritorni e ogni esempio verificato: `src/forgedge/docs/specs/experiment_en.md` (`experiment_it.md` per l'italiano). Motivazione di design — perché la risoluzione della configurazione avviene una sola volta, perché la ridondanza viene controllata sia dentro una catena sia tra i semi, il fix sull'ordine di reporting che protegge uno stato più superficiale confermato: `src/forgedge/docs/modules/Experiment.md`. Un esempio eseguibile end-to-end sui dati OHLCV bundled di questo repository: `examples/step_wise_discovery_usage.py`.
+
 ---
 
 ## 10. Configurazione

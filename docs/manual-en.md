@@ -1465,6 +1465,47 @@ conservative by design, not a bug.
 
 Full parameter/return reference, `PromotionGateConfig`'s complete field table, and every verified example: `src/forgedge/docs/specs/deployment_en.md`. Design rationale — why the sequence is fixed, why only `export_rules` touches the filesystem: `src/forgedge/docs/modules/Deployment.md`.
 
+### `forgedge.experiment` — pipelines of experiments built on `forge()`
+
+`forgedge.playground` reads what a run already produced; `forgedge.deployment` acts on it. `forgedge.experiment` is a third kind of sibling: it **runs its own multi-stage pipeline on top of `forge()`**, neither read-only nor production-facing. `StepWiseDiscovery`, its first class, answers a narrower, more exploratory question than a single `forge()` call: *starting from the strongest hold-out-confirmed single-condition rules, can each one be grown, one AND-condition at a time, by searching only the sub-population it already selects for a second dimension?* — a per-seed local search, as opposed to `forge()`'s own single global pass (including its grade-guided two-pass composition, §8).
+
+```python
+from forgedge.experiment import StepWiseDiscovery, StepWiseDiscoveryConfig
+```
+
+The algorithm, in order:
+
+1. **Resolve once.** The caller's (or default) `event_discovery_config`/`alpha_config`/`rule_discovery_config` are resolved a single time via `forgedge.config_report()`, against the full KPI table's *shape* only (length/span — never its values, so resolving before the split below introduces no look-ahead). Every internal `EventDiscovery`/`AlphaDiscovery`/`RuleDiscovery` call the search makes downstream reuses these same resolved configs, never a fresh, partially-`UNSET` one — a hand-built `EventDiscovery`/`AlphaDiscovery` constructed standalone otherwise falls back to an hourly calibration for any bar-counting field (`horizon_grid` and similar) left unset, regardless of the real `timeframe` — the same trap this manual's own Module 1/2 walkthroughs warn about for direct standalone use, earlier in this section. `StepWiseDiscovery` closes it by construction, the same way `forge()` itself does internally.
+2. **Split an outer hold-out.** Independent of, and in addition to, whatever internal train/test split the passed-in configs already use — `holdout_df` is never read by any discovery call, only by hold-out re-confirmation. Sized from the resolved `alpha_config.horizon_grid`/`embargo_bars` by default (`StepWiseDiscoveryConfig.outer_horizon_bars`/`outer_embargo_bars`, `None` — override with a domain-specific value, e.g. an OU-half-life-derived scale, if you have one).
+3. **Iteration 1** — one `forge()` call on `search_df` alone, composition forced off (that is this class's own job): every single-condition candidate/contract/verdict the KPI table supports.
+4. **Seed selection** — rank iteration 1's results and accept up to `config.n_seeds`, each requiring a distinct feature family, hold-out confirmation, **and** diversity from every seed already accepted (Jaccard on boolean activation, plus a continuous-correlation check — `forgedge.experiment.redundancy` — so an ATR-ratio and its NATR analogue under different names don't each spend a full independent search chain on the same information).
+5. **Partition & compose**, per seed, up to `config.depth`: partition `search_df` to the chain's currently active rows, search that partition for a second condition among pointwise children (built directly on the partition) and rolling-transform children (pctrank/zscore/delta — recovered by computing the transform on the FULL `search_df` and calibrating only the threshold on the partition, avoiding the look-ahead a naive "transform on the partition" approach would introduce on a non-contiguous partition), reject anything redundant with a component already in the chain, retry every hold-out-confirmed child in ranked order until one composes into an Alpha-Discovery-derivable target, and commit the composed state only once it *itself* re-confirms on the hold-out — a failed composition attempt never overwrites a genuinely confirmed shallower result.
+
+None of this is asset- or timeframe-specific — fee/`mfe_floor` calibration, which indicator periods went into the KPI table, and how much outer embargo to reserve are all caller decisions, made via the configs passed in. This class owns the search algorithm only.
+
+**Verified**, on this repo's own `tests/fixtures/ADA_1D_TRAIN.parquet` reference fixture (882 bars), default `DiscoveryConfig`/`AlphaConfig`/`RuleDiscoveryConfig`, `StepWiseDiscoveryConfig(n_seeds=2, depth=2)`:
+
+```python
+import pandas as pd
+from forgedge.experiment import StepWiseDiscovery, StepWiseDiscoveryConfig
+
+kpi = pd.read_parquet("tests/fixtures/ADA_1D_TRAIN.parquet")
+engine = StepWiseDiscovery(kpi, ticker="ADAUSDC", timeframe="1D",
+                            config=StepWiseDiscoveryConfig(n_seeds=2, depth=2))
+result = engine.run()
+print(result.summary()[["chain", "expression", "depth_reached", "verdict"]].to_string(index=False))
+```
+
+```
+                                        chain                                                            expression  depth_reached  verdict
+seed1:diffnorm_close_vol_vol|rolling_pctrank                          pr_diffnorm_close_vol12_vol24_168 < 0.172619              0  PARTIAL-EDGE
+          seed2:ratio_close_ema_ema|identity  (ratio_close_ema03_ema12 < 0.952059) AND (zs_close_ema_03_96 < -1.5)              1  NON-EDGE
+```
+
+`seed1` stays a single-condition `PARTIAL-EDGE` — the one composition attempted at depth 0 failed hold-out confirmation, so the chain reports the last genuinely confirmed state (the seed itself) rather than the failed attempt. `seed2` reaches depth 1: its search-level `RuleDiscoveryResponse.verdict` is `NON-EDGE`, but the composed two-condition rule re-confirms on the concatenated search+holdout evaluation (mean expectancy across post-holdout walk-forward folds `+0.01574 > 0`) — the same "verdict says one thing, hold-out re-evaluation says another" nuance `confirms_on_holdout` is built to catch, reported honestly rather than collapsed into a single boolean. Neither chain reaches depth 2 on this fixture — an honest negative, not an error: like the rest of `forgedge`, this module never forces a positive result on a configuration that doesn't support one.
+
+Full parameter/return reference and every verified example: `src/forgedge/docs/specs/experiment_en.md`. Design rationale — why config resolution happens exactly once, why redundancy is checked both within a chain and across seeds, the reporting-order fix that protects a confirmed shallower state: `src/forgedge/docs/modules/Experiment.md`. A runnable, end-to-end example against this repo's own bundled OHLCV data: `examples/step_wise_discovery_usage.py`.
+
 ---
 
 ## 10. Configuration

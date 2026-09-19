@@ -1,6 +1,6 @@
 ---
 name: forgedge
-description: Use whenever working with the forgedge / FORGE (Feature-Oriented Rule Generation Engine) codebase or Python library — writing or debugging code that imports `forgedge`, calling `forge()` / `forge_multi()` / `forge_preset()` / `config_report()`, building or validating a KPI Table, working with Event Discovery, Alpha Discovery, Rule Discovery or the Rule Registry, interpreting EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA verdicts, replaying an `EventCandidate` or monitoring a published rule on fresh candles, or fixing/extending forgedge's own source and tests. Trigger this any time forgedge, FORGE, "KPI table", `EventCandidate`, `AlphaContract`, `RuleDiscoveryResponse`, `PipelineContext`, walk-forward OOS, or look-ahead bias comes up in the context of this repository — even if the user does not name the skill explicitly or only pastes an error/traceback from the library.
+description: Use whenever working with the forgedge / FORGE (Feature-Oriented Rule Generation Engine) codebase or Python library — writing or debugging code that imports `forgedge`, calling `forge()` / `forge_multi()` / `forge_preset()` / `config_report()`, building or validating a KPI Table, working with Event Discovery, Alpha Discovery, Rule Discovery or the Rule Registry, interpreting EDGE / PARTIAL-EDGE / NON-EDGE / INSUFFICIENT-DATA verdicts, replaying an `EventCandidate` or monitoring a published rule on fresh candles, running a `forgedge.experiment.StepWiseDiscovery` partition & compose search, or fixing/extending forgedge's own source and tests. Trigger this any time forgedge, FORGE, "KPI table", `EventCandidate`, `AlphaContract`, `RuleDiscoveryResponse`, `PipelineContext`, `StepWiseDiscovery`, walk-forward OOS, or look-ahead bias comes up in the context of this repository — even if the user does not name the skill explicitly or only pastes an error/traceback from the library.
 ---
 
 # forgedge / FORGE
@@ -336,6 +336,38 @@ candidate the gate evaluated, against the configured thresholds — below a
 15% gate-survival rate it also suggests concrete parameters at the observed
 median. `forge()`'s M1 stage line carries this text; `result.event_discovery
 .event_distribution_report` exposes it for code-level inspection.
+
+### 7. Growing a confirmed rule one AND-condition at a time: `StepWiseDiscovery`
+
+```python
+from forgedge.experiment import StepWiseDiscovery, StepWiseDiscoveryConfig
+
+engine = StepWiseDiscovery(kpi, ticker="BTCUSDC", timeframe="1D",
+                            config=StepWiseDiscoveryConfig(n_seeds=3, depth=2))
+result = engine.run()
+print(result.summary())          # one row per chain: expression, depth_reached, verdict, ...
+for chain in result.edges():     # chains whose final (last-confirmed) state is EDGE/PARTIAL-EDGE
+    print(chain.chain_label, chain.expression, chain.verdict)
+```
+
+`forgedge.experiment` (not re-exported top-level, like its siblings
+`forgedge.playground`/`forgedge.deployment`) is a different kind of module:
+it RUNS its own multi-stage pipeline on top of `forge()` instead of only
+reading or acting on a `ForgeResult` that already exists. `StepWiseDiscovery`
+answers a narrower question than a single `forge()` call: starting from the
+strongest hold-out-confirmed single-condition rules, can each be grown, one
+AND-condition at a time, by searching only the sub-population it already
+selects for a second dimension? Config resolution and the outer hold-out
+split happen exactly once, reusing `config_report()`/`forge()` themselves
+(pattern 6 above) — every internal `EventDiscovery`/`AlphaDiscovery`/
+`RuleDiscovery` call the search makes downstream shares the same resolved
+configuration, closing pitfall #2 for this module by construction. Any
+asset-specific calibration (fee, `mfe_floor`, gate thresholds) is still the
+caller's job, passed in via `event_discovery_config`/`alpha_config`/
+`rule_discovery_config` exactly as it would be to `forge()`. See
+`src/forgedge/docs/specs/experiment_en.md` for the full parameter/return
+reference and `src/forgedge/docs/modules/Experiment.md` for the design
+rationale.
 
 ## Common pitfalls
 
@@ -761,6 +793,9 @@ src/forgedge/
 ├── target_optimizer.py    TargetOptimizer (target-first alternative workflow)
 ├── rule_report.py          RuleSpec, rule_performance_report
 ├── summary_report.py       data-quality diagnostics
+├── playground/             read-only analysis helpers over pooled ForgeResult (not M0-M4, not re-exported top-level)
+├── deployment/             promotion_gate/export_rules/monitoring_manifest — putting rules into production (real effects)
+├── experiment/             StepWiseDiscovery — runs its OWN multi-stage pipeline on top of forge() (partition & compose search)
 └── docs/                   packaged module + spec docs (see below)
 ```
 
@@ -820,6 +855,9 @@ current with the code, with the caveat above that source wins on conflict:
 | End-to-end production guide — config per module, checklists | `src/forgedge/docs/specs/how_to_use_en.md` (`_it.md`) |
 | Global configuration reference | `src/forgedge/docs/specs/configuration_en.md` (`_it.md`) |
 | Per-module spec | `src/forgedge/docs/specs/modulo_{0..4}_en.md` (`_it.md`) |
+| `forgedge.playground` — read-only analysis over pooled `ForgeResult` (11 use cases, issue #237) | `src/forgedge/docs/specs/playground_en.md` (`_it.md`); design rationale in `src/forgedge/docs/modules/Playground.md` |
+| `forgedge.deployment` — promotion gate / rule export / monitoring manifest, putting rules into production (real effects — issue #245) | `src/forgedge/docs/specs/deployment_en.md` (`_it.md`); design rationale in `src/forgedge/docs/modules/Deployment.md` |
+| `forgedge.experiment` — `StepWiseDiscovery`, a partition & compose search that grows a hold-out-confirmed rule one AND-condition at a time by RUNNING its own pipeline on top of `forge()` (unlike the two siblings above, neither read-only nor production-facing) | `src/forgedge/docs/specs/experiment_en.md` (`_it.md`); design rationale + the manual research it generalizes in `src/forgedge/docs/modules/Experiment.md`; runnable example in `examples/step_wise_discovery_usage.py` |
 | Technical analyses (low-freq robustness, rotation-null calibration) | `docs/analysis/*.md` |
 | Runnable examples per module, incl. the coherence audit and entry-mode impact | `examples/*.py` (several predate a `GateParams` API change — see pitfall #9 before copying `GateParams(...)` from one) |
 | Interactive walkthroughs | `notebooks/0{1..6}_*.ipynb`, `notebooks/hurst.ipynb` |
