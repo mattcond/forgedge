@@ -92,7 +92,7 @@ def max_jaccard(bool_series: np.ndarray, used_series_list: Sequence[np.ndarray])
         j = inter / union if union > 0 else 0.0
         if j > best:
             best = j
-    return best
+    return float(best)
 
 
 def max_abs_corr(
@@ -137,7 +137,7 @@ def max_abs_corr(
             corr = np.corrcoef(s[valid], u[valid])[0, 1]
             if np.isfinite(corr) and abs(corr) > best:
                 best = abs(corr)
-    return best
+    return float(best)
 
 
 def is_redundant(
