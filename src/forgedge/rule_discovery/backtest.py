@@ -39,9 +39,15 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from ..episodes import ConcurrencyStats, concurrency, episode_ids
+from ..episodes import ConcurrencyStats, concurrency, episode_ids, episode_starts
 from ..unset import coalesce
-from .models import BacktestParams, BacktestSummary, ScoringParams
+from .models import (
+    BacktestParams,
+    BacktestSummary,
+    EntryTimingOffset,
+    EntryTimingOptimization,
+    ScoringParams,
+)
 
 # Sigmoid steepness on the trade count (hardcoded, see backtest_scoring.md).
 _K_TRADES = 0.15
@@ -668,3 +674,164 @@ def optimistic_hit_col(direction: str) -> str:
     The conservative convention is always ``close`` for both.
     """
     return "low" if direction == "short" else "high"
+
+
+# ---------------------------------------------------------------------------
+# Cluster entry-offset scan (issue #269, draft)
+# ---------------------------------------------------------------------------
+# See EntryTimingOptimization's docstring for the full motivation. Kept
+# separate from the run_backtest hot path above: this calls run_backtest once
+# per offset rather than being threaded through _PreparedCandles, since it is
+# an occasional diagnostic over a single rule, not part of the ~200-call grid/
+# walk-forward screening loop that section is tuned for.
+
+def _signal_clusters(active: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Start index and length of every maximal run of consecutive active bars.
+
+    Start positions come from :func:`forgedge.episodes.episode_starts` with
+    ``gap=0`` (strict runs — "adjacent bars"), so cluster boundaries agree
+    with the rest of the pipeline's episode primitives rather than
+    reimplementing run detection from scratch. Lengths are not something
+    ``episode_starts`` returns, so they are walked out locally; total work
+    across all clusters is ``O(n)`` since every bar is visited once.
+    """
+    active = np.asarray(active).astype(bool)
+    starts_mask = episode_starts(active, gap=0)
+    start_idx = np.flatnonzero(starts_mask)
+    if start_idx.size == 0:
+        return start_idx, np.array([], dtype=np.int64)
+
+    n = active.size
+    lengths = np.empty(start_idx.size, dtype=np.int64)
+    for i, s in enumerate(start_idx):
+        j = s
+        while j < n and active[j]:
+            j += 1
+        lengths[i] = j - s
+    return start_idx, lengths
+
+
+def _offset_signal(
+    start_idx: np.ndarray, lengths: np.ndarray, offset: int, n: int
+) -> np.ndarray:
+    """0/1 signal keeping only bar ``offset`` of every cluster long enough to have one."""
+    arr = np.zeros(n, dtype=np.int64)
+    eligible = lengths > offset
+    arr[start_idx[eligible] + offset] = 1
+    return arr
+
+
+def _one_shot_filter(trades: pd.DataFrame) -> pd.DataFrame:
+    """Greedy non-overlapping filter: at most one open position at a time.
+
+    A trade is kept only if its ``signal_rn`` is at or after the ``exit_rn``
+    of the last *kept* trade — a new entry never opens while a previously
+    opened one (from this same reduced signal) has not yet closed. This is
+    the single-position-at-a-time policy the whole offset scan is evaluated
+    under; it is what turns "one signal fires per cluster" into "one trade
+    opens per cluster" when two clusters sit close enough together that a
+    long ``target_h`` still has the first one's position open.
+    """
+    if trades is None or len(trades) == 0:
+        return trades
+    ordered = trades.sort_values("signal_rn").reset_index(drop=True)
+    keep_idx = []
+    last_exit_rn = -1
+    for i, row in ordered.iterrows():
+        if row["signal_rn"] >= last_exit_rn:
+            keep_idx.append(i)
+            last_exit_rn = row["exit_rn"]
+    return ordered.loc[keep_idx].reset_index(drop=True)
+
+
+def cluster_entry_offset_scan(
+    candle: pd.DataFrame,
+    signal_col: str,
+    params: BacktestParams,
+    timerange_from: Optional[str] = None,
+    timerange_to: Optional[str] = None,
+    scoring: Optional[ScoringParams] = None,
+    timestamp_col: str = "open_dt",
+    max_offset: Optional[int] = None,
+) -> EntryTimingOptimization:
+    """Scan which bar of a multi-bar signal cluster is the best one-shot entry.
+
+    For every offset ``k`` (the ``k``-th bar of a cluster of consecutive
+    active bars, ``0`` = first), builds a reduced signal keeping only that
+    bar of every cluster long enough to have one, backtests it with the
+    *same* ``params`` under the one-shot policy (:func:`_one_shot_filter`),
+    and records profit factor, net gain and trades opened. See
+    :class:`~forgedge.rule_discovery.models.EntryTimingOptimization` for the
+    full motivation and how this differs from :class:`EntryOptimization`.
+
+    Parameters
+    ----------
+    candle, signal_col, params, timerange_from, timerange_to, scoring,
+    timestamp_col
+        Same meaning as :func:`run_backtest` — this function calls it once
+        per offset with an otherwise-identical signature.
+    max_offset : int, optional
+        Caps how many offsets are scanned. Defaults to the longest cluster's
+        length, i.e. every offset that could possibly open a trade.
+
+    Returns
+    -------
+    EntryTimingOptimization
+    """
+    params = params.resolved()
+    prep = _PreparedCandles(candle, signal_col, timestamp_col)
+    active = prep.signal.astype(bool)
+
+    start_idx, lengths = _signal_clusters(active)
+    n_clusters = int(start_idx.size)
+    if n_clusters == 0:
+        return EntryTimingOptimization(
+            offsets=[], best_offset=None,
+            mean_cluster_length=float("nan"), max_cluster_length=0,
+            n_clusters=0,
+        )
+
+    mean_len = float(lengths.mean())
+    max_len = int(lengths.max())
+    limit = max_offset if max_offset is not None else max_len
+
+    rows = []
+    for offset in range(max(limit, 0)):
+        eligible = int((lengths > offset).sum())
+        if eligible == 0:
+            # Monotonically non-increasing in offset: once no cluster reaches
+            # this offset, none will reach a longer one either.
+            break
+
+        sig = _offset_signal(start_idx, lengths, offset, prep.n)
+        frame = candle.assign(**{signal_col: sig})
+        _, trades = run_backtest(
+            frame, signal_col, params,
+            timerange_from=timerange_from, timerange_to=timerange_to,
+            scoring=scoring, timestamp_col=timestamp_col, return_trades=True,
+        )
+        kept = _one_shot_filter(trades)
+        n_trades = int(len(kept)) if kept is not None else 0
+
+        if n_trades == 0:
+            pf, net_gain = float("nan"), 0.0
+        else:
+            net = kept["net_pct_gain"].to_numpy()
+            wins, losses = net[net > 0], net[net < 0]
+            pos, neg = float(wins.sum()), float(-losses.sum())
+            pf = (pos / neg) if neg > 0 else (float("inf") if pos > 0 else float("nan"))
+            net_gain = float(net.sum())
+
+        rows.append(EntryTimingOffset(
+            offset=offset, n_clusters_eligible=eligible,
+            n_trades_opened=n_trades, profit_factor=pf, net_gain=net_gain,
+        ))
+
+    priced = [r for r in rows if r.n_trades_opened > 0]
+    best_offset = max(priced, key=lambda r: r.net_gain).offset if priced else None
+
+    return EntryTimingOptimization(
+        offsets=rows, best_offset=best_offset,
+        mean_cluster_length=mean_len, max_cluster_length=max_len,
+        n_clusters=n_clusters,
+    )

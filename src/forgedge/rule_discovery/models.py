@@ -1146,6 +1146,107 @@ class EntryOptimization:
 
 
 @dataclass
+class EntryTimingOffset:
+    """One row of a :class:`EntryTimingOptimization` scan (issue #269, draft).
+
+    Attributes
+    ----------
+    offset : int
+        0-indexed position within a cluster of consecutive active bars —
+        ``0`` is the cluster's first bar, ``1`` its second, and so on.
+    n_clusters_eligible : int
+        Clusters long enough to have a bar at this position at all
+        (``length > offset``).  Shrinks monotonically as ``offset`` grows,
+        since a cluster of length ``L`` stops contributing past offset
+        ``L - 1``.
+    n_trades_opened : int
+        Trades actually opened at this offset under the one-shot (single
+        position at a time) policy — can be lower than
+        ``n_clusters_eligible`` when a position from an earlier cluster is
+        still open when a later cluster's offset bar arrives.  Read this
+        alongside ``net_gain``: an offset that "wins" on 2 trades is not the
+        same finding as one that wins on 20.
+    profit_factor : float
+        Over the trades actually opened.  ``inf`` when there are wins and no
+        losses, ``nan`` when ``n_trades_opened == 0``.
+    net_gain : float
+        Nominal sum of ``net_pct_gain`` over the trades opened.  One-shot has
+        no overlapping positions by construction, so nominal and
+        episode-aggregated net gain coincide here — unlike the every-bar
+        backtest, there is no aggregation choice to make.
+    """
+
+    offset: int
+    n_clusters_eligible: int
+    n_trades_opened: int
+    profit_factor: float
+    net_gain: float
+
+
+@dataclass
+class EntryTimingOptimization:
+    """Optimal one-shot entry point within a consecutive-signal cluster.
+
+    ``run_backtest`` opens a position on *every* active bar (see its "Nominal
+    vs. effective sample size" note) — a signal that fires on several bars in
+    a row pyramids into the same move.  Under a strict **one-shot** policy (a
+    single position at a time, no new entry until the previous one closes),
+    which bar of that run gets chosen matters: entering on the run's first
+    bar is not always its best trade, and can flip a rule from profitable to
+    unprofitable relative to entering one or two bars later (see issue #269
+    for the finding that motivated this — on a rolling hold-out over 10
+    discovered rules, 9 had a later offset beating the first bar, and 5 of 6
+    whose first-bar one-shot net gain was negative turned positive at
+    exactly the run's *second* bar).
+
+    This is a different axis from :class:`EntryOptimization`: that class
+    optimises *at what price* a single already-triggered entry fills
+    (sweeping ``buy_drop_pct``); this one optimises *which day of a
+    multi-day activation run* to trigger the entry on in the first place,
+    under the one-position-at-a-time constraint. Both can be relevant to the
+    same rule; neither substitutes for the other.
+
+    Cluster boundaries come from
+    :func:`forgedge.episodes.episode_starts` with ``gap=0`` — strict
+    consecutive-bar runs, the "adjacent bars" semantics this question needs
+    (the module's own ``gap=1`` default elsewhere would wrongly bridge a
+    one-bar interruption into the same run for this purpose).
+
+    Attributes
+    ----------
+    offsets : list of EntryTimingOffset
+        One row per offset scanned, ``0`` through the longest cluster's
+        length minus one (or ``max_offset - 1`` when that argument caps the
+        scan). Empty when the signal never activates.
+    best_offset : int or None
+        The offset with the highest ``net_gain`` among offsets that opened
+        at least one trade.  ``None`` when no offset opened any trade at
+        all (e.g. the whole signal falls outside the backtest window).
+    mean_cluster_length, max_cluster_length : float, int
+        Descriptive statistics of the clusters found, independent of
+        ``params`` or the time window used to open trades.
+    n_clusters : int
+        Total number of consecutive-bar clusters in the signal (over the
+        full candle table, not just the entry window).
+    """
+
+    offsets: List[EntryTimingOffset]
+    best_offset: Optional[int]
+    mean_cluster_length: float
+    max_cluster_length: int
+    n_clusters: int
+
+    def to_dict(self) -> dict:
+        return {
+            "offsets": [asdict(row) for row in self.offsets],
+            "best_offset": self.best_offset,
+            "mean_cluster_length": self.mean_cluster_length,
+            "max_cluster_length": self.max_cluster_length,
+            "n_clusters": self.n_clusters,
+        }
+
+
+@dataclass
 class RuleDiscoveryResponse:
     """Verdict and full evidence produced by Rule Discovery (Section 8).
 
