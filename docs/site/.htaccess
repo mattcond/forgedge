@@ -1,3 +1,15 @@
+# Force http -> https. Without this, http://forgedge.it/ stays a live,
+# separately crawlable URL and Google has to resolve the http/https
+# duplicate itself via the canonical tag (which it does correctly --
+# see the "Duplicate, Google chose different canonical" report entry
+# for the http URL -- but a redirect removes the duplicate at the
+# source instead of leaving it to be reconciled after the fact).
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{HTTPS} off
+  RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+</IfModule>
+
 # Force UTF-8 regardless of the shared-hosting server's own default
 # charset (OVH's Apache commonly defaults text/html to ISO-8859-1 via
 # AddDefaultCharset, which overrides the page's own <meta charset="UTF-8">
