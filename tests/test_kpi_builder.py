@@ -426,3 +426,145 @@ def test_pattern_features_datetimeindex_fallback():
     frame = _pattern_frame().set_index("open_dt")
     out = pattern_features(frame)
     assert "candle_pattern" in out.columns
+
+
+# ── CCI / WILLR / Stochastic / WMA / TRIMA / ADX / Aroon / A-D (opt-in) ────────
+# Cross-checked against the technical-indicator set of arXiv:2509.11844
+# ("ProteuS"), Table 3 / Section 4.3 (itself derived from Kara et al. 2011).
+
+_NEW_INDICATOR_CFG = {
+    "cci":        {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "willr":      {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "stochastic": {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "wma":        {"enabled": True, "params": {"periods": [10], "columns": ["close"]}},
+    "trima":      {"enabled": True, "params": {"periods": [10], "columns": ["close"]}},
+    "adx":        {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "aroon":      {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "ad":         {"enabled": True, "params": {"periods": [1, 14], "columns": ["close"]}},
+}
+
+
+def test_new_indicators_disabled_by_default():
+    kpi = build_features(_candles(), timestamp_col="open_time")
+    for token in ("_cci_", "_willr_", "_sk_", "_sd_", "_wma_", "_trima_", "_adx_",
+                  "aroon_up_", "aroon_down_", "_ad_"):
+        assert not any(token in c for c in kpi.columns), token
+
+
+def test_new_indicators_enabled_produce_columns():
+    kpi = build_features(_candles(), _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    for col in ("close_cci_14", "close_willr_14", "close_sk_14", "close_sd_14",
+                "close_wma_10", "close_trima_10", "close_adx_14",
+                "aroon_up_14", "aroon_down_14", "close_ad_01", "close_ad_14"):
+        assert col in kpi.columns, col
+
+
+def test_willr_stochastic_adx_aroon_are_bounded_0_100():
+    kpi = build_features(_candles(n=600), _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    for col in ("close_willr_14", "close_sk_14", "close_sd_14", "close_adx_14",
+                "aroon_up_14", "aroon_down_14"):
+        valid = kpi[col].dropna()
+        assert valid.between(0, 100).all(), col
+
+
+def test_wma_trima_are_price_scale():
+    """WMA/TRIMA track the price level (like SMA/EMA), unlike bounded oscillators."""
+    kpi = build_features(_candles(n=600), _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    valid = kpi[["close", "close_wma_10", "close_trima_10"]].dropna()
+    np.testing.assert_allclose(valid["close_wma_10"], valid["close"], rtol=0.2)
+    np.testing.assert_allclose(valid["close_trima_10"], valid["close"], rtol=0.2)
+
+
+def test_stochastic_sd_is_sma_of_sk():
+    kpi = build_features(_candles(n=600), _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    expected = kpi["close_sk_14"].rolling(14).mean().round(5)
+    pd.testing.assert_series_equal(
+        kpi["close_sd_14"].reset_index(drop=True),
+        expected.reset_index(drop=True),
+        check_names=False,
+    )
+
+
+def test_ad_window_one_is_raw_unsmoothed():
+    """`window=1` reproduces the raw per-bar Williams A/D oscillator (Table 3)."""
+    kpi = build_features(_candles(n=100), _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    expected = ((kpi["high"] - kpi["close"].shift(1)) / (kpi["high"] - kpi["low"])).round(5)
+    pd.testing.assert_series_equal(
+        kpi["close_ad_01"].reset_index(drop=True),
+        expected.reset_index(drop=True),
+        check_names=False,
+    )
+
+
+def test_new_indicators_require_high_low():
+    candles = _candles().drop(columns=["high", "low"])
+    kpi = build_features(candles, _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    for token in ("_cci_", "_willr_", "_sk_", "_sd_", "_adx_", "aroon_up_", "_ad_"):
+        assert not any(token in c for c in kpi.columns), token
+    # WMA/TRIMA need only `close`, unaffected by the missing high/low
+    assert "close_wma_10" in kpi.columns
+    assert "close_trima_10" in kpi.columns
+
+
+def test_new_indicators_all_recognised_by_feature_generator():
+    """All 8 new indicators are now recognised by feature_generator._PATTERNS
+    (cci/willr/sk/sd/adx/ad joined rsi's generic oscillator pattern; trima
+    joined wma/hma's generic price-scale pattern; aroon_up/aroon_down got a
+    dedicated pattern, since Aroon has no OHLC base prefix) — this used to
+    only be true for WMA (see the gap tracked in the follow-up issue, now
+    closed by extending _PATTERNS/_PRICE_SCALE_FAMILIES/_generate_arity2's
+    price-vs-MA list and adding _generate_aroon_pairs)."""
+    from forgedge.event_discovery.feature_generator import parse_feature
+    for col in ("close_wma_10", "close_cci_14", "close_willr_14", "close_sk_14",
+                "close_sd_14", "close_trima_10", "close_adx_14", "close_ad_14",
+                "aroon_up_14", "aroon_down_14"):
+        pf = parse_feature(col)
+        assert pf is not None, col
+
+
+def test_cci_gets_same_family_multiperiod_pairing():
+    """CCI at two periods pairs like RSI14/RSI25 (ratio + diffnorm)."""
+    from forgedge.event_discovery.classifier import TypeClassifier
+    from forgedge.event_discovery.feature_generator import FeatureGenerator
+    cfg = {"cci": {"enabled": True, "params": {"periods": [14, 20], "columns": ["close"]}}}
+    kpi = build_features(_candles(n=600), cfg, timestamp_col="open_time")
+    classifications = TypeClassifier().fit(kpi)
+    _, meta = FeatureGenerator().generate(kpi, classifications)
+    assert "ratio_close_cci14_cci20" in meta
+    assert "diffnorm_close_cci14_cci20" in meta
+
+
+def test_trima_gets_price_vs_ma_pairing():
+    """TRIMA now reaches `_generate_arity2`'s "price vs its own MA" branch,
+    like SMA/EMA/WMA/HMA (spread_close_trimaNN)."""
+    from forgedge.event_discovery.classifier import TypeClassifier
+    from forgedge.event_discovery.feature_generator import FeatureGenerator
+    cfg = {"trima": {"enabled": True, "params": {"periods": [10], "columns": ["close"]}}}
+    kpi = build_features(_candles(n=600), cfg, timestamp_col="open_time")
+    classifications = TypeClassifier().fit(kpi)
+    _, meta = FeatureGenerator().generate(kpi, classifications)
+    assert "spread_close_trima10" in meta
+    assert meta["spread_close_trima10"].is_scale_free
+
+
+def test_aroon_oscillator_pairs_up_and_down_at_same_period():
+    """Aroon Up vs Aroon Down, same period, is the Aroon Oscillator — a
+    dedicated pairing (_generate_aroon_pairs), not the generic same-family
+    loop (Up and Down are deliberately different families so that loop only
+    ever pairs Up-vs-Up / Down-vs-Down across periods, never Up-vs-Down)."""
+    from forgedge.event_discovery.classifier import TypeClassifier
+    from forgedge.event_discovery.feature_generator import FeatureGenerator
+    cfg = {"aroon": {"enabled": True, "params": {"periods": [14, 25], "columns": ["close"]}}}
+    kpi = build_features(_candles(n=600), cfg, timestamp_col="open_time")
+    classifications = TypeClassifier().fit(kpi)
+    _, meta = FeatureGenerator().generate(kpi, classifications)
+    # Up-vs-Down at the same period (the oscillator) — from the dedicated method
+    assert "diffnorm_aroon14_updown" in meta
+    assert "diffnorm_aroon25_updown" in meta
+    # Up-vs-Up and Down-vs-Down across periods — from the generic same-family loop
+    assert "ratio_up_aroon_up14_aroon_up25" in meta
+    assert "ratio_down_aroon_down14_aroon_down25" in meta
+    # Never a direct Up-vs-Down *across* periods (would be a meaningless
+    # comparison — the generic loop groups strictly by family, which Up and
+    # Down never share)
+    assert not any("aroon_up" in k and "aroon_down" in k for k in meta)
