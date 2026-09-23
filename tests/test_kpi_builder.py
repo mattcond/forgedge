@@ -506,13 +506,65 @@ def test_new_indicators_require_high_low():
     assert "close_trima_10" in kpi.columns
 
 
-def test_wma_recognised_by_feature_generator_price_scale_family():
-    """WMA matches the existing price-scale regex (SMA/EMA/WMA/HMA) — see
-    feature_generator._PATTERNS — so it gets same-family ratio pairing for
-    free. The other 7 new indicators do NOT match any _PATTERNS entry yet
-    (tracked in the gap issue) — this pins the current, asymmetric state."""
+def test_new_indicators_all_recognised_by_feature_generator():
+    """All 8 new indicators are now recognised by feature_generator._PATTERNS
+    (cci/willr/sk/sd/adx/ad joined rsi's generic oscillator pattern; trima
+    joined wma/hma's generic price-scale pattern; aroon_up/aroon_down got a
+    dedicated pattern, since Aroon has no OHLC base prefix) — this used to
+    only be true for WMA (see the gap tracked in the follow-up issue, now
+    closed by extending _PATTERNS/_PRICE_SCALE_FAMILIES/_generate_arity2's
+    price-vs-MA list and adding _generate_aroon_pairs)."""
     from forgedge.event_discovery.feature_generator import parse_feature
-    assert parse_feature("close_wma_10") is not None
-    for col in ("close_cci_14", "close_willr_14", "close_sk_14", "close_sd_14",
-                "close_trima_10", "close_adx_14", "close_ad_14"):
-        assert parse_feature(col) is None, col
+    for col in ("close_wma_10", "close_cci_14", "close_willr_14", "close_sk_14",
+                "close_sd_14", "close_trima_10", "close_adx_14", "close_ad_14",
+                "aroon_up_14", "aroon_down_14"):
+        pf = parse_feature(col)
+        assert pf is not None, col
+
+
+def test_cci_gets_same_family_multiperiod_pairing():
+    """CCI at two periods pairs like RSI14/RSI25 (ratio + diffnorm)."""
+    from forgedge.event_discovery.classifier import TypeClassifier
+    from forgedge.event_discovery.feature_generator import FeatureGenerator
+    cfg = {"cci": {"enabled": True, "params": {"periods": [14, 20], "columns": ["close"]}}}
+    kpi = build_features(_candles(n=600), cfg, timestamp_col="open_time")
+    classifications = TypeClassifier().fit(kpi)
+    _, meta = FeatureGenerator().generate(kpi, classifications)
+    assert "ratio_close_cci14_cci20" in meta
+    assert "diffnorm_close_cci14_cci20" in meta
+
+
+def test_trima_gets_price_vs_ma_pairing():
+    """TRIMA now reaches `_generate_arity2`'s "price vs its own MA" branch,
+    like SMA/EMA/WMA/HMA (spread_close_trimaNN)."""
+    from forgedge.event_discovery.classifier import TypeClassifier
+    from forgedge.event_discovery.feature_generator import FeatureGenerator
+    cfg = {"trima": {"enabled": True, "params": {"periods": [10], "columns": ["close"]}}}
+    kpi = build_features(_candles(n=600), cfg, timestamp_col="open_time")
+    classifications = TypeClassifier().fit(kpi)
+    _, meta = FeatureGenerator().generate(kpi, classifications)
+    assert "spread_close_trima10" in meta
+    assert meta["spread_close_trima10"].is_scale_free
+
+
+def test_aroon_oscillator_pairs_up_and_down_at_same_period():
+    """Aroon Up vs Aroon Down, same period, is the Aroon Oscillator — a
+    dedicated pairing (_generate_aroon_pairs), not the generic same-family
+    loop (Up and Down are deliberately different families so that loop only
+    ever pairs Up-vs-Up / Down-vs-Down across periods, never Up-vs-Down)."""
+    from forgedge.event_discovery.classifier import TypeClassifier
+    from forgedge.event_discovery.feature_generator import FeatureGenerator
+    cfg = {"aroon": {"enabled": True, "params": {"periods": [14, 25], "columns": ["close"]}}}
+    kpi = build_features(_candles(n=600), cfg, timestamp_col="open_time")
+    classifications = TypeClassifier().fit(kpi)
+    _, meta = FeatureGenerator().generate(kpi, classifications)
+    # Up-vs-Down at the same period (the oscillator) — from the dedicated method
+    assert "diffnorm_aroon14_updown" in meta
+    assert "diffnorm_aroon25_updown" in meta
+    # Up-vs-Up and Down-vs-Down across periods — from the generic same-family loop
+    assert "ratio_up_aroon_up14_aroon_up25" in meta
+    assert "ratio_down_aroon_down14_aroon_down25" in meta
+    # Never a direct Up-vs-Down *across* periods (would be a meaningless
+    # comparison — the generic loop groups strictly by family, which Up and
+    # Down never share)
+    assert not any("aroon_up" in k and "aroon_down" in k for k in meta)

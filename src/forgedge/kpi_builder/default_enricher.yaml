@@ -87,7 +87,8 @@ macd:
 # forgedge against the technical-indicator set of arXiv:2509.11844
 # ("ProteuS"), Table 3 (itself derived from Kara et al. 2011). All need
 # high/low except WMA/TRIMA; disabled by default, same reasoning as atr/macd
-# above. See indicators.py for formulas and naming-regex caveats.
+# above. See indicators.py for formulas; all 8 are recognised by
+# event_discovery.feature_generator.parse_feature.
 cci:
   enabled: false
   params:

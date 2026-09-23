@@ -57,11 +57,10 @@ DEFAULT_CONFIG: Mapping = {
     # ("ProteuS"), Table 3 (itself derived from Kara et al. 2011). All need
     # `high`/`low` except WMA/TRIMA; disabled by default for OHLC-only
     # consumers and so DEFAULT_CONFIG's output stays unchanged. See
-    # indicators.py's "CCI / WILLR / ..." section for formulas and the
-    # FeatureGenerator naming-regex caveats (docs/analysis or the tracking
-    # issue for the ones NOT yet recognised by parse_feature: cci, willr,
-    # sk/sd, adx, aroon, ad — only wma matches the existing price-scale
-    # family pattern).
+    # indicators.py's "CCI / WILLR / ..." section for formulas; all 8 are
+    # recognised by event_discovery.feature_generator.parse_feature (cci/
+    # willr/sk/sd/adx joined rsi's generic pattern, trima joined wma/hma's,
+    # aroon_up/aroon_down got a dedicated pattern + pairing method).
     "cci":            {"enabled": False, "params": {"periods": [14, 20],
                                                    "columns": ["close"]}},
     "willr":          {"enabled": False, "params": {"periods": [14],

@@ -57,7 +57,7 @@ _LAG_CROSS_TRANSFORMS: frozenset[str] = frozenset({"identity"})
 #   comparing e.g. RSI directly to a raw price is exactly the ATR-vs-NATR
 #   mistake #162 avoided).
 _INDICATOR_LAG_CROSS_DEFAULT_LAGS: tuple[int, ...] = (1, 3)
-_PRICE_SCALE_FAMILIES: frozenset[str] = frozenset({"ema", "sma", "wma", "hma"})
+_PRICE_SCALE_FAMILIES: frozenset[str] = frozenset({"ema", "sma", "wma", "hma", "trima"})
 
 
 # ---------------------------------------------------------------------------
@@ -123,8 +123,12 @@ _PATTERNS: list[tuple[str, str, str]] = [
     # from every other indicator here which has exactly one.
     (r'^(close|high|low|open)_macd_(\d+)_(\d+)$', "macd", "macd_line"),
     # Standard MA / oscillator (also scale-free ratio-style indicators that
-    # benefit from same-family multi-period pairing: max_drawdown, ATR, NATR)
-    (r'^(close|high|low|open|volume)_(ema|sma|rsi|dema|tema|wma|hma|mdd|atr|natr)_(\d+)$', "{1}", "{1}"),
+    # benefit from same-family multi-period pairing: max_drawdown, ATR, NATR).
+    # cci/willr/sk/sd/adx/ad are bounded-or-stationary oscillators (same
+    # footing as rsi); trima is price-scale (same footing as ema/sma/wma/hma)
+    # — see kpi_builder indicators.py's "CCI / WILLR / ..." section for their
+    # formulas.
+    (r'^(close|high|low|open|volume)_(ema|sma|rsi|dema|tema|wma|hma|mdd|atr|natr|trima|cci|willr|sk|sd|adx|ad)_(\d+)$', "{1}", "{1}"),
     # Rolling min/max on a price column
     (r'^(close|high|low)_(min|max)_(\d+)$', "{1}", "rolling_{1}"),
     # Volatility / return series. "volume" is a valid base here (issue #162):
@@ -142,6 +146,17 @@ _PATTERNS: list[tuple[str, str, str]] = [
     # geometry measure, and the issue flags it for discussion rather than
     # prescribing inclusion.
     (r'^(body|upper_wick|lower_wick|close_pos|range_pct|gap)$', "{0}", "candle_geometry"),
+    # Aroon Up/Down (kpi_builder.indicators.aroon) — no OHLC base prefix
+    # (Aroon is defined on high/low jointly, not against a single price
+    # series), so it needs its own literal alternative rather than the
+    # generic {base}_{indicator}_{param} shape. Up and down get distinct
+    # families (not shared) so the generic same-family loop above only pairs
+    # aroon_up_14 against aroon_up_25 (a legitimate multi-period comparison,
+    # like RSI14/RSI25) — never against aroon_down; the Aroon Oscillator
+    # (up vs down at the *same* period) needs a period-keyed match instead,
+    # which is why it gets its own dedicated method, _generate_aroon_pairs,
+    # mirroring how _generate_macd_pairs matches a MACD line to its signal.
+    (r'^aroon_(up|down)_(\d+)$', "aroon_{0}", "aroon_{0}"),
     # Raw OHLCV
     (r'^(close|high|low|open)$', "raw", "price"),
     (r'^volume$', "raw", "volume"),
@@ -358,6 +373,7 @@ class FeatureGenerator:
         extended = self._generate_macd_pairs(df, parsed, extended, meta)
         extended = self._generate_price_volume_pairs(df, parsed, extended, meta)
         extended = self._generate_candle_geometry_pairs(df, parsed, extended, meta)
+        extended = self._generate_aroon_pairs(df, parsed, extended, meta)
 
         # Arity 2 — indicator vs lagged OHLC-base cross-time pairs (issue #165)
         lags = (
@@ -469,7 +485,7 @@ class FeatureGenerator:
         price_cols = [col for col, pf in parsed.items() if pf.family == "price"]
         ma_cols = [
             col for col, pf in parsed.items()
-            if pf.family in ("ema", "sma", "wma", "hma") and pf.base == "close"
+            if pf.family in ("ema", "sma", "wma", "hma", "trima") and pf.base == "close"
         ]
         for price_col in price_cols:
             pf_price = parsed[price_col]
@@ -823,6 +839,89 @@ class FeatureGenerator:
                     arity=2,
                     operation="diff_norm",
                     source_cols=[line_col, sig_col],
+                    params={"diffnorm_std": dn_std},
+                )
+
+        return _flush_new_columns(extended, new_cols)
+
+    def _generate_aroon_pairs(
+        self,
+        df: pd.DataFrame,
+        parsed: dict[str, ParsedFeature],
+        extended: pd.DataFrame,
+        meta: dict[str, DerivedFeature],
+    ) -> pd.DataFrame:
+        """Pair Aroon Up against Aroon Down at the same period (Aroon Oscillator).
+
+        ``aroon_up_N``/``aroon_down_N`` (``kpi_builder.indicators.aroon``) are
+        given distinct families (``aroon_up``/``aroon_down``) by ``_PATTERNS``
+        precisely so the generic same-family loop in ``_generate_arity2``
+        never pairs Up against Down — it only sees each family on its own, so
+        it can still legitimately pair ``aroon_up_14`` against
+        ``aroon_up_25`` (a same-indicator, multi-period comparison, exactly
+        like RSI14/RSI25). Up-vs-Down needs a *period-keyed* match instead
+        (the pair only makes sense at the same ``N``) — the same shape as
+        MACD line vs signal in ``_generate_macd_pairs``, which is why this
+        mirrors that method rather than extending the generic loop.
+
+        Column names: ``ratio_aroon{N:02d}_updown``,
+        ``diffnorm_aroon{N:02d}_updown``. Both are bounded/normalised by
+        construction (Up and Down are already ``[0, 100]``), so this is
+        marked scale-free like every other arity-2 pairing here.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Original KPI table (read-only).
+        parsed : dict[str, ParsedFeature]
+            Pre-parsed feature metadata for continuous columns.
+        extended : pd.DataFrame
+            Target DataFrame — new columns are appended here.
+        meta : dict[str, DerivedFeature]
+            Target metadata dict — new entries are added here.
+        """
+        aroon_up: dict[int, str] = {}
+        aroon_down: dict[int, str] = {}
+        for col, pf in parsed.items():
+            if not pf.params:
+                continue
+            period = pf.params[0]
+            if pf.family == "aroon_up":
+                aroon_up[period] = col
+            elif pf.family == "aroon_down":
+                aroon_down[period] = col
+
+        new_cols: dict[str, pd.Series] = {}
+
+        for period in set(aroon_up) & set(aroon_down):
+            up_col = aroon_up[period]
+            down_col = aroon_down[period]
+            tag = f"aroon{period:02d}_updown"
+
+            ratio_col = f"ratio_{tag}"
+            if ratio_col not in extended.columns and ratio_col not in new_cols:
+                series = _safe_ratio(df[up_col], df[down_col])
+                new_cols[ratio_col] = series
+                meta[ratio_col] = DerivedFeature(
+                    col=ratio_col,
+                    series=series,
+                    is_scale_free=True,
+                    arity=2,
+                    operation="ratio",
+                    source_cols=[up_col, down_col],
+                )
+
+            dn_col = f"diffnorm_{tag}"
+            if dn_col not in extended.columns and dn_col not in new_cols:
+                dn_series, dn_std = _safe_diff_norm(df[up_col], df[down_col])
+                new_cols[dn_col] = dn_series
+                meta[dn_col] = DerivedFeature(
+                    col=dn_col,
+                    series=dn_series,
+                    is_scale_free=True,
+                    arity=2,
+                    operation="diff_norm",
+                    source_cols=[up_col, down_col],
                     params={"diffnorm_std": dn_std},
                 )
 
