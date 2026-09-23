@@ -313,3 +313,252 @@ def multiple_macd(df: pd.DataFrame, periods: list, on: str, order_on: str) -> pd
         fast, slow, signal = periods[i:i + 3]
         out.append(macd(df, fast, slow, signal, on, order_on))
     return pd.concat(out, axis=1)
+
+
+# ---------------------------------------------------------------------------
+# CCI / WILLR / Stochastic %K-%D / WMA / TRIMA / ADX / Aroon / A-D
+#
+# Added to cross-check forgedge's KPI Builder against the technical-indicator
+# set of Kara, Boyacioglu & Baykan (2011) — cited as [23] in Suárez-Cetrulo,
+# Cervantes & Quintana, "ProteuS: A Generative Approach for Simulating
+# Concept Drift in Financial Markets" (arXiv:2509.11844), Table 3 / Section
+# 4.3 (S3 - Data Preparation and Feature Engineering), which that paper's own
+# feature set is partially derived from. NOT candle-shape/geometry
+# indicators (see forgedge.kpi_builder.candle for those) — CCI, WILLR,
+# Stochastic %K/%D and A/D follow the exact formulas in that Table 3; ADX,
+# TRIMA and Aroon are not given explicit formulas there (only named in the
+# paper's "full list") and use their standard textbook definitions instead.
+# ---------------------------------------------------------------------------
+
+def cci(df: pd.DataFrame, window: int, on: str, order_on: str) -> pd.Series:
+    """Commodity Channel Index: ``(M - SMA(M, n)) / (0.015 * MAD(M, n))``.
+
+    ``M`` = typical price ``(high + low + close) / 3``; ``MAD`` is the mean
+    absolute deviation of ``M`` from its own SMA over the window. Needs
+    ``high``/``low`` in addition to ``on`` (normally ``"close"``).
+    """
+    sorted_df = df.sort_values(order_on, ascending=True)
+    high = sorted_df["high"].astype(float)
+    low = sorted_df["low"].astype(float)
+    close = sorted_df[on].astype(float)
+    typical = (high + low + close) / 3.0
+    sma_typical = typical.rolling(window=window, center=False).mean()
+    mad = typical.rolling(window=window, center=False).apply(
+        lambda x: np.mean(np.abs(x - x.mean())), raw=True
+    )
+    value = (typical - sma_typical) / (0.015 * mad)
+    return value.replace([np.inf, -np.inf], np.nan).round(5)
+
+
+def multiple_cci(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.DataFrame:
+    """CCI over several windows (``{on}_cci_{w:02d}``)."""
+    out = []
+    for w in windows:
+        tmp = cci(df, w, on, order_on)
+        tmp.name = f"{on.lower()}_cci_{w:02d}"
+        out.append(tmp)
+    return pd.concat(out, axis=1)
+
+
+def willr(df: pd.DataFrame, window: int, on: str, order_on: str) -> pd.Series:
+    """Larry Williams %R (LWR): ``(HHn - C) / (HHn - LLn) * 100``.
+
+    Uses the Table 3 / Kara et al. (2011) sign convention — range
+    ``[0, 100]`` (0 = close at the period high) — rather than TA-Lib's
+    ``[-100, 0]`` convention. Needs ``high``/``low`` in addition to ``on``.
+    """
+    sorted_df = df.sort_values(order_on, ascending=True)
+    high = sorted_df["high"].astype(float)
+    low = sorted_df["low"].astype(float)
+    close = sorted_df[on].astype(float)
+    hh = high.rolling(window=window, center=False).max()
+    ll = low.rolling(window=window, center=False).min()
+    rng = (hh - ll).replace(0, np.nan)
+    value = (hh - close) / rng * 100.0
+    return value.round(5)
+
+
+def multiple_willr(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.DataFrame:
+    """Williams %R over several windows (``{on}_willr_{w:02d}``)."""
+    out = []
+    for w in windows:
+        tmp = willr(df, w, on, order_on)
+        tmp.name = f"{on.lower()}_willr_{w:02d}"
+        out.append(tmp)
+    return pd.concat(out, axis=1)
+
+
+def stochastic_k(df: pd.DataFrame, window: int, on: str, order_on: str) -> pd.Series:
+    """Stochastic %K (fast): ``(C - LLn) / (HHn - LLn) * 100``."""
+    sorted_df = df.sort_values(order_on, ascending=True)
+    high = sorted_df["high"].astype(float)
+    low = sorted_df["low"].astype(float)
+    close = sorted_df[on].astype(float)
+    ll = low.rolling(window=window, center=False).min()
+    hh = high.rolling(window=window, center=False).max()
+    rng = (hh - ll).replace(0, np.nan)
+    value = (close - ll) / rng * 100.0
+    return value.round(5)
+
+
+def multiple_stochastic(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.DataFrame:
+    """Stochastic %K and %D over several windows.
+
+    For each window ``n``, produces ``{on}_sk_{n:02d}`` (%K, the raw
+    ``n``-period stochastic) and ``{on}_sd_{n:02d}`` (%D, the ``n``-period
+    SMA of %K — the "slow" stochastic) — matching Table 3, which defines
+    both with the same single period ``n``. Needs ``high``/``low``.
+    """
+    out = []
+    for w in windows:
+        k = stochastic_k(df, w, on, order_on)
+        d = k.rolling(window=w, center=False).mean().round(5)
+        k = k.rename(f"{on.lower()}_sk_{w:02d}")
+        d = d.rename(f"{on.lower()}_sd_{w:02d}")
+        out.append(k)
+        out.append(d)
+    return pd.concat(out, axis=1)
+
+
+def wma(df: pd.DataFrame, window: int, on: str, order_on: str) -> pd.Series:
+    """Weighted moving average: linearly weights the most recent bar highest."""
+    weights = np.arange(1, window + 1, dtype=float)
+    sorted_series = df.sort_values(order_on, ascending=True)[on].astype(float)
+    value = sorted_series.rolling(window=window, center=False).apply(
+        lambda x: np.dot(x, weights) / weights.sum(), raw=True
+    )
+    return value.round(5)
+
+
+def multiple_wma(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.DataFrame:
+    """WMA over several windows (``{on}_wma_{w:02d}``) — recognised by
+    FeatureGenerator's price-scale family regex (same as SMA/EMA/HMA)."""
+    out = []
+    for w in windows:
+        tmp = wma(df, w, on, order_on)
+        tmp.name = f"{on.lower()}_wma_{w:02d}"
+        out.append(tmp)
+    return pd.concat(out, axis=1)
+
+
+def trima(df: pd.DataFrame, window: int, on: str, order_on: str) -> pd.Series:
+    """Triangular moving average: an SMA of an SMA (double-smoothed)."""
+    sorted_series = df.sort_values(order_on, ascending=True)[on].astype(float)
+    n1 = window // 2 + 1
+    n2 = window - n1 + 1
+    sma1 = sorted_series.rolling(window=n1, center=False).mean()
+    value = sma1.rolling(window=n2, center=False).mean()
+    return value.round(5)
+
+
+def multiple_trima(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.DataFrame:
+    """TRIMA over several windows (``{on}_trima_{w:02d}``)."""
+    out = []
+    for w in windows:
+        tmp = trima(df, w, on, order_on)
+        tmp.name = f"{on.lower()}_trima_{w:02d}"
+        out.append(tmp)
+    return pd.concat(out, axis=1)
+
+
+def adx(df: pd.DataFrame, window: int, on: str, order_on: str) -> pd.Series:
+    """Average Directional Index (Wilder smoothing), bounded ``[0, 100]``.
+
+    Needs ``high``/``low`` in addition to ``on`` (used for the true-range leg
+    of Wilder's smoothing, same as :func:`atr`).
+    """
+    sorted_df = df.sort_values(order_on, ascending=True)
+    high = sorted_df["high"].astype(float)
+    low = sorted_df["low"].astype(float)
+    close = sorted_df[on].astype(float)
+
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = pd.Series(
+        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index,
+    )
+    minus_dm = pd.Series(
+        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index,
+    )
+    prev_close = close.shift(1)
+    true_range = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    smoothed_tr = true_range.ewm(alpha=1 / window, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / window, adjust=False).mean() / smoothed_tr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / window, adjust=False).mean() / smoothed_tr
+    di_sum = (plus_di + minus_di).replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / di_sum
+    value = dx.ewm(alpha=1 / window, adjust=False).mean()
+    return value.round(5)
+
+
+def multiple_adx(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.DataFrame:
+    """ADX over several windows (``{on}_adx_{w:02d}``)."""
+    out = []
+    for w in windows:
+        tmp = adx(df, w, on, order_on)
+        tmp.name = f"{on.lower()}_adx_{w:02d}"
+        out.append(tmp)
+    return pd.concat(out, axis=1)
+
+
+def aroon(df: pd.DataFrame, window: int, order_on: str) -> pd.DataFrame:
+    """Aroon Up / Aroon Down: bars since the period high/low, as a ``[0,100]`` recency score.
+
+    Uses ``high``/``low`` only (no ``on`` — Aroon is not defined against a
+    single price series).
+    """
+    sorted_df = df.sort_values(order_on, ascending=True)
+    high = sorted_df["high"].astype(float)
+    low = sorted_df["low"].astype(float)
+    up = high.rolling(window=window + 1, center=False).apply(
+        lambda x: (np.argmax(x) / window) * 100.0, raw=True
+    )
+    down = low.rolling(window=window + 1, center=False).apply(
+        lambda x: (np.argmin(x) / window) * 100.0, raw=True
+    )
+    up.name = f"aroon_up_{window:02d}"
+    down.name = f"aroon_down_{window:02d}"
+    return pd.concat([up.round(5), down.round(5)], axis=1)
+
+
+def multiple_aroon(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.DataFrame:
+    """Aroon Up/Down over several windows. ``on`` is accepted (and ignored)
+    only to match the dispatch signature every other ``multiple_*`` uses."""
+    out = [aroon(df, w, order_on) for w in windows]
+    return pd.concat(out, axis=1)
+
+
+def accumulation_distribution(df: pd.DataFrame, window: int, on: str, order_on: str) -> pd.Series:
+    """Williams Accumulation/Distribution oscillator: ``(H - C[t-1]) / (H - L)``.
+
+    This is the per-bar A/D formula in Table 3 — it has no lookback
+    parameter of its own. ``window`` (when > 1) applies a simple moving
+    average to that raw oscillator purely so it fits FORGE's
+    ``{base}_{indicator}_{period}`` multi-period naming convention;
+    ``window=1`` reproduces the raw, unsmoothed per-bar value.
+    """
+    sorted_df = df.sort_values(order_on, ascending=True)
+    high = sorted_df["high"].astype(float)
+    low = sorted_df["low"].astype(float)
+    close = sorted_df[on].astype(float)
+    prev_close = close.shift(1)
+    rng = (high - low).replace(0, np.nan)
+    raw = (high - prev_close) / rng
+    if window and window > 1:
+        raw = raw.rolling(window=window, center=False).mean()
+    return raw.round(5)
+
+
+def multiple_ad(df: pd.DataFrame, windows: list, on: str, order_on: str) -> pd.DataFrame:
+    """A/D over several smoothing windows (``{on}_ad_{w:02d}``)."""
+    out = []
+    for w in windows:
+        tmp = accumulation_distribution(df, w, on, order_on)
+        tmp.name = f"{on.lower()}_ad_{w:02d}"
+        out.append(tmp)
+    return pd.concat(out, axis=1)

@@ -52,6 +52,32 @@ DEFAULT_CONFIG: Mapping = {
     # not independent window lengths — see indicators.multiple_macd.
     "macd":           {"enabled": False, "params": {"periods": [12, 26, 9],
                                                    "columns": ["close"]}},
+    # CCI/WILLR/Stochastic/WMA/TRIMA/ADX/Aroon/A-D — added to cross-check
+    # forgedge against the technical-indicator set used in arXiv:2509.11844
+    # ("ProteuS"), Table 3 (itself derived from Kara et al. 2011). All need
+    # `high`/`low` except WMA/TRIMA; disabled by default for OHLC-only
+    # consumers and so DEFAULT_CONFIG's output stays unchanged. See
+    # indicators.py's "CCI / WILLR / ..." section for formulas and the
+    # FeatureGenerator naming-regex caveats (docs/analysis or the tracking
+    # issue for the ones NOT yet recognised by parse_feature: cci, willr,
+    # sk/sd, adx, aroon, ad — only wma matches the existing price-scale
+    # family pattern).
+    "cci":            {"enabled": False, "params": {"periods": [14, 20],
+                                                   "columns": ["close"]}},
+    "willr":          {"enabled": False, "params": {"periods": [14],
+                                                   "columns": ["close"]}},
+    "stochastic":     {"enabled": False, "params": {"periods": [14],
+                                                   "columns": ["close"]}},
+    "wma":            {"enabled": False, "params": {"periods": [10, 20],
+                                                   "columns": ["close"]}},
+    "trima":          {"enabled": False, "params": {"periods": [10, 20],
+                                                   "columns": ["close"]}},
+    "adx":            {"enabled": False, "params": {"periods": [14],
+                                                   "columns": ["close"]}},
+    "aroon":          {"enabled": False, "params": {"periods": [14, 25],
+                                                   "columns": ["close"]}},
+    "ad":             {"enabled": False, "params": {"periods": [1, 14],
+                                                   "columns": ["close"]}},
 }
 # NB: il lag non è nel config. Si applica dopo build_features() con lag_features(),
 # così si ritardano colonne reali (anche derivate) senza conoscerne i nomi a priori.

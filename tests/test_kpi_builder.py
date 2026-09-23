@@ -426,3 +426,93 @@ def test_pattern_features_datetimeindex_fallback():
     frame = _pattern_frame().set_index("open_dt")
     out = pattern_features(frame)
     assert "candle_pattern" in out.columns
+
+
+# ── CCI / WILLR / Stochastic / WMA / TRIMA / ADX / Aroon / A-D (opt-in) ────────
+# Cross-checked against the technical-indicator set of arXiv:2509.11844
+# ("ProteuS"), Table 3 / Section 4.3 (itself derived from Kara et al. 2011).
+
+_NEW_INDICATOR_CFG = {
+    "cci":        {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "willr":      {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "stochastic": {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "wma":        {"enabled": True, "params": {"periods": [10], "columns": ["close"]}},
+    "trima":      {"enabled": True, "params": {"periods": [10], "columns": ["close"]}},
+    "adx":        {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "aroon":      {"enabled": True, "params": {"periods": [14], "columns": ["close"]}},
+    "ad":         {"enabled": True, "params": {"periods": [1, 14], "columns": ["close"]}},
+}
+
+
+def test_new_indicators_disabled_by_default():
+    kpi = build_features(_candles(), timestamp_col="open_time")
+    for token in ("_cci_", "_willr_", "_sk_", "_sd_", "_wma_", "_trima_", "_adx_",
+                  "aroon_up_", "aroon_down_", "_ad_"):
+        assert not any(token in c for c in kpi.columns), token
+
+
+def test_new_indicators_enabled_produce_columns():
+    kpi = build_features(_candles(), _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    for col in ("close_cci_14", "close_willr_14", "close_sk_14", "close_sd_14",
+                "close_wma_10", "close_trima_10", "close_adx_14",
+                "aroon_up_14", "aroon_down_14", "close_ad_01", "close_ad_14"):
+        assert col in kpi.columns, col
+
+
+def test_willr_stochastic_adx_aroon_are_bounded_0_100():
+    kpi = build_features(_candles(n=600), _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    for col in ("close_willr_14", "close_sk_14", "close_sd_14", "close_adx_14",
+                "aroon_up_14", "aroon_down_14"):
+        valid = kpi[col].dropna()
+        assert valid.between(0, 100).all(), col
+
+
+def test_wma_trima_are_price_scale():
+    """WMA/TRIMA track the price level (like SMA/EMA), unlike bounded oscillators."""
+    kpi = build_features(_candles(n=600), _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    valid = kpi[["close", "close_wma_10", "close_trima_10"]].dropna()
+    np.testing.assert_allclose(valid["close_wma_10"], valid["close"], rtol=0.2)
+    np.testing.assert_allclose(valid["close_trima_10"], valid["close"], rtol=0.2)
+
+
+def test_stochastic_sd_is_sma_of_sk():
+    kpi = build_features(_candles(n=600), _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    expected = kpi["close_sk_14"].rolling(14).mean().round(5)
+    pd.testing.assert_series_equal(
+        kpi["close_sd_14"].reset_index(drop=True),
+        expected.reset_index(drop=True),
+        check_names=False,
+    )
+
+
+def test_ad_window_one_is_raw_unsmoothed():
+    """`window=1` reproduces the raw per-bar Williams A/D oscillator (Table 3)."""
+    kpi = build_features(_candles(n=100), _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    expected = ((kpi["high"] - kpi["close"].shift(1)) / (kpi["high"] - kpi["low"])).round(5)
+    pd.testing.assert_series_equal(
+        kpi["close_ad_01"].reset_index(drop=True),
+        expected.reset_index(drop=True),
+        check_names=False,
+    )
+
+
+def test_new_indicators_require_high_low():
+    candles = _candles().drop(columns=["high", "low"])
+    kpi = build_features(candles, _NEW_INDICATOR_CFG, timestamp_col="open_time")
+    for token in ("_cci_", "_willr_", "_sk_", "_sd_", "_adx_", "aroon_up_", "_ad_"):
+        assert not any(token in c for c in kpi.columns), token
+    # WMA/TRIMA need only `close`, unaffected by the missing high/low
+    assert "close_wma_10" in kpi.columns
+    assert "close_trima_10" in kpi.columns
+
+
+def test_wma_recognised_by_feature_generator_price_scale_family():
+    """WMA matches the existing price-scale regex (SMA/EMA/WMA/HMA) — see
+    feature_generator._PATTERNS — so it gets same-family ratio pairing for
+    free. The other 7 new indicators do NOT match any _PATTERNS entry yet
+    (tracked in the gap issue) — this pins the current, asymmetric state."""
+    from forgedge.event_discovery.feature_generator import parse_feature
+    assert parse_feature("close_wma_10") is not None
+    for col in ("close_cci_14", "close_willr_14", "close_sk_14", "close_sd_14",
+                "close_trima_10", "close_adx_14", "close_ad_14"):
+        assert parse_feature(col) is None, col

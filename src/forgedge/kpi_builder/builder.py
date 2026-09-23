@@ -8,8 +8,10 @@ Two composable steps
 --------------------
 1. :func:`build_features` — from raw candles + a KPI config, compute the base
    indicators (SMA, EMA, RSI, Bollinger, rolling min/max, returns, volatility,
-   max-drawdown) plus the built-in ``color``.  It also derives the ``open_dt``
-   datetime column FORGE expects and sorts chronologically.
+   max-drawdown; opt-in: ATR, MACD, CCI, Williams %R, Stochastic %K/%D, WMA,
+   TRIMA, ADX, Aroon, Williams A/D) plus the built-in ``color``.  It also
+   derives the ``open_dt`` datetime column FORGE expects and sorts
+   chronologically.
 
 2. :func:`lag_features` — lag *columns that already exist* in the built table.
    Because it runs after the build, the caller selects real, inspectable columns
@@ -52,12 +54,26 @@ INDICATORS = {
     "max_drawdown":    ta.multiple_max_drawdown,
     "atr":             ta.multiple_atr,
     "macd":            ta.multiple_macd,
+    "cci":             ta.multiple_cci,
+    "willr":           ta.multiple_willr,
+    "stochastic":      ta.multiple_stochastic,
+    "wma":             ta.multiple_wma,
+    "trima":           ta.multiple_trima,
+    "adx":             ta.multiple_adx,
+    "aroon":           ta.multiple_aroon,
+    "ad":              ta.multiple_ad,
 }
 # Indicators that read columns beyond `columns` (the per-column "on" loop) —
 # checked once per indicator before dispatch so missing OHLC data is skipped
 # with a warning instead of raising deep inside the indicator function.
 _EXTRA_REQUIRED_COLS = {
     "atr": {"high", "low"},
+    "cci": {"high", "low"},
+    "willr": {"high", "low"},
+    "stochastic": {"high", "low"},
+    "adx": {"high", "low"},
+    "aroon": {"high", "low"},
+    "ad": {"high", "low"},
 }
 _LAG_SUFFIX = "prev"
 
