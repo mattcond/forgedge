@@ -219,6 +219,46 @@ carry forward. `ETHEUR_1DAY` and `AMZN_1D` show the same mix: a handful of
 rules survive, most don't, which is the expected shape of a real out-of-sample
 filter rather than a pipeline that always says yes.
 
+### Follow-up: M2 grade-guided AND composition on one ticker
+
+The rest of this report uses `two_pass_composition=False` (Method step 4) to
+stay within this container's memory budget across all 9 tickers in one batch.
+As a follow-up, `COPPER.CMDUSD_1DAY` was re-run alone with
+`--two-pass` (`two_pass_composition=True`, the `forge()` default), under a
+memory watchdog that would kill the run before it could OOM the container
+(11 GB RSS threshold — the earlier full-batch OOM peaked at >13.9 GB). It
+completed cleanly, well under that threshold:
+
+- **1D candidate pool:** 10,273 (Event Discovery, single-condition).
+- **Pass-2 pool:** 11,816 = 10,273 singles + **1,543 composed** (AND-paired by
+  Alpha Discovery grade, per `grade_guided_compose()`).
+- **Pipeline edges:** 22 (vs. 20 single-pass on the same ticker/preset — close,
+  since composition adds candidates but each still has to clear the same
+  promotion gates).
+
+One AND-composed rule made the top-5 selection and **survived holdout**:
+
+| # | Event expression | Components | IS trades | IS PF | IS net gain | Holdout trades | Holdout WR | Holdout PF | Holdout net gain | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| — | `diffnorm_volume_sma03_sma25 > 0.912647 AND zs_diffnorm_volume_sma03_sma25_96 > 1` | AND ×2 | 150 | 4.325 | 733.2% | 7 | 100.0% | 9999* | 72.2% | **SURVIVES** |
+
+Both of its components are themselves single-condition rules already in this
+ticker's single-pass top-5 (`diffnorm_volume_sma03_sma25 > 0.912647` and
+`zs_diffnorm_volume_sma03_sma25_96 > 1`, both independently `SURVIVES` — see
+COPPER's table above) — the AND composition here narrows an already-holding
+signal rather than manufacturing a new one from two unrelated conditions,
+which is the expected, encouraging case for `grade_guided_compose()`.
+
+This is one ticker, not a general clearance: COPPER's training window
+produced a moderate single-pass pool (20 edges); a ticker whose single-pass
+pool is much larger (`E_Brent_1DAY` had 260 single-pass edges — plausibly a
+10×+ larger 1D candidate pool) would make the O(n²) composition step
+correspondingly more expensive and was **not** re-tested here. Whether
+`two_pass_composition=True` is safe across the full 9-ticker batch on this
+container remains open; the memory-watchdog pattern used here (kill at a
+fixed RSS threshold before the container's own OOM killer fires) is the safe
+way to try it ticker-by-ticker.
+
 ## Caveats
 
 - **`profit_factor = 9999.0` is a sentinel, not a real ratio.** `run_backtest()`
