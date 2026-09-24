@@ -126,7 +126,7 @@ def _build_kpi_table(candles: pd.DataFrame) -> pd.DataFrame:
 # 2. forge() sul solo training (holdout censurato)
 # ---------------------------------------------------------------------------
 
-def _run_forge_with_fallback(kpi_train: pd.DataFrame, ticker: str):
+def _run_forge_with_fallback(kpi_train: pd.DataFrame, ticker: str, two_pass: bool = False):
     """Try presets in order, from the most selective to the most permissive.
 
     A preset can fail two different ways: it can raise (config_report finds
@@ -136,7 +136,14 @@ def _run_forge_with_fallback(kpi_train: pd.DataFrame, ticker: str):
     zero edges. Either way we keep trying more permissive presets; the first
     preset that yields at least one edge wins, and if none do we fall back to
     the last preset that at least ran without raising (an honest "0 edges"
-    result beats no result)."""
+    result beats no result).
+
+    ``two_pass`` (default ``False``) toggles ``forge()``'s
+    ``two_pass_composition`` — M2's grade-guided AND-composition (issue #254
+    Phase 8). It defaults off because it is O(n^2) in the 1D candidate pool
+    and OOM-killed (>13.9 GB RSS) on this container when run against a KPI
+    table this wide across the *whole* 9-ticker batch; opt in per-ticker
+    (``--two-pass --tickers ...``) for a single, monitored run."""
     last_err = None
     last_clean: tuple | None = None  # (result, preset) of the last non-raising run
     for preset in PRESET_FALLBACK_ORDER:
@@ -149,16 +156,7 @@ def _run_forge_with_fallback(kpi_train: pd.DataFrame, ticker: str):
                 event_discovery_config=disc,
                 alpha_config=alpha,
                 rule_discovery_config=rd,
-                # Single-pass: a wide KPI table (all default families plus
-                # the 8 new indicators) makes the two-pass grade-guided
-                # composition step (default since #254 Phase 8) O(n^2) in
-                # the 1D candidate pool and OOM-kills on this container
-                # (~14 GB cgroup limit; observed >13.9 GB RSS with the
-                # default on). Every preset already pins
-                # max_and_components=1, so this only drops the *second*
-                # AlphaDiscovery pass over composed pairs — single-condition
-                # events, which is plenty for 2-5 rules/ticker.
-                two_pass_composition=False,
+                two_pass_composition=two_pass,
                 progress=False,
             )
         except ValueError as exc:
@@ -224,7 +222,7 @@ def _rank_key(pair):
     return (gain, pf)
 
 
-def process_ticker(path: Path, holdout_months: int) -> dict:
+def process_ticker(path: Path, holdout_months: int, two_pass: bool = False) -> dict:
     ticker = path.stem
     candles = _load_candles(path)
     kpi_full = _build_kpi_table(candles)
@@ -241,15 +239,22 @@ def process_ticker(path: Path, holdout_months: int) -> dict:
         "bars_holdout": holdout_bars,
         "range_total": [str(kpi_full["open_dt"].min().date()), str(last_date.date())],
         "cutoff": str(cutoff.date()),
+        "two_pass_composition": two_pass,
         "rules": [],
     }
 
     try:
-        result, preset_used = _run_forge_with_fallback(kpi_train, ticker)
+        result, preset_used = _run_forge_with_fallback(kpi_train, ticker, two_pass=two_pass)
     except RuntimeError as exc:
         info["error"] = str(exc)
         return info
     info["preset_used"] = preset_used
+    if two_pass:
+        info["n_grading_candidates_1d"] = len(result.grading_candidates or [])
+        info["n_pooled_candidates_pass2"] = len(result.candidates)
+        info["n_composed_candidates"] = sum(
+            1 for c in result.candidates if len(c.components) > 1
+        )
 
     edges = result.edges()
     info["n_edges_pipeline"] = len(edges)
@@ -272,6 +277,7 @@ def process_ticker(path: Path, holdout_months: int) -> dict:
         rule_info = {
             "alpha_id": contract.alpha_id,
             "event_expression": cand.expression,
+            "n_components": len(cand.components),
             "direction": resp.validated_rule.params.direction,
             "pipeline_verdict": resp.verdict,
             "pipeline_in_sample": {
@@ -294,6 +300,11 @@ def main():
     ap.add_argument("--out", type=str, default=None)
     ap.add_argument("--tickers", nargs="*", default=None,
                      help="Subset of filenames from examples/data to run (default: all 1D)")
+    ap.add_argument("--two-pass", action="store_true",
+                     help="Enable forge()'s two_pass_composition (M2 grade-guided AND "
+                          "composition). Off by default: O(n^2) in the 1D candidate pool, "
+                          "OOM-prone on a wide KPI table across the whole batch — use with "
+                          "--tickers to try it on one ticker at a time.")
     args = ap.parse_args()
 
     files = args.tickers or TICKERS_1D
@@ -305,7 +316,7 @@ def main():
             continue
         print(f"\n=== {fname} ===")
         try:
-            info = process_ticker(path, args.holdout_months)
+            info = process_ticker(path, args.holdout_months, two_pass=args.two_pass)
         except Exception as exc:  # keep going across tickers
             info = {"ticker": path.stem, "error": f"{type(exc).__name__}: {exc}"}
         report.append(info)
@@ -314,8 +325,13 @@ def main():
             continue
         print(f"  bars total/train/holdout = {info['bars_total']}/{info['bars_train']}/{info['bars_holdout']}")
         print(f"  preset={info.get('preset_used')}  pipeline edges={info.get('n_edges_pipeline')}")
+        if args.two_pass and "n_pooled_candidates_pass2" in info:
+            print(f"  1D pool={info['n_grading_candidates_1d']}  "
+                  f"pass2 pool={info['n_pooled_candidates_pass2']}  "
+                  f"composed={info['n_composed_candidates']}")
         for r in info["rules"]:
-            print(f"  - {r['alpha_id']:>28s} {r['pipeline_verdict']:>13s} -> "
+            tag = f"AND x{r['n_components']}" if r["n_components"] > 1 else "single"
+            print(f"  - {r['alpha_id']:>28s} [{tag:>8s}] {r['pipeline_verdict']:>13s} -> "
                   f"holdout: {r['holdout_verdict']} "
                   f"(trades={r['holdout']['total_trades']}, "
                   f"pf={r['holdout']['profit_factor']}, "
