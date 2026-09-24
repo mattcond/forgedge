@@ -127,10 +127,18 @@ def _build_kpi_table(candles: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def _run_forge_with_fallback(kpi_train: pd.DataFrame, ticker: str):
-    """Try presets in order until config_report/forge() doesn't raise on the
-    resolved configuration (pitfall #8 — a low daily rate can derive an
-    M3 training window too long for the pooled OOS span this history has)."""
+    """Try presets in order, from the most selective to the most permissive.
+
+    A preset can fail two different ways: it can raise (config_report finds
+    the resolved configuration structurally incoherent for this history —
+    pitfall #8, a low daily rate deriving an M3 training window too long for
+    the pooled OOS span this history has), or it can run cleanly but promote
+    zero edges. Either way we keep trying more permissive presets; the first
+    preset that yields at least one edge wins, and if none do we fall back to
+    the last preset that at least ran without raising (an honest "0 edges"
+    result beats no result)."""
     last_err = None
+    last_clean: tuple | None = None  # (result, preset) of the last non-raising run
     for preset in PRESET_FALLBACK_ORDER:
         disc, alpha, rd = forge_preset(preset, timeframe="1D", asset=ticker)
         try:
@@ -143,10 +151,14 @@ def _run_forge_with_fallback(kpi_train: pd.DataFrame, ticker: str):
                 rule_discovery_config=rd,
                 progress=False,
             )
-            return result, preset
         except ValueError as exc:
             last_err = exc
             continue
+        last_clean = (result, preset)
+        if result.edges():
+            return result, preset
+    if last_clean is not None:
+        return last_clean
     raise RuntimeError(f"[{ticker}] every preset raised on config_report: {last_err}")
 
 
