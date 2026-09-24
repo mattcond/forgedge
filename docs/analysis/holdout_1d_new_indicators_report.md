@@ -250,14 +250,25 @@ signal rather than manufacturing a new one from two unrelated conditions,
 which is the expected, encouraging case for `grade_guided_compose()`.
 
 This is one ticker, not a general clearance: COPPER's training window
-produced a moderate single-pass pool (20 edges); a ticker whose single-pass
-pool is much larger (`E_Brent_1DAY` had 260 single-pass edges — plausibly a
-10×+ larger 1D candidate pool) would make the O(n²) composition step
-correspondingly more expensive and was **not** re-tested here. Whether
-`two_pass_composition=True` is safe across the full 9-ticker batch on this
-container remains open; the memory-watchdog pattern used here (kill at a
-fixed RSS threshold before the container's own OOM killer fires) is the safe
-way to try it ticker-by-ticker.
+produced a moderate single-pass pool (20 edges). `E_Brent_1DAY` — whose
+single-pass pool was far larger (260 edges) — **was** re-tested the same way,
+under the same 11 GB watchdog, and surfaced a different failure mode
+entirely: it never approached the memory limit (peak RSS ~2.24 GB throughout)
+but ran single-threaded at ~99% CPU for **8+ hours** with no output and no
+sign of finishing, and was killed manually rather than left to run
+indefinitely. Composition's own caps (`per_stratum_pair_cap=100`,
+`exhaustive_safety_cap=5000` on the `{A,B}` grade stratum) bound the
+*composed* pool's size, but not the cost of grading and pairing the much
+larger *raw* 1D pool a wide KPI table produces on a ticker like this one —
+that pre-cap work is apparently what dominates here, not the final candidate
+count. **Takeaway:** `two_pass_composition=True` is not just a memory risk on
+a wide 1D KPI table — on some tickers it's a runtime risk with no memory
+symptom at all, so a memory watchdog alone is not sufficient; a wall-clock
+budget is needed too. Whether `two_pass_composition=True` is practical across
+the full 9-ticker batch on this container remains open, and is unlikely to
+hold for every ticker without either narrowing the KPI config (fewer
+indicator families/periods, shrinking the raw 1D pool before it reaches
+composition) or capping the raw pool size itself ahead of grading.
 
 ## Caveats
 
