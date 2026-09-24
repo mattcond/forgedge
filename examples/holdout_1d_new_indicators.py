@@ -149,6 +149,16 @@ def _run_forge_with_fallback(kpi_train: pd.DataFrame, ticker: str):
                 event_discovery_config=disc,
                 alpha_config=alpha,
                 rule_discovery_config=rd,
+                # Single-pass: a wide KPI table (all default families plus
+                # the 8 new indicators) makes the two-pass grade-guided
+                # composition step (default since #254 Phase 8) O(n^2) in
+                # the 1D candidate pool and OOM-kills on this container
+                # (~14 GB cgroup limit; observed >13.9 GB RSS with the
+                # default on). Every preset already pins
+                # max_and_components=1, so this only drops the *second*
+                # AlphaDiscovery pass over composed pairs — single-condition
+                # events, which is plenty for 2-5 rules/ticker.
+                two_pass_composition=False,
                 progress=False,
             )
         except ValueError as exc:
