@@ -371,6 +371,13 @@ rationale.
 
 ## Common pitfalls
 
+Six of the pitfalls below (#2, #3, #4, #14, #15, #16) are silent-misuse
+patterns — no exception anywhere, just a wrong or misleading result — that
+have each been reproduced against this repo's own fixture and measured
+against the correct usage in `docs/analysis/how_not_to_use_forge.md`; that
+document is the fuller, evidence-backed version of the one-paragraph
+entries here.
+
 1. **Passing the wrong frame to `AlphaDiscovery`.** When building the pipeline
    by hand, pass `ed.df` (Event Discovery's post-pipeline frame, with derived
    features already attached), not the original KPI Table.
@@ -848,6 +855,7 @@ current with the code, with the caveat above that source wins on conflict:
 | Topic | File |
 |---|---|
 | Comprehensive practical manual — installation through production architecture, troubleshooting, best practices/anti-patterns, FAQ, glossary; every example verified against this repo | `docs/manual-en.md` (`docs/manuale-it.md` for Italian) |
+| **How not to use forge** — six ways to call `forgedge` that raise nothing but silently return wrong/misleading results, each one actually constructed against this repo's fixture and measured side by side with the correct usage (not inferred from reading the code); read this before writing code that bypasses `forge()`, reuses an `AlphaConfig` across calls, names a custom KPI column, "monitors" a published rule, or reads a `RuleRegistry` table | `docs/analysis/how_not_to_use_forge.md`; reproduce any number in it with `examples/how_not_to_use_repro.py` |
 | The parameter-coherence audit — design rationale for the resolver/`config_report`/`PipelineContext` layer, all 16 findings with measured numbers | `docs/analysis/pipeline_parameter_coherence.md` |
 | Project overview, pipeline diagram, quick start | `README.md` (`README_it.md` for Italian) |
 | Deep architectural guide — artefact YAML formats, principles, roadmap | `src/forgedge/docs/README.md` (Italian) |
