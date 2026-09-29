@@ -12,7 +12,7 @@
 <link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
 <link href="../assets/docs.css" rel="stylesheet"/>
-<script defer src="https://cloud.umami.is/script.js" data-website-id="7d0186f7-578d-4301-96b6-c63fd0201480"></script>
+<script data-website-id="7d0186f7-578d-4301-96b6-c63fd0201480" defer="" src="https://cloud.umami.is/script.js"></script>
 </head>
 <body>
 <a class="back" href="/">← FORGE</a>
@@ -258,6 +258,18 @@ va calibrato <code>dispersion_margin</code>, non <code>max_dispersion</code>.</p
 <td><code>1</code></td>
 <td>Gap massimo, in barre, che appartiene ancora allo stesso episodio. Con il default <code>1</code>, una singola barra mancante dentro un run non apre un nuovo episodio. <code>0</code> impone run strettamente consecutivi.</td>
 </tr>
+<tr>
+<td><code>tpm_mode</code></td>
+<td><code>"floor"</code> | <code>"ranged"</code></td>
+<td><code>"floor"</code></td>
+<td><code>"floor"</code> (comportamento invariato) accetta <code>rate &gt;= min_tpm</code>. <code>"ranged"</code> (opt-in, solo conteggio <code>"episode"</code> — <code>ValueError</code> sotto <code>"bar"</code>) tratta invece <code>min_tpm</code> come il <strong>centro</strong> di una banda, rigettando anche un evento che si attiva <em>troppo spesso</em>, non solo uno troppo raro. Vedi <code>tpm_tolerance</code> e <code>docs/analysis/ranged_tpm_and_market_alignment_proposal.md</code> §2.</td>
+</tr>
+<tr>
+<td><code>tpm_tolerance</code></td>
+<td>float</td>
+<td><code>UNSET</code></td>
+<td>Mezza-larghezza della banda <code>"ranged"</code>, stessa unità di <code>min_tpm</code>. Lasciata <code>UNSET</code>, derivata dalla tolleranza di dispersione della sessione stessa (<code>σ = sqrt(eff_max_dispersion·min_tpm/n_total_months)</code>, mezza-larghezza <code>= 1.959964·σ</code>) invece che dall'<code>episode_id</code> dell'evento. Fissala esplicitamente per una banda letterale (<code>tpm_tolerance=2.0</code> con <code>min_tpm=4.0</code> dà sempre <code>[2.0, 6.0]</code>). Non letta quando <code>tpm_mode="floor"</code>; non esposta via <code>ResolutionTrace</code> (dipende da <code>n_total_months</code>, un fatto del dataset che il resolver non vede mai).</td>
+</tr>
 </tbody>
 </table>
 <pre><code class="language-python">from forgedge import DiscoveryConfig
@@ -270,6 +282,11 @@ config = DiscoveryConfig(
         min_episodes=5,
         event_counting="episode",  # default; "bar" riproduce il comportamento pre-#134
     )
+)
+
+# Opt-in: rigetta anche gli eventi che si attivano troppo spesso, non solo troppo raramente
+ranged_config = DiscoveryConfig(
+    gate_params=GateParams(tpm_mode="ranged", min_tpm=4.0, tpm_tolerance=2.0)  # banda = [2.0, 6.0]
 )
 </code></pre>
 <blockquote>
@@ -585,7 +602,19 @@ result.candidates            # output pooled della passata 2 — ciò su cui M3 
 <td><code>require_significant_direction</code></td>
 <td>bool</td>
 <td><code>True</code></td>
-<td>Se True, la direzione è assegnata solo se <code>h*</code> supera Benjamini-Hochberg (non <code>statistically_weak</code>); altrimenti → <code>undetermined</code>. False = comportamento legacy non-bloccante.</td>
+<td>Se True, la direzione è assegnata solo se <code>h*</code> supera Benjamini-Hochberg (<code>h_sig</code>, non <code>statistically_weak</code>) <strong>oppure</strong> il test AUC sull'intera griglia sotto è significativo (<code>p_auc &lt; auc_max_p</code>) — un OR dei due test, non solo BH-FDR (vedi <code>docs/analysis/ranged_tpm_and_market_alignment_proposal.md</code> §3.9). <code>False</code> ripristina il comportamento più vecchio, guidato solo da <code>argmax|z_h|</code>, senza alcun controllo di significatività.</td>
+</tr>
+<tr>
+<td><code>auc_max_p</code></td>
+<td>float</td>
+<td><code>0.10</code></td>
+<td>Idea B, stadio (a): p-value massimo per l'AUC pesata a trapezio del tasso di eccesso per barra (<code>Δ_h/h</code>) contro la rotation null, integrata sull'intera griglia degli orizzonti. Raggiunto solo quando <code>require_significant_direction=True</code>; alimenta <code>AlphaContract.promotion_route</code>/<code>.nature</code> (§3.3/§3.9 del documento sopra).</td>
+</tr>
+<tr>
+<td><code>rho_momentum_threshold</code></td>
+<td>float</td>
+<td><code>0.5</code></td>
+<td>Idea B, stadio (b), calcolato solo quando lo stadio (a) è significativo: la pendenza di Spearman del tasso per barra lungo la griglia degli orizzonti necessaria per etichettare <code>AlphaContract.nature</code> <code>"momentum-aligned"</code> (<code>rho &gt; soglia</code>) o <code>"mean-reversion-aligned"</code> (<code>rho &lt; -soglia</code>); altrimenti <code>"idiosyncratic"</code>.</td>
 </tr>
 </tbody>
 </table>
