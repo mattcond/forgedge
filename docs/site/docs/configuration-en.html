@@ -12,7 +12,7 @@
 <link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800;900&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
 <link href="../assets/docs.css" rel="stylesheet"/>
-<script data-website-id="7d0186f7-578d-4301-96b6-c63fd0201480" defer="" src="https://cloud.umami.is/script.js"></script>
+<script defer src="https://cloud.umami.is/script.js" data-website-id="7d0186f7-578d-4301-96b6-c63fd0201480"></script>
 </head>
 <body>
 <a class="back" href="/en/">← FORGE</a>
@@ -269,18 +269,6 @@ not <code>max_dispersion</code>.</p>
 <td><code>1</code></td>
 <td>Maximum gap, in bars, that still belongs to the same episode. With the default <code>1</code>, a single missing bar inside a run does not start a new episode. <code>0</code> gives strict consecutive runs.</td>
 </tr>
-<tr>
-<td><code>tpm_mode</code></td>
-<td><code>"floor"</code> | <code>"ranged"</code></td>
-<td><code>"floor"</code></td>
-<td><code>"floor"</code> (unchanged behaviour) accepts <code>rate &gt;= min_tpm</code>. <code>"ranged"</code> (opt-in, <code>"episode"</code> counting only — <code>ValueError</code> under <code>"bar"</code>) instead treats <code>min_tpm</code> as the <strong>centre</strong> of a band, rejecting an event that fires <em>too often</em> as well as one too rare. See <code>tpm_tolerance</code> and <code>docs/analysis/ranged_tpm_and_market_alignment_proposal.md</code> §2.</td>
-</tr>
-<tr>
-<td><code>tpm_tolerance</code></td>
-<td>float</td>
-<td><code>UNSET</code></td>
-<td>Half-width of the <code>"ranged"</code> band, same unit as <code>min_tpm</code>. Left <code>UNSET</code>, derived from the session's own dispersion tolerance (<code>σ = sqrt(eff_max_dispersion·min_tpm/n_total_months)</code>, half-width <code>= 1.959964·σ</code>) rather than the event's own <code>episode_id</code>. Set explicitly for a literal band (<code>tpm_tolerance=2.0</code> with <code>min_tpm=4.0</code> always gives <code>[2.0, 6.0]</code>). Unread when <code>tpm_mode="floor"</code>; not exposed through <code>ResolutionTrace</code> (depends on <code>n_total_months</code>, a dataset fact the resolver never sees).</td>
-</tr>
 </tbody>
 </table>
 <pre><code class="language-python">from forgedge import DiscoveryConfig
@@ -293,11 +281,6 @@ config = DiscoveryConfig(
         min_episodes=5,
         event_counting="episode",  # default; "bar" reproduces pre-#134 behaviour
     )
-)
-
-# Opt-in: reject events firing too often, not just too rarely
-ranged_config = DiscoveryConfig(
-    gate_params=GateParams(tpm_mode="ranged", min_tpm=4.0, tpm_tolerance=2.0)  # band = [2.0, 6.0]
 )
 </code></pre>
 <blockquote>
@@ -617,19 +600,7 @@ promotion (except in extreme cases) — they inform the grade.</p>
 <td><code>require_significant_direction</code></td>
 <td>bool</td>
 <td><code>True</code></td>
-<td>When True, a direction is assigned only if <code>h*</code> clears Benjamini-Hochberg (<code>h_sig</code>, not <code>statistically_weak</code>) <strong>or</strong> the whole-grid AUC test below is significant (<code>p_auc &lt; auc_max_p</code>) — an OR of the two tests, not BH-FDR alone (see <code>docs/analysis/ranged_tpm_and_market_alignment_proposal.md</code> §3.9). <code>False</code> restores the older, purely <code>argmax\|z_h\|</code>-driven behaviour with no significance check at all.</td>
-</tr>
-<tr>
-<td><code>auc_max_p</code></td>
-<td>float</td>
-<td><code>0.10</code></td>
-<td>Idea B stage (a): max p-value for the trapezoidal-weighted AUC of the per-bar excess rate (<code>Δ_h/h</code>) against the rotation null, integrated over the whole horizon grid. Only reached when <code>require_significant_direction=True</code>; feeds <code>AlphaContract.promotion_route</code>/<code>.nature</code> (§3.3/§3.9 of the doc above).</td>
-</tr>
-<tr>
-<td><code>rho_momentum_threshold</code></td>
-<td>float</td>
-<td><code>0.5</code></td>
-<td>Idea B stage (b), computed only when stage (a) is significant: the Spearman-rank slope of the per-bar rate along the horizon grid needed to label <code>AlphaContract.nature</code> <code>"momentum-aligned"</code> (<code>rho &gt; threshold</code>) or <code>"mean-reversion-aligned"</code> (<code>rho &lt; -threshold</code>); otherwise <code>"idiosyncratic"</code>.</td>
+<td>When True, a direction is assigned only if <code>h*</code> clears Benjamini-Hochberg (not <code>statistically_weak</code>); otherwise → <code>undetermined</code>. False = legacy non-blocking behaviour.</td>
 </tr>
 </tbody>
 </table>
