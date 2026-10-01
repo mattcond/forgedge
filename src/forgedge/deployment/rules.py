@@ -22,6 +22,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,7 @@ import pandas as pd
 from ..forge import ForgeResult
 from ..rule_registry import RuleRegistry
 from ..rule_report import RuleSpec
+from .kpi_recipe import KpiRecipe, KpiRecipeVerification, minimal_kpi_recipe, verify_kpi_recipe
 
 __all__ = [
     "PromotionGateConfig",
@@ -96,7 +98,7 @@ def _compute_rows(
     """One dict per tradeable (EDGE/PARTIAL-EDGE) contract, flags plus live refs.
 
     Internal — carries the actual ``contract``/``response``/``candidate``
-    objects (under ``_contract``/``_response``/``_candidate``) so
+    objects (under ``_contract``/``_response``/``_candidate``/``_result``) so
     ``export_rules`` can write files without recomputing anything;
     ``promotion_gate`` strips those columns before returning.
     """
@@ -142,6 +144,7 @@ def _compute_rows(
                     "_contract": contract,
                     "_response": response,
                     "_candidate": candidate,
+                    "_result": result,
                 }
             )
 
@@ -326,6 +329,9 @@ def export_rules(
     registries: Optional[Iterable[RuleRegistry]] = None,
     config: PromotionGateConfig = PromotionGateConfig(),
     promotable_only: bool = True,
+    include_kpi_recipe: bool = True,
+    kpi_config=None,
+    kpi_recipe_warmup_bars: int = 0,
 ) -> pd.DataFrame:
     """Write one ``.pkl`` (event) + one ``.yaml`` (rule params) per exported contract.
 
@@ -340,6 +346,14 @@ def export_rules(
       published operating point: direction, entry mode, buy/sell
       parameters, horizon, fee) plus ``ticker``/``alpha_id``/``verdict`` for
       context.
+    - ``{output_dir}/{alpha_id}.kpi_recipe.json`` (``include_kpi_recipe``,
+      #296) — the :class:`~forgedge.deployment.KpiRecipe` recomputing only
+      the KPI columns the event reads from raw candles, plus a
+      ``"verification"`` block: the event replayed on
+      ``KpiRecipe.rebuild(result.event_frame)`` vs on ``result.event_frame``
+      itself (:func:`~forgedge.deployment.verify_kpi_recipe`). The pickle is
+      always written too — it stays the faithful fallback whenever the
+      recipe is incomplete (``unresolved_columns``) or unverified.
 
     Parameters
     ----------
@@ -355,13 +369,29 @@ def export_rules(
         Export only contracts the gate marks ``promotable``. Set ``False``
         to export every tradeable contract regardless of the gate (the
         columns are still reported for audit).
+    include_kpi_recipe : bool, default True
+        Also write ``{alpha_id}.kpi_recipe.json`` per contract.
+    kpi_config : dict, str, Path or None
+        ``kpi_builder`` configuration the KPI Table was built with, forwarded
+        to :func:`~forgedge.deployment.minimal_kpi_recipe` (``None`` =
+        ``DEFAULT_CONFIG``).
+    kpi_recipe_warmup_bars : int, default 0
+        Bars excluded from the start of each ``result.event_frame`` when
+        verifying the recipe. Leave at ``0`` when the KPI Table was built
+        with ``kpi_builder`` from the very candles passed to ``forge()``
+        (the round-trip is then exact). When it was built on a longer
+        history and truncated, recursive/rolling indicators rebuilt from the
+        shorter span differ during a warm-up transient — exclude it
+        explicitly; no heuristic default is applied (#296).
 
     Returns
     -------
     pd.DataFrame
         One row per exported contract: ``ticker``, ``alpha_id``,
         ``event_candidate_id``, ``verdict``, ``promotable``, ``pkl_path``,
-        ``yaml_path``.
+        ``yaml_path``, ``kpi_recipe_path``, ``kpi_recipe_verified``
+        (``None`` when no recipe was written, or when ``result.event_frame``
+        is unavailable to verify against).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -370,6 +400,7 @@ def export_rules(
     promotable = _promotable_mask(rows, config)
 
     manifest_rows: List[dict] = []
+    recipe_cache: Dict[tuple, tuple] = {}
 
     for row, is_promotable in zip(rows, promotable):
         if promotable_only and not is_promotable:
@@ -399,6 +430,22 @@ def export_rules(
         )
         yaml_path.write_text(_dump_yaml_mapping(params))
 
+        recipe_path = None
+        recipe_verified = None
+        if include_kpi_recipe and getattr(candidate, "components", None):
+            key = (id(row["_result"]), candidate.event_id)
+            if key not in recipe_cache:
+                recipe_cache[key] = _recipe_and_verification(
+                    candidate, row["_result"], kpi_config, kpi_recipe_warmup_bars
+                )
+            recipe, verification = recipe_cache[key]
+            recipe_path = output_dir / f"{alpha_id}.kpi_recipe.json"
+            payload = recipe.to_dict()
+            payload["verification"] = verification.to_dict() if verification is not None else None
+            recipe_path.write_text(json.dumps(payload, indent=2) + "\n")
+            recipe_path = str(recipe_path)
+            recipe_verified = verification.matches if verification is not None else None
+
         manifest_rows.append(
             {
                 "ticker": row["ticker"],
@@ -408,26 +455,57 @@ def export_rules(
                 "promotable": is_promotable,
                 "pkl_path": str(pkl_path),
                 "yaml_path": str(yaml_path),
+                "kpi_recipe_path": recipe_path,
+                "kpi_recipe_verified": recipe_verified,
             }
         )
 
-    columns = [
-        "ticker",
-        "alpha_id",
-        "event_candidate_id",
-        "verdict",
-        "promotable",
-        "pkl_path",
-        "yaml_path",
-    ]
-    return pd.DataFrame(manifest_rows, columns=columns)
+    return pd.DataFrame(manifest_rows, columns=_EXPORT_COLUMNS)
+
+
+_EXPORT_COLUMNS = [
+    "ticker",
+    "alpha_id",
+    "event_candidate_id",
+    "verdict",
+    "promotable",
+    "pkl_path",
+    "yaml_path",
+    "kpi_recipe_path",
+    "kpi_recipe_verified",
+]
+
+
+def _recipe_and_verification(
+    candidate, result, kpi_config, warmup_bars: int
+) -> "tuple[KpiRecipe, Optional[KpiRecipeVerification]]":
+    """Recipe for ``candidate`` + its round-trip check on ``result.event_frame``.
+
+    The verification is ``None`` when the result carries no ``event_frame``
+    (nothing to verify against) — distinct from a failed check.
+    """
+    recipe = minimal_kpi_recipe(candidate, kpi_config=kpi_config)
+    frame = getattr(result, "event_frame", None)
+    if frame is None:
+        return recipe, None
+    timestamp_col = getattr(getattr(result, "context", None), "timestamp_col", "open_dt")
+    mask = None
+    if warmup_bars > 0:
+        mask = pd.Series(np.arange(len(frame)) >= warmup_bars, index=frame.index)
+    verification = verify_kpi_recipe(
+        candidate, recipe, frame, evaluation_mask=mask, timestamp_col=timestamp_col
+    )
+    return recipe, verification
 
 
 # ---------------------------------------------------------------------------
 # 3. Monitoring manifest
 # ---------------------------------------------------------------------------
 
-def monitoring_manifest(results: Iterable[ForgeResult]) -> pd.DataFrame:
+def monitoring_manifest(
+    results: Iterable[ForgeResult],
+    exported: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
     """Long-format index of every tradeable rule, for a periodic re-check job.
 
     Applies :meth:`RuleSpec.from_forge_result` (already provided by
@@ -440,14 +518,23 @@ def monitoring_manifest(results: Iterable[ForgeResult]) -> pd.DataFrame:
     ----------
     results : Iterable[ForgeResult]
         R — one or more ``forge()``/``forge_multi()`` outputs.
+    exported : pd.DataFrame, optional
+        :func:`export_rules`'s returned manifest. When given, its
+        ``kpi_recipe_path``/``kpi_recipe_verified`` are joined in on
+        ``(ticker, event_candidate_id)`` (#296), so the re-check job knows
+        which rules it can keep alive from the minimal KPI recipe alone and
+        which need the full KPI Table / pickled event. Rows are *not*
+        filtered — rules that were not exported keep ``None`` there.
 
     Returns
     -------
     pd.DataFrame
         Columns: ``ticker``, ``rule_name``, ``event_candidate_id``,
-        ``is_end``, ``verdict``, ``oos_expectancy``. Join on
-        ``event_candidate_id`` against :func:`export_rules`'s output to
-        restrict to rules that were actually exported.
+        ``is_end``, ``verdict``, ``oos_expectancy``, ``kpi_recipe_path``,
+        ``kpi_recipe_verified`` (the last two ``None`` without
+        ``exported``). Join on ``event_candidate_id`` against
+        :func:`export_rules`'s output to restrict to rules that were
+        actually exported.
     """
     rows: List[dict] = []
 
@@ -464,5 +551,27 @@ def monitoring_manifest(results: Iterable[ForgeResult]) -> pd.DataFrame:
                 }
             )
 
-    columns = ["ticker", "rule_name", "event_candidate_id", "is_end", "verdict", "oos_expectancy"]
+    recipes: Dict[tuple, tuple] = {}
+    if exported is not None and "kpi_recipe_path" in exported.columns:
+        for rec in exported.itertuples(index=False):
+            key = (rec.ticker, rec.event_candidate_id)
+            # Every contract built on the same event shares one recipe; keep
+            # the first exported one.
+            if pd.notna(rec.kpi_recipe_path) and key not in recipes:
+                recipes[key] = (rec.kpi_recipe_path, rec.kpi_recipe_verified)
+    for row in rows:
+        path, verified = recipes.get((row["ticker"], row["event_candidate_id"]), (None, None))
+        row["kpi_recipe_path"] = path
+        row["kpi_recipe_verified"] = verified
+
+    columns = [
+        "ticker",
+        "rule_name",
+        "event_candidate_id",
+        "is_end",
+        "verdict",
+        "oos_expectancy",
+        "kpi_recipe_path",
+        "kpi_recipe_verified",
+    ]
     return pd.DataFrame(rows, columns=columns)

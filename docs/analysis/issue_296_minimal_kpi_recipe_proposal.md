@@ -1,10 +1,13 @@
 # Ricetta KPI minimale per regola — manifest di redeploy ridotto e verificato
 
-> **Status: proposta, non implementata.** Nessun codice in `src/forgedge/` è stato
-> toccato da questo documento. Il meccanismo è stato prototipato e verificato
-> empiricamente solo a livello di notebook — vedi PR #295,
-> `notebooks/07_mysql_holdout_pipeline.ipynb` §8 — non nella libreria. Questo
-> documento è il piano per portarlo in `forgedge.deployment`. Issue:
+> **Status: Fasi 1 e 2 implementate** in `src/forgedge/deployment/kpi_recipe.py`
+> (`KpiRecipe`, `KpiRecipeVerification`, `minimal_kpi_recipe()`,
+> `verify_kpi_recipe()`) e integrate in `export_rules()`/`monitoring_manifest()`;
+> test in `tests/test_kpi_recipe.py` e `tests/test_deployment.py`. Riferimento
+> d'uso: `src/forgedge/docs/specs/deployment_en.md` (`_it.md`), §*Minimal KPI
+> recipe*. La Fase 3 (aggregazione del manifest a scala, §5.1.3) resta aperta.
+> Il resto di questo documento è la proposta originale, lasciata com'era; le
+> deviazioni dall'API proposta sono elencate in §7. Issue:
 > [#296](https://github.com/mattcond/forgedge/issues/296).
 
 **Punto di partenza:** mentre si costruiva una pipeline di validazione hold-out in un
@@ -269,3 +272,38 @@ invece di O(n) sull'intero export.
 - Skill `forgedge`, pitfall #4 — naming convention non standard fuori dal radar del
   `FeatureGenerator` (stesso limite si applica qui, §5).
 - Issue [#296](https://github.com/mattcond/forgedge/issues/296).
+
+## 7. Note di implementazione (deviazioni dalla proposta)
+
+- **Mappa inversa:** non una singola chiamata `build_features()` con `kpi_config`
+  per intero — da quella non si può attribuire ogni colonna prodotta alla voce che
+  l'ha prodotta. È invece un probe per ogni combinazione indicatore × colonna ×
+  gruppo-di-periodi su un frame sintetico di 8 barre, costruito **una volta per
+  config** (`lru_cache`): ~130 probe / ~0,2 s per `DEFAULT_CONFIG`, poi solo lookup
+  per ogni candidato. L'obiettivo di §4 (costo indipendente dal numero di regole
+  esportate) è rispettato. Le voci vengono sondate ignorando `enabled`, così gli
+  indicatori opt-in si risolvono anche se la config passata li ha disabilitati.
+- **Campi aggiunti a `KpiRecipe`:** `color` (la colonna `color` di
+  `build_features` — il prototipo non la ricostruiva se la config risultava vuota)
+  e `base_columns`; `is_complete`, `to_json()`/`from_dict()`/`from_json()` per
+  rileggere il file esportato.
+- **`KpiRecipeVerification`** riporta anche `n_compared_bars`, `last_mismatch_at`
+  (mismatch confinati all'inizio = firma del warm-up) ed `error` (ricetta
+  incompleta, colonna mancante) invece di sollevare.
+- **Finestra di verifica (§5.1.1):** come proposto, nessuna euristica in v1 —
+  `verify_kpi_recipe(evaluation_mask=...)` e
+  `export_rules(kpi_recipe_warmup_bars=...)`, default l'intera serie. Misurato:
+  quando la KPI Table è costruita da `kpi_builder` sulle stesse candele il
+  round-trip è esatto su 23 488 / 23 488 candidati (fixture ADA 1D ricostruita con
+  `DEFAULT_CONFIG` + MACD/ATR/Stochastic/Aroon + candle features + lag). Sulla
+  fixture così com'è (costruita su uno storico più lungo) il warm-up si propaga
+  attraverso le finestre pctrank fino a ~260 barre; in più le colonne non
+  arrotondate `close_bb_mid_*`/`close_bb_width_*` differiscono per rumore
+  floating-point lungo tutta la serie, che in rari casi ribalta un confronto
+  esattamente sulla soglia — non eliminabile con una maschera, visibile da
+  `n_mismatched_bars`.
+- **`CustomEvent`:** la formula viene riportata testualmente in
+  `unresolved_columns` (non si tenta di estrarne gli identificatori).
+- **`monitoring_manifest(results, exported=None)`:** colonne
+  `kpi_recipe_path`/`kpi_recipe_verified` sempre presenti (schema stabile),
+  valorizzate solo passando l'output di `export_rules()`.

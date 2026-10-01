@@ -1313,6 +1313,33 @@ KDEs (low/close/high forward returns at `target_h`), base-vs-event MAE→net
 scatter, rolling expectancy (edge-decay detector), per-regime performance,
 most recent trades, and a "signal active now" badge.
 
+### Minimal KPI recipe per exported rule (`forgedge.deployment`, #296)
+
+```python
+from forgedge.deployment import KpiRecipe, KpiRecipeVerification, minimal_kpi_recipe, verify_kpi_recipe
+
+recipe = minimal_kpi_recipe(candidate, kpi_config=None, base_cols=("open_dt", "open", "high", "low", "close", "volume"))
+reduced = recipe.rebuild(candles, timestamp_col="open_dt")     # ValueError if recipe.unresolved_columns
+check = verify_kpi_recipe(candidate, recipe, reference_kpi, evaluation_mask=None, timestamp_col="open_dt")
+KpiRecipe.from_json(recipe.to_json())                          # == recipe
+```
+
+`KpiRecipe` fields: `build_features_config`, `lag_features` (ordered),
+`candle_features`, `pattern_features`, `color`, `unresolved_columns`,
+`base_columns`; `.is_complete`. `KpiRecipeVerification`: `matches`,
+`n_compared_bars`, `n_mismatched_bars`, `first_mismatch_at`,
+`last_mismatch_at`, `error`. `export_rules(..., include_kpi_recipe=True,
+kpi_config=None, kpi_recipe_warmup_bars=0)` writes
+`{alpha_id}.kpi_recipe.json` (recipe + `"verification"` on
+`result.event_frame`) and adds `kpi_recipe_path`/`kpi_recipe_verified`;
+`monitoring_manifest(results, exported=...)` joins them in. Exact round-trip
+when the reference KPI Table was built by `kpi_builder` from the same
+candles; on a table built from a longer history then truncated (like the ADA
+fixture) indicator warm-up makes the first bars differ — pass
+`evaluation_mask`/`kpi_recipe_warmup_bars`, there is no heuristic default.
+`CustomEvent` formulas and non-`kpi_builder` columns (e.g. M0 `regime`) land
+in `unresolved_columns`; the `.pkl` stays the fallback.
+
 ## Errors and warnings
 
 No custom exception hierarchy — every raised error is a plain Python

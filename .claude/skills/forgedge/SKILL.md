@@ -801,7 +801,7 @@ src/forgedge/
 ├── rule_report.py          RuleSpec, rule_performance_report
 ├── summary_report.py       data-quality diagnostics
 ├── playground/             read-only analysis helpers over pooled ForgeResult (not M0-M4, not re-exported top-level)
-├── deployment/             promotion_gate/export_rules/monitoring_manifest — putting rules into production (real effects)
+├── deployment/             promotion_gate/export_rules/monitoring_manifest + minimal_kpi_recipe/verify_kpi_recipe (#296) — putting rules into production (real effects)
 ├── experiment/             StepWiseDiscovery — runs its OWN multi-stage pipeline on top of forge() (partition & compose search)
 └── docs/                   packaged module + spec docs (see below)
 ```
@@ -864,7 +864,7 @@ current with the code, with the caveat above that source wins on conflict:
 | Global configuration reference | `src/forgedge/docs/specs/configuration_en.md` (`_it.md`) |
 | Per-module spec | `src/forgedge/docs/specs/modulo_{0..4}_en.md` (`_it.md`) |
 | `forgedge.playground` — read-only analysis over pooled `ForgeResult` (11 use cases, issue #237) | `src/forgedge/docs/specs/playground_en.md` (`_it.md`); design rationale in `src/forgedge/docs/modules/Playground.md` |
-| `forgedge.deployment` — promotion gate / rule export / monitoring manifest, putting rules into production (real effects — issue #245) | `src/forgedge/docs/specs/deployment_en.md` (`_it.md`); design rationale in `src/forgedge/docs/modules/Deployment.md` |
+| `forgedge.deployment` — promotion gate / rule export / monitoring manifest, putting rules into production (real effects — issue #245); per-rule minimal, round-trip-verified KPI recipe JSON written next to each exported `.pkl` (issue #296) | `src/forgedge/docs/specs/deployment_en.md` (`_it.md`); design rationale in `src/forgedge/docs/modules/Deployment.md` |
 | `forgedge.experiment` — `StepWiseDiscovery`, a partition & compose search that grows a hold-out-confirmed rule one AND-condition at a time by RUNNING its own pipeline on top of `forge()` (unlike the two siblings above, neither read-only nor production-facing) | `src/forgedge/docs/specs/experiment_en.md` (`_it.md`); design rationale + the manual research it generalizes in `src/forgedge/docs/modules/Experiment.md`; runnable example in `examples/step_wise_discovery_usage.py` |
 | Technical analyses (low-freq robustness, rotation-null calibration) | `docs/analysis/*.md` |
 | Runnable examples per module, incl. the coherence audit and entry-mode impact | `examples/*.py` (several predate a `GateParams` API change — see pitfall #9 before copying `GateParams(...)` from one) |
