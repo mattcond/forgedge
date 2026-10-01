@@ -1,17 +1,27 @@
 """Tests for forgedge.deployment — promotion gate, export, monitoring manifest."""
 
+import json
 import pickle
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from forgedge.deployment import (
+    KpiRecipe,
     PromotionGateConfig,
     export_rules,
     monitoring_manifest,
     promotion_gate,
 )
+from forgedge.event_discovery.models import (
+    ActivationStats,
+    EventCandidate,
+    EventComponent,
+    GateResult,
+)
+from forgedge.kpi_builder import build_features
 
 
 def _candidate(event_id):
@@ -323,7 +333,132 @@ class TestExportRules:
             "promotable",
             "pkl_path",
             "yaml_path",
+            "kpi_recipe_path",
+            "kpi_recipe_verified",
         ]
+
+    def test_stub_candidate_without_components_gets_no_recipe(self, tmp_path):
+        candidate = _candidate("EVT-1")
+        contract = _contract("A-1", event_candidate_id="EVT-1")
+        result = _result("T", candidates=[candidate], rule_responses=[(contract, _response("EDGE"))])
+
+        manifest = export_rules([result], tmp_path)
+
+        assert manifest.iloc[0]["kpi_recipe_path"] is None
+        assert manifest.iloc[0]["kpi_recipe_verified"] is None
+        assert not (tmp_path / "A-1.kpi_recipe.json").exists()
+
+
+def _kpi_frame(n=300, seed=0):
+    """Real KPI Table indexed by timestamp, like ``ForgeResult.event_frame``."""
+    rng = np.random.default_rng(seed)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, n)))
+    openp = np.concatenate([[close[0]], close[:-1]])
+    candles = pd.DataFrame(
+        {
+            "open_time": 1_600_000_000_000 + np.arange(n) * 3_600_000,
+            "open": openp,
+            "high": np.maximum(openp, close) * 1.002,
+            "low": np.minimum(openp, close) * 0.998,
+            "close": close,
+        }
+    )
+    kpi = build_features(candles, timestamp_col="open_time")
+    return kpi.drop(columns="open_time").set_index("open_dt")
+
+
+def _event_candidate(event_id="EVT-1", source_feature="close_rsi_14"):
+    comp = EventComponent(
+        source_feature=source_feature,
+        transform="rolling_pctrank",
+        transform_params={"window": 24},
+        transformed_col=f"pr_{source_feature}_24",
+        threshold=0.8,
+        threshold_type="test",
+        direction="above",
+        event_type="threshold",
+        expression=f"pr_{source_feature}_24 > 0.8",
+    )
+    return EventCandidate(
+        event_id=event_id,
+        status="CANDIDATE",
+        components=[comp],
+        expression=comp.expression,
+        activation_stats=ActivationStats(
+            n_activations=0, n_active_months=0, zero_months=0,
+            max_monthly_share=float("nan"), mean_tpm=float("nan"),
+        ),
+        consistency_gate=GateResult(
+            passed=True, n_activations=0, n_active_months=0,
+            max_monthly_share=float("nan"), mean_tpm=float("nan"),
+        ),
+    )
+
+
+class TestExportKpiRecipe:
+    def _result(self, event_frame=None, source_feature="close_rsi_14"):
+        candidate = _event_candidate(source_feature=source_feature)
+        contracts = [
+            (_contract("A-1", event_candidate_id="EVT-1"), _response("EDGE")),
+            (_contract("A-2", event_candidate_id="EVT-1"), _response("EDGE")),
+        ]
+        result = _result("T", candidates=[candidate], rule_responses=contracts)
+        result.event_frame = event_frame
+        return result
+
+    def test_writes_verified_recipe_next_to_pickle(self, tmp_path):
+        result = self._result(event_frame=_kpi_frame())
+
+        manifest = export_rules([result], tmp_path)
+
+        assert list(manifest["kpi_recipe_verified"]) == [True, True]
+        recipe_path = tmp_path / "A-1.kpi_recipe.json"
+        assert manifest.iloc[0]["kpi_recipe_path"] == str(recipe_path)
+        assert (tmp_path / "A-1.pkl").exists()  # the pickle fallback is always kept
+        payload = json.loads(recipe_path.read_text())
+        assert payload["verification"]["matches"] is True
+        assert payload["verification"]["n_compared_bars"] == 300
+        recipe = KpiRecipe.from_dict(payload)
+        assert recipe.build_features_config == {
+            "rsi": {"enabled": True, "params": {"periods": [14], "columns": ["close"]}}
+        }
+
+    def test_without_event_frame_recipe_is_written_but_unverified(self, tmp_path):
+        result = self._result(event_frame=None)
+
+        manifest = export_rules([result], tmp_path)
+
+        assert pd.isna(manifest.iloc[0]["kpi_recipe_verified"])
+        payload = json.loads((tmp_path / "A-1.kpi_recipe.json").read_text())
+        assert payload["verification"] is None
+
+    def test_unresolved_recipe_is_exported_as_unverified(self, tmp_path):
+        frame = _kpi_frame().copy()
+        frame["proprietary_signal"] = frame["close_rsi_14"]
+        result = self._result(event_frame=frame, source_feature="proprietary_signal")
+
+        manifest = export_rules([result], tmp_path)
+
+        assert bool(manifest.iloc[0]["kpi_recipe_verified"]) is False
+        payload = json.loads((tmp_path / "A-1.kpi_recipe.json").read_text())
+        assert payload["unresolved_columns"] == ["proprietary_signal"]
+        assert "unresolved columns" in payload["verification"]["error"]
+
+    def test_warmup_bars_restrict_the_verification_window(self, tmp_path):
+        result = self._result(event_frame=_kpi_frame())
+
+        export_rules([result], tmp_path, kpi_recipe_warmup_bars=50)
+
+        payload = json.loads((tmp_path / "A-1.kpi_recipe.json").read_text())
+        assert payload["verification"]["n_compared_bars"] == 250
+
+    def test_include_kpi_recipe_false_skips_it(self, tmp_path):
+        result = self._result(event_frame=_kpi_frame())
+
+        manifest = export_rules([result], tmp_path, include_kpi_recipe=False)
+
+        assert not list(tmp_path.glob("*.kpi_recipe.json"))
+        assert manifest["kpi_recipe_path"].isna().all()
 
 
 class TestMonitoringManifest:
@@ -363,4 +498,28 @@ class TestMonitoringManifest:
             "is_end",
             "verdict",
             "oos_expectancy",
+            "kpi_recipe_path",
+            "kpi_recipe_verified",
         ]
+
+    def test_joins_kpi_recipe_from_export_manifest(self, monkeypatch):
+        specs = [
+            SimpleNamespace(name="A-1", candidate=_candidate("EVT-1"), is_end=None,
+                            verdict="EDGE", oos_expectancy=0.01),
+            SimpleNamespace(name="A-9", candidate=_candidate("EVT-9"), is_end=None,
+                            verdict="EDGE", oos_expectancy=0.02),
+        ]
+        monkeypatch.setattr(
+            "forgedge.deployment.rules.RuleSpec.from_forge_result",
+            lambda r: specs,
+        )
+        exported = pd.DataFrame(
+            [{"ticker": "T", "event_candidate_id": "EVT-1",
+              "kpi_recipe_path": "/x/A-1.kpi_recipe.json", "kpi_recipe_verified": True}]
+        )
+
+        df = monitoring_manifest([_result("T")], exported=exported)
+
+        assert df.iloc[0]["kpi_recipe_path"] == "/x/A-1.kpi_recipe.json"
+        assert bool(df.iloc[0]["kpi_recipe_verified"]) is True
+        assert pd.isna(df.iloc[1]["kpi_recipe_path"])  # not exported: kept, not filtered
