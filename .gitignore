@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# forge rule-discovery outputs (notebooks/07_mysql_holdout_pipeline.ipynb)
+notebooks/discovered_rules/
