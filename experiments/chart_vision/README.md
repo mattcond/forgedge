@@ -60,3 +60,55 @@ Il grafico autoscalato **perde l'informazione di scala**, cioè quanto è ampia 
 - **Timeframe giornaliero**, con finestre più lunghe e pattern "classici" (testa-spalle ecc.).
 
 Riprodurre: `python experiments/chart_vision/chart_vision.py` (~18 min, 4 core) oppure `--quick` (20k campioni, ~5 min).
+
+---
+
+# Parte 2 — CNN addestrata: target long +1% dopo 10 barre (`train_cnn.py`)
+
+**Domanda:** una CNN addestrata a guardare un grafico di 20 candele riconosce le situazioni in cui `close[t+10] / close[t] − 1 ≥ +1%`?
+
+**Risposta breve:** la CNN impara qualcosa (AUC 0.72), ma impara **la volatilità, non la direzione**. Un modello che guarda solo l'ampiezza della finestra fa esattamente lo stesso (AUC 0.722), e combinare i due modelli non aggiunge nulla.
+
+## Setup
+
+| | |
+|---|---|
+| Immagine | 20 candele → 2 canali × 32 × 40 px (2 px per candela), asse Y autoscalato |
+| Target | `close[t+10] / close[t] − 1 ≥ 1%`, dove t è l'ultima candela visibile |
+| Split | per ogni asset: primo 70% = train, con finestre **non sovrapposte** da 20 barre (l'ultimo 15% delle finestre di train serve per l'early stopping); restante 30% = test, anch'esso non sovrapposto. L'ultima label di train finisce prima del taglio |
+| Dati | EURUSD da solo ha **6 positivi su 1 237** finestre di train (base rate 0,5%) → uso in pool tutti i 33 asset `*_1HOUR`: 17 107 train, 3 034 val, 8 615 test, base rate 17% |
+| CNN | JAX: conv 3×3 (16→32→64) + max-pool ×3, media sull'asse prezzo mantenendo 5 colonne temporali, dense 32 → 1. AdamW, loss bilanciata, early stopping sull'AUC di validazione, 3 seed in ensemble |
+| Varianti | `cnn image only` (solo pixel) e `cnn image + y-axis scale` (pixel + range/volatilità della finestra, cioè "i numeri sull'asse Y") |
+| Baseline | `vol`: regressione logistica su 3 numeri (range della finestra, volatilità realizzata, range medio delle candele) · `raw`: 20 candele numeriche + vol con HGB |
+
+## Risultati sul test (30% finale, `results/train_cnn_results.csv`)
+
+| modello | AUC (pool) | AUC entro l'asset | z vs nullo | precisione top 10% (entro asset) |
+|---|---|---|---|---|
+| vol (3 numeri) | **0.722** | 0.604 | 9.8 | 0.265 |
+| raw candele + vol (HGB) | 0.719 | 0.602 | 9.6 | 0.271 |
+| CNN solo immagine | 0.585 | 0.526 | 2.4 | 0.199 |
+| CNN immagine + scala | 0.720 | 0.603 | 10.0 | 0.269 |
+| stack vol + CNN | 0.720 | 0.603 | 10.1 | 0.274 |
+
+Il base rate è 0.172. "Entro l'asset" significa: AUC calcolata dentro ogni asset e poi mediata. Il nullo si ottiene permutando le label all'interno di ogni asset.
+
+**Perché è volatilità e non direzione:** nel 10% delle finestre a punteggio più alto (dentro ogni asset):
+
+| | P(≥ +1%) | P(≤ −1%) | P(chiude su) |
+|---|---|---|---|
+| tutto il test | 0.172 | 0.146 | 0.531 |
+| top 10% del punteggio | 0.265 | **0.219** | 0.539 |
+
+La probabilità di un −1% cresce quanto quella di un +1%. Il modello riconosce "sta per muoversi molto", non "sta per salire". La direzione (0.539 contro 0.531) non cambia.
+
+## Conclusioni
+
+1. **L'addestramento funziona:** la CNN supera il caso in modo netto (z ≈ 10).
+2. **Ma tutto il segnale è la volatilità.** Per un target a soglia fissa, +1% è prima di tutto una domanda su *quanto* si muove il prezzo. Tre numeri (range e volatilità) bastano per ottenere lo stesso risultato. Con l'immagine autoscalata e senza scala, la CNN deve ricostruire la volatilità indirettamente dalle forme, e arriva solo a 0.585.
+3. **La forma del grafico non aggiunge nulla oltre la volatilità:** lo stack vol + CNN è uguale al solo vol (0.603 contro 0.604 entro l'asset).
+4. **EURUSD da solo non è addestrabile** su questo target: con 6 positivi un +1% in 10 ore è un evento raro per il cambio.
+
+**Prossimo test sensato:** rendere il target indipendente dalla volatilità, per esempio `fwd ≥ +k·σ` (con σ la volatilità della finestra) oppure "+1% prima di −1%" (triple barrier). In questo modo l'unica cosa che resta da prevedere è la direzione, cioè la vera domanda sugli "occhi del trader".
+
+Riprodurre: `python experiments/chart_vision/train_cnn.py` (~15 min su 4 core CPU, richiede `jax optax`).
