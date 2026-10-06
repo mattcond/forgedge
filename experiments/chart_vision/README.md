@@ -112,3 +112,57 @@ La probabilità di un −1% cresce quanto quella di un +1%. Il modello riconosce
 **Prossimo test sensato:** rendere il target indipendente dalla volatilità, per esempio `fwd ≥ +k·σ` (con σ la volatilità della finestra) oppure "+1% prima di −1%" (triple barrier). In questo modo l'unica cosa che resta da prevedere è la direzione, cioè la vera domanda sugli "occhi del trader".
 
 Riprodurre: `python experiments/chart_vision/train_cnn.py` (~15 min su 4 core CPU, richiede `jax optax`).
+
+---
+
+# Parte 3 — CNN addestrata: target "+1% prima di −1%" (`train_cnn.py --target barrier`)
+
+**Domanda:** tolta la volatilità dal target, la CNN che guarda il grafico sa dire **da che parte** si muoverà il prezzo?
+
+**Risposta breve: no.** Sul test la CNN ha AUC **0.497**, sotto il caso, con z ≈ −0.5 rispetto al nullo. Nel 10% di finestre a punteggio più alto vince il 52.4% dei trade, contro una frequenza di base del 52.1%.
+
+## Setup
+
+Uguale alla Parte 2 (20 candele → immagine 2×32×40, finestre non sovrapposte, split 70/30 per asset, 33 asset 1H), con queste differenze:
+
+| | |
+|---|---|
+| Target | ingresso al close dell'ultima candela visibile; **1** se l'high tocca +1% prima che il low tocchi −1%, **0** altrimenti |
+| Esclusi | finestre in cui entrambe le soglie sono toccate nella stessa barra (ordine non conoscibile su OHLC) e finestre non risolte entro 200 barre |
+| Purge | una finestra di train è tenuta solo se la barriera si risolve **prima** del taglio del 70% |
+| Campioni | 16 533 train / 2 933 val / 8 298 test. Frequenza di base 0.51 nel train e 0.52 nel test. Mediana di 8 barre per arrivare a una delle due soglie |
+| EURUSD | ora è utilizzabile: 913 finestre di train (430 positive) e 377 di test |
+| Baseline in più | `asset prior`: il tasso di vittoria di ogni asset nel train (cattura solo il drift dell'asset, nessun timing) |
+
+## Risultati sul test (`results/train_cnn_results_barrier.csv`)
+
+| modello | AUC (pool) | AUC entro l'asset | z vs nullo | vittorie nel top 10% (entro asset) | P&L medio top 10% (bps) |
+|---|---|---|---|---|---|
+| asset prior | 0.487 | 0.500 | — | 0.521 | 4.3 |
+| vol (3 numeri) | 0.511 | 0.511 | 1.6 | 0.531 | 6.3 |
+| raw candele + vol (HGB) | 0.509 | 0.511 | 1.6 | 0.546 | 9.1 |
+| **CNN solo immagine** | **0.498** | **0.497** | **−0.5** | 0.503 | 0.6 |
+| **CNN immagine + scala** | **0.497** | **0.498** | **−0.5** | 0.524 | 4.9 |
+| stack vol + CNN | 0.505 | 0.505 | 0.8 | 0.514 | 2.7 |
+| *tutti i trade* | | | | *0.521* | *4.3* |
+
+Il P&L medio è in bps per trade: +100 se vince, −100 se perde, costi esclusi.
+
+- **Già in validazione** la CNN si ferma a 0.51–0.52 (con la soglia fissa della Parte 2 arrivava a 0.74). L'early stopping si attiva dopo circa 13 epoche: il modello non trova nulla da imparare che generalizzi.
+- **Nessun baseline è significativo.** Il migliore (raw + vol, z = 1.6) resta sotto la soglia del 5% anche prima di correggere per i 6 modelli testati.
+- **Sul piano economico:** il 10% di trade selezionati dalla CNN rende +4.9 bps lordi, praticamente come prenderli tutti (+4.3 bps, cioè il drift). Dopo i costi è negativo.
+- **Per asset** (`results/train_cnn_per_asset_barrier.csv`): l'AUC della CNN va da 0.43 a 0.56 e si distribuisce simmetricamente intorno a 0.5, come ci si aspetta dal rumore su 150–500 campioni.
+
+## Conclusioni sulle tre parti
+
+| | target | cosa ha imparato il modello visivo |
+|---|---|---|
+| Parte 1 | direzione a 6/24 barre | niente (AUC 0.50–0.51) |
+| Parte 2 | close +1% a 10 barre | **volatilità** (AUC 0.72), identica a 3 numeri su range e volatilità |
+| Parte 3 | +1% prima di −1% | niente (AUC 0.497) |
+
+L'idea degli "occhi del trader" funziona *tecnicamente*: la CNN impara davvero dai pixel quando nel target c'è qualcosa da imparare (Parte 2). Ma l'unica informazione che il grafico porta è *quanto* si muove il prezzo. La *direzione* a breve, su dati orari, non è contenuta nella forma delle ultime 20–50 candele, per nessun encoder provato (CNN addestrata, CNN casuale, PCA, autoencoder) e nemmeno nei numeri grezzi.
+
+Se si vuole continuare, ha più senso usare il grafico come **contesto** invece che come previsore autonomo:
+- condizionare un evento FORGE già validato: "l'evento X funziona meglio quando il grafico ha questa forma?";
+- prevedere la volatilità per dimensionare stop e target (Parte 2).
