@@ -280,7 +280,7 @@ def report(name, y, s, fwd, assets):
         m = np.where(assets == a)[0]
         top_w[m] = s[m] >= np.quantile(s[m], 0.9)
     return dict(model=name, auc_pooled=roc_auc_score(y, s), auc_within=wa, n_assets=na,
-                within_null_mean=nm, within_null_sd=ns, z_within=(wa - nm) / ns,
+                within_null_mean=nm, within_null_sd=ns, z_within=(wa - nm) / ns if ns > 0 else float('nan'),
                 prec_top10=y[top].mean(), base_rate=y.mean(),
                 prec_top10_within=y[top_w].mean(),
                 fwd_bps_top10_within=1e4 * fwd[top_w].mean(), fwd_bps_all=1e4 * fwd.mean())
@@ -333,11 +333,13 @@ def main():
     st = LogisticRegression().fit(Z[va], y[va])
     scores["stack vol + cnn"] = st.decision_function(Z)
 
+    sfx = "" if TARGET == "fixed" else f"_{TARGET}"
+    OUT.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(OUT / f"train_cnn_scores{sfx}.npz", y=y, fwd=d["fwd"], split=sp.astype(str),
+                        asset=A.astype(str), **{k.replace(" ", "_"): v for k, v in scores.items()})
     for name, s in scores.items():
         rows.append(report(name, y[te], s[te], d["fwd"][te], A[te]))
     res = pd.DataFrame(rows)
-    OUT.mkdir(parents=True, exist_ok=True)
-    sfx = "" if TARGET == "fixed" else f"_{TARGET}"
     res.to_csv(OUT / f"train_cnn_results{sfx}.csv", index=False)
     (OUT / f"train_cnn_training_log{sfx}.json").write_text(json.dumps(logs, indent=1, default=float))
     pd.set_option("display.width", 250)
