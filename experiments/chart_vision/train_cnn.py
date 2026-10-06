@@ -27,10 +27,23 @@ volatile* an asset is.  So we report, next to the pooled AUC:
 and the *within-asset* AUC (mean of per-asset AUCs), which removes the
 cross-asset volatility effect and measures timing only.
 
-Run:  python experiments/chart_vision/train_cnn.py
+Target variants (``--target``)
+------------------------------
+* ``fixed``   (default) close[t+10] / close[t] - 1 >= +1%
+* ``barrier`` "+1% before -1%": from the close of the last visible candle,
+              walk forward bar by bar; 1 if the high reaches +1% before the
+              low reaches -1%, 0 if the opposite.  Bars that touch both levels
+              (order unknowable on OHLC) and windows unresolved within
+              ``MAX_BARRIER`` bars are dropped.  Train windows must resolve
+              before the 70% cut (purge).  This target is volatility-neutral:
+              a big move is equally likely to hit either side, so only the
+              *direction* is left to predict.
+
+Run:  python experiments/chart_vision/train_cnn.py [--target barrier]
 """
 from __future__ import annotations
 
+import argparse
 import glob
 import json
 import time
@@ -58,6 +71,8 @@ PX = 2          # pixels per candle -> width 40
 TRAIN_FRAC = 0.70
 VAL_FRAC = 0.15  # of train windows, last chronologically, for early stopping
 SEEDS = [0, 1, 2]
+MAX_BARRIER = 200  # bars allowed for the +1%/-1% barrier to resolve
+TARGET = "fixed"
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +110,26 @@ def windows(df, ends):
     return render(O, H, L, C), raw.astype(np.float32), vol.astype(np.float32), fwd
 
 
+def barrier(df, ends):
+    """+THR before -THR from close[t]. Returns (label in {1,0,-1 unresolved/ambiguous}, resolve index)."""
+    h, l, c = (df[x].to_numpy(float) for x in ("high", "low", "close"))
+    n = len(c)
+    lab = np.full(len(ends), -1, dtype=np.int8)
+    res = np.full(len(ends), n + MAX_BARRIER, dtype=np.int64)
+    for i, t in enumerate(ends):
+        stop = min(n, t + 1 + MAX_BARRIER)
+        up = h[t + 1:stop] >= c[t] * (1 + THR)
+        dn = l[t + 1:stop] <= c[t] * (1 - THR)
+        iu = np.argmax(up) if up.any() else MAX_BARRIER + 1
+        idn = np.argmax(dn) if dn.any() else MAX_BARRIER + 1
+        if iu == idn:                    # same bar or never: unknown order / unresolved
+            res[i] = t + 1 + min(iu, MAX_BARRIER)
+            continue
+        lab[i] = int(iu < idn)
+        res[i] = t + 1 + min(iu, idn)
+    return lab, res
+
+
 def build():
     parts = []
     for f in sorted(glob.glob(str(DATA / "*_1HOUR.csv"))):
@@ -108,14 +143,24 @@ def build():
         tr_ends = np.arange(W - 1, cut - HZ, W)
         te_ends = np.arange(cut + W - 1, n - HZ, W)          # first test image starts at cut
         for split, ends in (("train", tr_ends), ("test", te_ends)):
+            if TARGET == "barrier":
+                lab, res = barrier(df, ends)
+                keep = lab >= 0
+                if split == "train":
+                    keep &= res < cut                          # purge: resolved before the cut
+                ends, lab, res = ends[keep], lab[keep], res[keep]
             img, raw, vol, fwd = windows(df, ends)
+            if TARGET == "barrier":
+                fwd = np.where(lab == 1, THR, -THR)            # realised P&L of the barrier trade
+                bars = (res - ends).astype(np.float32)
             sp = np.full(len(ends), split, dtype=object)
             if split == "train":
                 sp[int(len(ends) * (1 - VAL_FRAC)):] = "val"
             parts.append(dict(img=img, raw=raw, vol=vol, fwd=fwd, split=sp,
+                              bars=bars if TARGET == "barrier" else np.full(len(ends), HZ, np.float32),
                               asset=np.full(len(ends), asset, dtype=object)))
     cat = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
-    cat["y"] = (cat["fwd"] >= THR).astype(np.float32)
+    cat["y"] = (cat["fwd"] >= THR).astype(np.float32)   # barrier: fwd is exactly +/-THR
     return cat
 
 
@@ -253,7 +298,12 @@ def main():
     print(f"EURUSD alone: train windows={(trva & e).sum()} positives={int(y[trva & e].sum())}; "
           f"test windows={(te & e).sum()} positives={int(y[te & e].sum())}")
 
+    if TARGET == "barrier":
+        print(f"median bars to resolve: train={np.median(d['bars'][trva]):.0f} test={np.median(d['bars'][te]):.0f}")
     rows, scores = [], {}
+    # asset prior: the train win-rate of each asset (captures drift, zero timing by construction)
+    prior = pd.Series(y[trva]).groupby(A[trva]).mean()
+    scores["asset prior (train win-rate)"] = pd.Series(A).map(prior).fillna(y[trva].mean()).to_numpy()
     sc_vol = StandardScaler().fit(d["vol"][trva])
     V = sc_vol.transform(d["vol"]).astype(np.float32)
 
@@ -287,8 +337,9 @@ def main():
         rows.append(report(name, y[te], s[te], d["fwd"][te], A[te]))
     res = pd.DataFrame(rows)
     OUT.mkdir(parents=True, exist_ok=True)
-    res.to_csv(OUT / "train_cnn_results.csv", index=False)
-    (OUT / "train_cnn_training_log.json").write_text(json.dumps(logs, indent=1, default=float))
+    sfx = "" if TARGET == "fixed" else f"_{TARGET}"
+    res.to_csv(OUT / f"train_cnn_results{sfx}.csv", index=False)
+    (OUT / f"train_cnn_training_log{sfx}.json").write_text(json.dumps(logs, indent=1, default=float))
     pd.set_option("display.width", 250)
     print(res.round(4).to_string(index=False))
 
@@ -302,10 +353,13 @@ def main():
                             auc_cnn=roc_auc_score(y[m], s[m]),
                             auc_vol=roc_auc_score(y[m], scores["vol (range+realised vol)"][m])))
     per = pd.DataFrame(per)
-    per.to_csv(OUT / "train_cnn_per_asset.csv", index=False)
+    per.to_csv(OUT / f"train_cnn_per_asset{sfx}.csv", index=False)
     print(per.round(3).to_string(index=False))
     print(f"done in {time.time()-t0:.0f}s")
 
 
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--target", choices=["fixed", "barrier"], default="fixed")
+    TARGET = ap.parse_args().target
     main()
