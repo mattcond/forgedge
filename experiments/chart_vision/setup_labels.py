@@ -82,7 +82,10 @@ def chart_features(kpi, enc):
 
 
 def main(k):
+    global OUT
+    OUT = OUT.parent / f"setups_k{k}"
     OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / ".gitignore").write_text("*.parquet\n")
     enc = cv.RandomConvEncoder(seed=0)
     per = {}
     for a in ASSETS:
