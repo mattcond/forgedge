@@ -30,7 +30,7 @@ import pandas as pd
 from forgedge import forge, forge_preset
 
 HERE = Path(__file__).resolve().parent
-SETUPS = HERE / "results" / "setups"
+SETUPS = HERE / "results" / "setups_k12"
 OUT = HERE / "results" / "forge_setups"
 
 # per-side cost as a fraction of price (spread + commission, retail CFD/FX order of magnitude)
