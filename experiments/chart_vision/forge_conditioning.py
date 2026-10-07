@@ -42,6 +42,7 @@ OUT = HERE / "results" / "forge_conditioning"
 FEES = {"E_SandP-500": 0.0001, "E_DAAX": 0.0001, "EURUSD": 0.00009,
         "GBPUSD": 0.0001, "E_Brent": 0.0002}
 N_PARENTS = 20
+W_SETUP = 20  # candles per setup chart (setup_labels.W)
 
 
 def configs(asset):
@@ -107,14 +108,26 @@ def main(asset, k):
         s = ser.reindex(ts)
         kc[f"ev_{i:02d}"] = s.fillna(0).astype(int).to_numpy()
     kc["fsetup"] = np.roll(kc["setup"].to_numpy(), len(kc) // 2)
+    # numeric control: "20-bar return in its lowest quantile", same frequency as
+    # the decline setup and threshold fitted on the same first 50% -> a setup
+    # expressible with ONE number, no image
+    ret20 = kc["close"] / kc["close"].shift(W_SETUP - 1) - 1
+    fit = np.arange(len(kc)) < len(kc) // 2
+    decline = (kc.loc[fit].groupby("setup")["close_ret_24"].median().idxmin()
+               if "close_ret_24" in kc else None)
+    freq = (kc.loc[fit, "setup"] == decline).mean()
+    thr = ret20[fit].quantile(freq)
+    kc["nsetup"] = np.where(ret20 <= thr, decline, "none")
+    kc.loc[ret20.isna(), "nsetup"] = None
 
     labels = sorted(kc["setup"].dropna().unique())
     manual, meta = [], []
     for i in range(len(parents_df)):
         manual.append(CustomEvent(f"ev_{i:02d} == 1", name=f"P{i:02d}"))
         meta.append(dict(parent=i, kind="parent", setup=None))
-        for col, kind in (("setup", "real"), ("fsetup", "fake")):
-            for lab in labels:
+        for col, kind, labs in (("setup", "real", labels), ("fsetup", "fake", labels),
+                                ("nsetup", "numeric", [decline])):
+            for lab in labs:
                 manual.append(CustomEvent(f"ev_{i:02d} == 1 and {col} == '{lab}'",
                                           name=f"P{i:02d}&{kind}{lab}"))
                 meta.append(dict(parent=i, kind=kind, setup=lab))

@@ -166,3 +166,80 @@ L'idea degli "occhi del trader" funziona *tecnicamente*: la CNN impara davvero d
 Se si vuole continuare, ha più senso usare il grafico come **contesto** invece che come previsore autonomo:
 - condizionare un evento FORGE già validato: "l'evento X funziona meglio quando il grafico ha questa forma?";
 - prevedere la volatilità per dimensionare stop e target (Parte 2).
+
+---
+
+# Parte 4 — Setup non supervisionati come *contesto* per gli eventi FORGE
+
+**Domanda:** se etichettiamo i grafici in "setup" senza supervisione, un evento già validato da FORGE funziona meglio quando si verifica dentro un certo setup?
+
+**Risposta breve:** sì, ma solo per un setup, e quel setup equivale a un solo numero. La "discesa che chiude vicino ai minimi" migliora nettamente gli eventi rispetto a un setup finto (47/60 coppie, p < 0.001). Lo stesso miglioramento però si ottiene con "rendimento a 20 barre nel quantile basso", senza immagine. Nessuna ipotesi supera M3: tutte risultano **NON-EDGE**.
+
+## 1. Etichettatura (`setup_labels.py`)
+
+- Grafico di 20 candele → CNN a kernel casuali (non addestrata) → standardizzazione → PCA (10 componenti) → **KMeans**.
+- Fit **solo sul primo 50%** di 6 serie 1H (S&P, DAX, EURUSD, GBPUSD, Brent, BTC) in pool, così il clustering non vede mai il 30% out-of-sample di FORGE. Nessun rendimento viene usato.
+- Ogni barra riceve l'etichetta del grafico che termina su di essa. È una funzione dei soli prezzi passati, quindi rispetta l'invariante #1.
+- k = 12 (`results/setups_k12/`): setup leggibili (breakout, bandiera, discesa, base, top, laterale). k = 4 (`results/setups_k4/`):
+  - `S00` rally seguito da una pausa sui massimi;
+  - `S01` breakout rialzista nelle ultime candele;
+  - `S02` laterale o in calo disordinato;
+  - `S03` **discesa che chiude vicino ai minimi**.
+- Il silhouette è basso (≈0.11): lo spazio dei grafici è un continuo, non gruppi netti. La frequenza di ogni setup è stabile tra il periodo di fit e quello successivo.
+
+## 2. Primo tentativo: setup come colonna categorica (`forge_setups.py`)
+
+FORGE trasforma la colonna `setup` in eventi `is_setup_Sxx`, ma **nessuno supera il Consistency Gate**. Il preset `balanced` 1H chiede ≥ 24 episodi al mese e i setup ne fanno 9–22, anche con k = 4. Di conseguenza non arrivano mai alla composizione e i run A (base) e B (+ setup) risultano identici. Nota: i run in parallelo di EURUSD/S&P B sono stati interrotti per memoria, e BTCEUR produce 0 candidati in M1 a prescindere dai setup.
+
+## 3. Test diretto: condizionare eventi validati (`forge_conditioning.py`)
+
+Per S&P, EURUSD e DAX:
+1. Run FORGE di base → i **20 eventi promossi in M2 con il punteggio più alto** sono i "padri".
+2. Un secondo run FORGE (manual events, stessa sessione, stesso null, stesso walk-forward) valuta:
+   - `P` — il padre da solo;
+   - `P & setup == Sk` — il padre ristretto a ciascun setup reale;
+   - `P & fsetup == Sk` — **controllo finto**: la colonna dei setup spostata di metà serie (stesse frequenze e durate, nessun legame con il grafico);
+   - `P & nsetup` — **controllo numerico**: "rendimento a 20 barre ≤ quantile", con la stessa frequenza del setup di discesa e soglia fittata sullo stesso primo 50%.
+
+### Risultati (`results/forge_conditioning/*_k4_hypotheses.csv`)
+
+Setup di discesa `S03` (60 coppie = 20 padri × 3 asset):
+
+| asset | condizione | promossi M2 | conferma OOS M2 | direzione long | punteggio M2 (mediana) | PF OOS M3 (mediana) |
+|---|---|---|---|---|---|---|
+| EURUSD | setup **reale** | 1.00 | **0.70** | 0.65 | 0.47 | 0.83 |
+| | setup finto | 0.20 | 0.05 | 0.05 | 0.15 | 0.76 |
+| | numerico | 0.95 | 0.25 | 0.65 | 0.38 | 0.83 |
+| S&P | setup **reale** | 0.80 | 0.50 | 0.75 | 0.62 | 1.25 |
+| | setup finto | 0.65 | 0.25 | 0.50 | 0.44 | 1.27 |
+| | numerico | 0.75 | 0.60 | 0.65 | 0.64 | 0.93 |
+| DAX | setup **reale** | 0.35 | 0.15 | 0.05 | 0.12 | 1.05 |
+| | setup finto | 0.05 | 0.00 | 0.05 | 0.11 | — |
+| | numerico | 0.25 | 0.15 | 0.05 | 0.13 | 1.10 |
+
+Confronti a coppie sul punteggio composito di M2 (test del segno unilaterale):
+- **reale > finto: 47/60, p < 0.001**, differenza mediana +0.23;
+- **reale > numerico: 37/60, p = 0.046**, differenza mediana +0.03, al limite e senza correzione per test multipli.
+
+Sugli altri setup (S00, S01, S02) il setup reale non batte in modo sistematico quello finto. Considerando tutte le 240 coppie, reale > finto vale solo nel 45% dei casi.
+
+**Verdetto M3:** 0 EDGE e 0 PARTIAL-EDGE su 540 ipotesi (padri, reali, finti, numerici). Il preset `balanced` richiede PF ≥ 2 (≥ 1.5 per PARTIAL) e win rate ≥ 55%. Il miglior PF OOS mediano è 1.25 (S&P), e su EURUSD i costi lo portano sotto 1.
+
+## Lettura
+
+1. **I setup non supervisionati catturano qualcosa di reale.** Il contesto "discesa che chiude sui minimi" cambia il comportamento degli eventi: più promozioni, più conferme OOS, e la direzione passa in prevalenza a long. È un mean-reversion di breve periodo dopo un calo, coerente su tre asset diversi, e il setup finto con la stessa frequenza non lo riproduce.
+2. **Quel contesto però è un numero, non una forma.** Il controllo numerico (rendimento a 20 barre) ottiene quasi lo stesso risultato. L'immagine ha "riscoperto" la variabile `ret_20`, che FORGE ha già nella KPI table.
+3. **Non è economicamente sfruttabile** con i criteri di FORGE: tutto NON-EDGE in M3.
+4. **Attenzione alla dipendenza:** i 20 padri di ogni asset sono spesso varianti della stessa famiglia (per esempio `range_pct_96/168`). Le 60 coppie non sono 60 prove indipendenti, quindi i p-value sono ottimistici.
+
+## Come proseguire
+
+- Se l'obiettivo è il contesto "dopo un calo", conviene usarlo come **feature numerica** (rendimento a 20 barre, posizione nel range) e lasciare che la composizione di FORGE la combini. Non serve l'immagine.
+- Un setup *visivo* avrebbe senso solo se catturasse qualcosa che pochi numeri non esprimono: forme complesse (testa e spalle, triangoli), su timeframe più lunghi, con un encoder addestrato in modo contrastivo. Andrebbe verificato sempre contro gli stessi due controlli, finto e numerico.
+
+Riprodurre:
+```
+python experiments/chart_vision/setup_labels.py --k 4
+PYTHONHASHSEED=0 python experiments/chart_vision/forge_conditioning.py --k 4 E_SandP-500 EURUSD E_DAAX
+```
+(il run di base di FORGE dura 10–70 minuti per asset; viene messo in cache in `*_parents.pkl`).
