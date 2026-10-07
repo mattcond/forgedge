@@ -243,3 +243,45 @@ python experiments/chart_vision/setup_labels.py --k 4
 PYTHONHASHSEED=0 python experiments/chart_vision/forge_conditioning.py --k 4 E_SandP-500 EURUSD E_DAAX
 ```
 (il run di base di FORGE dura 10–70 minuti per asset; viene messo in cache in `*_parents.pkl`).
+
+---
+
+# Parte 5 — ID bottom-up per formazioni simili (`formations.py`)
+
+**Domanda (solo etichettatura, niente target):** se raggruppiamo dal basso i grafici che si somigliano molto, sotto lo stesso ID, quali "formazioni" emergono? E ricorrono più di quanto farebbe il caso?
+
+## Metodo
+
+| | |
+|---|---|
+| Unità | grafico da 20 candele, immagine 2×32×40 px autoscalata; finestre **non sovrapposte** (finestre spostate di una barra si somiglierebbero per costruzione) |
+| Dati | 33 serie 1H, primo 70% di ciascuna per il fit (20 152 grafici), ultimo 30% per verificare la ricorrenza (8 616) |
+| Somiglianza | distanza euclidea tra immagini leggermente sfocate (σ = 0.8 px): una candela spostata di un pixel conta come la stessa |
+| Raggruppamento | clustering agglomerativo a **legame completo**, tagliato a una distanza τ: *ogni* coppia di membri è sotto τ ("tutti somigliano a tutti") |
+| Soglia | τ espressa come percentile della distanza tra coppie casuali (τ@1% = più simili del 99% delle coppie a caso); **ID solo se ≥ 10 membri**, tutto il resto resta **non etichettato** |
+| Controllo | stessa procedura su serie con le **candele rimescolate nel tempo**: la forma della singola candela resta, le formazioni multi-candela spariscono |
+
+## Risultati (`results/formations/`)
+
+| τ (percentile) | ID reali | copertura reale | ID rimescolati | copertura rimescolata |
+|---|---|---|---|---|
+| 0.25% | 6 | 0.3% | 25 | 1.4% |
+| 0.5% | 28 | 1.6% | 57 | 3.5% |
+| **1%** | **88** | **5.3%** | **108** | **7.0%** |
+| 2% | 168 | 11.1% | 195 | 13.6% |
+| 5% | 321 | 23.6% | 346 | 27.3% |
+
+- **Il metodo funziona come raggruppatore** (`gallery_real.png`): gli ID sono visivamente coerenti. Membri di asset e anni diversi hanno davvero la stessa forma, e i gruppi principali contano 10–17 asset diversi.
+- **Però le formazioni che emergono sono quasi solo trend "puliti":** salita regolare, discesa regolare, curva a S, rally seguito da una pausa, accelerazione finale. È ciò che rende due grafici molto simili pixel per pixel. Formazioni con più fasi (testa e spalle, doppio minimo, triangoli) non producono gruppi abbastanza compatti.
+- **Il controllo rimescolato produce PIÙ ID e più copertura a ogni soglia** (`gallery_shuffled.png`), con gli stessi tipi di forma. Le formazioni ricorrenti dei dati reali non sono più frequenti di quelle che una sequenza casuale di candele genera da sola. I dati reali ne hanno anzi meno, probabilmente perché il volatility clustering e i gap (una candela enorme in mezzo a candele piccole) rendono i grafici reali più idiosincratici.
+- **Stabilità nel tempo:** la frequenza degli ID nel fit e nel holdout è poco correlata (0.21 reale contro 0.29 rimescolato). Nota: la copertura del holdout (25%) non è confrontabile con quella del fit (5%), perché l'assegnazione dei nuovi grafici usa una regola più larga (distanza dal medoide entro il raggio). Il confronto reale/rimescolato usa però la stessa regola (25% contro 28%).
+
+## Lettura
+
+L'etichettatura bottom-up fa quello che promette: dà lo stesso ID a grafici che si somigliano davvero, e lascia senza etichetta il ~95% dei grafici che non somigliano abbastanza a nessun altro. Però **a livello di forma candela per candela, le formazioni ricorrenti sono quelle che produce anche il caso**. Per trovare "formazioni" che valga la pena portare alla fase successiva serve una nozione di somiglianza diversa, oppure un criterio di selezione che le confronti con il nullo:
+
+1. **Tenere solo gli ID in eccesso rispetto al nullo:** densità della formazione nei dati reali contro quelli rimescolati (rapporto > 1 con un margine). È il filtro naturale prima della Fase 2.
+2. **Somiglianza più "gestaltica":** confrontare la forma a risoluzione più bassa (per esempio 8–10 punti per grafico) o con distanza elastica (DTW). Così "testa e spalle" più larga o più stretta resta la stessa formazione.
+3. **Embedding appreso in modo contrastivo:** si addestra un encoder che considera uguali due versioni leggermente deformate dello stesso grafico, e si raggruppa in quello spazio.
+
+Riprodurre: `python experiments/chart_vision/formations.py --tau-pct 1.0` (~15 minuti, la maggior parte è il linkage su 20k grafici).
