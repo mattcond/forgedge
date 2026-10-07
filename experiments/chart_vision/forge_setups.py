@@ -99,7 +99,7 @@ def main(assets):
             c = dict(asset=asset, run=tag, minutes=round((time.time() - t0) / 60, 1), **counts(res, tbl))
             summary.append(c)
             print(json.dumps(c), flush=True)
-            pd.DataFrame(summary).to_csv(OUT / "summary.csv", index=False)
+            pd.DataFrame(summary).to_csv(OUT / f"summary_{'_'.join(assets)}.csv", index=False)
     print(pd.DataFrame(summary).to_string(index=False))
 
 
