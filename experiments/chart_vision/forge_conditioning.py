@@ -121,7 +121,10 @@ def main(asset, k):
 
     # 3. evaluate every hypothesis in one session (same null, same walk-forward)
     res = forge(kc, ticker=asset, timeframe="1H", manual_events=manual,
-                alpha_config=a, rule_discovery_config=r)
+                alpha_config=a, rule_discovery_config=r, two_pass_composition=False)
+    m2 = res.summary().drop_duplicates("expression").set_index("expression")
+    M2_COLS = ["direction", "holding_period_h", "lift", "mean_advantage", "win_rate", "base_rate",
+               "oos_passed", "oos_lift", "oos_p_value", "grade", "composite_score"]
     by_name = {}
     cand_by_id = {c.event_id: c for c in res.candidates}
     for c in res.contracts:
@@ -139,7 +142,8 @@ def main(asset, k):
                    parent_baseline_verdict=parents_df["baseline_verdict"].iloc[m["parent"]],
                    n_active=int(ev.apply(kc).sum()),
                    m2_promoted=bool(c is not None and c in (res.promoted or [])),
-                   direction=getattr(c, "direction", None))
+                   **{f"m2_{col}": (m2.at[cand_expr, col] if cand_expr in m2.index else None)
+                      for col in M2_COLS})
         row.update(stats(resp) if resp is not None else dict(verdict="not-in-M3"))
         rows.append(row)
     df = pd.DataFrame(rows)
