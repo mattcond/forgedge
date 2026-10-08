@@ -1,0 +1,5 @@
+asset,run,minutes,candidates,setup_candidates,promoted,m3_evaluated,edge,partial,edge_with_setup,partial_with_setup
+E_DAAX,A_baseline,20.4,3462,0,599,599,0,0,0,0
+E_DAAX,B_with_setup,16.5,3462,0,599,599,0,0,0,0
+BTCEUR,A_baseline,1.6,0,0,0,0,0,0,0,0
+BTCEUR,B_with_setup,1.5,0,0,0,0,0,0,0,0

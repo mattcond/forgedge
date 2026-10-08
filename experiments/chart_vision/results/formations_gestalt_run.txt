@@ -1,0 +1,201 @@
+charts: real fit=20152 holdout=8616 (2s)
+[dtw] linkage done 129s
+{
+ "metric": "dtw",
+ "tau_pct": 1.0,
+ "tau": 0.221208534952764,
+ "n_ids": 104,
+ "coverage": {
+  "real_fit": 0.20221317983326717,
+  "real_holdout": 0.18337975858867223,
+  "shuffled_fit": 0.19245657568238214,
+  "shuffled_holdout": 0.19096819131646156
+ },
+ "n_selected_holdout_fdr": 0,
+ "n_hold_p05": 6,
+ "n_hold_p05_expected": 5.2,
+ "min_q_hold": 0.551548682022166,
+ "excess_hold_median": 0.9303395491591869
+}
+formation  size  n_assets  radius  hits_real_fit_nonmember  hits_shuf_fit  excess_fit  p_fit  hits_real_hold  hits_shuf_hold  excess_hold  p_hold  q_hold  selected
+     G062    11        10   0.182                       56             60       0.933  0.679              24              10        2.399   0.012   0.552     False
+     G022    13        10   0.161                       72             51       1.412  0.035              32              16        2.000   0.015   0.552     False
+     G086    10         8   0.151                        8             17       0.471  0.978              12               3        3.999   0.018   0.552     False
+     G096    10         9   0.171                       30             22       1.364  0.166              23              11        2.090   0.029   0.552     False
+     G061    11         9   0.179                       34             33       1.030  0.500              20               9        2.222   0.031   0.552     False
+     G020    13         8   0.139                       11             15       0.733  0.837              14               5        2.799   0.032   0.552     False
+     G077    10         9   0.179                       27             35       0.771  0.874              30              18        1.666   0.056   0.767     False
+     G021    13         8   0.177                       37             35       1.057  0.453              23              13        1.769   0.066   0.767     False
+     G040    12        11   0.193                       39             39       1.000  0.545              28              17        1.647   0.068   0.767     False
+     G070    10         9   0.181                       43             28       1.536  0.048              20              11        1.818   0.075   0.767     False
+     G033    12        12   0.193                       80             63       1.270  0.090              37              25        1.480   0.081   0.767     False
+     G069    10         8   0.152                       11             10       1.100  0.500               7               2        3.499   0.090   0.779     False
+{
+ "metric": "dtw",
+ "tau_pct": 2.0,
+ "tau": 0.25371724908250887,
+ "n_ids": 270,
+ "coverage": {
+  "real_fit": 0.41762604208019055,
+  "real_holdout": 0.3940343546889508,
+  "shuffled_fit": 0.39707196029776676,
+  "shuffled_holdout": 0.3938936614813095
+ },
+ "n_selected_holdout_fdr": 0,
+ "n_hold_p05": 10,
+ "n_hold_p05_expected": 13.5,
+ "min_q_hold": 0.2936792067144827,
+ "excess_hold_median": 0.9997678737233054
+}
+formation  size  n_assets  radius  hits_real_fit_nonmember  hits_shuf_fit  excess_fit  p_fit  hits_real_hold  hits_shuf_hold  excess_hold  p_hold  q_hold  selected
+     G054    14         8   0.202                       20             11       1.818  0.075              19               4        4.749   0.001   0.294     False
+     G210    10        10   0.209                       33             22       1.500  0.089              18               4        4.499   0.002   0.294     False
+     G158    11         7   0.208                        7              9       0.778  0.773              11               2        5.499   0.011   0.835     False
+     G211    10         8   0.198                       47             51       0.921  0.693              32              16        2.000   0.015   0.835     False
+     G172    11        11   0.204                       28             18       1.555  0.092              14               4        3.499   0.015   0.835     False
+     G220    10         9   0.179                       14             24       0.583  0.964              21               9        2.333   0.021   0.949     False
+     G181    11         9   0.179                       19             25       0.760  0.854              11               3        3.666   0.029   0.949     False
+     G098    13        12   0.167                       31             31       1.000  0.550              22              11        2.000   0.040   0.949     False
+     G063    14        11   0.169                       16             14       1.143  0.428              13               5        2.599   0.048   0.949     False
+     G068    14        12   0.192                       25             37       0.676  0.951              20              10        2.000   0.049   0.949     False
+     G170    11         9   0.192                       67             74       0.905  0.750              44              29        1.517   0.050   0.949     False
+     G040    15        13   0.205                       25             22       1.136  0.385              14               6        2.333   0.058   0.949     False
+{
+ "metric": "dtw",
+ "tau_pct": 5.0,
+ "tau": 0.31796365669415433,
+ "n_ids": 632,
+ "coverage": {
+  "real_fit": 0.7988289003572846,
+  "real_holdout": 0.7795961002785515,
+  "shuffled_fit": 0.7790570719602977,
+  "shuffled_holdout": 0.7752495936846994
+ },
+ "n_selected_holdout_fdr": 0,
+ "n_hold_p05": 26,
+ "n_hold_p05_expected": 31.6,
+ "min_q_hold": 0.3718481427167583,
+ "excess_hold_median": 0.9997678737233054
+}
+formation  size  n_assets  radius  hits_real_fit_nonmember  hits_shuf_fit  excess_fit  p_fit  hits_real_hold  hits_shuf_hold  excess_hold  p_hold  q_hold  selected
+     G586    10         5   0.299                       23             25       0.920  0.667              22               5        4.399   0.001   0.372     False
+     G545    10         8   0.198                       12             18       0.667  0.900              15               2        7.498   0.001   0.372     False
+     G321    13        11   0.231                       14             21       0.667  0.912              20               7        2.856   0.010   1.000     False
+     G420    12         9   0.222                       19             29       0.655  0.944              15               4        3.749   0.010   1.000     False
+     G456    11        11   0.246                       28             27       1.037  0.500              13               3        4.332   0.011   1.000     False
+     G620    10        10   0.169                       11             22       0.500  0.982              16               5        3.199   0.013   1.000     False
+     G532    11         7   0.294                       33             35       0.943  0.642              19               7        2.714   0.015   1.000     False
+     G464    11         8   0.233                       19             20       0.950  0.625              12               3        3.999   0.018   1.000     False
+     G194    16        14   0.229                       16             31       0.516  0.991              12               3        3.999   0.018   1.000     False
+     G337    13        10   0.216                       19             11       1.727  0.100              10               2        4.999   0.019   1.000     False
+     G474    11         7   0.208                        4              9       0.444  0.954               8               1        7.998   0.020   1.000     False
+     G203    16        12   0.208                       21             22       0.954  0.620              22              10        2.199   0.025   1.000     False
+[euc] linkage done 75s
+{
+ "metric": "euc",
+ "tau_pct": 1.0,
+ "tau": 0.35592922312472497,
+ "n_ids": 310,
+ "coverage": {
+  "real_fit": 0.375396982929734,
+  "real_holdout": 0.3519034354688951,
+  "shuffled_fit": 0.35444168734491316,
+  "shuffled_holdout": 0.349895518922684
+ },
+ "n_selected_holdout_fdr": 0,
+ "n_hold_p05": 13,
+ "n_hold_p05_expected": 15.5,
+ "min_q_hold": 0.15159795692176986,
+ "excess_hold_median": 0.9997678737233054
+}
+formation  size  n_assets  radius  hits_real_fit_nonmember  hits_shuf_fit  excess_fit  p_fit  hits_real_hold  hits_shuf_hold  excess_hold  p_hold  q_hold  selected
+     G281    10         9   0.272                       27             33       0.818  0.817              14               1       13.997   0.000   0.152     False
+     G054    16        13   0.281                       28             25       1.120  0.392              23               8        2.874   0.005   0.494     False
+     G259    10         8   0.267                        9              7       1.286  0.402              10               1        9.998   0.006   0.494     False
+     G150    12        11   0.272                       13             24       0.542  0.976              14               3        4.666   0.006   0.494     False
+     G149    12         8   0.288                       28             59       0.475  1.000              24              10        2.399   0.012   0.755     False
+     G234    11         8   0.305                       41             44       0.932  0.668              22              10        2.199   0.025   1.000     False
+     G020    19        15   0.237                       11             24       0.458  0.992              16               6        2.666   0.026   1.000     False
+     G218    11         8   0.238                       15             21       0.714  0.879               7               1        6.998   0.035   1.000     False
+     G129    12        10   0.256                        4             10       0.400  0.971               7               1        6.998   0.035   1.000     False
+     G223    11        10   0.281                       11             25       0.440  0.994              12               4        2.999   0.038   1.000     False
+     G275    10         8   0.304                       13             16       0.812  0.771              12               4        2.999   0.038   1.000     False
+     G014    20        13   0.271                       17             15       1.133  0.430              15               6        2.499   0.039   1.000     False
+{
+ "metric": "euc",
+ "tau_pct": 2.0,
+ "tau": 0.4057439900214067,
+ "n_ids": 521,
+ "coverage": {
+  "real_fit": 0.6138844779674474,
+  "real_holdout": 0.584958217270195,
+  "shuffled_fit": 0.5962779156327543,
+  "shuffled_holdout": 0.587299744601811
+ },
+ "n_selected_holdout_fdr": 0,
+ "n_hold_p05": 25,
+ "n_hold_p05_expected": 26.1,
+ "min_q_hold": 0.22412742230077118,
+ "excess_hold_median": 0.9997678737233054
+}
+formation  size  n_assets  radius  hits_real_fit_nonmember  hits_shuf_fit  excess_fit  p_fit  hits_real_hold  hits_shuf_hold  excess_hold  p_hold  q_hold  selected
+     G480    10         8   0.267                        3              4       0.750  0.773              10               0       19.995   0.001   0.224     False
+     G160    15        10   0.261                        6             18       0.333  0.997              15               2        7.498   0.001   0.224     False
+     G360    11        11   0.343                       16             21       0.762  0.838              17               3        5.665   0.001   0.224     False
+     G089    19        12   0.267                       20             21       0.952  0.622              16               3        5.332   0.002   0.289     False
+     G471    10        10   0.302                       11             11       1.000  0.584              12               2        5.999   0.006   0.675     False
+     G030    25        15   0.268                        4              9       0.444  0.954               7               0       13.997   0.008   0.679     False
+     G240    13         9   0.230                       10             20       0.500  0.979              20               7        2.856   0.010   0.714     False
+     G399    11        10   0.281                       11             28       0.393  0.998              11               2        5.499   0.011   0.732     False
+     G102    18        15   0.341                       27             25       1.080  0.445              25              11        2.272   0.014   0.833     False
+     G429    10        10   0.315                       38             66       0.576  0.998              26              12        2.166   0.017   0.833     False
+     G350    11         8   0.292                       11             23       0.478  0.988              12               3        3.999   0.018   0.833     False
+     G445    10         8   0.306                       10             14       0.714  0.846              10               2        4.999   0.019   0.838     False
+{
+ "metric": "euc",
+ "tau_pct": 5.0,
+ "tau": 0.4986397968102997,
+ "n_ids": 767,
+ "coverage": {
+  "real_fit": 0.9063616514489877,
+  "real_holdout": 0.8841689879294337,
+  "shuffled_fit": 0.8827791563275434,
+  "shuffled_holdout": 0.8805433016020432
+ },
+ "n_selected_holdout_fdr": 0,
+ "n_hold_p05": 36,
+ "n_hold_p05_expected": 38.4,
+ "min_q_hold": 0.1055163273107181,
+ "excess_hold_median": 0.9997678737233054
+}
+formation  size  n_assets  radius  hits_real_fit_nonmember  hits_shuf_fit  excess_fit  p_fit  hits_real_hold  hits_shuf_hold  excess_hold  p_hold  q_hold  selected
+     G126    26        16   0.267                        4             18       0.222  1.000              16               1       15.996   0.000   0.106     False
+     G697    10        10   0.302                        8             12       0.667  0.868              14               1       13.997   0.000   0.187     False
+     G719    10         8   0.397                       20             19       1.053  0.500              18               3        5.999   0.001   0.187     False
+     G339    16        11   0.267                        4              4       1.000  0.637              10               0       19.995   0.001   0.187     False
+     G622    11         8   0.384                       24             29       0.828  0.795              20               5        3.999   0.002   0.313     False
+     G054    35        16   0.275                        6             14       0.429  0.979               8               0       15.996   0.004   0.500     False
+     G646    11         9   0.340                       22             23       0.956  0.617              18               5        3.599   0.005   0.583     False
+     G363    15         9   0.441                       33             26       1.269  0.217              25              10        2.499   0.008   0.725     False
+     G493    13        10   0.371                       23             37       0.622  0.974              20               7        2.856   0.010   0.725     False
+     G648    11         8   0.383                       27             15       1.800  0.044              15               4        3.749   0.010   0.725     False
+     G607    11        10   0.310                       15             13       1.154  0.425              13               3        4.332   0.011   0.725     False
+     G366    15        11   0.414                       17             30       0.567  0.980              18               6        2.999   0.011   0.725     False
+metric  tau_pct    tau     data  n_ids  coverage  largest
+   dtw      0.5 0.1894     real     24    0.0130       13
+   dtw      0.5 0.1894 shuffled     25    0.0141       15
+   dtw      1.0 0.2212     real    104    0.0609       20
+   dtw      1.0 0.2212 shuffled    115    0.0683       29
+   dtw      2.0 0.2537     real    270    0.1697       29
+   dtw      2.0 0.2537 shuffled    261    0.1713       36
+   dtw      5.0 0.3180     real    632    0.4808       47
+   dtw      5.0 0.3180 shuffled    618    0.4701       85
+   euc      0.5 0.3149     real    141    0.0850       23
+   euc      0.5 0.3149 shuffled    131    0.0801       22
+   euc      1.0 0.3559     real    310    0.1989       25
+   euc      1.0 0.3559 shuffled    271    0.1814       35
+   euc      2.0 0.4057     real    521    0.3779       58
+   euc      2.0 0.4057 shuffled    493    0.3612       44
+   euc      5.0 0.4986     real    767    0.7027      105
+   euc      5.0 0.4986 shuffled    793    0.7093       96
+done in 288s

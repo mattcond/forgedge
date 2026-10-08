@@ -1,0 +1,17 @@
+{
+ "tau_pct": 1.0,
+ "tau": 10.825797080993652,
+ "min_size": 10,
+ "real": {
+  "n_ids": 88,
+  "coverage_fit": 0.05289797538705836,
+  "coverage_holdout": 0.25348189415041783,
+  "freq_corr_fit_vs_holdout": 0.20506831815196608
+ },
+ "shuffled": {
+  "n_ids": 108,
+  "coverage_fit": 0.07037220843672456,
+  "coverage_holdout": 0.2839563501276991,
+  "freq_corr_fit_vs_holdout": 0.2942109697925413
+ }
+}
