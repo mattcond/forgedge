@@ -285,3 +285,49 @@ L'etichettatura bottom-up fa quello che promette: dà lo stesso ID a grafici che
 3. **Embedding appreso in modo contrastivo:** si addestra un encoder che considera uguali due versioni leggermente deformate dello stesso grafico, e si raggruppa in quello spazio.
 
 Riprodurre: `python experiments/chart_vision/formations.py --tau-pct 1.0` (~15 minuti, la maggior parte è il linkage su 20k grafici).
+
+---
+
+# Parte 6 — ID bottom-up con somiglianza "gestaltica" (`formations_gestalt.py`)
+
+**Domanda:** se due grafici vengono considerati uguali quando hanno lo stesso *disegno complessivo*, anche se le singole candele differiscono e le fasi durano un po' di più o di meno, emergono formazioni che ricorrono **più del caso**?
+
+**Risposta breve: no.** La somiglianza elastica produce formazioni più ricche (multi-fase) di quella pixel per pixel. Però, su 2 604 ID tra 6 configurazioni, **nessuno** ricompare nel periodo out-of-sample più spesso che nei dati con candele rimescolate (0 ID dopo FDR). Il numero di ID con p < 0.05 coincide con quello atteso per puro caso.
+
+## Metodo
+
+| | |
+|---|---|
+| Forma | percorso del prezzo (punto medio high/low di ogni candela) scalato sul range della finestra, riassunto in **10 punti** (uno ogni 2 candele) |
+| Distanza `dtw` | Dynamic Time Warping con banda di ±2 punti: una fase può allungarsi o accorciarsi di ~4 candele, ma una salita non può diventare una discesa |
+| Distanza `euc` | euclidea sugli stessi 10 punti (senza elasticità), per isolare il contributo del warping |
+| Raggruppamento | come nella Parte 5: legame completo, τ = percentile della distanza tra coppie casuali (1%, 2%, 5%), ID solo con ≥ 10 membri, fit sul primo 70% di 33 serie 1H (20 152 grafici, finestre non sovrapposte) |
+| Test per ogni ID | gli ID vengono **congelati sul fit**; nel **30% finale** ogni grafico, reale e con candele rimescolate, viene assegnato al medoide più vicino se cade entro il raggio dell'ID (stessa regola per entrambi). Test binomiale unilaterale "reale > rimescolato", **BH-FDR** su tutti gli ID |
+
+> **Correzione metodologica.** Una prima versione testava l'eccesso sul *fit* e contava tra le occorrenze reali anche i membri dell'ID, che vi cadono per costruzione. Questo produceva un falso positivo (G073, "rally – pausa – rally", 9× sul fit). Escludere i membri non basta, perché sbilancia il campione nell'altro verso. Il test pulito è quello sul holdout, che non ha partecipato alla costruzione degli ID. Il dato del fit resta nei cataloghi solo come informazione (`hits_real_fit_nonmember`).
+
+## Risultati (`results/formations_gestalt/`)
+
+| distanza | τ | ID | ID significativi (holdout, BH q<0.05) | ID con p<0.05 | attesi per caso | q minimo | eccesso mediano holdout |
+|---|---|---|---|---|---|---|---|
+| DTW | 1% | 104 | **0** | 6 | 5.2 | 0.55 | 0.93× |
+| DTW | 2% | 270 | **0** | 10 | 13.5 | 0.29 | 1.00× |
+| DTW | 5% | 632 | **0** | 26 | 31.6 | 0.37 | 1.00× |
+| Euclidea | 1% | 310 | **0** | 13 | 15.5 | 0.15 | 1.00× |
+| Euclidea | 2% | 521 | **0** | 25 | 26.1 | 0.22 | 1.00× |
+| Euclidea | 5% | 767 | **0** | 36 | 38.4 | 0.11 | 1.00× |
+
+Anche la copertura complessiva nel holdout (quota di grafici che cade in *qualche* ID) è identica tra reale e rimescolato: per esempio con DTW al 2% vale 39.4% contro 39.4%, con DTW al 5% vale 78.0% contro 77.5%.
+
+## Cosa si vede (`gallery_dtw_tau2.png`, ordinata per p del holdout)
+
+- Rispetto alla somiglianza pixel per pixel (Parte 5), il DTW raggruppa **formazioni multi-fase**: "laterale e poi crollo finale", "top arrotondato", "spike e inversione", "crollo e recupero a V", "rally, pausa, secondo rally". È più vicino a come un trader nomina le formazioni.
+- In cima alla classifica del holdout compaiono soprattutto i **cedimenti finali dopo una fase laterale** (G054, G210, G158, eccesso 4–5× nel holdout). Nessuno però sopravvive alla correzione per test multipli (q ≥ 0.29), e il loro numero è quello atteso tra centinaia di ID.
+
+## Lettura
+
+1. **L'etichettatura bottom-up funziona come strumento:** dà ID coerenti e leggibili, e la versione elastica cattura formazioni con più fasi.
+2. **Ma nessuna formazione è "speciale" per frequenza:** le stesse forme compaiono con la stessa frequenza in una serie dove l'ordine delle candele è casuale. A 20 candele su dati orari, *quali* formazioni si vedono è spiegato dalla distribuzione delle singole candele (volatilità, code, drift), non da una struttura sequenziale.
+3. **Questo non chiude la Fase 2.** Una formazione frequente quanto nel caso può comunque essere seguita da un comportamento *diverso* da quello che seguirebbe nel caso. L'assenza di eccesso di frequenza dice solo che le formazioni non sono rare o speciali in sé; la domanda "cosa succede dopo" resta aperta. In più, gli ID ora sono definiti in modo onesto, con un catalogo congelato e una regola di assegnazione, e si possono portare alla fase successiva.
+
+Riprodurre: `python experiments/chart_vision/formations_gestalt.py` (~5 minuti; serve `numba`).

@@ -1,0 +1,104 @@
+[
+ {
+  "metric": "dtw",
+  "tau_pct": 1.0,
+  "tau": 0.221208534952764,
+  "n_ids": 104,
+  "coverage": {
+   "real_fit": 0.20221317983326717,
+   "real_holdout": 0.18337975858867223,
+   "shuffled_fit": 0.19245657568238214,
+   "shuffled_holdout": 0.19096819131646156
+  },
+  "n_selected_holdout_fdr": 0,
+  "n_hold_p05": 6,
+  "n_hold_p05_expected": 5.2,
+  "min_q_hold": 0.551548682022166,
+  "excess_hold_median": 0.9303395491591869
+ },
+ {
+  "metric": "dtw",
+  "tau_pct": 2.0,
+  "tau": 0.25371724908250887,
+  "n_ids": 270,
+  "coverage": {
+   "real_fit": 0.41762604208019055,
+   "real_holdout": 0.3940343546889508,
+   "shuffled_fit": 0.39707196029776676,
+   "shuffled_holdout": 0.3938936614813095
+  },
+  "n_selected_holdout_fdr": 0,
+  "n_hold_p05": 10,
+  "n_hold_p05_expected": 13.5,
+  "min_q_hold": 0.2936792067144827,
+  "excess_hold_median": 0.9997678737233054
+ },
+ {
+  "metric": "dtw",
+  "tau_pct": 5.0,
+  "tau": 0.31796365669415433,
+  "n_ids": 632,
+  "coverage": {
+   "real_fit": 0.7988289003572846,
+   "real_holdout": 0.7795961002785515,
+   "shuffled_fit": 0.7790570719602977,
+   "shuffled_holdout": 0.7752495936846994
+  },
+  "n_selected_holdout_fdr": 0,
+  "n_hold_p05": 26,
+  "n_hold_p05_expected": 31.6,
+  "min_q_hold": 0.3718481427167583,
+  "excess_hold_median": 0.9997678737233054
+ },
+ {
+  "metric": "euc",
+  "tau_pct": 1.0,
+  "tau": 0.35592922312472497,
+  "n_ids": 310,
+  "coverage": {
+   "real_fit": 0.375396982929734,
+   "real_holdout": 0.3519034354688951,
+   "shuffled_fit": 0.35444168734491316,
+   "shuffled_holdout": 0.349895518922684
+  },
+  "n_selected_holdout_fdr": 0,
+  "n_hold_p05": 13,
+  "n_hold_p05_expected": 15.5,
+  "min_q_hold": 0.15159795692176986,
+  "excess_hold_median": 0.9997678737233054
+ },
+ {
+  "metric": "euc",
+  "tau_pct": 2.0,
+  "tau": 0.4057439900214067,
+  "n_ids": 521,
+  "coverage": {
+   "real_fit": 0.6138844779674474,
+   "real_holdout": 0.584958217270195,
+   "shuffled_fit": 0.5962779156327543,
+   "shuffled_holdout": 0.587299744601811
+  },
+  "n_selected_holdout_fdr": 0,
+  "n_hold_p05": 25,
+  "n_hold_p05_expected": 26.1,
+  "min_q_hold": 0.22412742230077118,
+  "excess_hold_median": 0.9997678737233054
+ },
+ {
+  "metric": "euc",
+  "tau_pct": 5.0,
+  "tau": 0.4986397968102997,
+  "n_ids": 767,
+  "coverage": {
+   "real_fit": 0.9063616514489877,
+   "real_holdout": 0.8841689879294337,
+   "shuffled_fit": 0.8827791563275434,
+   "shuffled_holdout": 0.8805433016020432
+  },
+  "n_selected_holdout_fdr": 0,
+  "n_hold_p05": 36,
+  "n_hold_p05_expected": 38.4,
+  "min_q_hold": 0.1055163273107181,
+  "excess_hold_median": 0.9997678737233054
+ }
+]

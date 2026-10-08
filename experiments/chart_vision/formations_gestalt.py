@@ -33,9 +33,10 @@ ID medoid if within that ID's radius.  For each ID:
 
   excess = freq(real) / freq(shuffled)
 
-tested with a one-sided binomial test, BH-FDR across IDs, *on the fit
-period only*.  IDs that pass are then checked on the holdout (last 30%),
-which played no part in building or selecting them.
+tested with a one-sided binomial test on the HOLDOUT (last 30%), which
+played no part in building the IDs, with BH-FDR across all IDs.  The fit
+period is reported for information only (members excluded from the count),
+because the IDs were built on it.
 
 Run:  python experiments/chart_vision/formations_gestalt.py
 """
@@ -230,25 +231,34 @@ def run_metric(metric, R_, N_):
             for sp in ("fit", "holdout"):
                 m = (S["meta"]["split"] == sp).to_numpy()
                 lab[(kind, sp)] = (assign(S["X"][m], M, rad, cd_fn), m.sum())
-        cr, cn, ratio, p = excess_table(*lab[("real", "fit")], *lab[("shuffled", "fit")], K)
+        # fit period (informative only): an ID's own members fall inside it by
+        # construction -> subtract them from its real-fit hits
+        lab_rf, n_rf = lab[("real", "fit")]
+        own = np.array([(lab_rf[med[k]["members"]] == k).sum() for k in range(1, K + 1)])
+        cr, cn, ratio, p = excess_table(lab_rf, n_rf, *lab[("shuffled", "fit")], K)
+        cr = cr - own
+        ratio = (cr / n_rf) / np.maximum(cn / lab[("shuffled", "fit")][1], 0.5 / lab[("shuffled", "fit")][1])
+        p = np.array([binomtest(int(a), int(a + b), 0.5, alternative="greater").pvalue if a + b else 1.0
+                      for a, b in zip(cr, cn)])
         crh, cnh, ratio_h, p_h = excess_table(*lab[("real", "holdout")], *lab[("shuffled", "holdout")], K)
-        q = bh(p)
-        selected = (q < FDR_Q) & (ratio >= MIN_EXCESS)
+        # the clean test: IDs frozen on the fit period, holdout real vs holdout
+        # shuffled with the same assignment rule, BH-FDR across all IDs
+        q = bh(p_h)
+        selected = (q < FDR_Q) & (ratio_h >= MIN_EXCESS)
         mf = R_["meta"][R_["fit"]].reset_index(drop=True)
         cat = pd.DataFrame(dict(
             formation=[f"G{k:03d}" for k in range(1, K + 1)],
             size=[len(med[k]["members"]) for k in range(1, K + 1)],
             n_assets=[mf.loc[med[k]["members"], "asset"].nunique() for k in range(1, K + 1)],
             radius=rad,
-            hits_real_fit=cr, hits_shuf_fit=cn, excess_fit=ratio, p_fit=p, q_fit=q, selected=selected,
-            hits_real_hold=crh, hits_shuf_hold=cnh, excess_hold=ratio_h, p_hold=p_h))
+            hits_real_fit_nonmember=cr, hits_shuf_fit=cn, excess_fit=ratio, p_fit=p,
+            hits_real_hold=crh, hits_shuf_hold=cnh, excess_hold=ratio_h, p_hold=p_h, q_hold=q, selected=selected))
         cov = {f"{k[0]}_{k[1]}": float((v[0] > 0).mean()) for k, v in lab.items()}
         sel = cat[cat.selected]
         summary = dict(metric=metric, tau_pct=tm, tau=taus[tm], n_ids=K, coverage=cov,
-                       n_selected=int(selected.sum()),
-                       selected_confirmed_holdout=int(((sel.excess_hold > 1) & (sel.p_hold < 0.05)).sum()),
-                       selected_excess_hold_median=float(sel.excess_hold.median()) if len(sel) else None,
-                       all_ids_excess_fit_median=float(np.median(ratio)))
+                       n_selected_holdout_fdr=int(selected.sum()),
+                       n_hold_p05=int((p_h < 0.05).sum()), n_hold_p05_expected=round(0.05 * K, 1),
+                       min_q_hold=float(q.min()), excess_hold_median=float(np.median(ratio_h)))
         results[tm] = (cat, summary, med)
     mf = R_["meta"][R_["fit"]].reset_index(drop=True)
     return grid, results, mf
@@ -258,7 +268,7 @@ def gallery(paths, meta, med, cat, fname, title, n_show=24, n_ex=5):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    rows = cat.sort_values(["selected", "excess_fit"], ascending=False).head(n_show)
+    rows = cat.sort_values(["selected", "p_hold"], ascending=[False, True]).head(n_show)
     fig, axes = plt.subplots(len(rows), n_ex + 1, figsize=(1.9 * (n_ex + 1), 1.15 * len(rows)), squeeze=False)
     r = np.random.default_rng(0)
     for row, (_, c) in enumerate(rows.iterrows()):
@@ -271,7 +281,7 @@ def gallery(paths, meta, med, cat, fname, title, n_show=24, n_ex=5):
         ax.plot(np.median(mids, 0), color="k", lw=1.4)
         tag = "★ " if c.selected else ""
         ax.set_ylabel(f"{tag}{c.formation}\nn={c['size']} · {c.n_assets} asset\nexcess fit {c.excess_fit:.1f}×"
-                      f"\nexcess hold {c.excess_hold:.1f}×", rotation=0, labelpad=36, fontsize=6, va="center")
+                      f"\nexcess hold {c.excess_hold:.1f}× p={c.p_hold:.2f}", rotation=0, labelpad=36, fontsize=6, va="center")
         pick = [med[k]["medoid"]] + list(r.choice(m[m != med[k]["medoid"]], min(n_ex - 1, len(m) - 1), replace=False))
         for j, i in enumerate(pick):
             fm.draw(axes[row, j + 1], paths[i])
@@ -303,11 +313,11 @@ def main():
             summaries.append(summary)
             cat.to_csv(OUT / f"catalogue_{metric}_tau{tm:g}.csv", index=False)
             gallery(pf, mf, med, cat, OUT / f"gallery_{metric}_tau{tm:g}.png",
-                    f"{metric.upper()} tau@{tm:g}% — ★ = excess over shuffled significant on fit "
-                    f"(BH q<{FDR_Q}, ≥{MIN_EXCESS}×)")
+                    f"{metric.upper()} tau@{tm:g}% — sorted by holdout p; ★ = holdout excess over shuffled "
+                    f"significant after BH (q<{FDR_Q}, ≥{MIN_EXCESS}×)")
             print(json.dumps(summary, indent=1, default=float), flush=True)
             pd.set_option("display.width", 220)
-            print(cat.sort_values("excess_fit", ascending=False).head(12).round(3).to_string(index=False), flush=True)
+            print(cat.sort_values("p_hold").head(12).round(3).to_string(index=False), flush=True)
     grid = pd.concat(grids)
     grid.to_csv(OUT / "tau_grid.csv", index=False)
     print(grid.round(4).to_string(index=False))
